@@ -1,0 +1,44 @@
+#include <Compiler/Ast.hpp>
+#include <Compiler/Lexer/Lexer.hpp>
+
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <string>
+
+namespace {
+    auto ReadFile(const std::string &path) -> std::string {
+        std::ifstream ifs(path);
+        if (!ifs) {
+            std::cerr << "cannot open file '" << path << "'\n";
+            std::exit(1);
+        }
+        std::ostringstream ss;
+        ss << ifs.rdbuf();
+        return ss.str();
+    }
+}
+
+auto main(const int argc, char *argv[]) -> int {
+    if (argc != 2) {
+        return 1;
+    }
+
+    const auto filename = std::string(argv[1]);
+    const auto source = ReadFile(filename);
+
+    DiagnosticEngine diagnostics;
+    diagnostics.SetSource(filename, source);
+
+    auto tokens = Lexer::Tokenize(source, filename, diagnostics);
+    if (diagnostics.HasErrors()) {
+        return 1;
+    }
+
+    auto decls = Ast::Parse(tokens, diagnostics);
+    if (diagnostics.HasErrors()) {
+        return 1;
+    }
+
+    return 0;
+}
