@@ -9,55 +9,55 @@ namespace Lexer {
         using KeywordMap = std::unordered_map<std::string_view, TokenKind>;
 
         const KeywordMap keywords = {
-            {"const",     TokenKind::kw_const    },
-            {"mut",       TokenKind::kw_mut      },
-            {"fn",        TokenKind::kw_fn       },
-            {"type",      TokenKind::kw_type     },
-            {"trait",     TokenKind::kw_trait    },
-            {"struct",    TokenKind::kw_struct   },
-            {"impl",      TokenKind::kw_impl     },
-            {"for",       TokenKind::kw_for      },
-            {"pub",       TokenKind::kw_pub      },
-            {"return",    TokenKind::kw_return   },
-            {"if",        TokenKind::kw_if       },
-            {"else",      TokenKind::kw_else     },
-            {"while",     TokenKind::kw_while    },
-            {"in",        TokenKind::kw_in       },
-            {"import",    TokenKind::kw_import   },
-            {"namespace", TokenKind::kw_namespace},
-            {"asm",       TokenKind::kw_asm      },
-            {"macro",     TokenKind::kw_macro    },
-            {"try",       TokenKind::kw_try      },
-            {"when",      TokenKind::kw_when     },
-            {"nil",       TokenKind::kw_nil      },
-            {"true",      TokenKind::kw_true     },
-            {"false",     TokenKind::kw_false    },
-            {"sizeof",    TokenKind::kw_sizeof   },
-            {"offsetof",  TokenKind::kw_offsetof },
-            {"cast",      TokenKind::kw_cast     },
-            {"enum",      TokenKind::kw_enum     },
-            {"packed",    TokenKind::kw_packed   },
-            {"iota",      TokenKind::kw_iota     },
-            {"default",   TokenKind::kw_default  },
-            {"undefined", TokenKind::kw_undefined},
-            {"len",       TokenKind::kw_len      },
+            {"const",     TokenKind::KwConst    },
+            {"mut",       TokenKind::KwMut      },
+            {"fn",        TokenKind::KwFn       },
+            {"type",      TokenKind::KwType     },
+            {"trait",     TokenKind::KwTrait    },
+            {"struct",    TokenKind::KwStruct   },
+            {"impl",      TokenKind::KwImpl     },
+            {"for",       TokenKind::KwFor      },
+            {"pub",       TokenKind::KwPub      },
+            {"return",    TokenKind::KwReturn   },
+            {"if",        TokenKind::KwIf       },
+            {"else",      TokenKind::KwElse     },
+            {"while",     TokenKind::KwWhile    },
+            {"in",        TokenKind::KwIn       },
+            {"import",    TokenKind::KwImport   },
+            {"namespace", TokenKind::KwNamespace},
+            {"asm",       TokenKind::KwAsm      },
+            {"macro",     TokenKind::KwMacro    },
+            {"try",       TokenKind::KwTry      },
+            {"when",      TokenKind::KwWhen     },
+            {"nil",       TokenKind::KwNil      },
+            {"true",      TokenKind::KwTrue     },
+            {"false",     TokenKind::KwFalse    },
+            {"sizeof",    TokenKind::KwSizeOf   },
+            {"offsetof",  TokenKind::KwOffsetOf },
+            {"cast",      TokenKind::KwCast     },
+            {"enum",      TokenKind::KwEnum     },
+            {"packed",    TokenKind::KwPacked   },
+            {"iota",      TokenKind::KwIota     },
+            {"default",   TokenKind::KwDefault  },
+            {"undefined", TokenKind::KwUndefined},
+            {"len",       TokenKind::KwLen      },
 
             // Primitive types
-            {"u8",        TokenKind::kw_u8       },
-            {"u16",       TokenKind::kw_u16      },
-            {"u32",       TokenKind::kw_u32      },
-            {"u64",       TokenKind::kw_u64      },
-            {"i8",        TokenKind::kw_i8       },
-            {"i16",       TokenKind::kw_i16      },
-            {"i32",       TokenKind::kw_i32      },
-            {"i64",       TokenKind::kw_i64      },
-            {"f32",       TokenKind::kw_f32      },
-            {"f64",       TokenKind::kw_f64      },
-            {"usize",     TokenKind::kw_usize    },
-            {"bool",      TokenKind::kw_bool     },
-            {"byte",      TokenKind::kw_byte     },
-            {"error",     TokenKind::kw_error    },
-            {"anyptr",    TokenKind::kw_anyptr   },
+            {"u8",        TokenKind::KwU8       },
+            {"u16",       TokenKind::KwU16      },
+            {"u32",       TokenKind::KwU32      },
+            {"u64",       TokenKind::KwU64      },
+            {"i8",        TokenKind::KwI8       },
+            {"i16",       TokenKind::KwI16      },
+            {"i32",       TokenKind::KwI32      },
+            {"i64",       TokenKind::KwI64      },
+            {"f32",       TokenKind::KwF32      },
+            {"f64",       TokenKind::KwF64      },
+            {"usize",     TokenKind::KwUSize    },
+            {"bool",      TokenKind::KwBool     },
+            {"byte",      TokenKind::KwByte     },
+            {"error",     TokenKind::KwError    },
+            {"anyptr",    TokenKind::KwAnyptr   },
         };
 
         auto IsDigit(const char ch) -> bool { return std::isdigit(ch) != 0; }
@@ -83,13 +83,13 @@ namespace Lexer {
 
                     tokens.push_back(token);
 
-                    if (token.Kind == TokenKind::kw_asm) {
+                    if (token.Kind == TokenKind::KwAsm) {
                         if (auto asm_token = lex_asm_block(); asm_token.has_value()) {
                             tokens.push_back(std::move(*asm_token));
                         }
                     }
 
-                    if (token.Kind == TokenKind::eof) {
+                    if (token.Kind == TokenKind::Eof) {
                         break;
                     }
                 }
@@ -125,7 +125,7 @@ namespace Lexer {
 
             [[nodiscard]] auto MakeEof() const -> Token {
                 return Token{
-                    .Kind = TokenKind::eof,
+                    .Kind = TokenKind::Eof,
                     .Lexeme = {},
                     .Location = MakeLocation(),
                 };
@@ -253,7 +253,7 @@ namespace Lexer {
                     }
                 }
 
-                return MakeToken(is_float ? TokenKind::float_literal : TokenKind::int_literal, start);
+                return MakeToken(is_float ? TokenKind::FloatLiteral : TokenKind::IntLiteral, start);
             }
 
             auto LexHexNumber(const size_t start) -> Token {
@@ -263,7 +263,7 @@ namespace Lexer {
                     Advance();
                 }
 
-                return MakeToken(TokenKind::int_literal, start);
+                return MakeToken(TokenKind::IntLiteral, start);
             }
 
             auto LexBinaryNumber(const size_t start) -> Token {
@@ -273,7 +273,7 @@ namespace Lexer {
                     Advance();
                 }
 
-                return MakeToken(TokenKind::int_literal, start);
+                return MakeToken(TokenKind::IntLiteral, start);
             }
 
             auto LexIdentifierOrKeyword(const size_t start) -> Token {
@@ -288,7 +288,7 @@ namespace Lexer {
                     return MakeToken(it->second, start);
                 }
 
-                return MakeToken(TokenKind::identifier, start);
+                return MakeToken(TokenKind::Identifier, start);
             }
 
             auto LexString(const size_t start) -> Token {
@@ -303,12 +303,12 @@ namespace Lexer {
                 if (AtEnd()) {
                     diagnostics_.ReportError(DiagnosticStage::Lexer, MakeLocation(), "unterminated string literal");
 
-                    return MakeToken(TokenKind::string_literal, start);
+                    return MakeToken(TokenKind::StringLiteral, start);
                 }
 
                 Advance();
 
-                return MakeToken(TokenKind::string_literal, start);
+                return MakeToken(TokenKind::StringLiteral, start);
             }
 
             auto LexSymbol(const size_t start, const char ch) -> Token {
@@ -319,82 +319,82 @@ namespace Lexer {
 
                 switch (ch) {
                 case '(':
-                    return MakeToken(TokenKind::lparen, start);
+                    return MakeToken(TokenKind::LParen, start);
                 case ')':
-                    return MakeToken(TokenKind::rparen, start);
+                    return MakeToken(TokenKind::RParen, start);
                 case '{':
-                    return MakeToken(TokenKind::lbrace, start);
+                    return MakeToken(TokenKind::LBrace, start);
                 case '}':
-                    return MakeToken(TokenKind::rbrace, start);
+                    return MakeToken(TokenKind::RBrace, start);
                 case '[':
-                    return MakeToken(TokenKind::lbracket, start);
+                    return MakeToken(TokenKind::LBracket, start);
                 case ']':
-                    return MakeToken(TokenKind::rbracket, start);
+                    return MakeToken(TokenKind::RBracket, start);
                 case ',':
-                    return MakeToken(TokenKind::comma, start);
+                    return MakeToken(TokenKind::Comma, start);
                 case '~':
-                    return MakeToken(TokenKind::tilde, start);
+                    return MakeToken(TokenKind::Tilde, start);
                 case '?':
-                    return MakeToken(TokenKind::question, start);
+                    return MakeToken(TokenKind::Question, start);
                 case ';':
-                    return MakeToken(TokenKind::semicolon, start);
+                    return MakeToken(TokenKind::Semicolon, start);
                 case '.':
-                    return MatchDouble('.', TokenKind::dot_dot, TokenKind::dot);
+                    return MatchDouble('.', TokenKind::DotDot, TokenKind::Dot);
 
                 case '+':
                     if (Match('+'))
-                        return MakeToken(TokenKind::plus_plus, start);
+                        return MakeToken(TokenKind::PlusPlus, start);
                     if (Match('='))
-                        return MakeToken(TokenKind::plus_equal, start);
-                    return MakeToken(TokenKind::plus, start);
+                        return MakeToken(TokenKind::PlusEqual, start);
+                    return MakeToken(TokenKind::Plus, start);
 
                 case '-':
                     if (Match('-'))
-                        return MakeToken(TokenKind::minus_minus, start);
+                        return MakeToken(TokenKind::MinusMinus, start);
                     if (Match('='))
-                        return MakeToken(TokenKind::minus_equal, start);
+                        return MakeToken(TokenKind::MinusEqual, start);
                     if (Match('>'))
-                        return MakeToken(TokenKind::arrow, start);
-                    return MakeToken(TokenKind::minus, start);
+                        return MakeToken(TokenKind::Arrow, start);
+                    return MakeToken(TokenKind::Minus, start);
 
                 case '*':
-                    return MatchDouble('=', TokenKind::star_equal, TokenKind::star);
+                    return MatchDouble('=', TokenKind::StarEqual, TokenKind::Star);
                 case '/':
-                    return MatchDouble('=', TokenKind::slash_equal, TokenKind::slash);
+                    return MatchDouble('=', TokenKind::SlashEqual, TokenKind::Slash);
                 case '%':
-                    return MakeToken(TokenKind::percent, start);
+                    return MakeToken(TokenKind::Percent, start);
 
                 case '&':
                     if (Match('&'))
-                        return MakeToken(TokenKind::amp_amp, start);
+                        return MakeToken(TokenKind::AmpAmp, start);
                     if (Match('='))
-                        return MakeToken(TokenKind::amp_equal, start);
-                    return MakeToken(TokenKind::ampersand, start);
+                        return MakeToken(TokenKind::AmpEqual, start);
+                    return MakeToken(TokenKind::Ampersand, start);
 
                 case '|':
                     if (Match('|'))
-                        return MakeToken(TokenKind::pipe_pipe, start);
+                        return MakeToken(TokenKind::PipePipe, start);
                     if (Match('='))
-                        return MakeToken(TokenKind::pipe_equal, start);
-                    return MakeToken(TokenKind::pipe, start);
+                        return MakeToken(TokenKind::PipeEqual, start);
+                    return MakeToken(TokenKind::Pipe, start);
 
                 case '^':
-                    return MatchDouble('=', TokenKind::caret_equal, TokenKind::caret);
+                    return MatchDouble('=', TokenKind::CaretEqual, TokenKind::Caret);
                 case '=':
-                    return MatchDouble('=', TokenKind::equal_equal, TokenKind::equal);
+                    return MatchDouble('=', TokenKind::EqualEqual, TokenKind::Equal);
                 case '!':
-                    return MatchDouble('=', TokenKind::bang_equal, TokenKind::bang);
+                    return MatchDouble('=', TokenKind::BangEqual, TokenKind::Bang);
 
                 case '<':
-                    return Match('<') ? MatchDouble('=', TokenKind::shift_left_equal, TokenKind::shift_left)
-                                      : MatchDouble('=', TokenKind::less_equal, TokenKind::less);
+                    return Match('<') ? MatchDouble('=', TokenKind::ShiftLeftEqual, TokenKind::ShiftLeft)
+                                      : MatchDouble('=', TokenKind::LessEqual, TokenKind::Less);
 
                 case '>':
-                    return Match('>') ? MatchDouble('=', TokenKind::shift_right_equal, TokenKind::shift_right)
-                                      : MatchDouble('=', TokenKind::greater_equal, TokenKind::greater);
+                    return Match('>') ? MatchDouble('=', TokenKind::ShiftRightEqual, TokenKind::ShiftRight)
+                                      : MatchDouble('=', TokenKind::GreaterEqual, TokenKind::Greater);
 
                 case ':':
-                    return MatchDouble('=', TokenKind::colon_equal, TokenKind::colon);
+                    return MatchDouble('=', TokenKind::ColonEqual, TokenKind::Colon);
 
                 default:
                     diagnostics_.ReportError(
@@ -407,7 +407,7 @@ namespace Lexer {
                         },
                         std::string("unexpected character '") + ch + "'");
 
-                    return MakeToken(TokenKind::eof, start);
+                    return MakeToken(TokenKind::Eof, start);
                 }
             }
 
@@ -437,7 +437,7 @@ namespace Lexer {
 
                 const auto body = source_.substr(block_start + 1, pos_ - block_start - 1);
                 auto tok = Token{
-                    .Kind = TokenKind::asm_block,
+                    .Kind = TokenKind::AsmBlock,
                     .Lexeme = std::string(body),
                     .Location =
                         {

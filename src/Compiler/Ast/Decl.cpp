@@ -1,20 +1,20 @@
-#include "../Ast.hpp"
+#include <Compiler/Ast.hpp>
 
 #include <format>
 
 namespace Ast {
     namespace {
         auto ParseFunctionParams(Parser &parser) -> std::vector<FunctionDecl::Param> {
-            parser.Expect(TokenKind::lparen, "'('");
+            parser.Expect(TokenKind::LParen, "'('");
 
             std::vector<FunctionDecl::Param> params;
 
-            while (!parser.Check(TokenKind::rparen) && !parser.AtEnd()) {
+            while (!parser.Check(TokenKind::RParen) && !parser.AtEnd()) {
                 const auto param_location = parser.CurrentLocation();
-                const auto param_is_mutable = parser.Match(TokenKind::kw_mut);
-                const auto param_name = parser.Expect(TokenKind::identifier, "parameter name");
+                const auto param_is_mutable = parser.Match(TokenKind::KwMut);
+                const auto param_name = parser.Expect(TokenKind::Identifier, "parameter name");
 
-                parser.Expect(TokenKind::colon, "':'");
+                parser.Expect(TokenKind::Colon, "':'");
 
                 params.push_back({
                     .IsMutable = param_is_mutable,
@@ -23,12 +23,12 @@ namespace Ast {
                     .Location = param_location,
                 });
 
-                if (!parser.Check(TokenKind::rparen)) {
-                    parser.Expect(TokenKind::comma, "','");
+                if (!parser.Check(TokenKind::RParen)) {
+                    parser.Expect(TokenKind::Comma, "','");
                 }
             }
 
-            parser.Expect(TokenKind::rparen, "')'");
+            parser.Expect(TokenKind::RParen, "')'");
 
             return params;
         }
@@ -36,10 +36,10 @@ namespace Ast {
         auto parse_function_return_types(Parser &parser) -> std::vector<Type> {
             std::vector<Type> return_types;
 
-            if (parser.Match(TokenKind::arrow)) {
+            if (parser.Match(TokenKind::Arrow)) {
                 return_types.push_back(ParseType(parser));
 
-                while (parser.Match(TokenKind::comma)) {
+                while (parser.Match(TokenKind::Comma)) {
                     return_types.push_back(ParseType(parser));
                 }
             }
@@ -50,9 +50,9 @@ namespace Ast {
         auto ParseFunctionDecl(Parser &parser, bool is_public) -> std::unique_ptr<FunctionDecl> {
             auto location = parser.CurrentLocation();
 
-            parser.Expect(TokenKind::kw_fn, "'fn'");
+            parser.Expect(TokenKind::KwFn, "'fn'");
 
-            auto fn_name = parser.Expect(TokenKind::identifier, "function name").Lexeme;
+            auto fn_name = parser.Expect(TokenKind::Identifier, "function name").Lexeme;
             auto fn_params = ParseFunctionParams(parser);
             auto fn_return_types = parse_function_return_types(parser);
             auto fn_body = ParseStmt(parser);
@@ -69,9 +69,9 @@ namespace Ast {
     }
 
     auto ParseDecl(Parser &parser, const bool top_level) -> std::optional<Decl> {
-        const auto is_public = !top_level || parser.Match(TokenKind::kw_pub);
+        const auto is_public = !top_level || parser.Match(TokenKind::KwPub);
 
-        if (parser.Check(TokenKind::kw_fn)) {
+        if (parser.Check(TokenKind::KwFn)) {
             return ParseFunctionDecl(parser, is_public);
         }
 

@@ -1,4 +1,4 @@
-#include "../Ast.hpp"
+#include <Compiler/Ast.hpp>
 
 #include <format>
 
@@ -6,9 +6,9 @@ namespace Ast {
     namespace {
         auto ParseNamedType(Parser &parser) -> std::unique_ptr<NamedType> {
             const auto location = parser.CurrentLocation();
-            const auto &name = parser.Expect(TokenKind::identifier, "type name").Lexeme;
+            const auto &name = parser.Expect(TokenKind::Identifier, "type name").Lexeme;
 
-            if (parser.Match(TokenKind::dot)) {
+            if (parser.Match(TokenKind::Dot)) {
                 return std::make_unique<NamedType>(NamedType{
                     .Name = name,
                     .Member = ParseNamedType(parser),
@@ -25,23 +25,23 @@ namespace Ast {
 
         auto ParseBuiltinTypeKind(Parser &parser) -> std::optional<BuiltinTypeKind> {
             switch (parser.Advance().Kind) {
-            case TokenKind::kw_u8:     return BuiltinTypeKind::U8;
-            case TokenKind::kw_u16:    return BuiltinTypeKind::U16;
-            case TokenKind::kw_u32:    return BuiltinTypeKind::U32;
-            case TokenKind::kw_u64:    return BuiltinTypeKind::U64;
-            case TokenKind::kw_i8:     return BuiltinTypeKind::I8;
-            case TokenKind::kw_i16:    return BuiltinTypeKind::I16;
-            case TokenKind::kw_i32:    return BuiltinTypeKind::I32;
-            case TokenKind::kw_i64:    return BuiltinTypeKind::I64;
-            case TokenKind::kw_f32:    return BuiltinTypeKind::F32;
-            case TokenKind::kw_f64:    return BuiltinTypeKind::F64;
-            case TokenKind::kw_usize:  return BuiltinTypeKind::Usize;
-            case TokenKind::kw_bool:   return BuiltinTypeKind::Bool;
-            case TokenKind::kw_byte:   return BuiltinTypeKind::Byte;
-            case TokenKind::kw_error:  return BuiltinTypeKind::Error;
-            case TokenKind::kw_anyptr: return BuiltinTypeKind::Anyptr;
-            case TokenKind::kw_type:   return BuiltinTypeKind::Type;
-            default:                    return std::nullopt;
+            case TokenKind::KwU8:     return BuiltinTypeKind::U8;
+            case TokenKind::KwU16:    return BuiltinTypeKind::U16;
+            case TokenKind::KwU32:    return BuiltinTypeKind::U32;
+            case TokenKind::KwU64:    return BuiltinTypeKind::U64;
+            case TokenKind::KwI8:     return BuiltinTypeKind::I8;
+            case TokenKind::KwI16:    return BuiltinTypeKind::I16;
+            case TokenKind::KwI32:    return BuiltinTypeKind::I32;
+            case TokenKind::KwI64:    return BuiltinTypeKind::I64;
+            case TokenKind::KwF32:    return BuiltinTypeKind::F32;
+            case TokenKind::KwF64:    return BuiltinTypeKind::F64;
+            case TokenKind::KwUSize:  return BuiltinTypeKind::Usize;
+            case TokenKind::KwBool:   return BuiltinTypeKind::Bool;
+            case TokenKind::KwByte:   return BuiltinTypeKind::Byte;
+            case TokenKind::KwError:  return BuiltinTypeKind::Error;
+            case TokenKind::KwAnyptr: return BuiltinTypeKind::Anyptr;
+            case TokenKind::KwType:   return BuiltinTypeKind::Type;
+            default:                  return std::nullopt;
             }
         }
     }
@@ -49,14 +49,14 @@ namespace Ast {
     auto ParseType(Parser &parser) -> Type {
         const auto location = parser.CurrentLocation();
 
-        if (parser.Match(TokenKind::star)) {
+        if (parser.Match(TokenKind::Star)) {
             return std::make_unique<PointerType>(PointerType{
                 .Pointee = ParseType(parser),
                 .Location = location,
             });
         }
 
-        if (parser.Check(TokenKind::identifier)) {
+        if (parser.Check(TokenKind::Identifier)) {
             return ParseNamedType(parser);
         }
 

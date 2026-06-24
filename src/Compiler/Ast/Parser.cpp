@@ -1,4 +1,4 @@
-#include "../Ast.hpp"
+#include <Compiler/Ast.hpp>
 
 #include <format>
 
@@ -27,7 +27,7 @@ namespace Ast {
             }
 
             auto AtEnd() const -> bool override {
-                return Current().Kind == TokenKind::eof;
+                return Current().Kind == TokenKind::Eof;
             }
 
             auto Peek() const -> const Token & override {
@@ -68,7 +68,7 @@ namespace Ast {
             }
 
             auto ExpectIdentifier(std::string_view identifier) -> const Token & override {
-                if (Check(TokenKind::identifier) || CurrentLexeme() == identifier) {
+                if (Check(TokenKind::Identifier) || CurrentLexeme() == identifier) {
                     return Advance();
                 }
 

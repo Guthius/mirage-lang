@@ -12,24 +12,28 @@ namespace Ast {
     struct FloatLiteralExpr;
     struct StringLiteralExpr;
     struct BoolLiteralExpr;
+    struct NilLiteralExpr;
     struct IdentExpr;
     struct UnaryExpr;
     struct BinaryExpr;
     struct TernaryExpr;
     struct AssignExpr;
     struct CallExpr;
+    struct IncrDecrExpr;
 
     using Expr = std::variant<
         std::unique_ptr<IntLiteralExpr>,
         std::unique_ptr<FloatLiteralExpr>,
         std::unique_ptr<StringLiteralExpr>,
         std::unique_ptr<BoolLiteralExpr>,
+        std::unique_ptr<NilLiteralExpr>,
         std::unique_ptr<IdentExpr>,
         std::unique_ptr<UnaryExpr>,
         std::unique_ptr<BinaryExpr>,
         std::unique_ptr<TernaryExpr>,
         std::unique_ptr<AssignExpr>,
-        std::unique_ptr<CallExpr>>;
+        std::unique_ptr<CallExpr>,
+        std::unique_ptr<IncrDecrExpr>>;
 
     struct IntLiteralExpr {
         uint64_t Value;
@@ -48,6 +52,10 @@ namespace Ast {
 
     struct BoolLiteralExpr {
         bool Value;
+        SourceLocation Location;
+    };
+
+    struct NilLiteralExpr {
         SourceLocation Location;
     };
 
@@ -100,8 +108,8 @@ namespace Ast {
 
     struct TernaryExpr {
         Expr Condition;
-        Expr Then;
-        Expr Else;
+        Expr ThenExpr;
+        Expr ElseExpr;
         SourceLocation Location;
     };
 
@@ -128,6 +136,13 @@ namespace Ast {
     struct CallExpr {
         Expr Callee;
         std::vector<Expr> Args;
+        SourceLocation Location;
+    };
+
+    struct IncrDecrExpr {
+        Expr Operand;
+        bool IsIncrement;
+        bool IsPrefix;
         SourceLocation Location;
     };
 }

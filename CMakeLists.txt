@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 23)
 add_executable(mirage
         src/Compiler/Ast/Decl.cpp
         src/Compiler/Ast/Decl.hpp
+        src/Compiler/Ast/Expr.cpp
         src/Compiler/Ast/Expr.hpp
         src/Compiler/Ast/Parser.cpp
         src/Compiler/Ast/Parser.hpp
