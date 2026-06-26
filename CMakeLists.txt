@@ -23,30 +23,23 @@ else ()
 endif ()
 
 add_executable(mirage
-        src/Compiler/Ast/Decl.cpp
-        src/Compiler/Ast/Decl.hpp
-        src/Compiler/Ast/Expr.cpp
-        src/Compiler/Ast/Expr.hpp
-        src/Compiler/Ast/Parser.cpp
-        src/Compiler/Ast/Parser.hpp
-        src/Compiler/Ast/Stmt.cpp
-        src/Compiler/Ast/Stmt.hpp
-        src/Compiler/Ast/Type.cpp
-        src/Compiler/Ast/Type.hpp
-        src/Compiler/Diagnostics/DiagnosticEngine.cpp
-        src/Compiler/Diagnostics/DiagnosticEngine.hpp
-        src/Compiler/Lexer/Lexer.cpp
-        src/Compiler/Lexer/Lexer.hpp
-
         src/Compiler/Sema/types/type_resolver.cpp
-
         src/Compiler/Sema/ResolvedType.hpp
         src/Compiler/Sema/Sema.cpp
         src/Compiler/Sema/Sema.hpp
-        src/Compiler/Ast.hpp
-        src/Compiler/SourceLocation.hpp
-        src/Compiler/Token.cpp
-        src/Compiler/Token.hpp
+
+        src/Compiler/ast.cpp
+        src/Compiler/ast.hpp
+        src/Compiler/ast_parser.cpp
+        src/Compiler/ast_parser.hpp
+        src/Compiler/diagnostic_engine.cpp
+        src/Compiler/diagnostic_engine.hpp
+        src/Compiler/lexer.cpp
+        src/Compiler/lexer.hpp
+        src/Compiler/source_location.hpp
+        src/Compiler/token.cpp
+        src/Compiler/token.hpp
+
         src/main.cpp
 )
 

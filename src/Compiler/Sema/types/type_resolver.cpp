@@ -2,24 +2,24 @@
 
 namespace Sema {
     namespace {
-        auto resolve_builtin(const Ast::BuiltinTypeKind kind) -> ResolvedType {
+        auto resolve_builtin(const ast::BuiltinTypeKind kind) -> ResolvedType {
             switch (kind) {
-            case Ast::BuiltinTypeKind::U8:     return ResolvedType{TypeKind::U8};
-            case Ast::BuiltinTypeKind::U16:    return ResolvedType{TypeKind::U16};
-            case Ast::BuiltinTypeKind::U32:    return ResolvedType{TypeKind::U32};
-            case Ast::BuiltinTypeKind::U64:    return ResolvedType{TypeKind::U64};
-            case Ast::BuiltinTypeKind::I8:     return ResolvedType{TypeKind::I8};
-            case Ast::BuiltinTypeKind::I16:    return ResolvedType{TypeKind::I16};
-            case Ast::BuiltinTypeKind::I32:    return ResolvedType{TypeKind::I32};
-            case Ast::BuiltinTypeKind::I64:    return ResolvedType{TypeKind::I64};
-            case Ast::BuiltinTypeKind::F32:    return ResolvedType{TypeKind::F32};
-            case Ast::BuiltinTypeKind::F64:    return ResolvedType{TypeKind::F64};
-            case Ast::BuiltinTypeKind::Usize:  return ResolvedType{TypeKind::USize};
-            case Ast::BuiltinTypeKind::Bool:   return ResolvedType{TypeKind::Bool};
-            case Ast::BuiltinTypeKind::Byte:   return ResolvedType{TypeKind::Byte};
-            case Ast::BuiltinTypeKind::Error:  return ResolvedType{TypeKind::Error};
-            case Ast::BuiltinTypeKind::Anyptr: return ResolvedType{TypeKind::Anyptr};
-            case Ast::BuiltinTypeKind::Type:   return ResolvedType{TypeKind::Void};
+            case ast::BuiltinTypeKind::U8:     return ResolvedType{TypeKind::U8};
+            case ast::BuiltinTypeKind::U16:    return ResolvedType{TypeKind::U16};
+            case ast::BuiltinTypeKind::U32:    return ResolvedType{TypeKind::U32};
+            case ast::BuiltinTypeKind::U64:    return ResolvedType{TypeKind::U64};
+            case ast::BuiltinTypeKind::I8:     return ResolvedType{TypeKind::I8};
+            case ast::BuiltinTypeKind::I16:    return ResolvedType{TypeKind::I16};
+            case ast::BuiltinTypeKind::I32:    return ResolvedType{TypeKind::I32};
+            case ast::BuiltinTypeKind::I64:    return ResolvedType{TypeKind::I64};
+            case ast::BuiltinTypeKind::F32:    return ResolvedType{TypeKind::F32};
+            case ast::BuiltinTypeKind::F64:    return ResolvedType{TypeKind::F64};
+            case ast::BuiltinTypeKind::Usize:  return ResolvedType{TypeKind::USize};
+            case ast::BuiltinTypeKind::Bool:   return ResolvedType{TypeKind::Bool};
+            case ast::BuiltinTypeKind::Byte:   return ResolvedType{TypeKind::Byte};
+            case ast::BuiltinTypeKind::Error:  return ResolvedType{TypeKind::Error};
+            case ast::BuiltinTypeKind::Anyptr: return ResolvedType{TypeKind::Anyptr};
+            case ast::BuiltinTypeKind::Type:   return ResolvedType{TypeKind::Void};
             }
             return ResolvedType{TypeKind::Void};
         }
@@ -30,12 +30,12 @@ namespace Sema {
             };
         }
 
-        auto resolve(const Ast::BuiltinType &type, SemaResult &) -> ResolvedType {
-            return resolve_builtin(type.Kind);
+        auto resolve(const ast::BuiltinType &type, SemaResult &) -> ResolvedType {
+            return resolve_builtin(type.kind);
         }
 
-        auto resolve(const std::unique_ptr<Ast::PointerType> &type, SemaResult &result) -> ResolvedType {
-            auto pointee = resolve_type(type->Pointee, result);
+        auto resolve(const std::unique_ptr<ast::PointerType> &type, SemaResult &result) -> ResolvedType {
+            auto pointee = resolve_type(type->pointee, result);
 
             const auto pointer = ResolvedType{
                 .Kind = TypeKind::Pointer,
@@ -47,7 +47,7 @@ namespace Sema {
             return pointer;
         }
 
-        auto resolve(const Ast::NamedType &, SemaResult &) -> ResolvedType {
+        auto resolve(const ast::NamedType &, SemaResult &) -> ResolvedType {
             //         diagnostics_.ReportError(
             // DiagnosticStage::Sema, alt->Location,
             // std::format("unknown type '{}' (named types not yet supported)", alt->Name));
@@ -58,7 +58,7 @@ namespace Sema {
         }
     }
 
-    auto resolve_type(const Ast::Type &type, SemaResult &result) -> ResolvedType {
+    auto resolve_type(const ast::Type &type, SemaResult &result) -> ResolvedType {
         return std::visit([&](const auto &v) { return resolve(v, result); }, type);
     }
 }

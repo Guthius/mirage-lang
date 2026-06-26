@@ -23,11 +23,11 @@ namespace Sema {
             explicit TypeChecker(DiagnosticEngine &diagnostics) : diagnostics_(diagnostics) {
             }
 
-            auto Check(const std::vector<Ast::Decl> &decls) -> SemaResult {
+            auto Check(const std::vector<ast::Decl> &decls) -> SemaResult {
                 SemaResult result;
 
                 for (auto &decl : decls) {
-                    const auto function_decl = std::get_if<Ast::FunctionDecl>(&decl);
+                    const auto function_decl = std::get_if<ast::FunctionDecl>(&decl);
                     if (function_decl == nullptr) {
                         continue;
                     }
@@ -38,7 +38,7 @@ namespace Sema {
                 return result;
             }
 
-            void CheckFunction(const Ast::FunctionDecl &decl, SemaResult &result) {
+            void CheckFunction(const ast::FunctionDecl &decl, SemaResult &result) {
                 LocalMap locals;
 
                 SemaResult::FunctionSignature signature;
@@ -60,22 +60,19 @@ namespace Sema {
                 result.Functions[&decl] = signature;
             }
 
-            void CheckStatement(const std::unique_ptr<Ast::BlockStmt> &stmt, LocalMap &locals, SemaResult &result, const std::vector<ResolvedType> &expected_returns) {
+            void CheckStatement(const std::unique_ptr<ast::BlockStmt> &stmt, LocalMap &locals, SemaResult &result, const std::vector<ResolvedType> &expected_returns) {
                 auto inner = locals;
 
-                for (auto &inner_stmt : stmt->Statements) {
+                for (auto &inner_stmt : stmt->stmts) {
                     CheckStatement(inner_stmt, inner, result, expected_returns);
                 }
             }
 
-            void CheckStatement(const std::unique_ptr<Ast::AsmStmt> &asm_stmt, LocalMap &locals, SemaResult &result, const std::vector<ResolvedType> &expected_returns) {
+            void CheckStatement(const std::unique_ptr<ast::ExprStmt> &expr_stmt, LocalMap &locals, SemaResult &result, const std::vector<ResolvedType> &expected_returns) {
+                CheckExpression(expr_stmt->expr, locals, result);
             }
 
-            void CheckStatement(const std::unique_ptr<Ast::ExprStmt> &expr_stmt, LocalMap &locals, SemaResult &result, const std::vector<ResolvedType> &expected_returns) {
-                CheckExpression(expr_stmt->Expr, locals, result);
-            }
-
-            void CheckStatement(const Ast::Stmt &stmt, LocalMap &locals, SemaResult &result, const std::vector<ResolvedType> &expected_returns) {
+            void CheckStatement(const ast::Stmt &stmt, LocalMap &locals, SemaResult &result, const std::vector<ResolvedType> &expected_returns) {
                 std::visit(
                     [&](const auto &v) {
                         CheckStatement(v, locals, result, expected_returns);
@@ -83,7 +80,7 @@ namespace Sema {
                     stmt);
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::LiteralIntegerExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
+            auto CheckExpression(const std::unique_ptr<ast::LiteralIntegerExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
                 if (expected && expected->IsInteger()) {
                     return *expected;
                 }
@@ -91,7 +88,7 @@ namespace Sema {
                 return ResolvedType{.Kind = TypeKind::I32};
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::LiteralFloatExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
+            auto CheckExpression(const std::unique_ptr<ast::LiteralFloatExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
                 if (expected && expected->IsFloat()) {
                     return *expected;
                 }
@@ -99,26 +96,26 @@ namespace Sema {
                 return ResolvedType{.Kind = TypeKind::F32};
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::LiteralStringExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) const -> ResolvedType {
-                diagnostics_.ReportError(DiagnosticStage::Sema, expr->Location, "string literals are not supported yet");
+            auto CheckExpression(const std::unique_ptr<ast::LiteralStringExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) const -> ResolvedType {
+                diagnostics_.report_error(DiagnosticStage::Sema, expr->location, "string literals are not supported yet");
 
                 return Types::Void;
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::LiteralBoolExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
+            auto CheckExpression(const std::unique_ptr<ast::LiteralBoolExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
                 return Types::Bool;
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::LiteralNilExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
+            auto CheckExpression(const std::unique_ptr<ast::LiteralNilExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
                 return Types::Anyptr;
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::IdentExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) const -> ResolvedType {
-                const auto it = locals.find(expr->Name);
+            auto CheckExpression(const std::unique_ptr<ast::IdentExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) const -> ResolvedType {
+                const auto it = locals.find(expr->name);
                 if (it == locals.end()) {
-                    diagnostics_.ReportError(
-                        DiagnosticStage::Sema, expr->Location,
-                        std::format("unknown identifier '{}'", expr->Name));
+                    diagnostics_.report_error(
+                        DiagnosticStage::Sema, expr->location,
+                        std::format("unknown identifier '{}'", expr->name));
 
                     return Types::Void;
                 }
@@ -126,52 +123,52 @@ namespace Sema {
                 return it->second.Type;
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::UnaryExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
+            auto CheckExpression(const std::unique_ptr<ast::UnaryExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
                 return CheckUnary(expr, locals, result);
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::BinaryExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
+            auto CheckExpression(const std::unique_ptr<ast::BinaryExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
                 return CheckBinary(expr, locals, result);
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::TernaryExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
-                CheckExpression(expr->Condition, locals, result, ResolvedType{.Kind = TypeKind::Bool});
+            auto CheckExpression(const std::unique_ptr<ast::TernaryExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
+                CheckExpression(expr->condition, locals, result, ResolvedType{.Kind = TypeKind::Bool});
 
-                const auto type_a = CheckExpression(expr->ThenExpr, locals, result);
-                const auto type_b = CheckExpression(expr->ElseExpr, locals, result);
+                const auto type_a = CheckExpression(expr->then_expr, locals, result);
+                const auto type_b = CheckExpression(expr->else_expr, locals, result);
 
                 if (type_a != type_b) {
-                    diagnostics_.ReportError(
-                        DiagnosticStage::Sema, expr->Location,
+                    diagnostics_.report_error(
+                        DiagnosticStage::Sema, expr->location,
                         "ternary branches have different types");
                 }
 
                 return type_a;
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::AssignExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
+            auto CheckExpression(const std::unique_ptr<ast::AssignExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
                 return CheckAssign(expr, locals, result);
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::CallExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) const -> ResolvedType {
-                diagnostics_.ReportError(DiagnosticStage::Sema, expr->Location, "call expressions are not supported yet");
+            auto CheckExpression(const std::unique_ptr<ast::CallExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) const -> ResolvedType {
+                diagnostics_.report_error(DiagnosticStage::Sema, expr->location, "call expressions are not supported yet");
 
                 return Types::Void;
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::IncrDecrExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
-                const auto operand_type = CheckExpression(expr->Operand, locals, result);
+            auto CheckExpression(const std::unique_ptr<ast::IncrDecrExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
+                const auto operand_type = CheckExpression(expr->operand, locals, result);
 
                 if (!operand_type.IsInteger()) {
-                    diagnostics_.ReportError(
-                        DiagnosticStage::Sema, expr->Location,
+                    diagnostics_.report_error(
+                        DiagnosticStage::Sema, expr->location,
                         "operand of increment/decrement expression must be an integer");
                 }
 
                 return operand_type;
             }
 
-            auto CheckExpression(const Ast::Expr &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected = std::nullopt) -> ResolvedType {
+            auto CheckExpression(const ast::Expr &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected = std::nullopt) -> ResolvedType {
                 const auto resolved_type = std::visit(
                     [&](const auto &v) {
                         return CheckExpression(v, locals, result, expected);
@@ -183,38 +180,38 @@ namespace Sema {
                 return resolved_type;
             }
 
-            auto CheckUnary(const std::unique_ptr<Ast::UnaryExpr> &expr, LocalMap &locals, SemaResult &result) -> ResolvedType {
-                switch (expr->Op) {
-                case Ast::UnaryOp::Negate:
+            auto CheckUnary(const std::unique_ptr<ast::UnaryExpr> &expr, LocalMap &locals, SemaResult &result) -> ResolvedType {
+                switch (expr->op) {
+                case ast::UnaryOp::Negate:
                     {
-                        const auto operand_type = CheckExpression(expr->Operand, locals, result);
+                        const auto operand_type = CheckExpression(expr->operand, locals, result);
                         if (!operand_type.IsInteger()) {
-                            diagnostics_.ReportError(DiagnosticStage::Sema, expr->Location, "unary '-' requires an integer operand");
+                            diagnostics_.report_error(DiagnosticStage::Sema, expr->location, "unary '-' requires an integer operand");
                         }
 
                         return operand_type;
                     }
 
-                case Ast::UnaryOp::LogicalNot:
+                case ast::UnaryOp::LogicalNot:
                     {
-                        CheckExpression(expr->Operand, locals, result, Types::Bool);
+                        CheckExpression(expr->operand, locals, result, Types::Bool);
 
                         return Types::Bool;
                     }
 
-                case Ast::UnaryOp::BitwiseNot:
+                case ast::UnaryOp::BitwiseNot:
                     {
-                        const auto operand_type = CheckExpression(expr->Operand, locals, result);
+                        const auto operand_type = CheckExpression(expr->operand, locals, result);
                         if (!operand_type.IsInteger()) {
-                            diagnostics_.ReportError(DiagnosticStage::Sema, expr->Location, "unary '~' requires an integer operand");
+                            diagnostics_.report_error(DiagnosticStage::Sema, expr->location, "unary '~' requires an integer operand");
                         }
 
                         return operand_type;
                     }
 
-                case Ast::UnaryOp::AddressOf:
+                case ast::UnaryOp::AddressOf:
                     {
-                        const auto operand_type = CheckExpression(expr->Operand, locals, result);
+                        const auto operand_type = CheckExpression(expr->operand, locals, result);
                         const auto pointer_type = ResolvedType{
                             .Kind = TypeKind::Pointer,
                             .PointeeIndex = static_cast<int>(result.PointerPointees.size()),
@@ -225,12 +222,12 @@ namespace Sema {
                         return pointer_type;
                     }
 
-                case Ast::UnaryOp::Deref:
+                case ast::UnaryOp::Deref:
                     {
-                        const auto operand_type = CheckExpression(expr->Operand, locals, result);
+                        const auto operand_type = CheckExpression(expr->operand, locals, result);
                         if (operand_type.Kind != TypeKind::Pointer) {
-                            diagnostics_.ReportError(
-                                DiagnosticStage::Sema, expr->Location,
+                            diagnostics_.report_error(
+                                DiagnosticStage::Sema, expr->location,
                                 "cannot dereference a non-pointer value");
 
                             return Types::Void;
@@ -240,53 +237,53 @@ namespace Sema {
                     }
                 }
 
-                diagnostics_.ReportError(
-                    DiagnosticStage::Sema, expr->Location,
+                diagnostics_.report_error(
+                    DiagnosticStage::Sema, expr->location,
                     "invalid unary operator");
 
                 return Types::Void;
             }
 
-            auto CheckBinary(const std::unique_ptr<Ast::BinaryExpr> &expr, LocalMap &locals, SemaResult &result) -> ResolvedType {
-                const auto lhs_type = CheckExpression(expr->Lhs, locals, result);
-                const auto rhs_type = CheckExpression(expr->Rhs, locals, result);
+            auto CheckBinary(const std::unique_ptr<ast::BinaryExpr> &expr, LocalMap &locals, SemaResult &result) -> ResolvedType {
+                const auto lhs_type = CheckExpression(expr->lhs, locals, result);
+                const auto rhs_type = CheckExpression(expr->rhs, locals, result);
 
-                switch (expr->Op) {
-                case Ast::BinaryOp::Add:
-                case Ast::BinaryOp::Sub:
-                case Ast::BinaryOp::Mul:
-                case Ast::BinaryOp::Div:
-                case Ast::BinaryOp::Mod:
-                case Ast::BinaryOp::BitwiseAnd:
-                case Ast::BinaryOp::BitwiseOr:
-                case Ast::BinaryOp::BitwiseXor:
-                case Ast::BinaryOp::ShiftLeft:
-                case Ast::BinaryOp::ShiftRight:
+                switch (expr->op) {
+                case ast::BinaryOp::Add:
+                case ast::BinaryOp::Sub:
+                case ast::BinaryOp::Mul:
+                case ast::BinaryOp::Div:
+                case ast::BinaryOp::Mod:
+                case ast::BinaryOp::BitwiseAnd:
+                case ast::BinaryOp::BitwiseOr:
+                case ast::BinaryOp::BitwiseXor:
+                case ast::BinaryOp::ShiftLeft:
+                case ast::BinaryOp::ShiftRight:
                     if (lhs_type != rhs_type) {
-                        diagnostics_.ReportError(
-                            DiagnosticStage::Sema, expr->Location,
+                        diagnostics_.report_error(
+                            DiagnosticStage::Sema, expr->location,
                             "operand type mismatch in binary expression");
                     }
                     return lhs_type;
 
-                case Ast::BinaryOp::Equal:
-                case Ast::BinaryOp::NotEqual:
-                case Ast::BinaryOp::Less:
-                case Ast::BinaryOp::Greater:
-                case Ast::BinaryOp::LessEqual:
-                case Ast::BinaryOp::GreaterEqual:
+                case ast::BinaryOp::Equal:
+                case ast::BinaryOp::NotEqual:
+                case ast::BinaryOp::Less:
+                case ast::BinaryOp::Greater:
+                case ast::BinaryOp::LessEqual:
+                case ast::BinaryOp::GreaterEqual:
                     if (lhs_type != rhs_type) {
-                        diagnostics_.ReportError(
-                            DiagnosticStage::Sema, expr->Location,
+                        diagnostics_.report_error(
+                            DiagnosticStage::Sema, expr->location,
                             "operand type mismatch in comparison");
                     }
                     return Types::Bool;
 
-                case Ast::BinaryOp::LogicalAnd:
-                case Ast::BinaryOp::LogicalOr:
+                case ast::BinaryOp::LogicalAnd:
+                case ast::BinaryOp::LogicalOr:
                     if (lhs_type.Kind != TypeKind::Bool || rhs_type.Kind != TypeKind::Bool) {
-                        diagnostics_.ReportError(
-                            DiagnosticStage::Sema, expr->Location,
+                        diagnostics_.report_error(
+                            DiagnosticStage::Sema, expr->location,
                             "&&/|| require bool operands");
                     }
                     return Types::Bool;
@@ -295,45 +292,45 @@ namespace Sema {
                 return Types::Void;
             }
 
-            auto CheckAssign(const std::unique_ptr<Ast::AssignExpr> &expr, LocalMap &locals, SemaResult &result) -> ResolvedType {
+            auto CheckAssign(const std::unique_ptr<ast::AssignExpr> &expr, LocalMap &locals, SemaResult &result) -> ResolvedType {
                 ResolvedType target_type;
 
-                if (const auto *ident = std::get_if<Ast::IdentExpr>(&expr->Target)) {
-                    const auto it = locals.find(ident->Name);
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&expr->target)) {
+                    const auto it = locals.find(ident->name);
                     if (it == locals.end()) {
-                        diagnostics_.ReportError(
-                            DiagnosticStage::Sema, expr->Location,
-                            std::format("unknown identifier '{}'t", ident->Name));
+                        diagnostics_.report_error(
+                            DiagnosticStage::Sema, expr->location,
+                            std::format("unknown identifier '{}'t", ident->name));
 
                         return Types::Void;
                     }
 
                     if (!it->second.IsMutable) {
-                        diagnostics_.ReportError(
-                            DiagnosticStage::Sema, expr->Location,
-                            std::format("cannot assign to '{}': not declared mut", ident->Name));
+                        diagnostics_.report_error(
+                            DiagnosticStage::Sema, expr->location,
+                            std::format("cannot assign to '{}': not declared mut", ident->name));
                     }
 
                     target_type = it->second.Type;
                 } else {
-                    diagnostics_.ReportError(
-                        DiagnosticStage::Sema, expr->Location,
+                    diagnostics_.report_error(
+                        DiagnosticStage::Sema, expr->location,
                         "invalid assignment target");
 
                     return Types::Void;
                 }
 
-                const auto value_type = CheckExpression(expr->Value, locals, result);
-                if (expr->Op == Ast::AssignOp::Assign) {
+                const auto value_type = CheckExpression(expr->value, locals, result);
+                if (expr->op == ast::AssignOp::Assign) {
                     if (value_type != target_type) {
-                        diagnostics_.ReportError(
-                            DiagnosticStage::Sema, expr->Location,
+                        diagnostics_.report_error(
+                            DiagnosticStage::Sema, expr->location,
                             "type mismatch in assignment");
                     }
                 } else {
                     if (value_type != target_type) {
-                        diagnostics_.ReportError(
-                            DiagnosticStage::Sema, expr->Location,
+                        diagnostics_.report_error(
+                            DiagnosticStage::Sema, expr->location,
                             "type mismatch in compound assignment");
                     }
                 }
@@ -343,7 +340,7 @@ namespace Sema {
         };
     }
 
-    auto Check(const std::vector<Ast::Decl> &decls, DiagnosticEngine &diagnostics) -> SemaResult {
+    auto Check(const std::vector<ast::Decl> &decls, DiagnosticEngine &diagnostics) -> SemaResult {
         return TypeChecker(diagnostics).Check(decls);
     }
 }

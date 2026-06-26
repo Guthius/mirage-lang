@@ -1,6 +1,6 @@
-#include "Token.hpp"
+#include "token.hpp"
 
-auto TokenKindName(const TokenKind kind) -> const char * {
+auto token_kind_name(const TokenKind kind) -> const char * {
     switch (kind) {
     case TokenKind::IntLiteral:      return "INT";
     case TokenKind::FloatLiteral:    return "FLOAT";

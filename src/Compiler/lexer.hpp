@@ -1,10 +1,10 @@
 #pragma once
 
-#include <Compiler/Diagnostics/DiagnosticEngine.hpp>
-#include <Compiler/Token.hpp>
+#include "diagnostic_engine.hpp"
+#include "token.hpp"
 
 #include <vector>
 
-namespace Lexer {
+namespace lexer {
     auto Tokenize(std::string_view source, std::string_view filename, DiagnosticEngine &diagnostics) -> std::vector<Token>;
 }

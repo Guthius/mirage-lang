@@ -1,10 +1,10 @@
-#include "Lexer.hpp"
+#include "lexer.hpp"
 
 #include <cctype>
 #include <optional>
 #include <unordered_map>
 
-namespace Lexer {
+namespace lexer {
     namespace {
         using KeywordMap = std::unordered_map<std::string_view, TokenKind>;
 
@@ -83,13 +83,13 @@ namespace Lexer {
 
                     tokens.push_back(token);
 
-                    if (token.Kind == TokenKind::KwAsm) {
+                    if (token.kind == TokenKind::KwAsm) {
                         if (auto asm_token = lex_asm_block(); asm_token.has_value()) {
                             tokens.push_back(std::move(*asm_token));
                         }
                     }
 
-                    if (token.Kind == TokenKind::Eof) {
+                    if (token.kind == TokenKind::Eof) {
                         break;
                     }
                 }
@@ -99,35 +99,35 @@ namespace Lexer {
 
             [[nodiscard]] auto MakeLocation() const -> SourceLocation {
                 return SourceLocation{
-                    .Filename = filename_,
-                    .Line = line_,
-                    .Column = col_,
-                    .Offset = pos_,
+                    .filename = filename_,
+                    .line = line_,
+                    .column = col_,
+                    .offset = pos_,
                 };
             }
 
             [[nodiscard]] auto MakeLocationFromOffset(const size_t offset) const -> SourceLocation {
                 return SourceLocation{
-                    .Filename = filename_,
-                    .Line = line_,
-                    .Column = col_ - (pos_ - offset),
-                    .Offset = offset,
+                    .filename = filename_,
+                    .line = line_,
+                    .column = col_ - (pos_ - offset),
+                    .offset = offset,
                 };
             }
 
             [[nodiscard]] auto MakeToken(const TokenKind kind, const size_t start) const -> Token {
                 return Token{
-                    .Kind = kind,
-                    .Lexeme = std::string(source_.substr(start, pos_ - start)),
-                    .Location = MakeLocationFromOffset(start),
+                    .kind = kind,
+                    .lexeme = std::string(source_.substr(start, pos_ - start)),
+                    .location = MakeLocationFromOffset(start),
                 };
             }
 
             [[nodiscard]] auto MakeEof() const -> Token {
                 return Token{
-                    .Kind = TokenKind::Eof,
-                    .Lexeme = {},
-                    .Location = MakeLocation(),
+                    .kind = TokenKind::Eof,
+                    .lexeme = {},
+                    .location = MakeLocation(),
                 };
             }
 
@@ -301,7 +301,7 @@ namespace Lexer {
                 }
 
                 if (AtEnd()) {
-                    diagnostics_.ReportError(DiagnosticStage::Lexer, MakeLocation(), "unterminated string literal");
+                    diagnostics_.report_error(DiagnosticStage::Lexer, MakeLocation(), "unterminated string literal");
 
                     return MakeToken(TokenKind::StringLiteral, start);
                 }
@@ -313,7 +313,7 @@ namespace Lexer {
 
             auto LexSymbol(const size_t start, const char ch) -> Token {
                 const auto MatchDouble = [&](const char expected, const TokenKind double_token,
-                                              const TokenKind single_token) -> Token {
+                                             const TokenKind single_token) -> Token {
                     return MakeToken(Match(expected) ? double_token : single_token, start);
                 };
 
@@ -397,13 +397,13 @@ namespace Lexer {
                     return MatchDouble('=', TokenKind::ColonEqual, TokenKind::Colon);
 
                 default:
-                    diagnostics_.ReportError(
+                    diagnostics_.report_error(
                         DiagnosticStage::Lexer,
                         SourceLocation{
-                            .Filename = filename_,
-                            .Line = line_,
-                            .Column = col_ - 1,
-                            .Offset = start,
+                            .filename = filename_,
+                            .line = line_,
+                            .column = col_ - 1,
+                            .offset = start,
                         },
                         std::string("unexpected character '") + ch + "'");
 
@@ -437,14 +437,14 @@ namespace Lexer {
 
                 const auto body = source_.substr(block_start + 1, pos_ - block_start - 1);
                 auto tok = Token{
-                    .Kind = TokenKind::AsmBlock,
-                    .Lexeme = std::string(body),
-                    .Location =
+                    .kind = TokenKind::AsmBlock,
+                    .lexeme = std::string(body),
+                    .location =
                         {
-                                   .Filename = filename_,
-                                   .Line = line_,
-                                   .Column = col_,
-                                   .Offset = block_start,
+                                   .filename = filename_,
+                                   .line = line_,
+                                   .column = col_,
+                                   .offset = block_start,
                                    },
                 };
 

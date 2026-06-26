@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Compiler/SourceLocation.hpp>
+#include "source_location.hpp"
 
 #include <cstdint>
 #include <string>
@@ -118,10 +118,10 @@ enum class TokenKind : uint8_t {
     Eof,
 };
 
-auto TokenKindName(TokenKind kind) -> const char *;
+auto token_kind_name(TokenKind kind) -> const char *;
 
 struct Token {
-    TokenKind Kind;
-    std::string Lexeme;
-    SourceLocation Location;
+    TokenKind kind;
+    std::string lexeme;
+    SourceLocation location;
 };

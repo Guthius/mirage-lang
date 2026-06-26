@@ -1,9 +1,9 @@
 #pragma once
 
-#include <Compiler/Ast/Decl.hpp>
-#include <Compiler/Ast/Expr.hpp>
-#include <Compiler/Diagnostics/DiagnosticEngine.hpp>
+#include "../diagnostic_engine.hpp"
+
 #include <Compiler/Sema/ResolvedType.hpp>
+#include <Compiler/ast.hpp>
 
 #include <unordered_map>
 #include <vector>
@@ -17,11 +17,11 @@ namespace Sema {
 
         std::unordered_map<const void *, ResolvedType> expr_types;
         std::vector<ResolvedType> PointerPointees;
-        std::unordered_map<const Ast::FunctionDecl *, FunctionSignature> Functions;
+        std::unordered_map<const ast::FunctionDecl *, FunctionSignature> Functions;
         bool Ok = false;
     };
 
-    inline auto GetExprKey(const Ast::Expr &expr) -> const void * {
+    inline auto GetExprKey(const ast::Expr &expr) -> const void * {
         return std::visit(
             [](const auto &ptr) -> const void * {
                 return &ptr;
@@ -29,7 +29,7 @@ namespace Sema {
             expr);
     }
 
-    auto Check(const std::vector<Ast::Decl> &decls, DiagnosticEngine &diagnostics) -> SemaResult;
+    auto Check(const std::vector<ast::Decl> &decls, DiagnosticEngine &diagnostics) -> SemaResult;
 
     /**
      * Resolves the type of the given type node.
@@ -37,5 +37,5 @@ namespace Sema {
      * @param result The result of the semantic analysis
      * @return The resolved type
      */
-    auto resolve_type(const Ast::Type &type, SemaResult &result) -> ResolvedType;
+    auto resolve_type(const ast::Type &type, SemaResult &result) -> ResolvedType;
 }

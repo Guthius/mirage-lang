@@ -1,6 +1,6 @@
-#include <Compiler/Ast.hpp>
-#include <Compiler/Lexer/Lexer.hpp>
 #include <Compiler/Sema/Sema.hpp>
+#include <Compiler/ast.hpp>
+#include <Compiler/lexer.hpp>
 
 #include <fstream>
 #include <iostream>
@@ -29,20 +29,20 @@ auto main(const int argc, char *argv[]) -> int {
     const auto source = ReadFile(filename);
 
     DiagnosticEngine diagnostics;
-    diagnostics.SetSource(filename, source);
+    diagnostics.set_source(filename, source);
 
-    auto tokens = Lexer::Tokenize(source, filename, diagnostics);
-    if (diagnostics.HasErrors()) {
+    auto tokens = lexer::Tokenize(source, filename, diagnostics);
+    if (diagnostics.has_errors()) {
         return 1;
     }
 
-    const auto decls = Ast::Parse(tokens, diagnostics);
-    if (diagnostics.HasErrors()) {
+    const auto decls = ast::parse(tokens, diagnostics);
+    if (diagnostics.has_errors()) {
         return 1;
     }
 
     auto res = Sema::Check(decls, diagnostics);
-    if (diagnostics.HasErrors()) {
+    if (diagnostics.has_errors()) {
         return 1;
     }
 
@@ -51,7 +51,7 @@ auto main(const int argc, char *argv[]) -> int {
 
 #include <unordered_map>
 
-using module = std::vector<Ast::Decl>;
+using module = std::vector<ast::Decl>;
 
 struct program {
     std::unordered_map<std::string, module> modules;

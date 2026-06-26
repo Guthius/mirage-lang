@@ -1,3 +1,10 @@
 ext fn sbrk(increment: usize) -> anyptr
 
-const my_mod := import("123")
+const alignment: usize = 16
+
+macro align_up(n: size_t) -> (n + (alignment - 1)) & ~(alignment - 1)
+
+const block_header_size := align_up(sizeof(block_header))
+
+mut heap_head: *block_header = nil
+mut heap_tail: *block_header = nil
