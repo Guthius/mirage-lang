@@ -48,3 +48,18 @@ auto main(const int argc, char *argv[]) -> int {
 
     return 0;
 }
+
+#include <unordered_map>
+
+using module = std::vector<Ast::Decl>;
+
+struct program {
+    std::unordered_map<std::string, module> modules;
+    std::vector<std::string> resolution_order;
+    std::vector<std::pair<std::string, std::string>> cycles;
+};
+
+class module_resolver {
+  public:
+    auto resolve(const module &m) -> program;
+};

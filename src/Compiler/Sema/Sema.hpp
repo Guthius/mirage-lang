@@ -30,4 +30,12 @@ namespace Sema {
     }
 
     auto Check(const std::vector<Ast::Decl> &decls, DiagnosticEngine &diagnostics) -> SemaResult;
+
+    /**
+     * Resolves the type of the given type node.
+     * @param type The type node
+     * @param result The result of the semantic analysis
+     * @return The resolved type
+     */
+    auto resolve_type(const Ast::Type &type, SemaResult &result) -> ResolvedType;
 }

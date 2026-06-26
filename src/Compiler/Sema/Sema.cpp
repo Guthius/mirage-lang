@@ -23,67 +23,6 @@ namespace Sema {
             explicit TypeChecker(DiagnosticEngine &diagnostics) : diagnostics_(diagnostics) {
             }
 
-            auto ResolveType(const Ast::Type &type, SemaResult &result) -> ResolvedType {
-                return std::visit(
-                    [&]<typename T>(const T &alt) -> ResolvedType {
-                        using V = std::decay_t<T>;
-
-                        if constexpr (std::is_same_v<V, std::monostate>) {
-                            return Types::Void;
-                        }
-
-                        if constexpr (std::is_same_v<V, std::unique_ptr<Ast::BuiltinType>>) {
-                            return ResolveBuiltin(alt->Kind);
-                        }
-
-                        if constexpr (std::is_same_v<V, std::unique_ptr<Ast::PointerType>>) {
-                            auto pointee = ResolveType(alt->Pointee, result);
-
-                            const auto pointer = ResolvedType{
-                                .Kind = TypeKind::Pointer,
-                                .PointeeIndex = static_cast<int>(result.PointerPointees.size()),
-                            };
-
-                            result.PointerPointees.push_back(pointee);
-
-                            return pointer;
-                        }
-
-                        if constexpr (std::is_same_v<V, std::unique_ptr<Ast::NamedType>>) {
-                            diagnostics_.ReportError(
-                                DiagnosticStage::Sema, alt->Location,
-                                std::format("unknown type '{}' (named types not yet supported)", alt->Name));
-
-                            return Types::Void;
-                        }
-
-                        return Types::Void;
-                    },
-                    type);
-            }
-
-            static auto ResolveBuiltin(const Ast::BuiltinTypeKind kind) -> ResolvedType {
-                switch (kind) {
-                case Ast::BuiltinTypeKind::U8:     return ResolvedType{TypeKind::U8};
-                case Ast::BuiltinTypeKind::U16:    return ResolvedType{TypeKind::U16};
-                case Ast::BuiltinTypeKind::U32:    return ResolvedType{TypeKind::U32};
-                case Ast::BuiltinTypeKind::U64:    return ResolvedType{TypeKind::U64};
-                case Ast::BuiltinTypeKind::I8:     return ResolvedType{TypeKind::I8};
-                case Ast::BuiltinTypeKind::I16:    return ResolvedType{TypeKind::I16};
-                case Ast::BuiltinTypeKind::I32:    return ResolvedType{TypeKind::I32};
-                case Ast::BuiltinTypeKind::I64:    return ResolvedType{TypeKind::I64};
-                case Ast::BuiltinTypeKind::F32:    return ResolvedType{TypeKind::F32};
-                case Ast::BuiltinTypeKind::F64:    return ResolvedType{TypeKind::F64};
-                case Ast::BuiltinTypeKind::Usize:  return ResolvedType{TypeKind::USize};
-                case Ast::BuiltinTypeKind::Bool:   return ResolvedType{TypeKind::Bool};
-                case Ast::BuiltinTypeKind::Byte:   return ResolvedType{TypeKind::Byte};
-                case Ast::BuiltinTypeKind::Error:  return ResolvedType{TypeKind::Error};
-                case Ast::BuiltinTypeKind::Anyptr: return ResolvedType{TypeKind::Anyptr};
-                case Ast::BuiltinTypeKind::Type:   return ResolvedType{TypeKind::Void};
-                }
-                return ResolvedType{TypeKind::Void};
-            }
-
             auto Check(const std::vector<Ast::Decl> &decls) -> SemaResult {
                 SemaResult result;
 
@@ -104,7 +43,7 @@ namespace Sema {
 
                 SemaResult::FunctionSignature signature;
                 for (auto &param : decl.Params) {
-                    auto type = ResolveType(param.Type, result);
+                    auto type = resolve_type(param.Type, result);
 
                     signature.Params.push_back(type);
 
@@ -115,7 +54,7 @@ namespace Sema {
                 }
 
                 for (auto &return_type : decl.ReturnTypes) {
-                    signature.ReturnTypes.push_back(ResolveType(return_type, result));
+                    signature.ReturnTypes.push_back(resolve_type(return_type, result));
                 }
 
                 result.Functions[&decl] = signature;

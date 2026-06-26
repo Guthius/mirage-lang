@@ -48,7 +48,7 @@ namespace Ast {
         }
 
         auto ParseFunctionDecl(Parser &parser, bool is_public) -> FunctionDecl {
-            auto location = parser.CurrentLocation();
+            const auto location = parser.CurrentLocation();
 
             parser.Expect(TokenKind::KwFn, "'fn'");
 
@@ -68,8 +68,71 @@ namespace Ast {
         }
     }
 
+    auto parse_ext_function_params(Parser &parser) -> std::vector<ExtFunctionDecl::Param> {
+        parser.Expect(TokenKind::LParen, "'('");
+
+        std::vector<ExtFunctionDecl::Param> params;
+
+        while (!parser.Check(TokenKind::RParen) && !parser.AtEnd()) {
+            const auto param_location = parser.CurrentLocation();
+            const auto param_name = parser.Expect(TokenKind::Identifier, "parameter name");
+
+            parser.Expect(TokenKind::Colon, "':'");
+
+            params.push_back({
+                .Name = param_name.Lexeme,
+                .Type = ParseType(parser),
+                .Location = param_location,
+            });
+
+            if (!parser.Check(TokenKind::RParen)) {
+                parser.Expect(TokenKind::Comma, "','");
+            }
+        }
+
+        parser.Expect(TokenKind::RParen, "')'");
+
+        return params;
+    }
+
+    auto parse_ext_function_return_type(Parser &parser) -> std::optional<Type> {
+        std::vector<Type> return_types;
+
+        if (parser.Match(TokenKind::Arrow)) {
+            return_types.push_back(ParseType(parser));
+
+            return ParseType(parser);
+        }
+
+        return std::nullopt;
+    }
+
+    auto ParseExtFunctionDecl(Parser &parser, bool is_public) -> ExtFunctionDecl {
+        const auto location = parser.CurrentLocation();
+
+        parser.Expect(TokenKind::KwFn, "'fn'");
+
+        auto fn_name = parser.Expect(TokenKind::Identifier, "function name").Lexeme;
+        auto fn_params = parse_ext_function_params(parser);
+        auto fn_return_type = parse_ext_function_return_type(parser);
+
+        return ExtFunctionDecl{
+            .IsPublic = is_public,
+            .Name = fn_name,
+            .Params = std::move(fn_params),
+            .ReturnType = std::move(fn_return_type),
+            .Location = location,
+        };
+    }
+
     auto ParseDecl(Parser &parser, const bool top_level) -> std::optional<Decl> {
         const auto is_public = !top_level || parser.Match(TokenKind::KwPub);
+
+        if (parser.Check(TokenKind::Identifier) && parser.CurrentLexeme() == "ext") {
+            parser.Advance();
+
+            return ParseExtFunctionDecl(parser, is_public);
+        }
 
         if (parser.Check(TokenKind::KwFn)) {
             return ParseFunctionDecl(parser, is_public);
