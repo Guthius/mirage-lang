@@ -14,6 +14,7 @@ enum class DiagnosticLevel : uint8_t {
 enum class DiagnosticStage : uint8_t {
     Lexer,
     Parser,
+    Sema,
 };
 
 struct Diagnostic {

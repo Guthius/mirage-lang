@@ -10,7 +10,7 @@
 namespace Ast {
     struct FunctionDecl;
 
-    using Decl = std::variant<std::unique_ptr<FunctionDecl>>;
+    using Decl = std::variant<FunctionDecl>;
 
     struct FunctionDecl {
         struct Param {

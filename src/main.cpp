@@ -1,5 +1,6 @@
 #include <Compiler/Ast.hpp>
 #include <Compiler/Lexer/Lexer.hpp>
+#include <Compiler/Sema/Sema.hpp>
 
 #include <fstream>
 #include <iostream>
@@ -36,6 +37,11 @@ auto main(const int argc, char *argv[]) -> int {
     }
 
     auto decls = Ast::Parse(tokens, diagnostics);
+    if (diagnostics.HasErrors()) {
+        return 1;
+    }
+
+    auto res = Sema::Check(decls, diagnostics);
     if (diagnostics.HasErrors()) {
         return 1;
     }

@@ -47,7 +47,7 @@ namespace Ast {
             return return_types;
         }
 
-        auto ParseFunctionDecl(Parser &parser, bool is_public) -> std::unique_ptr<FunctionDecl> {
+        auto ParseFunctionDecl(Parser &parser, bool is_public) -> FunctionDecl {
             auto location = parser.CurrentLocation();
 
             parser.Expect(TokenKind::KwFn, "'fn'");
@@ -57,14 +57,14 @@ namespace Ast {
             auto fn_return_types = parse_function_return_types(parser);
             auto fn_body = ParseStmt(parser);
 
-            return std::make_unique<FunctionDecl>(FunctionDecl{
+            return FunctionDecl{
                 .IsPublic = is_public,
                 .Name = std::move(fn_name),
                 .Params = std::move(fn_params),
                 .ReturnTypes = std::move(fn_return_types),
                 .Body = std::move(fn_body),
                 .Location = location,
-            });
+            };
         }
     }
 
