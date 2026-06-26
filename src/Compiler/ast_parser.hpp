@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Compiler/token.hpp>
+#include "token.hpp"
 
 namespace ast {
     class Parser {
@@ -16,7 +16,7 @@ namespace ast {
         virtual auto check(TokenKind kind) const -> bool = 0;
         virtual auto match(TokenKind kind) -> bool = 0;
         virtual auto expect(TokenKind kind, std::string_view message) -> const Token = 0;
-        virtual auto expect_identifier(std::string_view identifier) -> const Token & = 0;
+        virtual auto expect_identifier() -> const std::string & = 0;
         virtual auto report_error(SourceLocation location, std::string message) -> void = 0;
     };
 }

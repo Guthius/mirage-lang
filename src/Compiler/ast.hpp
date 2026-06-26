@@ -45,10 +45,24 @@ namespace ast {
         SourceLocation location;
     };
 
-    using Type = std::variant<std::monostate, BuiltinType, std::unique_ptr<PointerType>, NamedType>;
+    struct StructType;
+
+    using Type = std::variant<std::monostate, BuiltinType, std::unique_ptr<PointerType>, NamedType, std::unique_ptr<StructType>>;
 
     struct PointerType {
         Type pointee;
+        SourceLocation location;
+    };
+
+    struct StructType {
+        struct Field {
+            std::string name;
+            Type type;
+            SourceLocation location;
+        };
+
+        bool is_packed;
+        std::vector<Field> fields;
         SourceLocation location;
     };
 
@@ -93,6 +107,8 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct SizeOfExpr;
+
     using Expr = std::variant<
         LiteralIntegerExpr,
         LiteralFloatExpr,
@@ -106,7 +122,8 @@ namespace ast {
         std::unique_ptr<AssignExpr>,
         std::unique_ptr<CallExpr>,
         std::unique_ptr<IncrDecrExpr>,
-        ImportExpr>;
+        ImportExpr,
+        std::unique_ptr<SizeOfExpr>>;
 
     enum class UnaryOp : uint8_t {
         Negate,
@@ -190,6 +207,11 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct SizeOfExpr {
+        Expr operand;
+        SourceLocation location;
+    };
+
     struct BlockStmt;
     struct ExprStmt;
 
@@ -260,7 +282,14 @@ namespace ast {
         SourceLocation location;
     };
 
-    using Decl = std::variant<FunctionDecl, ExtFunctionDecl, VarDecl, MacroDecl>;
+    struct TypeDecl {
+        bool is_pub;
+        std::string name;
+        Type type;
+        SourceLocation location;
+    };
+
+    using Decl = std::variant<FunctionDecl, ExtFunctionDecl, VarDecl, MacroDecl, TypeDecl>;
 
     auto parse(std::span<Token> tokens, DiagnosticEngine &diagnostics) -> std::vector<Decl>;
 

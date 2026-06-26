@@ -56,6 +56,12 @@ namespace Sema {
                 .Kind = TypeKind::Void,
             };
         }
+
+        auto resolve(const std::unique_ptr<ast::StructType> &, SemaResult &) -> ResolvedType {
+            return ResolvedType{
+                .Kind = TypeKind::Void,
+            };
+        }
     }
 
     auto resolve_type(const ast::Type &type, SemaResult &result) -> ResolvedType {

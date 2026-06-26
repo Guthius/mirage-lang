@@ -168,6 +168,10 @@ namespace Sema {
                 return operand_type;
             }
 
+            auto CheckExpression(const std::unique_ptr<ast::SizeOfExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
+                return ResolvedType{.Kind = TypeKind::USize};
+            }
+
             auto CheckExpression(const ast::Expr &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected = std::nullopt) -> ResolvedType {
                 const auto resolved_type = std::visit(
                     [&](const auto &v) {

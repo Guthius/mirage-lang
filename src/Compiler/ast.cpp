@@ -1,4 +1,4 @@
-#include <Compiler/ast.hpp>
+#include "ast.hpp"
 
 #include <format>
 
@@ -25,7 +25,7 @@ namespace ast {
             };
         }
 
-        auto ParseBuiltinTypeKind(Parser &parser) -> std::optional<BuiltinTypeKind> {
+        auto parse_builtin_type_kind(Parser &parser) -> std::optional<BuiltinTypeKind> {
             switch (parser.advance().kind) {
             case TokenKind::KwU8:     return BuiltinTypeKind::U8;
             case TokenKind::KwU16:    return BuiltinTypeKind::U16;
@@ -45,6 +45,34 @@ namespace ast {
             case TokenKind::KwType:   return BuiltinTypeKind::Type;
             default:                  return std::nullopt;
             }
+        }
+
+        auto parse_struct_type(Parser &parser) -> Type {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwStruct, "'struct'");
+            parser.expect(TokenKind::LBrace, "'{'");
+
+            std::vector<StructType::Field> fields;
+            while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                const auto field_location = parser.current_location();
+                const auto field_name = parser.expect(TokenKind::Identifier, "identifier").lexeme;
+
+                parser.expect(TokenKind::Colon, "':'");
+
+                fields.push_back({
+                    .name = field_name,
+                    .type = parse_type(parser),
+                    .location = field_location,
+                });
+            }
+
+            parser.expect(TokenKind::RBrace, "'}'");
+
+            return std::make_unique<StructType>(StructType{
+                .fields = std::move(fields),
+                .location = location,
+            });
         }
 
         template <typename T>
@@ -161,6 +189,15 @@ namespace ast {
                 return LiteralNilExpr{
                     .location = location,
                 };
+            }
+
+            if (parser.check(TokenKind::KwSizeOf)) {
+                parser.advance();
+
+                return std::make_unique<SizeOfExpr>(SizeOfExpr{
+                    .operand = parse_expr(parser),
+                    .location = location,
+                });
             }
 
             if (parser.match(TokenKind::LParen)) {
@@ -772,6 +809,23 @@ namespace ast {
                 .location = location,
             };
         }
+
+        auto parse_type_decl(Parser &parser, const bool is_pub) -> TypeDecl {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwType, "'type'");
+
+            const auto type_name = parser.expect_identifier();
+
+            parser.expect(TokenKind::Equal, "'='");
+
+            return TypeDecl{
+                .is_pub = is_pub,
+                .name = type_name,
+                .type = parse_type(parser),
+                .location = location,
+            };
+        }
     }
 
     auto parse_type(Parser &parser) -> Type {
@@ -784,11 +838,15 @@ namespace ast {
             });
         }
 
+        if (parser.check(TokenKind::KwStruct)) {
+            return parse_struct_type(parser);
+        }
+
         if (parser.check(TokenKind::Identifier)) {
             return parse_named_type(parser);
         }
 
-        if (const auto kind = ParseBuiltinTypeKind(parser); kind.has_value()) {
+        if (const auto kind = parse_builtin_type_kind(parser); kind.has_value()) {
             return BuiltinType{
                 .kind = kind.value(),
                 .location = location,
@@ -833,6 +891,10 @@ namespace ast {
 
         if (parser.check(TokenKind::KwFn)) {
             return parse_function_decl(parser, is_pub);
+        }
+
+        if (parser.check(TokenKind::KwType)) {
+            return parse_type_decl(parser, is_pub);
         }
 
         if (parser.check(TokenKind::KwMut) || parser.check(TokenKind::KwConst)) {

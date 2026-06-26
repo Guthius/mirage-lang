@@ -70,14 +70,14 @@ namespace ast {
                 return current();
             }
 
-            auto expect_identifier(std::string_view identifier) -> const Token & override {
-                if (check(TokenKind::Identifier) || current_lexeme() == identifier) {
-                    return advance();
+            auto expect_identifier() -> const std::string & override {
+                if (check(TokenKind::Identifier)) {
+                    return advance().lexeme;
                 }
 
-                report_error(current_location(), std::format("expected '{}', got '{}'", identifier, current_lexeme()));
+                report_error(current_location(), std::format("expected identifier, got '{}'", current_lexeme()));
 
-                return current();
+                return current().lexeme;
             }
 
             auto report_error(const SourceLocation location, std::string message) -> void override {

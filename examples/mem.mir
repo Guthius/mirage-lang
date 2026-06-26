@@ -4,7 +4,21 @@ const alignment: usize = 16
 
 macro align_up(n: size_t) -> (n + (alignment - 1)) & ~(alignment - 1)
 
+type block_header = struct {
+    size: usize
+    is_free: bool
+    next: *block_header
+}
+
 const block_header_size := align_up(sizeof(block_header))
 
 mut heap_head: *block_header = nil
 mut heap_tail: *block_header = nil
+
+pub fn set(ptr: anyptr, value: byte, n: usize) -> anyptr {
+    mut p := ptr
+    while n-- {
+        p++* = value
+    }
+    return ptr
+}
