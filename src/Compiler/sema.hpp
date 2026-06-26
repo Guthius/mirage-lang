@@ -1,27 +1,26 @@
 #pragma once
 
-#include "../diagnostic_engine.hpp"
-
-#include <Compiler/Sema/ResolvedType.hpp>
-#include <Compiler/ast.hpp>
+#include "ast.hpp"
+#include "diagnostic_engine.hpp"
+#include "resolved_type.hpp"
 
 #include <unordered_map>
 #include <vector>
 
-namespace Sema {
+namespace sema {
     struct SemaResult {
         struct FunctionSignature {
-            std::vector<ResolvedType> Params;
-            std::vector<ResolvedType> ReturnTypes;
+            std::vector<ResolvedType> params;
+            std::vector<ResolvedType> return_types;
         };
 
         std::unordered_map<const void *, ResolvedType> expr_types;
-        std::vector<ResolvedType> PointerPointees;
-        std::unordered_map<const ast::FunctionDecl *, FunctionSignature> Functions;
-        bool Ok = false;
+        std::vector<ResolvedType> pointer_pointees;
+        std::unordered_map<const ast::FunctionDecl *, FunctionSignature> functions;
+        bool ok = false;
     };
 
-    inline auto GetExprKey(const ast::Expr &expr) -> const void * {
+    inline auto get_expr_key(const ast::Expr &expr) -> const void * {
         return std::visit(
             [](const auto &ptr) -> const void * {
                 return &ptr;
@@ -29,7 +28,7 @@ namespace Sema {
             expr);
     }
 
-    auto Check(const std::vector<ast::Decl> &decls, DiagnosticEngine &diagnostics) -> SemaResult;
+    auto check(const std::vector<ast::Decl> &decls, DiagnosticEngine &diagnostics) -> SemaResult;
 
     /**
      * Resolves the type of the given type node.

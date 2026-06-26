@@ -108,6 +108,8 @@ namespace ast {
     };
 
     struct SizeOfExpr;
+    struct CastExpr;
+    struct MemberExpr;
 
     using Expr = std::variant<
         LiteralIntegerExpr,
@@ -123,7 +125,9 @@ namespace ast {
         std::unique_ptr<CallExpr>,
         std::unique_ptr<IncrDecrExpr>,
         ImportExpr,
-        std::unique_ptr<SizeOfExpr>>;
+        std::unique_ptr<SizeOfExpr>,
+        std::unique_ptr<CastExpr>,
+        std::unique_ptr<MemberExpr>>;
 
     enum class UnaryOp : uint8_t {
         Negate,
@@ -212,20 +216,54 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct CastExpr {
+        Expr value;
+        Type as_type;
+        SourceLocation location;
+    };
+
+    struct MemberExpr {
+        Expr object;
+        std::string member;
+        SourceLocation location;
+    };
+
     struct BlockStmt;
-    struct ExprStmt;
+    struct WhileStmt;
+
+    struct ExprStmt {
+        Expr expr;
+        SourceLocation location;
+    };
+
+    struct VarDeclStmt {
+        bool is_mut;
+        std::string name;
+        std::optional<Type> type;
+        std::optional<Expr> init;
+        SourceLocation location;
+    };
+
+    struct ReturnStmt {
+        std::vector<Expr> return_values;
+        SourceLocation location;
+    };
 
     using Stmt = std::variant<
         std::unique_ptr<BlockStmt>,
-        std::unique_ptr<ExprStmt>>;
+        std::unique_ptr<WhileStmt>,
+        ExprStmt,
+        VarDeclStmt,
+        ReturnStmt>;
 
     struct BlockStmt {
         std::vector<Stmt> stmts;
         SourceLocation location;
     };
 
-    struct ExprStmt {
-        Expr expr;
+    struct WhileStmt {
+        Expr condition;
+        Stmt body;
         SourceLocation location;
     };
 

@@ -80,6 +80,30 @@ namespace ast {
             return std::make_unique<T>(std::forward<T>(value));
         }
 
+        auto can_start_expr(const TokenKind kind) -> bool {
+            switch (kind) {
+            case TokenKind::Identifier:
+            case TokenKind::IntLiteral:
+            case TokenKind::FloatLiteral:
+            case TokenKind::StringLiteral:
+            case TokenKind::KwTrue:
+            case TokenKind::KwFalse:
+            case TokenKind::KwNil:
+            case TokenKind::LParen:
+            case TokenKind::Minus:
+            case TokenKind::Bang:
+            case TokenKind::Tilde:
+            case TokenKind::Ampersand:
+            case TokenKind::KwCast:
+            case TokenKind::KwSizeOf:
+            case TokenKind::KwLen:
+            case TokenKind::KwDefault:
+                return true;
+            default:
+                return false;
+            }
+        }
+
         auto parse_literal_integer_expr(Parser &parser) -> Expr {
             const auto ToInt = [](const char ch) -> uint64_t {
                 if (std::isdigit(ch)) {
@@ -124,6 +148,23 @@ namespace ast {
                 .value = value,
                 .location = location,
             };
+        }
+
+        auto parse_cast_expr(Parser &parser) -> Expr {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwCast, "'cast'");
+            parser.expect(TokenKind::LParen, "'('");
+            auto expr = parse_expr(parser);
+            parser.expect(TokenKind::Comma, "','");
+            auto as_type = parse_type(parser);
+            parser.expect(TokenKind::RParen, "')'");
+
+            return std::make_unique<CastExpr>(CastExpr{
+                .value = std::move(expr),
+                .as_type = std::move(as_type),
+                .location = location,
+            });
         }
 
         auto parse_primary(Parser &parser) -> Expr {
@@ -200,6 +241,10 @@ namespace ast {
                 });
             }
 
+            if (parser.check(TokenKind::KwCast)) {
+                return parse_cast_expr(parser);
+            }
+
             if (parser.match(TokenKind::LParen)) {
                 auto inner = parse_expr(parser);
 
@@ -220,10 +265,10 @@ namespace ast {
         auto parse_postfix(Parser &parser) -> Expr {
             auto expr = parse_primary(parser);
 
+            const auto location = parser.current_location();
+
             while (true) {
                 if (parser.check(TokenKind::LParen)) {
-                    const auto location = parser.current_location();
-
                     parser.advance();
 
                     std::vector<Expr> args;
@@ -241,9 +286,13 @@ namespace ast {
                         .args = std::move(args),
                         .location = location,
                     });
+                } else if (parser.check(TokenKind::Dot)) {
+                    expr = make_expr(MemberExpr{
+                        .object = std::move(expr),
+                        .member = parser.expect_identifier(),
+                        .location = location,
+                    });
                 } else if (parser.check(TokenKind::PlusPlus)) {
-                    const auto location = parser.current_location();
-
                     parser.advance();
 
                     expr = make_expr(IncrDecrExpr{
@@ -253,8 +302,6 @@ namespace ast {
                         .location = location,
                     });
                 } else if (parser.check(TokenKind::MinusMinus)) {
-                    const auto location = parser.current_location();
-
                     parser.advance();
 
                     expr = make_expr(IncrDecrExpr{
@@ -603,10 +650,83 @@ namespace ast {
         auto parse_expr_stmt(Parser &parser) -> Stmt {
             const auto location = parser.current_location();
 
-            return std::make_unique<ExprStmt>(ExprStmt{
+            return ExprStmt{
                 .expr = parse_expr(parser),
                 .location = location,
+            };
+        }
+
+        auto parse_var_decl_stmt(Parser &parser) -> VarDeclStmt {
+            const auto location = parser.current_location();
+
+            const auto is_mut = parser.match(TokenKind::KwMut);
+            if (!is_mut) {
+                parser.expect(TokenKind::KwConst, "'const' or 'mut'");
+            }
+
+            auto var_name = parser.expect_identifier();
+
+            std::optional<Type> type = std::nullopt;
+            if (parser.match(TokenKind::Colon)) {
+                type = parse_type(parser);
+            }
+
+            std::optional<Expr> init_expr = std::nullopt;
+            if (type.has_value()) {
+                if (parser.match(TokenKind::Equal)) {
+                    init_expr = parse_expr(parser, false);
+                }
+            } else {
+                parser.expect(TokenKind::ColonEqual, "':' or ':='");
+                init_expr = parse_expr(parser, !is_mut);
+            }
+
+            if (!is_mut && init_expr == std::nullopt) {
+                parser.report_error(parser.current_location(), "'const' requires an initializer");
+            }
+
+            return VarDeclStmt{
+                .is_mut = is_mut,
+                .name = var_name,
+                .type = std::move(type),
+                .init = std::move(init_expr),
+                .location = location,
+            };
+        }
+
+        auto parse_while_stmt(Parser &parser) -> std::unique_ptr<WhileStmt> {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwWhile, "'while'");
+
+            auto condition = parse_expr(parser);
+            auto body = parse_block_stmt(parser);
+
+            return std::make_unique<WhileStmt>(WhileStmt{
+                .condition = std::move(condition),
+                .body = std::move(body),
+                .location = location,
             });
+        }
+
+        auto parse_return_stmt(Parser &parser) -> ReturnStmt {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwReturn, "'return'");
+
+            std::vector<Expr> values;
+            if (can_start_expr(parser.current().kind)) {
+                values.push_back(parse_expr(parser));
+
+                while (parser.match(TokenKind::Comma)) {
+                    values.push_back(parse_expr(parser));
+                }
+            }
+
+            return ReturnStmt{
+                .return_values = std::move(values),
+                .location = location,
+            };
         }
 
         auto parse_function_params(Parser &parser) -> std::vector<FunctionDecl::Param> {
@@ -875,6 +995,18 @@ namespace ast {
     auto parse_stmt(Parser &parser) -> Stmt {
         if (parser.check(TokenKind::LBrace)) {
             return parse_block_stmt(parser);
+        }
+
+        if (parser.check(TokenKind::KwMut) || parser.check(TokenKind::KwConst)) {
+            return parse_var_decl_stmt(parser);
+        }
+
+        if (parser.check(TokenKind::KwWhile)) {
+            return parse_while_stmt(parser);
+        }
+
+        if (parser.check(TokenKind::KwReturn)) {
+            return parse_return_stmt(parser);
         }
 
         return parse_expr_stmt(parser);

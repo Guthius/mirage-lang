@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace Sema {
+namespace sema {
     enum class TypeKind : uint8_t {
         Void,
         U8,
@@ -17,22 +17,21 @@ namespace Sema {
         F64,
         USize,
         Bool,
-        Byte,
         Error,
         Anyptr,
         Pointer,
     };
 
     struct ResolvedType {
-        TypeKind Kind = TypeKind::Void;
-        int PointeeIndex = -1;
+        TypeKind kind = TypeKind::Void;
+        int pointee_index = -1;
 
         auto operator==(const ResolvedType &other) const -> bool {
-            return Kind == other.Kind && PointeeIndex == other.PointeeIndex;
+            return kind == other.kind && pointee_index == other.pointee_index;
         }
 
-        [[nodiscard]] auto IsInteger() const -> bool {
-            switch (Kind) {
+        [[nodiscard]] auto is_integer() const -> bool {
+            switch (kind) {
             case TypeKind::U8:
             case TypeKind::U16:
             case TypeKind::U32:
@@ -41,7 +40,6 @@ namespace Sema {
             case TypeKind::I16:
             case TypeKind::I32:
             case TypeKind::I64:
-            case TypeKind::Byte:
             case TypeKind::USize:
             case TypeKind::Error:
                 return true;
@@ -50,8 +48,8 @@ namespace Sema {
             }
         }
 
-        [[nodiscard]] auto IsSigned() const -> bool {
-            switch (Kind) {
+        [[nodiscard]] auto is_signed() const -> bool {
+            switch (kind) {
             case TypeKind::I8:
             case TypeKind::I16:
             case TypeKind::I32:
@@ -62,8 +60,8 @@ namespace Sema {
             }
         }
 
-        [[nodiscard]] auto IsFloat() const -> bool {
-            switch (Kind) {
+        [[nodiscard]] auto is_float() const -> bool {
+            switch (kind) {
             case TypeKind::F32:
             case TypeKind::F64:
                 return true;

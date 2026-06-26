@@ -1,6 +1,6 @@
-#include <Compiler/Sema/Sema.hpp>
 #include <Compiler/ast.hpp>
 #include <Compiler/lexer.hpp>
+#include <Compiler/sema.hpp>
 
 #include <fstream>
 #include <iostream>
@@ -41,7 +41,7 @@ auto main(const int argc, char *argv[]) -> int {
         return 1;
     }
 
-    auto res = Sema::Check(decls, diagnostics);
+    auto res = sema::check(decls, diagnostics);
     if (diagnostics.has_errors()) {
         return 1;
     }

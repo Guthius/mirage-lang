@@ -23,11 +23,6 @@ else ()
 endif ()
 
 add_executable(mirage
-        src/Compiler/Sema/types/type_resolver.cpp
-        src/Compiler/Sema/ResolvedType.hpp
-        src/Compiler/Sema/Sema.cpp
-        src/Compiler/Sema/Sema.hpp
-
         src/Compiler/ast.cpp
         src/Compiler/ast.hpp
         src/Compiler/ast_parser.cpp
@@ -36,9 +31,13 @@ add_executable(mirage
         src/Compiler/diagnostic_engine.hpp
         src/Compiler/lexer.cpp
         src/Compiler/lexer.hpp
+        src/Compiler/resolved_type.hpp
+        src/Compiler/sema.cpp
+        src/Compiler/sema.hpp
         src/Compiler/source_location.hpp
         src/Compiler/token.cpp
         src/Compiler/token.hpp
+        src/Compiler/type_resolver.cpp
 
         src/main.cpp
 )

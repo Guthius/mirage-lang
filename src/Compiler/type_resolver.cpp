@@ -1,6 +1,6 @@
-#include <Compiler/Sema/Sema.hpp>
+#include "sema.hpp"
 
-namespace Sema {
+namespace sema {
     namespace {
         auto resolve_builtin(const ast::BuiltinTypeKind kind) -> ResolvedType {
             switch (kind) {
@@ -16,7 +16,7 @@ namespace Sema {
             case ast::BuiltinTypeKind::F64:    return ResolvedType{TypeKind::F64};
             case ast::BuiltinTypeKind::Usize:  return ResolvedType{TypeKind::USize};
             case ast::BuiltinTypeKind::Bool:   return ResolvedType{TypeKind::Bool};
-            case ast::BuiltinTypeKind::Byte:   return ResolvedType{TypeKind::Byte};
+            case ast::BuiltinTypeKind::Byte:   return ResolvedType{TypeKind::U8};
             case ast::BuiltinTypeKind::Error:  return ResolvedType{TypeKind::Error};
             case ast::BuiltinTypeKind::Anyptr: return ResolvedType{TypeKind::Anyptr};
             case ast::BuiltinTypeKind::Type:   return ResolvedType{TypeKind::Void};
@@ -26,7 +26,7 @@ namespace Sema {
 
         auto resolve(const std::monostate &, SemaResult &) -> ResolvedType {
             return ResolvedType{
-                .Kind = TypeKind::Void,
+                .kind = TypeKind::Void,
             };
         }
 
@@ -38,11 +38,11 @@ namespace Sema {
             auto pointee = resolve_type(type->pointee, result);
 
             const auto pointer = ResolvedType{
-                .Kind = TypeKind::Pointer,
-                .PointeeIndex = static_cast<int>(result.PointerPointees.size()),
+                .kind = TypeKind::Pointer,
+                .pointee_index = static_cast<int>(result.pointer_pointees.size()),
             };
 
-            result.PointerPointees.push_back(pointee);
+            result.pointer_pointees.push_back(pointee);
 
             return pointer;
         }
@@ -53,13 +53,13 @@ namespace Sema {
             // std::format("unknown type '{}' (named types not yet supported)", alt->Name));
 
             return ResolvedType{
-                .Kind = TypeKind::Void,
+                .kind = TypeKind::Void,
             };
         }
 
         auto resolve(const std::unique_ptr<ast::StructType> &, SemaResult &) -> ResolvedType {
             return ResolvedType{
-                .Kind = TypeKind::Void,
+                .kind = TypeKind::Void,
             };
         }
     }
