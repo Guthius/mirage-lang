@@ -36,7 +36,7 @@ auto main(const int argc, char *argv[]) -> int {
         return 1;
     }
 
-    auto decls = Ast::Parse(tokens, diagnostics);
+    const auto decls = Ast::Parse(tokens, diagnostics);
     if (diagnostics.HasErrors()) {
         return 1;
     }

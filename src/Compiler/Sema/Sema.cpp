@@ -42,18 +42,18 @@ namespace Sema {
                 LocalMap locals;
 
                 SemaResult::FunctionSignature signature;
-                for (auto &param : decl.Params) {
-                    auto type = resolve_type(param.Type, result);
+                for (auto &param : decl.params) {
+                    auto type = resolve_type(param.type, result);
 
                     signature.Params.push_back(type);
 
-                    locals[param.Name] = LocalVar{
+                    locals[param.name] = LocalVar{
                         .Type = type,
-                        .IsMutable = param.IsMutable,
+                        .IsMutable = param.is_mut,
                     };
                 }
 
-                for (auto &return_type : decl.ReturnTypes) {
+                for (auto &return_type : decl.return_types) {
                     signature.ReturnTypes.push_back(resolve_type(return_type, result));
                 }
 
@@ -83,7 +83,7 @@ namespace Sema {
                     stmt);
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::IntLiteralExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
+            auto CheckExpression(const std::unique_ptr<Ast::LiteralIntegerExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
                 if (expected && expected->IsInteger()) {
                     return *expected;
                 }
@@ -91,7 +91,7 @@ namespace Sema {
                 return ResolvedType{.Kind = TypeKind::I32};
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::FloatLiteralExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
+            auto CheckExpression(const std::unique_ptr<Ast::LiteralFloatExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
                 if (expected && expected->IsFloat()) {
                     return *expected;
                 }
@@ -99,17 +99,17 @@ namespace Sema {
                 return ResolvedType{.Kind = TypeKind::F32};
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::StringLiteralExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) const -> ResolvedType {
+            auto CheckExpression(const std::unique_ptr<Ast::LiteralStringExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) const -> ResolvedType {
                 diagnostics_.ReportError(DiagnosticStage::Sema, expr->Location, "string literals are not supported yet");
 
                 return Types::Void;
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::BoolLiteralExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
+            auto CheckExpression(const std::unique_ptr<Ast::LiteralBoolExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
                 return Types::Bool;
             }
 
-            auto CheckExpression(const std::unique_ptr<Ast::NilLiteralExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
+            auto CheckExpression(const std::unique_ptr<Ast::LiteralNilExpr> &expr, LocalMap &locals, SemaResult &result, std::optional<ResolvedType> expected) -> ResolvedType {
                 return Types::Anyptr;
             }
 
@@ -298,12 +298,12 @@ namespace Sema {
             auto CheckAssign(const std::unique_ptr<Ast::AssignExpr> &expr, LocalMap &locals, SemaResult &result) -> ResolvedType {
                 ResolvedType target_type;
 
-                if (const auto *ident = std::get_if<std::unique_ptr<Ast::IdentExpr>>(&expr->Target)) {
-                    const auto it = locals.find((*ident)->Name);
+                if (const auto *ident = std::get_if<Ast::IdentExpr>(&expr->Target)) {
+                    const auto it = locals.find(ident->Name);
                     if (it == locals.end()) {
                         diagnostics_.ReportError(
                             DiagnosticStage::Sema, expr->Location,
-                            std::format("unknown identifier '{}'t", (*ident)->Name));
+                            std::format("unknown identifier '{}'t", ident->Name));
 
                         return Types::Void;
                     }
@@ -311,7 +311,7 @@ namespace Sema {
                     if (!it->second.IsMutable) {
                         diagnostics_.ReportError(
                             DiagnosticStage::Sema, expr->Location,
-                            std::format("cannot assign to '{}': not declared mut", (*ident)->Name));
+                            std::format("cannot assign to '{}': not declared mut", ident->Name));
                     }
 
                     target_type = it->second.Type;

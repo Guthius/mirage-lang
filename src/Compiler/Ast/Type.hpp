@@ -7,16 +7,6 @@
 #include <variant>
 
 namespace Ast {
-    struct BuiltinType;
-    struct PointerType;
-    struct NamedType;
-
-    using Type = std::variant<
-        std::monostate,
-        std::unique_ptr<BuiltinType>,
-        std::unique_ptr<PointerType>,
-        std::unique_ptr<NamedType>>;
-
     enum class BuiltinTypeKind : uint8_t {
         U8,
         U16,
@@ -41,14 +31,18 @@ namespace Ast {
         SourceLocation Location;
     };
 
-    struct PointerType {
-        Type Pointee;
-        SourceLocation Location;
-    };
+    struct PointerType;
 
     struct NamedType {
         std::string Name;
         std::unique_ptr<NamedType> Member;
+        SourceLocation Location;
+    };
+
+    using Type = std::variant<std::monostate, BuiltinType, std::unique_ptr<PointerType>, NamedType>;
+
+    struct PointerType {
+        Type Pointee;
         SourceLocation Location;
     };
 }

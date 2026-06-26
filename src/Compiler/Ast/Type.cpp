@@ -4,23 +4,25 @@
 
 namespace Ast {
     namespace {
-        auto ParseNamedType(Parser &parser) -> std::unique_ptr<NamedType> {
+        auto parse_named_type(Parser &parser) -> NamedType {
             const auto location = parser.CurrentLocation();
             const auto &name = parser.Expect(TokenKind::Identifier, "type name").Lexeme;
 
             if (parser.Match(TokenKind::Dot)) {
-                return std::make_unique<NamedType>(NamedType{
+                auto member = parse_named_type(parser);
+
+                return NamedType{
                     .Name = name,
-                    .Member = ParseNamedType(parser),
+                    .Member = std::make_unique<NamedType>(std::move(member)),
                     .Location = location,
-                });
+                };
             }
 
-            return std::make_unique<NamedType>(NamedType{
+            return NamedType{
                 .Name = name,
                 .Member = nullptr,
                 .Location = location,
-            });
+            };
         }
 
         auto ParseBuiltinTypeKind(Parser &parser) -> std::optional<BuiltinTypeKind> {
@@ -46,25 +48,25 @@ namespace Ast {
         }
     }
 
-    auto ParseType(Parser &parser) -> Type {
+    auto parse_type(Parser &parser) -> Type {
         const auto location = parser.CurrentLocation();
 
         if (parser.Match(TokenKind::Star)) {
             return std::make_unique<PointerType>(PointerType{
-                .Pointee = ParseType(parser),
+                .Pointee = parse_type(parser),
                 .Location = location,
             });
         }
 
         if (parser.Check(TokenKind::Identifier)) {
-            return ParseNamedType(parser);
+            return parse_named_type(parser);
         }
 
         if (const auto kind = ParseBuiltinTypeKind(parser); kind.has_value()) {
-            return std::make_unique<BuiltinType>(BuiltinType{
+            return BuiltinType{
                 .Kind = kind.value(),
                 .Location = location,
-            });
+            };
         }
 
         parser.ReportError(location, std::format("expected type, got '{}'", parser.CurrentLexeme()));

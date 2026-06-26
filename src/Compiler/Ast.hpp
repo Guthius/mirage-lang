@@ -13,8 +13,8 @@
 namespace Ast {
     auto Parse(std::span<Token> tokens, DiagnosticEngine &diagnostics) -> std::vector<Decl>;
 
-    auto ParseType(Parser &parser) -> Type;
-    auto ParseDecl(Parser &parser, bool top_level) -> std::optional<Decl>;
+    auto parse_type(Parser &parser) -> Type;
+    auto parse_decl(Parser &parser, bool top_level) -> std::optional<Decl>;
     auto ParseStmt(Parser &parser) -> Stmt;
-    auto ParseExpr(Parser &parser) -> Expr;
+    auto parse_expr(Parser &parser, bool allow_import = false) -> Expr;
 }

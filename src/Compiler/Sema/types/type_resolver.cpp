@@ -30,8 +30,8 @@ namespace Sema {
             };
         }
 
-        auto resolve(const std::unique_ptr<Ast::BuiltinType> &type, SemaResult &) -> ResolvedType {
-            return resolve_builtin(type->Kind);
+        auto resolve(const Ast::BuiltinType &type, SemaResult &) -> ResolvedType {
+            return resolve_builtin(type.Kind);
         }
 
         auto resolve(const std::unique_ptr<Ast::PointerType> &type, SemaResult &result) -> ResolvedType {
@@ -47,7 +47,7 @@ namespace Sema {
             return pointer;
         }
 
-        auto resolve(const std::unique_ptr<Ast::NamedType> &, SemaResult &) -> ResolvedType {
+        auto resolve(const Ast::NamedType &, SemaResult &) -> ResolvedType {
             //         diagnostics_.ReportError(
             // DiagnosticStage::Sema, alt->Location,
             // std::format("unknown type '{}' (named types not yet supported)", alt->Name));

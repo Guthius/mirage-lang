@@ -24,7 +24,7 @@ namespace Sema {
     inline auto GetExprKey(const Ast::Expr &expr) -> const void * {
         return std::visit(
             [](const auto &ptr) -> const void * {
-                return ptr.get();
+                return &ptr;
             },
             expr);
     }

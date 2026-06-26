@@ -89,7 +89,7 @@ namespace Ast {
         std::vector<Decl> decls;
 
         while (!parser.AtEnd()) {
-            if (auto decl = ParseDecl(parser, true); decl.has_value()) {
+            if (auto decl = parse_decl(parser, true); decl.has_value()) {
                 decls.push_back(std::move(*decl));
             }
 

@@ -1,1 +1,3 @@
 ext fn sbrk(increment: usize) -> anyptr
+
+const my_mod := import("123")

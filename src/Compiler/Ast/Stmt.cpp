@@ -34,7 +34,7 @@ namespace Ast {
             const auto location = parser.CurrentLocation();
 
             return std::make_unique<ExprStmt>(ExprStmt{
-                .Expr = ParseExpr(parser),
+                .Expr = parse_expr(parser),
                 .Location = location,
             });
         }
