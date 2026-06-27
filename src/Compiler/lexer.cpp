@@ -60,10 +60,10 @@ namespace lexer {
             {"anyptr",    TokenKind::KwAnyptr   },
         };
 
-        auto IsDigit(const char ch) -> bool { return std::isdigit(ch) != 0; }
-        auto IsHexDigit(const char ch) -> bool { return std::isxdigit(ch) != 0; }
-        auto IsAlpha(const char ch) -> bool { return std::isalpha(ch) != 0; }
-        auto IsAlphaNumeric(const char ch) -> bool { return std::isalnum(ch) != 0; }
+        auto is_digit(const char ch) -> bool { return std::isdigit(ch) != 0; }
+        auto is_hex_digit(const char ch) -> bool { return std::isxdigit(ch) != 0; }
+        auto is_alpha(const char ch) -> bool { return std::isalpha(ch) != 0; }
+        auto is_alpha_numeric(const char ch) -> bool { return std::isalnum(ch) != 0; }
 
         struct LexerImpl {
             std::string_view source_;
@@ -75,11 +75,11 @@ namespace lexer {
 
             LexerImpl(const std::string_view source, const std::string_view filename, DiagnosticEngine &diagnostics) : source_(source), filename_(filename), diagnostics_(diagnostics) {}
 
-            auto Tokenize() -> std::vector<Token> {
+            auto tokenize() -> std::vector<Token> {
                 std::vector<Token> tokens;
 
                 while (true) {
-                    auto token = LexToken();
+                    auto token = lex_token();
 
                     tokens.push_back(token);
 
@@ -97,7 +97,7 @@ namespace lexer {
                 return tokens;
             }
 
-            [[nodiscard]] auto MakeLocation() const -> SourceLocation {
+            [[nodiscard]] auto make_location() const -> SourceLocation {
                 return SourceLocation{
                     .filename = filename_,
                     .line = line_,
@@ -106,7 +106,7 @@ namespace lexer {
                 };
             }
 
-            [[nodiscard]] auto MakeLocationFromOffset(const size_t offset) const -> SourceLocation {
+            [[nodiscard]] auto make_location_from_offset(const size_t offset) const -> SourceLocation {
                 return SourceLocation{
                     .filename = filename_,
                     .line = line_,
@@ -115,38 +115,38 @@ namespace lexer {
                 };
             }
 
-            [[nodiscard]] auto MakeToken(const TokenKind kind, const size_t start) const -> Token {
+            [[nodiscard]] auto make_token(const TokenKind kind, const size_t start) const -> Token {
                 return Token{
                     .kind = kind,
                     .lexeme = std::string(source_.substr(start, pos_ - start)),
-                    .location = MakeLocationFromOffset(start),
+                    .location = make_location_from_offset(start),
                 };
             }
 
-            [[nodiscard]] auto MakeEof() const -> Token {
+            [[nodiscard]] auto make_eof() const -> Token {
                 return Token{
                     .kind = TokenKind::Eof,
                     .lexeme = {},
-                    .location = MakeLocation(),
+                    .location = make_location(),
                 };
             }
 
-            [[nodiscard]] auto AtEnd() const -> bool {
+            [[nodiscard]] auto at_end() const -> bool {
                 return pos_ >= source_.size();
             }
 
-            [[nodiscard]] auto Peek() const -> char {
-                return AtEnd() ? '\n' : source_[pos_];
+            [[nodiscard]] auto peek() const -> char {
+                return at_end() ? '\n' : source_[pos_];
             }
 
-            [[nodiscard]] auto PeekNext() const -> char {
+            [[nodiscard]] auto peek_next() const -> char {
                 if (pos_ + 1 >= source_.size()) {
                     return '\0';
                 }
                 return source_[pos_ + 1];
             }
 
-            auto Advance() -> char {
+            auto advance() -> char {
                 const char ch = source_[pos_++];
 
                 if (ch == '\n') {
@@ -159,24 +159,24 @@ namespace lexer {
                 return ch;
             }
 
-            auto Match(const char expected) -> bool {
-                if (AtEnd() || source_[pos_] != expected) {
+            auto match(const char expected) -> bool {
+                if (at_end() || source_[pos_] != expected) {
                     return false;
                 }
 
-                Advance();
+                advance();
 
                 return true;
             }
 
-            void SkipWhitespaceAndComments() {
-                while (!AtEnd()) {
-                    const char ch = Peek();
+            void skip_whitespace_and_comments() {
+                while (!at_end()) {
+                    const char ch = peek();
                     if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
-                        Advance();
-                    } else if (ch == '/' && PeekNext() == '/') {
-                        while (!AtEnd() && Peek() != '\n') {
-                            Advance();
+                        advance();
+                    } else if (ch == '/' && peek_next() == '/') {
+                        while (!at_end() && peek() != '\n') {
+                            advance();
                         }
                     } else {
                         break;
@@ -184,217 +184,188 @@ namespace lexer {
                 }
             }
 
-            void SkipDigits() {
-                while (!AtEnd() && (IsDigit(Peek()) || Peek() == '_')) {
-                    Advance();
+            void skip_digits() {
+                while (!at_end() && (is_digit(peek()) || peek() == '_')) {
+                    advance();
                 }
             }
 
-            auto LexToken() -> Token {
-                SkipWhitespaceAndComments();
+            auto lex_token() -> Token {
+                skip_whitespace_and_comments();
 
-                if (AtEnd()) {
-                    return MakeEof();
+                if (at_end()) {
+                    return make_eof();
                 }
 
                 const auto start = pos_;
-                const auto ch = Advance();
+                const auto ch = advance();
 
-                if (IsDigit(ch)) {
-                    return LexNumber(start);
+                if (is_digit(ch)) {
+                    return lex_number(start);
                 }
 
-                if (IsAlpha(ch) || ch == '_') {
-                    return LexIdentifierOrKeyword(start);
+                if (is_alpha(ch) || ch == '_') {
+                    return lex_identifier_or_keyword(start);
                 }
 
                 if (ch == '"') {
-                    return LexString(start);
+                    return lex_string(start);
                 }
 
-                return LexSymbol(start, ch);
+                return lex_symbol(start, ch);
             }
 
-            auto LexNumber(const size_t start) -> Token {
+            auto lex_number(const size_t start) -> Token {
                 auto is_float = false;
 
                 if (source_[start] == '0' && pos_ < source_.size()) {
-                    const auto next = Peek();
+                    const auto next = peek();
                     if (next == 'x' || next == 'X') {
-                        return LexHexNumber(start);
+                        return lex_hex_number(start);
                     }
 
                     if (next == 'b' || next == 'B') {
-                        return LexBinaryNumber(start);
+                        return lex_binary_number(start);
                     }
                 }
 
-                SkipDigits();
+                skip_digits();
 
-                if (!AtEnd() && Peek() == '.' && IsDigit(PeekNext())) {
+                if (!at_end() && peek() == '.' && is_digit(peek_next())) {
                     is_float = true;
 
-                    Advance();
+                    advance();
 
-                    SkipDigits();
+                    skip_digits();
                 }
 
-                if (!AtEnd() && (Peek() == 'e' || Peek() == 'E')) {
+                if (!at_end() && (peek() == 'e' || peek() == 'E')) {
                     is_float = true;
 
-                    Advance();
+                    advance();
 
-                    if (!AtEnd() && (Peek() == '+' || Peek() == '-')) {
-                        Advance();
+                    if (!at_end() && (peek() == '+' || peek() == '-')) {
+                        advance();
                     }
 
-                    while (!AtEnd() && IsDigit(Peek())) {
-                        Advance();
+                    while (!at_end() && is_digit(peek())) {
+                        advance();
                     }
                 }
 
-                return MakeToken(is_float ? TokenKind::FloatLiteral : TokenKind::IntLiteral, start);
+                return make_token(is_float ? TokenKind::FloatLiteral : TokenKind::IntLiteral, start);
             }
 
-            auto LexHexNumber(const size_t start) -> Token {
-                Advance();
+            auto lex_hex_number(const size_t start) -> Token {
+                advance();
 
-                while (!AtEnd() && (IsHexDigit(Peek()) || Peek() == '_')) {
-                    Advance();
+                while (!at_end() && (is_hex_digit(peek()) || peek() == '_')) {
+                    advance();
                 }
 
-                return MakeToken(TokenKind::IntLiteral, start);
+                return make_token(TokenKind::IntLiteral, start);
             }
 
-            auto LexBinaryNumber(const size_t start) -> Token {
-                Advance();
+            auto lex_binary_number(const size_t start) -> Token {
+                advance();
 
-                while (!AtEnd() && (Peek() == '0' || Peek() == '1' || Peek() == '_')) {
-                    Advance();
+                while (!at_end() && (peek() == '0' || peek() == '1' || peek() == '_')) {
+                    advance();
                 }
 
-                return MakeToken(TokenKind::IntLiteral, start);
+                return make_token(TokenKind::IntLiteral, start);
             }
 
-            auto LexIdentifierOrKeyword(const size_t start) -> Token {
-                while (!AtEnd() && (IsAlphaNumeric(Peek()) || Peek() == '_')) {
-                    Advance();
+            auto lex_identifier_or_keyword(const size_t start) -> Token {
+                while (!at_end() && (is_alpha_numeric(peek()) || peek() == '_')) {
+                    advance();
                 }
 
                 const auto text = source_.substr(start, pos_ - start);
 
                 const auto it = keywords.find(text);
                 if (it != keywords.end()) {
-                    return MakeToken(it->second, start);
+                    return make_token(it->second, start);
                 }
 
-                return MakeToken(TokenKind::Identifier, start);
+                return make_token(TokenKind::Identifier, start);
             }
 
-            auto LexString(const size_t start) -> Token {
-                while (!AtEnd() && Peek() != '"') {
-                    if (Peek() == '\\') {
-                        Advance();
+            auto lex_string(const size_t start) -> Token {
+                while (!at_end() && peek() != '"') {
+                    if (peek() == '\\') {
+                        advance();
                     }
 
-                    Advance();
+                    advance();
                 }
 
-                if (AtEnd()) {
-                    diagnostics_.report_error(DiagnosticStage::Lexer, MakeLocation(), "unterminated string literal");
+                if (at_end()) {
+                    diagnostics_.report_error(DiagnosticStage::Lexer, make_location(), "unterminated string literal");
 
-                    return MakeToken(TokenKind::StringLiteral, start);
+                    return make_token(TokenKind::StringLiteral, start);
                 }
 
-                Advance();
+                advance();
 
-                return MakeToken(TokenKind::StringLiteral, start);
+                return make_token(TokenKind::StringLiteral, start);
             }
 
-            auto LexSymbol(const size_t start, const char ch) -> Token {
-                const auto MatchDouble = [&](const char expected, const TokenKind double_token,
-                                             const TokenKind single_token) -> Token {
-                    return MakeToken(Match(expected) ? double_token : single_token, start);
+            auto lex_symbol(const size_t start, const char ch) -> Token {
+                const auto match_double = [&](const char expected, const TokenKind double_token,
+                                              const TokenKind single_token) -> Token {
+                    return make_token(match(expected) ? double_token : single_token, start);
                 };
 
                 switch (ch) {
-                case '(':
-                    return MakeToken(TokenKind::LParen, start);
-                case ')':
-                    return MakeToken(TokenKind::RParen, start);
-                case '{':
-                    return MakeToken(TokenKind::LBrace, start);
-                case '}':
-                    return MakeToken(TokenKind::RBrace, start);
-                case '[':
-                    return MakeToken(TokenKind::LBracket, start);
-                case ']':
-                    return MakeToken(TokenKind::RBracket, start);
-                case ',':
-                    return MakeToken(TokenKind::Comma, start);
-                case '~':
-                    return MakeToken(TokenKind::Tilde, start);
-                case '?':
-                    return MakeToken(TokenKind::Question, start);
-                case ';':
-                    return MakeToken(TokenKind::Semicolon, start);
-                case '.':
-                    return MatchDouble('.', TokenKind::DotDot, TokenKind::Dot);
+                case '(': return make_token(TokenKind::LParen, start);
+                case ')': return make_token(TokenKind::RParen, start);
+                case '{': return make_token(TokenKind::LBrace, start);
+                case '}': return make_token(TokenKind::RBrace, start);
+                case '[': return make_token(TokenKind::LBracket, start);
+                case ']': return make_token(TokenKind::RBracket, start);
+                case ',': return make_token(TokenKind::Comma, start);
+                case '~': return make_token(TokenKind::Tilde, start);
+                case '?': return make_token(TokenKind::Question, start);
+                case ';': return make_token(TokenKind::Semicolon, start);
+                case '.': return match_double('.', TokenKind::DotDot, TokenKind::Dot);
 
                 case '+':
-                    if (Match('+'))
-                        return MakeToken(TokenKind::PlusPlus, start);
-                    if (Match('='))
-                        return MakeToken(TokenKind::PlusEqual, start);
-                    return MakeToken(TokenKind::Plus, start);
+                    if (match('+')) return make_token(TokenKind::PlusPlus, start);
+                    if (match('=')) return make_token(TokenKind::PlusEqual, start);
+                    return make_token(TokenKind::Plus, start);
 
                 case '-':
-                    if (Match('-'))
-                        return MakeToken(TokenKind::MinusMinus, start);
-                    if (Match('='))
-                        return MakeToken(TokenKind::MinusEqual, start);
-                    if (Match('>'))
-                        return MakeToken(TokenKind::Arrow, start);
-                    return MakeToken(TokenKind::Minus, start);
+                    if (match('-')) return make_token(TokenKind::MinusMinus, start);
+                    if (match('=')) return make_token(TokenKind::MinusEqual, start);
+                    if (match('>')) return make_token(TokenKind::Arrow, start);
+                    return make_token(TokenKind::Minus, start);
 
-                case '*':
-                    return MatchDouble('=', TokenKind::StarEqual, TokenKind::Star);
-                case '/':
-                    return MatchDouble('=', TokenKind::SlashEqual, TokenKind::Slash);
-                case '%':
-                    return MakeToken(TokenKind::Percent, start);
+                case '*': return match_double('=', TokenKind::StarEqual, TokenKind::Star);
+                case '/': return match_double('=', TokenKind::SlashEqual, TokenKind::Slash);
+                case '%': return make_token(TokenKind::Percent, start);
 
                 case '&':
-                    if (Match('&'))
-                        return MakeToken(TokenKind::AmpAmp, start);
-                    if (Match('='))
-                        return MakeToken(TokenKind::AmpEqual, start);
-                    return MakeToken(TokenKind::Ampersand, start);
+                    if (match('&')) return make_token(TokenKind::AmpAmp, start);
+                    if (match('=')) return make_token(TokenKind::AmpEqual, start);
+                    return make_token(TokenKind::Ampersand, start);
 
                 case '|':
-                    if (Match('|'))
-                        return MakeToken(TokenKind::PipePipe, start);
-                    if (Match('='))
-                        return MakeToken(TokenKind::PipeEqual, start);
-                    return MakeToken(TokenKind::Pipe, start);
+                    if (match('|')) return make_token(TokenKind::PipePipe, start);
+                    if (match('=')) return make_token(TokenKind::PipeEqual, start);
+                    return make_token(TokenKind::Pipe, start);
 
-                case '^':
-                    return MatchDouble('=', TokenKind::CaretEqual, TokenKind::Caret);
-                case '=':
-                    return MatchDouble('=', TokenKind::EqualEqual, TokenKind::Equal);
-                case '!':
-                    return MatchDouble('=', TokenKind::BangEqual, TokenKind::Bang);
+                case '^': return match_double('=', TokenKind::CaretEqual, TokenKind::Caret);
+                case '=': return match_double('=', TokenKind::EqualEqual, TokenKind::Equal);
+                case '!': return match_double('=', TokenKind::BangEqual, TokenKind::Bang);
 
-                case '<':
-                    return Match('<') ? MatchDouble('=', TokenKind::ShiftLeftEqual, TokenKind::ShiftLeft)
-                                      : MatchDouble('=', TokenKind::LessEqual, TokenKind::Less);
+                case '<': return match('<') ? match_double('=', TokenKind::ShiftLeftEqual, TokenKind::ShiftLeft)
+                                            : match_double('=', TokenKind::LessEqual, TokenKind::Less);
 
-                case '>':
-                    return Match('>') ? MatchDouble('=', TokenKind::ShiftRightEqual, TokenKind::ShiftRight)
-                                      : MatchDouble('=', TokenKind::GreaterEqual, TokenKind::Greater);
+                case '>': return match('>') ? match_double('=', TokenKind::ShiftRightEqual, TokenKind::ShiftRight)
+                                            : match_double('=', TokenKind::GreaterEqual, TokenKind::Greater);
 
-                case ':':
-                    return MatchDouble('=', TokenKind::ColonEqual, TokenKind::Colon);
+                case ':': return match_double('=', TokenKind::ColonEqual, TokenKind::Colon);
 
                 default:
                     diagnostics_.report_error(
@@ -407,23 +378,23 @@ namespace lexer {
                         },
                         std::string("unexpected character '") + ch + "'");
 
-                    return MakeToken(TokenKind::Eof, start);
+                    return make_token(TokenKind::Eof, start);
                 }
             }
 
             auto lex_asm_block() -> std::optional<Token> {
-                SkipWhitespaceAndComments();
-                if (AtEnd() || Peek() != '{') {
+                skip_whitespace_and_comments();
+                if (at_end() || peek() != '{') {
                     return std::nullopt;
                 }
 
                 const auto block_start = pos_;
 
-                Advance();
+                advance();
 
                 int depth = 1;
-                while (!AtEnd() && depth > 0) {
-                    const auto ch = Peek();
+                while (!at_end() && depth > 0) {
+                    const auto ch = peek();
                     if (ch == '{') {
                         ++depth;
                     } else if (ch == '}') {
@@ -431,7 +402,7 @@ namespace lexer {
                     }
 
                     if (depth > 0) {
-                        Advance();
+                        advance();
                     }
                 }
 
@@ -448,8 +419,8 @@ namespace lexer {
                                    },
                 };
 
-                if (!AtEnd()) {
-                    Advance();
+                if (!at_end()) {
+                    advance();
                 }
 
                 return tok;
@@ -457,7 +428,7 @@ namespace lexer {
         };
     }
 
-    auto Tokenize(const std::string_view source, const std::string_view filename, DiagnosticEngine &diagnostics) -> std::vector<Token> {
-        return LexerImpl(source, filename, diagnostics).Tokenize();
+    auto tokenize(const std::string_view source, const std::string_view filename, DiagnosticEngine &diagnostics) -> std::vector<Token> {
+        return LexerImpl(source, filename, diagnostics).tokenize();
     }
 }

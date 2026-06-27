@@ -30,7 +30,7 @@ namespace ast {
 
             diagnostics.set_source(canonical_path, source);
 
-            auto tokens = lexer::Tokenize(source, canonical_path, diagnostics);
+            auto tokens = lexer::tokenize(source, canonical_path, diagnostics);
             if (diagnostics.has_errors()) {
                 return {};
             }
