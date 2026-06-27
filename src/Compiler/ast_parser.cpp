@@ -60,6 +60,13 @@ namespace ast {
                 return false;
             }
 
+            auto match_identifier(const std::string_view lexeme) -> bool override {
+                if (check(TokenKind::Identifier)) {
+                    return advance().lexeme == lexeme;
+                }
+                return false;
+            }
+
             auto expect(const TokenKind kind, std::string_view message) -> const Token override {
                 if (check(kind)) {
                     return advance();

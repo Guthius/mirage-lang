@@ -37,7 +37,6 @@ namespace lexer {
             {"offsetof",  TokenKind::KwOffsetOf },
             {"cast",      TokenKind::KwCast     },
             {"enum",      TokenKind::KwEnum     },
-            {"packed",    TokenKind::KwPacked   },
             {"iota",      TokenKind::KwIota     },
             {"default",   TokenKind::KwDefault  },
             {"undefined", TokenKind::KwUndefined},

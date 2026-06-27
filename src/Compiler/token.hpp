@@ -41,7 +41,6 @@ enum class TokenKind : uint8_t {
     KwOffsetOf,
     KwCast,
     KwEnum,
-    KwPacked,
     KwIota,
     KwDefault,
     KwUndefined,

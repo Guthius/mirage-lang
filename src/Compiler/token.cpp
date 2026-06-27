@@ -34,7 +34,6 @@ auto token_kind_name(const TokenKind kind) -> const char * {
     case TokenKind::KwOffsetOf:      return "KW_OFFSETOF";
     case TokenKind::KwCast:          return "KW_CAST";
     case TokenKind::KwEnum:          return "KW_ENUM";
-    case TokenKind::KwPacked:        return "KW_PACKED";
     case TokenKind::KwIota:          return "KW_IOTA";
     case TokenKind::KwDefault:       return "KW_DEFAULT";
     case TokenKind::KwUndefined:     return "KW_UNDEFINED";

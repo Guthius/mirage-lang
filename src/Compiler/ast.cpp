@@ -6,7 +6,7 @@ namespace ast {
     namespace {
         auto parse_named_type(Parser &parser) -> NamedType {
             const auto location = parser.current_location();
-            const auto &name = parser.expect(TokenKind::Identifier, "type name").lexeme;
+            const auto name = parser.expect_identifier();
 
             if (parser.match(TokenKind::Dot)) {
                 auto member = parse_named_type(parser);
@@ -50,13 +50,21 @@ namespace ast {
         auto parse_struct_type(Parser &parser) -> Type {
             const auto location = parser.current_location();
 
+            auto is_packed = false;
+
             parser.expect(TokenKind::KwStruct, "'struct'");
+            if (parser.match(TokenKind::LParen)) {
+                is_packed = parser.match_identifier("packed");
+
+                parser.expect(TokenKind::RParen, "')'");
+            }
+
             parser.expect(TokenKind::LBrace, "'{'");
 
             std::vector<StructType::Field> fields;
             while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
                 const auto field_location = parser.current_location();
-                const auto field_name = parser.expect(TokenKind::Identifier, "identifier").lexeme;
+                const auto field_name = parser.expect_identifier();
 
                 parser.expect(TokenKind::Colon, "':'");
 
@@ -70,6 +78,7 @@ namespace ast {
             parser.expect(TokenKind::RBrace, "'}'");
 
             return std::make_unique<StructType>(StructType{
+                .is_packed = is_packed,
                 .fields = std::move(fields),
                 .location = location,
             });
@@ -315,7 +324,8 @@ namespace ast {
                 } else if (parser.check(TokenKind::Star) && !can_start_expr(parser.peek().kind)) {
                     parser.advance();
 
-                    expr = make_expr(DerefExpr{
+                    expr = make_expr(UnaryExpr{
+                        .op = UnaryOp::Deref,
                         .operand = std::move(expr),
                         .location = location,
                     });
@@ -777,13 +787,13 @@ namespace ast {
             while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
                 const auto param_location = parser.current_location();
                 const auto param_is_mutable = parser.match(TokenKind::KwMut);
-                const auto param_name = parser.expect(TokenKind::Identifier, "parameter name");
+                const auto param_name = parser.expect_identifier();
 
                 parser.expect(TokenKind::Colon, "':'");
 
                 params.push_back({
                     .is_mut = param_is_mutable,
-                    .name = param_name.lexeme,
+                    .name = param_name,
                     .type = parse_type(parser),
                     .location = param_location,
                 });
@@ -817,14 +827,14 @@ namespace ast {
 
             parser.expect(TokenKind::KwFn, "'fn'");
 
-            auto fn_name = parser.expect(TokenKind::Identifier, "function name").lexeme;
+            auto fn_name = parser.expect_identifier();
             auto fn_params = parse_function_params(parser);
             auto fn_return_types = parse_function_return_types(parser);
             auto fn_body = parse_stmt(parser);
 
             return FunctionDecl{
                 .is_pub = is_pub,
-                .name = std::move(fn_name),
+                .name = fn_name,
                 .params = std::move(fn_params),
                 .return_types = std::move(fn_return_types),
                 .body = std::move(fn_body),
@@ -839,12 +849,12 @@ namespace ast {
 
             while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
                 const auto param_location = parser.current_location();
-                const auto param_name = parser.expect(TokenKind::Identifier, "parameter name");
+                const auto param_name = parser.expect_identifier();
 
                 parser.expect(TokenKind::Colon, "':'");
 
                 params.push_back({
-                    .name = param_name.lexeme,
+                    .name = param_name,
                     .type = parse_type(parser),
                     .location = param_location,
                 });
@@ -872,7 +882,7 @@ namespace ast {
 
             parser.expect(TokenKind::KwFn, "'fn'");
 
-            const auto fn_name = parser.expect(TokenKind::Identifier, "identifier").lexeme;
+            const auto fn_name = parser.expect_identifier();
             auto fn_params = parse_ext_function_params(parser);
             auto fn_return_type = parse_ext_function_return_type(parser);
 
@@ -893,7 +903,7 @@ namespace ast {
                 parser.expect(TokenKind::KwConst, "'const' or 'mut'");
             }
 
-            const auto var_name = parser.expect(TokenKind::Identifier, "identifier").lexeme;
+            const auto name = parser.expect_identifier();
 
             std::optional<Type> type = std::nullopt;
             if (parser.match(TokenKind::Colon)) {
@@ -917,7 +927,7 @@ namespace ast {
             return VarDecl{
                 .is_pub = is_pub,
                 .is_mut = is_mut,
-                .name = var_name,
+                .name = name,
                 .type = std::move(type),
                 .init = std::move(init_expr),
                 .location = location,
@@ -931,7 +941,7 @@ namespace ast {
 
             while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
                 const auto param_location = parser.current_location();
-                const auto param_name = parser.expect(TokenKind::Identifier, "identifier").lexeme;
+                const auto param_name = parser.expect_identifier();
 
                 parser.expect(TokenKind::Colon, "':'");
 
@@ -956,15 +966,15 @@ namespace ast {
 
             parser.expect(TokenKind::KwMacro, "'macro'");
 
-            const auto m_name = parser.expect(TokenKind::Identifier, "identifier").lexeme;
-            auto m_params = parse_macro_params(parser);
+            const auto name = parser.expect_identifier();
+            auto params = parse_macro_params(parser);
 
             parser.expect(TokenKind::Arrow, "'->'");
 
             return MacroDecl{
                 .is_pub = is_pub,
-                .name = m_name,
-                .params = std::move(m_params),
+                .name = name,
+                .params = std::move(params),
                 .expr_template = parse_expr(parser),
                 .location = location,
             };

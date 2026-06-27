@@ -110,7 +110,6 @@ namespace ast {
     struct SizeOfExpr;
     struct CastExpr;
     struct MemberExpr;
-    struct DerefExpr;
 
     using Expr = std::variant<
         LiteralIntegerExpr,
@@ -128,8 +127,7 @@ namespace ast {
         ImportExpr,
         std::unique_ptr<SizeOfExpr>,
         std::unique_ptr<CastExpr>,
-        std::unique_ptr<MemberExpr>,
-        std::unique_ptr<DerefExpr>>;
+        std::unique_ptr<MemberExpr>>;
 
     enum class UnaryOp : uint8_t {
         Negate,
@@ -227,11 +225,6 @@ namespace ast {
     struct MemberExpr {
         Expr object;
         std::string member;
-        SourceLocation location;
-    };
-
-    struct DerefExpr {
-        Expr operand;
         SourceLocation location;
     };
 

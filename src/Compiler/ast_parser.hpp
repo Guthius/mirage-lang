@@ -15,6 +15,7 @@ namespace ast {
         virtual auto advance() -> const Token & = 0;
         virtual auto check(TokenKind kind) const -> bool = 0;
         virtual auto match(TokenKind kind) -> bool = 0;
+        virtual auto match_identifier(std::string_view lexeme) -> bool = 0;
         virtual auto expect(TokenKind kind, std::string_view message) -> const Token = 0;
         virtual auto expect_identifier() -> const std::string & = 0;
         virtual auto report_error(SourceLocation location, std::string message) -> void = 0;
