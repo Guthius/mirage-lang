@@ -1,6 +1,7 @@
 #include "ast.hpp"
 
 #include <format>
+#include <sstream>
 
 namespace ast {
     namespace {
@@ -176,6 +177,58 @@ namespace ast {
             });
         }
 
+        auto parse_string_literal(Parser &parser) -> LiteralStringExpr {
+            const auto location = parser.current_location();
+
+            auto &token = parser.expect(TokenKind::StringLiteral, "string literal");
+
+            if (token.lexeme.size() < 2) {
+                parser.report_error(location, "malformed string literal");
+
+                return LiteralStringExpr{
+                    .value = {},
+                    .location = location,
+                };
+            }
+
+            std::ostringstream oss;
+
+            std::string_view str = token.lexeme;
+
+            str.remove_prefix(1);
+            str.remove_suffix(1);
+
+            while (!str.empty()) {
+                if (str[0] == '\\') {
+                    str.remove_prefix(1);
+                    if (str.empty()) {
+                        break;
+                    }
+
+                    switch (str[0]) {
+                    case '\\': oss << '\\'; break;
+                    case '"':  oss << '"'; break;
+                    case 'n':  oss << '\n'; break;
+                    case 't':  oss << '\t'; break;
+                    case 'r':  oss << '\r'; break;
+                    case '0':  oss << '\0'; break;
+                    default:
+                        parser.report_error(location, std::format("unkown escape sequence '\\{}' in string literal", str[0]));
+                        break;
+                    }
+                } else {
+                    oss << str[0];
+                }
+
+                str.remove_prefix(1);
+            }
+
+            return LiteralStringExpr{
+                .value = oss.str(),
+                .location = location,
+            };
+        }
+
         auto parse_primary(Parser &parser) -> Expr {
             const auto location = parser.current_location();
 
@@ -193,17 +246,7 @@ namespace ast {
             }
 
             if (parser.check(TokenKind::StringLiteral)) {
-                auto &token = parser.advance();
-
-                auto value = token.lexeme;
-                if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
-                    value = value.substr(1, value.size() - 2);
-                }
-
-                return LiteralStringExpr{
-                    .value = std::move(value),
-                    .location = location,
-                };
+                return parse_string_literal(parser);
             }
 
             if (parser.check(TokenKind::KwTrue)) {
@@ -638,12 +681,12 @@ namespace ast {
             parser.expect(TokenKind::KwImport, "'import'");
             parser.expect(TokenKind::LParen, "'('");
 
-            const auto module_name = parser.expect(TokenKind::StringLiteral, "string literal").lexeme;
+            const auto module_name = parse_string_literal(parser);
 
             parser.expect(TokenKind::RParen, "')'");
 
             return ImportExpr{
-                .module_name = module_name,
+                .module_name = module_name.value,
                 .location = location,
             };
         }

@@ -1,5 +1,6 @@
-#include <Compiler/ast.hpp>
-#include <Compiler/lexer.hpp>
+#include "Compiler/ast.hpp"
+#include "Compiler/lexer.hpp"
+#include "Compiler/module_resolver.hpp"
 
 #include <fstream>
 #include <iostream>
@@ -25,35 +26,13 @@ auto main(const int argc, char *argv[]) -> int {
     }
 
     const auto filename = std::string(argv[1]);
-    const auto source = ReadFile(filename);
 
     DiagnosticEngine diagnostics;
-    diagnostics.set_source(filename, source);
 
-    auto tokens = lexer::Tokenize(source, filename, diagnostics);
-    if (diagnostics.has_errors()) {
-        return 1;
-    }
-
-    const auto decls = ast::parse(tokens, diagnostics);
-    if (diagnostics.has_errors()) {
+    const auto program = ast::resolve(filename, diagnostics);
+    if (!program.ok) {
         return 1;
     }
 
     return 0;
 }
-
-#include <unordered_map>
-
-using module = std::vector<ast::Decl>;
-
-struct program {
-    std::unordered_map<std::string, module> modules;
-    std::vector<std::string> resolution_order;
-    std::vector<std::pair<std::string, std::string>> cycles;
-};
-
-class module_resolver {
-  public:
-    auto resolve(const module &m) -> program;
-};

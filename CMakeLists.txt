@@ -31,6 +31,8 @@ add_executable(mirage
         src/Compiler/diagnostic_engine.hpp
         src/Compiler/lexer.cpp
         src/Compiler/lexer.hpp
+        src/Compiler/module_resolver.cpp
+        src/Compiler/module_resolver.hpp
         src/Compiler/source_location.hpp
         src/Compiler/token.cpp
         src/Compiler/token.hpp
