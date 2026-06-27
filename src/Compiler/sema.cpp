@@ -272,6 +272,13 @@ namespace sema {
                     }
 
                     target_type = it->second.type;
+                } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr->target)) {
+
+                    // TODO: Implement me...
+
+                    return ResolvedType{
+                        .kind = TypeKind::Void,
+                    };
                 } else {
                     diagnostics.report_error(
                         DiagnosticStage::Sema, expr->location,

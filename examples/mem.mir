@@ -83,3 +83,85 @@ fn split_block(block: *block_header, wanted: usize) {
         heap_tail = new_block
     }
 }
+
+fn coalesce() {
+    mut cur := heap_head
+    while cur != nil && cur.next != nil {
+        const cur_end := cast(cur, usize) + block_header_size + cur.size
+
+        if cur.is_free && cur.next.is_free && cur_end == cast(cur.next, usize) {
+            cur.size += block_header_size + cur.next.size
+            cur.next = cur.next.next
+
+            if cur.next != nil {
+                heap_tail = cur
+            }
+
+            continue
+        }
+
+        cur = cur.next
+    }
+}
+
+pub fn malloc(mut size: usize) -> anyptr {
+    if size == 0 {
+        return nil
+    }
+
+    size = align_up(size)
+
+    mut block := find_free_block(size)
+    if block != nil {
+        split_block(block, size)
+
+        block.free = false
+    } else {
+        block = request_from_os(size)
+        if block == nil {
+            return nil
+        }
+    }
+
+    return cast(block, anyptr) + block_header_size
+}
+
+pub fn free(ptr: anyptr) {
+    if ptr == nil {
+        return
+    }
+
+    const block := cast(ptr - block_header_size, *block_header)
+
+    block.is_free = true
+
+    coalesce()
+}
+
+pub fn realloc(ptr: anyptr, mut size: usize) -> anyptr {
+    if ptr == nil {
+        return malloc(size)
+    }
+
+    if size == 0 {
+        free(ptr)
+        return nil
+    }
+
+    const block := cast(ptr - block_header_size, *block_header)
+    if block.size >= size {
+        split_block(block, size)
+        return ptr
+    }
+
+    mut new_ptr := malloc(size)
+    if new_ptr == nil {
+        return nil
+    }
+
+    copy(new_ptr, ptr, block.size)
+
+    free(ptr)
+
+    return new_ptr
+}
