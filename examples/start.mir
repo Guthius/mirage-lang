@@ -1,0 +1,6 @@
+const mem := import("mem")
+const vector := import("vector")
+
+pub fn main() -> i32 {
+    return 0
+}
