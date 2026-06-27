@@ -521,7 +521,7 @@ namespace ast {
 
                 const auto location = parser.current_location();
 
-                return make_expr(BinaryExpr{
+                lhs = make_expr(BinaryExpr{
                     .op = BinaryOp::BitwiseOr,
                     .lhs = std::move(lhs),
                     .rhs = parse_bitwise_xor(parser),
@@ -538,7 +538,7 @@ namespace ast {
             while (parser.match(TokenKind::AmpAmp)) {
                 const auto location = parser.current_location();
 
-                return make_expr(BinaryExpr{
+                lhs = make_expr(BinaryExpr{
                     .op = BinaryOp::LogicalAnd,
                     .lhs = std::move(lhs),
                     .rhs = parse_bitwise_or(parser),
@@ -555,7 +555,7 @@ namespace ast {
             while (parser.match(TokenKind::PipePipe)) {
                 const auto location = parser.current_location();
 
-                return make_expr(BinaryExpr{
+                lhs = make_expr(BinaryExpr{
                     .op = BinaryOp::LogicalOr,
                     .lhs = std::move(lhs),
                     .rhs = parse_logical_and(parser),
