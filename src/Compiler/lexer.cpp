@@ -18,6 +18,7 @@ namespace lexer {
             {"impl",      TokenKind::KwImpl     },
             {"for",       TokenKind::KwFor      },
             {"pub",       TokenKind::KwPub      },
+            {"continue",  TokenKind::KwContinue },
             {"return",    TokenKind::KwReturn   },
             {"if",        TokenKind::KwIf       },
             {"else",      TokenKind::KwElse     },

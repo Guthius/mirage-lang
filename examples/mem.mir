@@ -16,9 +16,70 @@ mut heap_head: *block_header = nil
 mut heap_tail: *block_header = nil
 
 pub fn set(ptr: anyptr, value: byte, n: usize) -> anyptr {
-    mut p := ptr
+    mut p := cast(ptr, *byte)
     while n-- {
         p++* = value
     }
     return ptr
+}
+
+pub fn copy(dest: anyptr, mut src: anyptr, n: usize) -> anyptr {
+    mut d := cast(dest, *byte)
+    mut s := cast(src, *byte)
+    while n-- {
+        d++* = s++*
+    }
+    return dest
+}
+
+fn find_free_block(size: usize) -> *block_header {
+    mut cur := heap_head
+    while cur {
+        if cur.is_free && cur.size >= size {
+            return cur
+        }
+        cur = cur.next
+    }
+    return nil
+}
+
+fn request_from_os(size: usize) -> *block_header {
+    const total := block_header_size + size
+
+    const new_block: *block_header = sbrk(total)
+    if cast(new_block, i64) == -1 {
+        return nil
+    }
+
+    new_block.size = size
+    new_block.is_free = false
+    new_block.next = nil
+
+    if !heap_head {
+        heap_head = heap_tail = new_block
+    } else {
+        heap_tail.next = new_block
+        heap_tail = new_block
+    }
+
+    return new_block
+}
+
+fn split_block(block: *block_header, wanted: usize) {
+    if block.size < wanted + block_header_size + alignment {
+        return
+    }
+
+    mut new_block: *block_header = cast(block, anyptr) + block_header_size + wanted
+
+    new_block.size = block.size - wanted - block_header_size
+    new_block.is_free = true
+    new_block.next = block
+
+    block.size = wanted
+    block.next = new_block
+
+    if heap_tail == block {
+        heap_tail = new_block
+    }
 }

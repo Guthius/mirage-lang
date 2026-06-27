@@ -135,7 +135,7 @@ namespace ast {
                     value = value * 2 + (lexeme[i] - '0');
                 }
             } else {
-                for (char c : lexeme) {
+                for (const char c : lexeme) {
                     if (c == '_') {
                         continue;
                     }
@@ -287,6 +287,8 @@ namespace ast {
                         .location = location,
                     });
                 } else if (parser.check(TokenKind::Dot)) {
+                    parser.advance();
+
                     expr = make_expr(MemberExpr{
                         .object = std::move(expr),
                         .member = parser.expect_identifier(),
@@ -310,6 +312,13 @@ namespace ast {
                         .is_prefix = false,
                         .location = location,
                     });
+                } else if (parser.check(TokenKind::Star) && !can_start_expr(parser.peek().kind)) {
+                    parser.advance();
+
+                    expr = make_expr(DerefExpr{
+                        .operand = std::move(expr),
+                        .location = location,
+                    });
                 } else {
                     break;
                 }
@@ -319,7 +328,7 @@ namespace ast {
         }
 
         auto parse_unary(Parser &parser) -> Expr {
-            auto MatchUnaryOp = [](const TokenKind kind) -> std::optional<UnaryOp> {
+            auto match_unary_op = [](const TokenKind kind) -> std::optional<UnaryOp> {
                 switch (kind) {
                 case TokenKind::Minus:     return UnaryOp::Negate;
                 case TokenKind::Bang:      return UnaryOp::LogicalNot;
@@ -329,7 +338,7 @@ namespace ast {
                 }
             };
 
-            if (auto op = MatchUnaryOp(parser.current().kind)) {
+            if (const auto op = match_unary_op(parser.current().kind)) {
                 const auto location = parser.current_location();
 
                 parser.advance();
@@ -619,7 +628,7 @@ namespace ast {
             parser.expect(TokenKind::KwImport, "'import'");
             parser.expect(TokenKind::LParen, "'('");
 
-            auto module_name = parser.expect(TokenKind::StringLiteral, "string literal").lexeme;
+            const auto module_name = parser.expect(TokenKind::StringLiteral, "string literal").lexeme;
 
             parser.expect(TokenKind::RParen, "')'");
 
@@ -664,7 +673,7 @@ namespace ast {
                 parser.expect(TokenKind::KwConst, "'const' or 'mut'");
             }
 
-            auto var_name = parser.expect_identifier();
+            const auto var_name = parser.expect_identifier();
 
             std::optional<Type> type = std::nullopt;
             if (parser.match(TokenKind::Colon)) {
@@ -694,6 +703,27 @@ namespace ast {
             };
         }
 
+        auto parse_if_stmt(Parser &parser) -> std::unique_ptr<IfStmt> {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwIf, "'if'");
+
+            auto condition = parse_expr(parser);
+            auto then_stmt = parse_stmt(parser);
+
+            std::optional<Stmt> else_stmt = std::nullopt;
+            if (parser.match(TokenKind::KwElse)) {
+                else_stmt = parse_stmt(parser);
+            }
+
+            return std::make_unique<IfStmt>(IfStmt{
+                .condition = std::move(condition),
+                .then_stmt = std::move(then_stmt),
+                .else_stmt = std::move(else_stmt),
+                .location = location,
+            });
+        }
+
         auto parse_while_stmt(Parser &parser) -> std::unique_ptr<WhileStmt> {
             const auto location = parser.current_location();
 
@@ -707,6 +737,16 @@ namespace ast {
                 .body = std::move(body),
                 .location = location,
             });
+        }
+
+        auto parse_continue_stmt(Parser &parser) -> ContinueStmt {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwContinue, "'continue'");
+
+            return ContinueStmt{
+                .location = location,
+            };
         }
 
         auto parse_return_stmt(Parser &parser) -> ReturnStmt {
@@ -832,7 +872,7 @@ namespace ast {
 
             parser.expect(TokenKind::KwFn, "'fn'");
 
-            auto fn_name = parser.expect(TokenKind::Identifier, "identifier").lexeme;
+            const auto fn_name = parser.expect(TokenKind::Identifier, "identifier").lexeme;
             auto fn_params = parse_ext_function_params(parser);
             auto fn_return_type = parse_ext_function_return_type(parser);
 
@@ -916,7 +956,7 @@ namespace ast {
 
             parser.expect(TokenKind::KwMacro, "'macro'");
 
-            auto m_name = parser.expect(TokenKind::Identifier, "identifier").lexeme;
+            const auto m_name = parser.expect(TokenKind::Identifier, "identifier").lexeme;
             auto m_params = parse_macro_params(parser);
 
             parser.expect(TokenKind::Arrow, "'->'");
@@ -1001,8 +1041,16 @@ namespace ast {
             return parse_var_decl_stmt(parser);
         }
 
+        if (parser.check(TokenKind::KwIf)) {
+            return parse_if_stmt(parser);
+        }
+
         if (parser.check(TokenKind::KwWhile)) {
             return parse_while_stmt(parser);
+        }
+
+        if (parser.check(TokenKind::KwContinue)) {
+            return parse_continue_stmt(parser);
         }
 
         if (parser.check(TokenKind::KwReturn)) {

@@ -22,6 +22,7 @@ enum class TokenKind : uint8_t {
     KwImpl,
     KwFor,
     KwPub,
+    KwContinue,
     KwReturn,
     KwIf,
     KwElse,

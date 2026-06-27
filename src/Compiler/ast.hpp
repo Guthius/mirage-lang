@@ -110,6 +110,7 @@ namespace ast {
     struct SizeOfExpr;
     struct CastExpr;
     struct MemberExpr;
+    struct DerefExpr;
 
     using Expr = std::variant<
         LiteralIntegerExpr,
@@ -127,7 +128,8 @@ namespace ast {
         ImportExpr,
         std::unique_ptr<SizeOfExpr>,
         std::unique_ptr<CastExpr>,
-        std::unique_ptr<MemberExpr>>;
+        std::unique_ptr<MemberExpr>,
+        std::unique_ptr<DerefExpr>>;
 
     enum class UnaryOp : uint8_t {
         Negate,
@@ -228,7 +230,13 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct DerefExpr {
+        Expr operand;
+        SourceLocation location;
+    };
+
     struct BlockStmt;
+    struct IfStmt;
     struct WhileStmt;
 
     struct ExprStmt {
@@ -244,6 +252,10 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct ContinueStmt {
+        SourceLocation location;
+    };
+
     struct ReturnStmt {
         std::vector<Expr> return_values;
         SourceLocation location;
@@ -251,13 +263,22 @@ namespace ast {
 
     using Stmt = std::variant<
         std::unique_ptr<BlockStmt>,
+        std::unique_ptr<IfStmt>,
         std::unique_ptr<WhileStmt>,
         ExprStmt,
         VarDeclStmt,
+        ContinueStmt,
         ReturnStmt>;
 
     struct BlockStmt {
         std::vector<Stmt> stmts;
+        SourceLocation location;
+    };
+
+    struct IfStmt {
+        Expr condition;
+        Stmt then_stmt;
+        std::optional<Stmt> else_stmt;
         SourceLocation location;
     };
 

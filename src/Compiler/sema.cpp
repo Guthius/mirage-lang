@@ -26,6 +26,9 @@ namespace sema {
                 }
             }
 
+            void operator()(const std::unique_ptr<ast::IfStmt> &) const {
+            }
+
             void operator()(const std::unique_ptr<ast::WhileStmt> &) const {
             }
 
@@ -34,6 +37,9 @@ namespace sema {
             }
 
             void operator()(const ast::VarDeclStmt &) const {
+            }
+
+            void operator()(const ast::ContinueStmt &) const {
             }
 
             void operator()(const ast::ReturnStmt &) const {
@@ -336,6 +342,19 @@ namespace sema {
                 return ResolvedType{
                     .kind = TypeKind::Void,
                 };
+            }
+
+            auto operator()(const std::unique_ptr<ast::DerefExpr> &expr) const -> ResolvedType {
+                const auto [kind, pointee_index] = check_expr(expr->operand, locals, result, diagnostics);
+
+                if (kind != TypeKind::Pointer) {
+                    diagnostics.report_error(DiagnosticStage::Sema, expr->location, "cannot dereference non-pointer type");
+                    return ResolvedType{
+                        .kind = TypeKind::Void,
+                    };
+                }
+
+                return result.pointer_pointees[pointee_index];
             }
         };
 
