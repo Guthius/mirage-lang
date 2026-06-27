@@ -82,6 +82,8 @@ namespace ast {
                     continue;
                 }
 
+                program.module_imports[path][import_str] = resolved_path;
+
                 visit(resolved_path, program, diagnostics);
             }
         }

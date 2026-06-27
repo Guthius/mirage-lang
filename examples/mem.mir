@@ -2,7 +2,7 @@ ext fn sbrk(increment: usize) -> anyptr
 
 const alignment: usize = 16
 
-macro align_up(n: size_t) -> (n + (alignment - 1)) & ~(alignment - 1)
+macro align_up(n: usize) -> (n + (alignment - 1)) & ~(alignment - 1)
 
 type block_header = struct {
     size: usize

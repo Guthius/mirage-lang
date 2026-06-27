@@ -10,6 +10,7 @@ namespace ast {
 
     struct Program {
         std::unordered_map<std::string, Module> modules;
+        std::unordered_map<std::string, std::unordered_map<std::string, std::string>> module_imports;
         std::string root_module_path;
         bool ok = false;
     };
