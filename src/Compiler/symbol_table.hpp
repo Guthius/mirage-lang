@@ -6,45 +6,36 @@
 #include "resolved_type.hpp"
 
 namespace sema {
-    struct StructInfo {
-        struct Field {
-            std::string name;
-            ResolvedType type;
-            size_t offset = 0;
-        };
-
-        std::vector<Field> fields;
-        size_t size = 0;
-        size_t align = 1;
-        bool is_packed = false;
-        bool layout_done = false;
-    };
-
     struct GlobalSymbol {
+        const ast::VarDecl *decl = nullptr;
         ResolvedType type;
         bool is_mut = false;
         bool is_pub = false;
     };
 
     struct FunctionSymbol {
+        const ast::FunctionDecl *decl = nullptr;
         std::vector<ResolvedType> params;
         std::vector<ResolvedType> return_types;
         bool is_pub = false;
     };
 
     struct ExtFunctionSymbol {
+        const ast::ExtFunctionDecl *decl = nullptr;
         std::vector<ResolvedType> params;
         std::vector<ResolvedType> return_types;
         bool is_pub = false;
     };
 
     struct MacroSymbol {
+        const ast::MacroDecl *decl = nullptr;
         std::vector<ResolvedType> params;
         ResolvedType result_type;
         bool is_pub = false;
     };
 
     struct ImportSymbol {
+        const ast::ImportExpr *expr = nullptr;
         std::string module_path;
         bool is_pub = false;
     };

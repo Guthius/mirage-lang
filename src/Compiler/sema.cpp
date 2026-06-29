@@ -3,6 +3,16 @@
 #include <format>
 
 namespace sema {
+    auto resolve_import(const ast::Program &program, const std::string &importer, const std::string &imported) -> std::string {
+        if (const auto importer_it = program.module_imports.find(importer); importer_it != program.module_imports.end()) {
+            if (const auto module_it = importer_it->second.find(imported); module_it != importer_it->second.end()) {
+                return module_it->second;
+            }
+        }
+
+        return {};
+    }
+
     auto declare_symbol(SymbolTable &symbol_table, std::string name, Symbol symbol, const SourceLocation &location, DiagnosticEngine &diagnostics) -> bool {
         if (symbol_table.contains(name)) {
             diagnostics.report_error(DiagnosticStage::Sema, location, std::format("redefinition if '{}'", name));
@@ -39,16 +49,6 @@ namespace sema {
         };
     }
 
-    auto resolve_import(const ast::Program &program, const std::string &importer, const std::string &imported) -> std::string {
-        if (const auto importer_it = program.module_imports.find(importer); importer_it != program.module_imports.end()) {
-            if (const auto module_it = importer_it->second.find(imported); module_it != importer_it->second.end()) {
-                return module_it->second;
-            }
-        }
-
-        return {};
-    }
-
     void declare_global(const ast::VarDecl &decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, DiagnosticEngine &diagnostics) {
         if (module.symbols.contains(decl.name)) {
             diagnostics.report_error(DiagnosticStage::Sema, decl.location, std::format("redefinition if '{}'", decl.name));
@@ -56,15 +56,16 @@ namespace sema {
         }
 
         if (decl.init && std::holds_alternative<ast::ImportExpr>(*decl.init)) {
-            const auto &[imported_module_name, location] = std::get<ast::ImportExpr>(*decl.init);
+            const auto &import_expr = std::get<ast::ImportExpr>(*decl.init);
 
-            if (const auto resolved_path = resolve_import(program, module_path, imported_module_name); module_path.empty()) {
-                diagnostics.report_error(DiagnosticStage::Sema, location, std::format("import '{}' was not resolved", imported_module_name));
+            if (const auto resolved_path = resolve_import(program, module_path, import_expr.module_name); resolved_path.empty()) {
+                diagnostics.report_error(DiagnosticStage::Sema, import_expr.location, std::format("import '{}' was not resolved", import_expr.module_name));
             } else {
                 declare_symbol(
                     module.symbols,
                     decl.name,
                     ImportSymbol{
+                        .expr = &import_expr,
                         .module_path = resolved_path,
                         .is_pub = decl.is_pub,
                     },
@@ -75,6 +76,7 @@ namespace sema {
         }
 
         module.symbols[decl.name] = GlobalSymbol{
+            .decl = &decl,
             .type = ResolvedType{.kind = TypeKind::Invalid},
             .is_mut = decl.is_mut,
             .is_pub = decl.is_pub,
@@ -88,13 +90,13 @@ namespace sema {
                     using V = std::decay_t<T>;
 
                     if constexpr (std::is_same_v<V, ast::FunctionDecl>) {
-                        declare_symbol(module.symbols, v.name, FunctionSymbol{.is_pub = v.is_pub}, v.location, diagnostics);
+                        declare_symbol(module.symbols, v.name, FunctionSymbol{.decl = &v, .is_pub = v.is_pub}, v.location, diagnostics);
                     } else if constexpr (std::is_same_v<V, ast::ExtFunctionDecl>) {
-                        declare_symbol(module.symbols, v.name, ExtFunctionSymbol{.is_pub = v.is_pub}, v.location, diagnostics);
+                        declare_symbol(module.symbols, v.name, ExtFunctionSymbol{.decl = &v, .is_pub = v.is_pub}, v.location, diagnostics);
                     } else if constexpr (std::is_same_v<V, ast::VarDecl>) {
                         declare_global(v, program, module_path, module, diagnostics);
                     } else if constexpr (std::is_same_v<V, ast::MacroDecl>) {
-                        declare_symbol(module.symbols, v.name, MacroSymbol{.is_pub = v.is_pub}, v.location, diagnostics);
+                        declare_symbol(module.symbols, v.name, MacroSymbol{.decl = &v, .is_pub = v.is_pub}, v.location, diagnostics);
                     } else if constexpr (std::is_same_v<V, ast::TypeDecl>) {
                         declare_type(v, module, diagnostics);
                     }
