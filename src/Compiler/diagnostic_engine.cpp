@@ -1,11 +1,8 @@
 #include "diagnostic_engine.hpp"
 
-#include <iostream>
+#include "source_manager.hpp"
 
-void DiagnosticEngine::set_source(const std::string_view filename, const std::string_view source) {
-    filename_ = filename;
-    source_ = source;
-}
+#include <iostream>
 
 void DiagnosticEngine::report(const DiagnosticLevel level, const DiagnosticStage stage, const SourceLocation &location, std::string message) {
     if (error_count_ >= MAX_ERRORS) {
@@ -55,7 +52,7 @@ void DiagnosticEngine::print_diagnostic(const Diagnostic &diagnostic) const {
 
     out << diagnostic.message << "\n";
 
-    if (const auto source_line = get_source_line(diagnostic.location.line); !source_line.empty()) {
+    if (const auto source_line = source_manager_.get_source_line(diagnostic.location.filename, diagnostic.location.line); !source_line.empty()) {
         out << "  " << source_line << "\n";
         out << "  ";
 
@@ -65,30 +62,4 @@ void DiagnosticEngine::print_diagnostic(const Diagnostic &diagnostic) const {
 
         out << "\033[1;32m^\033[0m\n";
     }
-}
-
-auto DiagnosticEngine::get_source_line(const uint32_t line) const -> std::string_view {
-    if (source_.empty() || line == 0) {
-        return {};
-    }
-
-    uint32_t current_line = 1;
-    size_t line_start = 0;
-
-    for (size_t i = 0; i < source_.size(); ++i) {
-        if (current_line == line) {
-            line_start = i;
-            while (i < source_.size() && source_[i] != '\n') {
-                ++i;
-            }
-
-            return source_.substr(line_start, i - line_start);
-        }
-
-        if (source_[i] == '\n') {
-            ++current_line;
-        }
-    }
-
-    return {};
 }

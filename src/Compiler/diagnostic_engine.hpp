@@ -4,7 +4,10 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+class SourceManager;
 
 enum class DiagnosticLevel : uint8_t {
     Error,
@@ -26,7 +29,7 @@ struct Diagnostic {
 
 class DiagnosticEngine {
   public:
-    void set_source(std::string_view filename, std::string_view source);
+    explicit DiagnosticEngine(SourceManager &source_manager) : source_manager_(source_manager) {}
 
     void report(DiagnosticLevel level, DiagnosticStage stage, const SourceLocation &location, std::string message);
     void report_error(DiagnosticStage stage, const SourceLocation &location, std::string message);
@@ -38,13 +41,9 @@ class DiagnosticEngine {
   private:
     void print_diagnostic(const Diagnostic &diagnostic) const;
 
-    [[nodiscard]]
-    auto get_source_line(uint32_t line) const -> std::string_view;
-
     static constexpr size_t MAX_ERRORS = 20;
 
-    std::string_view filename_;
-    std::string_view source_;
+    SourceManager &source_manager_;
     std::vector<Diagnostic> diagnostics_;
     size_t error_count_ = 0;
 };

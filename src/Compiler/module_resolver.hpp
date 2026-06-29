@@ -16,5 +16,5 @@ namespace ast {
     };
 
     auto canonicalize(const std::string &path) -> std::string;
-    auto resolve(const std::string &root_module_path, DiagnosticEngine &diagnostics) -> Program;
+    auto resolve(const std::string &root_module_path, SourceManager &source_manager, DiagnosticEngine &diagnostics) -> Program;
 }

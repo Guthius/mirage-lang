@@ -1,7 +1,7 @@
 #include "Compiler/ast.hpp"
 #include "Compiler/lexer.hpp"
 #include "Compiler/module_resolver.hpp"
-#include "Compiler/sema.hpp"
+#include "Compiler/source_manager.hpp"
 
 #include <string>
 
@@ -12,9 +12,10 @@ auto main(const int argc, char *argv[]) -> int {
 
     const auto filename = std::string(argv[1]);
 
-    DiagnosticEngine diagnostics;
+    SourceManager source_manager;
+    DiagnosticEngine diagnostics(source_manager);
 
-    const auto program = ast::resolve(filename, diagnostics);
+    const auto program = ast::resolve(filename, source_manager, diagnostics);
     if (!program.ok) {
         return 1;
     }

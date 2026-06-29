@@ -37,6 +37,8 @@ add_executable(mirage
         src/Compiler/sema.cpp
         src/Compiler/sema.hpp
         src/Compiler/source_location.hpp
+        src/Compiler/source_manager.cpp
+        src/Compiler/source_manager.hpp
         src/Compiler/symbol_table.hpp
         src/Compiler/token.cpp
         src/Compiler/token.hpp
