@@ -33,7 +33,11 @@ add_executable(mirage
         src/Compiler/lexer.hpp
         src/Compiler/module_resolver.cpp
         src/Compiler/module_resolver.hpp
+        src/Compiler/resolved_type.hpp
+        src/Compiler/sema.cpp
+        src/Compiler/sema.hpp
         src/Compiler/source_location.hpp
+        src/Compiler/symbol_table.hpp
         src/Compiler/token.cpp
         src/Compiler/token.hpp
 

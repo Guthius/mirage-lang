@@ -1,6 +1,7 @@
 #include "Compiler/ast.hpp"
 #include "Compiler/lexer.hpp"
 #include "Compiler/module_resolver.hpp"
+#include "Compiler/sema.hpp"
 
 #include <string>
 
