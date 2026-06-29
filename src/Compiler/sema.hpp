@@ -5,7 +5,6 @@
 
 namespace sema {
     struct ProgramModule {
-        std::string path;
         SymbolTable symbols;
         std::vector<StructInfo> structs;
     };

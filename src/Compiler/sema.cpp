@@ -49,7 +49,7 @@ namespace sema {
         return {};
     }
 
-    void declare_global(const ast::VarDecl &decl, const ast::Program &program, ProgramModule &module, DiagnosticEngine &diagnostics) {
+    void declare_global(const ast::VarDecl &decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, DiagnosticEngine &diagnostics) {
         if (module.symbols.contains(decl.name)) {
             diagnostics.report_error(DiagnosticStage::Sema, decl.location, std::format("redefinition if '{}'", decl.name));
             return;
@@ -58,14 +58,14 @@ namespace sema {
         if (decl.init && std::holds_alternative<ast::ImportExpr>(*decl.init)) {
             const auto &[imported_module_name, location] = std::get<ast::ImportExpr>(*decl.init);
 
-            if (const auto module_path = resolve_import(program, module.path, imported_module_name); module_path.empty()) {
+            if (const auto resolved_path = resolve_import(program, module_path, imported_module_name); module_path.empty()) {
                 diagnostics.report_error(DiagnosticStage::Sema, location, std::format("import '{}' was not resolved", imported_module_name));
             } else {
                 declare_symbol(
                     module.symbols,
                     decl.name,
                     ImportSymbol{
-                        .module_path = module_path,
+                        .module_path = resolved_path,
                         .is_pub = decl.is_pub,
                     },
                     decl.location, diagnostics);
@@ -81,7 +81,7 @@ namespace sema {
         };
     }
 
-    void build_symbol_table_for_module(const ast::Program &program, ProgramModule &module, const ast::Module &decls, DiagnosticEngine &diagnostics) {
+    void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, const ast::Module &decls, DiagnosticEngine &diagnostics) {
         for (auto &decl : decls) {
             std::visit(
                 [&]<typename T>(const T &v) {
@@ -92,7 +92,7 @@ namespace sema {
                     } else if constexpr (std::is_same_v<V, ast::ExtFunctionDecl>) {
                         declare_symbol(module.symbols, v.name, ExtFunctionSymbol{.is_pub = v.is_pub}, v.location, diagnostics);
                     } else if constexpr (std::is_same_v<V, ast::VarDecl>) {
-                        declare_global(v, program, module, diagnostics);
+                        declare_global(v, program, module_path, module, diagnostics);
                     } else if constexpr (std::is_same_v<V, ast::MacroDecl>) {
                         declare_symbol(module.symbols, v.name, MacroSymbol{.is_pub = v.is_pub}, v.location, diagnostics);
                     } else if constexpr (std::is_same_v<V, ast::TypeDecl>) {
@@ -110,7 +110,7 @@ namespace sema {
         }
 
         for (auto &[path, decls] : program.modules) {
-            build_symbol_table_for_module(program, res.modules[path], decls, diagnostics);
+            build_symbol_table_for_module(program, path, res.modules[path], decls, diagnostics);
         }
 
         return res;
