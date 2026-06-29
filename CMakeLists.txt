@@ -36,12 +36,16 @@ add_executable(mirage
         src/Compiler/resolved_type.hpp
         src/Compiler/sema.cpp
         src/Compiler/sema.hpp
+        src/Compiler/sema_check.cpp
+        src/Compiler/sema_declare.cpp
         src/Compiler/source_location.hpp
         src/Compiler/source_manager.cpp
         src/Compiler/source_manager.hpp
         src/Compiler/symbol_table.hpp
         src/Compiler/token.cpp
         src/Compiler/token.hpp
+        src/Compiler/type_resolver.cpp
+        src/Compiler/value_resolver.cpp
 
         src/main.cpp
 )

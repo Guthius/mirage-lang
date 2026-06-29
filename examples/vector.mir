@@ -38,7 +38,7 @@ fn reserve(v: *vector, new_capacity: usize) -> bool {
 
 pub fn push(v: *vector, element: anyptr) -> bool {
     if v.length == v.capacity {
-        const new_capacity := v.capacity == 0 ? 8 : v.capacity * 2
+        const new_capacity: usize = v.capacity == 0 ? 8 : v.capacity * 2
         if !reserve(v, new_capacity) {
             return false
         }

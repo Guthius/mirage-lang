@@ -15,7 +15,7 @@ const block_header_size := align_up(sizeof(block_header))
 mut heap_head: *block_header = nil
 mut heap_tail: *block_header = nil
 
-pub fn set(ptr: anyptr, value: byte, n: usize) -> anyptr {
+pub fn set(ptr: anyptr, value: byte, mut n: usize) -> anyptr {
     mut p := cast(ptr, *byte)
     while n-- {
         p++* = value
@@ -23,7 +23,7 @@ pub fn set(ptr: anyptr, value: byte, n: usize) -> anyptr {
     return ptr
 }
 
-pub fn copy(dest: anyptr, mut src: anyptr, n: usize) -> anyptr {
+pub fn copy(dest: anyptr, mut src: anyptr, mut n: usize) -> anyptr {
     mut d := cast(dest, *byte)
     mut s := cast(src, *byte)
     while n-- {
@@ -115,7 +115,7 @@ pub fn malloc(mut size: usize) -> anyptr {
     if block != nil {
         split_block(block, size)
 
-        block.free = false
+        block.is_free = false
     } else {
         block = request_from_os(size)
         if block == nil {

@@ -11,6 +11,7 @@ namespace sema {
         ResolvedType type;
         bool is_mut = false;
         bool is_pub = false;
+        bool is_resolved = false;
     };
 
     struct FunctionSymbol {
@@ -23,7 +24,7 @@ namespace sema {
     struct ExtFunctionSymbol {
         const ast::ExtFunctionDecl *decl = nullptr;
         std::vector<ResolvedType> params;
-        std::vector<ResolvedType> return_types;
+        std::optional<ResolvedType> return_type;
         bool is_pub = false;
     };
 
@@ -32,6 +33,7 @@ namespace sema {
         std::vector<ResolvedType> params;
         ResolvedType result_type;
         bool is_pub = false;
+        bool is_resolved = false;
     };
 
     struct ImportSymbol {

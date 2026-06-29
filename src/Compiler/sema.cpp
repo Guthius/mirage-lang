@@ -1,120 +1,102 @@
 #include "sema.hpp"
 
-#include <format>
+#include <ranges>
 
 namespace sema {
-    auto resolve_import(const ast::Program &program, const std::string &importer, const std::string &imported) -> std::string {
-        if (const auto importer_it = program.module_imports.find(importer); importer_it != program.module_imports.end()) {
-            if (const auto module_it = importer_it->second.find(imported); module_it != importer_it->second.end()) {
-                return module_it->second;
-            }
-        }
+    void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, const ast::Module &decls, DiagnosticEngine &diagnostics);
 
-        return {};
-    }
-
-    auto declare_symbol(SymbolTable &symbol_table, std::string name, Symbol symbol, const SourceLocation &location, DiagnosticEngine &diagnostics) -> bool {
-        if (symbol_table.contains(name)) {
-            diagnostics.report_error(DiagnosticStage::Sema, location, std::format("redefinition if '{}'", name));
-            return false;
-        }
-
-        symbol_table[name] = std::move(symbol);
-        return true;
-    }
-
-    void declare_type(const ast::TypeDecl &decl, ProgramModule &module, DiagnosticEngine &diagnostics) {
-        if (module.symbols.contains(decl.name)) {
-            diagnostics.report_error(DiagnosticStage::Sema, decl.location, std::format("redefinition if '{}'", decl.name));
-            return;
-        }
-
-        std::optional<ResolvedType> resolved = std::nullopt;
-        if (std::holds_alternative<std::unique_ptr<ast::StructType>>(decl.type)) {
-            module.structs.push_back(StructInfo{
-                .is_packed = std::get<std::unique_ptr<ast::StructType>>(decl.type)->is_packed,
-            });
-
-            resolved = ResolvedType{
-                .kind = TypeKind::Struct,
-                .struct_index = static_cast<int>(module.structs.size()) - 1,
-            };
-        }
-
-        module.symbols[decl.name] = TypeSymbol{
-            .decl = &decl,
-            .resolved = resolved,
-            .is_pub = decl.is_pub,
-            .location = decl.location,
-        };
-    }
-
-    void declare_global(const ast::VarDecl &decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, DiagnosticEngine &diagnostics) {
-        if (module.symbols.contains(decl.name)) {
-            diagnostics.report_error(DiagnosticStage::Sema, decl.location, std::format("redefinition if '{}'", decl.name));
-            return;
-        }
-
-        if (decl.init && std::holds_alternative<ast::ImportExpr>(*decl.init)) {
-            const auto &import_expr = std::get<ast::ImportExpr>(*decl.init);
-
-            if (const auto resolved_path = resolve_import(program, module_path, import_expr.module_name); resolved_path.empty()) {
-                diagnostics.report_error(DiagnosticStage::Sema, import_expr.location, std::format("import '{}' was not resolved", import_expr.module_name));
-            } else {
-                declare_symbol(
-                    module.symbols,
-                    decl.name,
-                    ImportSymbol{
-                        .expr = &import_expr,
-                        .module_path = resolved_path,
-                        .is_pub = decl.is_pub,
-                    },
-                    decl.location, diagnostics);
+    namespace {
+        void resolve_signatures_for_module(const std::string &module_path, ProgramModule &module, ProgramResult &program, DiagnosticEngine &diag) {
+            for (auto &[name, sym] : module.symbols) {
+                if (std::holds_alternative<TypeSymbol>(sym)) {
+                    const auto loc = std::get<TypeSymbol>(sym).decl->location;
+                    resolve_type_symbol(module_path, name, program, diag, loc);
+                }
             }
 
-            return;
-        }
-
-        module.symbols[decl.name] = GlobalSymbol{
-            .decl = &decl,
-            .type = ResolvedType{.kind = TypeKind::Invalid},
-            .is_mut = decl.is_mut,
-            .is_pub = decl.is_pub,
-        };
-    }
-
-    void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, const ast::Module &decls, DiagnosticEngine &diagnostics) {
-        for (auto &decl : decls) {
-            std::visit(
-                [&]<typename T>(const T &v) {
-                    using V = std::decay_t<T>;
-
-                    if constexpr (std::is_same_v<V, ast::FunctionDecl>) {
-                        declare_symbol(module.symbols, v.name, FunctionSymbol{.decl = &v, .is_pub = v.is_pub}, v.location, diagnostics);
-                    } else if constexpr (std::is_same_v<V, ast::ExtFunctionDecl>) {
-                        declare_symbol(module.symbols, v.name, ExtFunctionSymbol{.decl = &v, .is_pub = v.is_pub}, v.location, diagnostics);
-                    } else if constexpr (std::is_same_v<V, ast::VarDecl>) {
-                        declare_global(v, program, module_path, module, diagnostics);
-                    } else if constexpr (std::is_same_v<V, ast::MacroDecl>) {
-                        declare_symbol(module.symbols, v.name, MacroSymbol{.decl = &v, .is_pub = v.is_pub}, v.location, diagnostics);
-                    } else if constexpr (std::is_same_v<V, ast::TypeDecl>) {
-                        declare_type(v, module, diagnostics);
+            for (auto &sym : module.symbols | std::views::values) {
+                if (auto *fn = std::get_if<FunctionSymbol>(&sym)) {
+                    for (auto &p : fn->decl->params) {
+                        fn->params.push_back(resolve_type(p.type, module_path, program, diag));
                     }
-                },
-                decl);
+                    for (auto &rt : fn->decl->return_types) {
+                        fn->return_types.push_back(resolve_type(rt, module_path, program, diag));
+                    }
+                } else if (auto *ef = std::get_if<ExtFunctionSymbol>(&sym)) {
+                    for (auto &p : ef->decl->params) {
+                        ef->params.push_back(resolve_type(p.type, module_path, program, diag));
+                    }
+
+                    if (ef->decl->return_type) {
+                        ef->return_type = resolve_type(*ef->decl->return_type, module_path, program, diag);
+                    }
+                }
+            }
+        }
+
+        void resolve_values_for_module(const std::string &module_path, ProgramModule &module, ProgramResult &program, DiagnosticEngine &diag) {
+            for (auto &[name, sym] : module.symbols) {
+                if (std::holds_alternative<GlobalSymbol>(sym)) {
+                    const auto loc = std::get<GlobalSymbol>(sym).decl->location;
+                    resolve_global_symbol(module_path, name, program, diag, loc);
+                } else if (std::holds_alternative<MacroSymbol>(sym)) {
+                    const auto loc = std::get<MacroSymbol>(sym).decl->location;
+                    resolve_macro_symbol(module_path, name, program, diag, loc);
+                }
+            }
+        }
+
+        void check_bodies_for_module(const std::string &module_path, ProgramModule &module, ProgramResult &program, DiagnosticEngine &diag) {
+            for (auto &sym : module.symbols | std::views::values) {
+                const auto *fn = std::get_if<FunctionSymbol>(&sym);
+                if (!fn) {
+                    continue;
+                }
+
+                LocalScope locals;
+                for (auto &[gname, gsym] : module.symbols) {
+                    if (auto *g = std::get_if<GlobalSymbol>(&gsym)) {
+                        locals[gname] = LocalBinding{.type = g->type, .is_mut = g->is_mut};
+                    }
+                }
+
+                for (size_t i = 0; i < fn->decl->params.size(); ++i) {
+                    locals[fn->decl->params[i].name] = LocalBinding{.type = fn->params[i], .is_mut = fn->decl->params[i].is_mut};
+                }
+
+                check_stmt(fn->decl->body, locals, module_path, program, diag, fn->return_types, 0);
+            }
         }
     }
 
-    auto check_program(const ast::Program &program, DiagnosticEngine &diagnostics) -> ProgramResult {
-        ProgramResult res;
+    auto check_program(const ast::Program &program, DiagnosticEngine &diag) -> ProgramResult {
         if (!program.ok) {
-            return res;
+            return {};
         }
+
+        ProgramResult out;
 
         for (auto &[path, decls] : program.modules) {
-            build_symbol_table_for_module(program, path, res.modules[path], decls, diagnostics);
+            build_symbol_table_for_module(program, path, out.modules[path], decls, diag);
         }
 
-        return res;
+        for (const auto &path : program.modules | std::views::keys) {
+            resolve_signatures_for_module(path, out.modules.at(path), out, diag);
+        }
+
+        for (const auto &path : program.modules | std::views::keys) {
+            resolve_values_for_module(path, out.modules.at(path), out, diag);
+        }
+
+        for (const auto &path : program.modules | std::views::keys) {
+            check_bodies_for_module(path, out.modules.at(path), out, diag);
+        }
+
+        out.ok = !diag.has_errors();
+        for (auto &module : out.modules | std::views::values) {
+            module.ok = out.ok;
+        }
+
+        return out;
     }
 }
