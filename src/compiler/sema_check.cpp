@@ -237,8 +237,8 @@ namespace sema {
 
     auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth) -> ResolvedType {
         const auto ty = std::visit(
-            [&]<typename T>(const T &v) -> ResolvedType {
-                using V = std::decay_t<T>;
+            [&]<typename T0>(const T0 &v) -> ResolvedType {
+                using V = std::decay_t<T0>;
 
                 if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr>) {
                     if (expected && expected->is_integer()) return *expected;
@@ -270,23 +270,24 @@ namespace sema {
                         return error(diag, v.location, std::format("unknown identifier '{}'", v.name));
                     }
 
-                    return std::visit([&](const auto &sym) -> ResolvedType {
-                        using S = std::decay_t<decltype(sym)>;
-                        if constexpr (std::is_same_v<S, GlobalSymbol>) {
-                            return resolve_global_symbol(module_path, v.name, program, diag, v.location);
-                        } else if constexpr (std::is_same_v<S, ImportSymbol>) {
-                            return ResolvedType{.kind = TypeKind::Namespace};
-                        } else if constexpr (std::is_same_v<S, FunctionSymbol>) {
-                            return error(diag, v.location, std::format("'{}' is a function; did you mean to call it?", v.name));
-                        } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
-                            return error(diag, v.location, std::format("'{}' is an external function; did you mean to call it?", v.name));
-                        } else if constexpr (std::is_same_v<S, MacroSymbol>) {
-                            return error(diag, v.location, std::format("'{}' is a macro; did you mean to call it?", v.name));
-                        } else {
-                            return error(diag, v.location, std::format("'{}' is a type, not a value", v.name));
-                        }
-                    },
-                                      sym_it->second);
+                    return std::visit(
+                        [&]<typename T1>(const T1 &sym) -> ResolvedType {
+                            using S = std::decay_t<T1>;
+                            if constexpr (std::is_same_v<S, GlobalSymbol>) {
+                                return resolve_global_symbol(module_path, v.name, program, diag, v.location);
+                            } else if constexpr (std::is_same_v<S, ImportSymbol>) {
+                                return ResolvedType{.kind = TypeKind::Namespace};
+                            } else if constexpr (std::is_same_v<S, FunctionSymbol>) {
+                                return error(diag, v.location, std::format("'{}' is a function; did you mean to call it?", v.name));
+                            } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
+                                return error(diag, v.location, std::format("'{}' is an external function; did you mean to call it?", v.name));
+                            } else if constexpr (std::is_same_v<S, MacroSymbol>) {
+                                return error(diag, v.location, std::format("'{}' is a macro; did you mean to call it?", v.name));
+                            } else {
+                                return error(diag, v.location, std::format("'{}' is a type, not a value", v.name));
+                            }
+                        },
+                        sym_it->second);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
                     switch (v->op) {
@@ -390,27 +391,30 @@ namespace sema {
                                 return error(diag, v->location, std::format("unknown function '{}'", fn_name));
                             }
 
-                            return std::visit([&](const auto &sym) -> ResolvedType {
-                                using S = std::decay_t<decltype(sym)>;
-                                if constexpr (std::is_same_v<S, FunctionSymbol>) {
-                                    if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
-                                    check_call_args(v->args, sym.params, locals, module_path, program, diag, v->location, fn_name, loop_depth);
-                                    if (sym.return_types.size() > 1) return error(diag, v->location, "multi-value capture is not yet supported here");
-                                    return sym.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sym.return_types.front();
-                                } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
-                                    if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
-                                    check_call_args(v->args, sym.params, locals, module_path, program, diag, v->location, fn_name, loop_depth);
-                                    return sym.return_type.value_or(ResolvedType{.kind = TypeKind::Void});
-                                } else if constexpr (std::is_same_v<S, MacroSymbol>) {
-                                    if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
-                                    auto &resolved_macro = resolve_macro_symbol(*target_module, fn_name, program, diag, v->location);
-                                    check_call_args(v->args, resolved_macro.params, locals, module_path, program, diag, v->location, fn_name, loop_depth);
-                                    return resolved_macro.result_type;
-                                } else {
-                                    return error(diag, v->location, std::format("'{}' is not callable", fn_name));
-                                }
-                            },
-                                              sym_it->second);
+                            return std::visit(
+                                [&]<typename T1>(const T1 &sym) -> ResolvedType {
+                                    using S = std::decay_t<T1>;
+                                    if constexpr (std::is_same_v<S, FunctionSymbol>) {
+                                        if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
+                                        check_call_args(v->args, sym.params, locals, module_path, program, diag, v->location, fn_name, loop_depth);
+                                        if (sym.return_types.size() > 1) {
+                                            return error(diag, v->location, "multi-value capture is not yet supported here");
+                                        }
+                                        return sym.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sym.return_types.front();
+                                    } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
+                                        if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
+                                        check_call_args(v->args, sym.params, locals, module_path, program, diag, v->location, fn_name, loop_depth);
+                                        return sym.return_type.value_or(ResolvedType{.kind = TypeKind::Void});
+                                    } else if constexpr (std::is_same_v<S, MacroSymbol>) {
+                                        if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
+                                        auto &resolved_macro = resolve_macro_symbol(*target_module, fn_name, program, diag, v->location);
+                                        check_call_args(v->args, resolved_macro.params, locals, module_path, program, diag, v->location, fn_name, loop_depth);
+                                        return resolved_macro.result_type;
+                                    } else {
+                                        return error(diag, v->location, std::format("'{}' is not callable", fn_name));
+                                    }
+                                },
+                                sym_it->second);
                         }
                         return error(diag, v->location, "method calls on struct values are not yet supported");
                     }
@@ -419,6 +423,7 @@ namespace sema {
                     if (!callee_ident) {
                         return error(diag, v->location, "unsupported call target");
                     }
+
                     if (locals.contains(callee_ident->name)) {
                         return error(diag, v->location, std::format("'{}' is not callable", callee_ident->name));
                     }
@@ -427,29 +432,33 @@ namespace sema {
                     if (mod_it == program.modules.end()) {
                         return error(diag, v->location, std::format("internal error: module '{}' not found", module_path));
                     }
+
                     auto sym_it = mod_it->second.symbols.find(callee_ident->name);
                     if (sym_it == mod_it->second.symbols.end()) {
                         return error(diag, v->location, std::format("unknown function '{}'", callee_ident->name));
                     }
 
-                    return std::visit([&](const auto &sym) -> ResolvedType {
-                        using S = std::decay_t<decltype(sym)>;
-                        if constexpr (std::is_same_v<S, FunctionSymbol>) {
-                            check_call_args(v->args, sym.params, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth);
-                            if (sym.return_types.size() > 1) return error(diag, v->location, "multi-value capture is not yet supported here");
-                            return sym.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sym.return_types.front();
-                        } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
-                            check_call_args(v->args, sym.params, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth);
-                            return sym.return_type.value_or(ResolvedType{.kind = TypeKind::Void});
-                        } else if constexpr (std::is_same_v<S, MacroSymbol>) {
-                            auto &resolved_macro = resolve_macro_symbol(module_path, callee_ident->name, program, diag, v->location);
-                            check_call_args(v->args, resolved_macro.params, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth);
-                            return resolved_macro.result_type;
-                        } else {
-                            return error(diag, v->location, std::format("'{}' is not callable", callee_ident->name));
-                        }
-                    },
-                                      sym_it->second);
+                    return std::visit(
+                        [&]<typename T1>(const T1 &sym) -> ResolvedType {
+                            using S = std::decay_t<T1>;
+                            if constexpr (std::is_same_v<S, FunctionSymbol>) {
+                                check_call_args(v->args, sym.params, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth);
+                                if (sym.return_types.size() > 1) {
+                                    return error(diag, v->location, "multi-value capture is not yet supported here");
+                                }
+                                return sym.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sym.return_types.front();
+                            } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
+                                check_call_args(v->args, sym.params, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth);
+                                return sym.return_type.value_or(ResolvedType{.kind = TypeKind::Void});
+                            } else if constexpr (std::is_same_v<S, MacroSymbol>) {
+                                auto &resolved_macro = resolve_macro_symbol(module_path, callee_ident->name, program, diag, v->location);
+                                check_call_args(v->args, resolved_macro.params, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth);
+                                return resolved_macro.result_type;
+                            } else {
+                                return error(diag, v->location, std::format("'{}' is not callable", callee_ident->name));
+                            }
+                        },
+                        sym_it->second);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) {
                     const LvalueInfo lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth);
