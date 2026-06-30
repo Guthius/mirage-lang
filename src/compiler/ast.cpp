@@ -364,14 +364,6 @@ namespace ast {
                         .is_prefix = false,
                         .location = location,
                     });
-                } else if (parser.check(TokenKind::Star) && !can_start_expr(parser.peek().kind)) {
-                    parser.advance();
-
-                    expr = make_expr(UnaryExpr{
-                        .op = UnaryOp::Deref,
-                        .operand = std::move(expr),
-                        .location = location,
-                    });
                 } else {
                     break;
                 }
@@ -387,6 +379,7 @@ namespace ast {
                 case TokenKind::Bang:      return UnaryOp::LogicalNot;
                 case TokenKind::Tilde:     return UnaryOp::BitwiseNot;
                 case TokenKind::Ampersand: return UnaryOp::AddressOf;
+                case TokenKind::Star:      return UnaryOp::Deref;
                 default:                   return std::nullopt;
                 }
             };

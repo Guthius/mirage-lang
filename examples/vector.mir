@@ -55,3 +55,10 @@ pub fn pop(v: *vector) {
     }
     v.length--
 }
+
+pub fn at(v: *vector, idx: usize) -> anyptr {
+    if idx >= v.length {
+        return nil
+    }
+    return v.data + idx * v.element_size
+}

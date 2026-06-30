@@ -1,6 +1,12 @@
 const mem := import("mem")
-const vector := import("vector")
+const vec := import("vector")
 
 pub fn main() -> i32 {
-    return 0
+    const x: i32 = 42
+    mut v: vec.vector
+    vec.init(&v, sizeof(x))
+    vec.push(&v, &x)
+    const result: i32 = *cast(vec.at(&v, 0), *i32)
+    vec.destroy(&v)
+    return result
 }
