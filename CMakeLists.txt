@@ -23,29 +23,29 @@ else ()
 endif ()
 
 add_executable(mirage
-        src/Compiler/ast.cpp
-        src/Compiler/ast.hpp
-        src/Compiler/ast_parser.cpp
-        src/Compiler/ast_parser.hpp
-        src/Compiler/diagnostic_engine.cpp
-        src/Compiler/diagnostic_engine.hpp
-        src/Compiler/lexer.cpp
-        src/Compiler/lexer.hpp
-        src/Compiler/module_resolver.cpp
-        src/Compiler/module_resolver.hpp
-        src/Compiler/resolved_type.hpp
-        src/Compiler/sema.cpp
-        src/Compiler/sema.hpp
-        src/Compiler/sema_check.cpp
-        src/Compiler/sema_declare.cpp
-        src/Compiler/source_location.hpp
-        src/Compiler/source_manager.cpp
-        src/Compiler/source_manager.hpp
-        src/Compiler/symbol_table.hpp
-        src/Compiler/token.cpp
-        src/Compiler/token.hpp
-        src/Compiler/type_resolver.cpp
-        src/Compiler/value_resolver.cpp
+        src/compiler/ast.cpp
+        src/compiler/ast.hpp
+        src/compiler/ast_parser.cpp
+        src/compiler/ast_parser.hpp
+        src/compiler/diagnostic_engine.cpp
+        src/compiler/diagnostic_engine.hpp
+        src/compiler/lexer.cpp
+        src/compiler/lexer.hpp
+        src/compiler/module_resolver.cpp
+        src/compiler/module_resolver.hpp
+        src/compiler/resolved_type.hpp
+        src/compiler/sema.cpp
+        src/compiler/sema.hpp
+        src/compiler/sema_check.cpp
+        src/compiler/sema_declare.cpp
+        src/compiler/source_location.hpp
+        src/compiler/source_manager.cpp
+        src/compiler/source_manager.hpp
+        src/compiler/symbol_table.hpp
+        src/compiler/token.cpp
+        src/compiler/token.hpp
+        src/compiler/type_resolver.cpp
+        src/compiler/value_resolver.cpp
 
         src/main.cpp
 )

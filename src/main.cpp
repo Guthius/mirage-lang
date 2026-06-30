@@ -1,8 +1,8 @@
-#include "Compiler/ast.hpp"
-#include "Compiler/lexer.hpp"
-#include "Compiler/module_resolver.hpp"
-#include "Compiler/sema.hpp"
-#include "Compiler/source_manager.hpp"
+#include "compiler/ast.hpp"
+#include "compiler/lexer.hpp"
+#include "compiler/module_resolver.hpp"
+#include "compiler/sema.hpp"
+#include "compiler/source_manager.hpp"
 
 #include <string>
 
