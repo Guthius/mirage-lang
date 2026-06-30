@@ -27,6 +27,8 @@ add_executable(mirage
         src/compiler/ast.hpp
         src/compiler/ast_parser.cpp
         src/compiler/ast_parser.hpp
+        src/compiler/codegen.cpp
+        src/compiler/codegen.hpp
         src/compiler/diagnostic_engine.cpp
         src/compiler/diagnostic_engine.hpp
         src/compiler/lexer.cpp

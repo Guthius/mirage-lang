@@ -18,6 +18,7 @@ enum class DiagnosticStage : uint8_t {
     Lexer,
     Parser,
     Sema,
+    Codegen,
 };
 
 struct Diagnostic {
