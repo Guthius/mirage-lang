@@ -28,6 +28,10 @@ build target="all": configure
 run: build
     ./{{ build_dir }}/mirage examples/start.mir
 
+# Install the compiler to the system
+install prefix="/usr/local": build
+    install -Dm755 {{ build_dir }}/mirage {{ prefix }}/bin/mirage
+
 # Format all source files that are part of the project
 format:
     find ./src -type f \( -name '*.cpp' \) \

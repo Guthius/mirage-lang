@@ -15,6 +15,7 @@
 #include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/Triple.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
@@ -26,14 +27,27 @@ namespace {
         bool emit_ir;
         bool freestanding;
         std::string filename;
-        std::string output = "start.out";
+        std::string output = "a.out";
     };
+
+    auto print_usage(const char *argv0) -> void {
+        llvm::errs() << "Usage: " << argv0 << " [options] <file>\n"
+                     << "\n"
+                     << "Options:\n"
+                     << "  -o, --output <file>  Output file name (default: a.out)\n"
+                     << "  --emit-ir            Print LLVM IR to stdout instead of compiling\n"
+                     << "  --freestanding       Compile without standard library\n"
+                     << "  --help               Show this help message\n";
+    }
 
     auto parse_options(const int argc, char *argv[]) -> Options {
         Options options{};
 
         for (int i = 1; i < argc; ++i) {
-            if (const auto arg = std::string(argv[i]); arg == "--emit-ir") {
+            if (const auto arg = std::string(argv[i]); arg == "--help" || arg == "-h") {
+                print_usage(argv[0]);
+                std::exit(0);
+            } else if (arg == "--emit-ir") {
                 options.emit_ir = true;
             } else if (arg == "--freestanding") {
                 options.freestanding = true;
@@ -136,13 +150,17 @@ namespace {
 
 auto main(const int argc, char *argv[]) -> int {
     if (argc < 2) {
+        print_usage(argv[0]);
         return 1;
     }
 
     const auto options = parse_options(argc, argv);
     if (options.filename.empty()) {
+        print_usage(argv[0]);
         return 1;
     }
+
+    const auto start_time = std::chrono::steady_clock::now();
 
     SourceManager source_manager;
     DiagnosticEngine diag(source_manager);
@@ -181,6 +199,10 @@ auto main(const int argc, char *argv[]) -> int {
 
     std::error_code remove_error;
     std::filesystem::remove(object_path, remove_error);
+
+    const auto elapsed = std::chrono::steady_clock::now() - start_time;
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    llvm::outs() << std::format("Compiled '{}' -> '{}' in {}ms\n", options.filename, options.output, ms);
 
     return 0;
 }
