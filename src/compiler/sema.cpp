@@ -6,7 +6,7 @@ namespace sema {
     void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, const ast::Module &decls, DiagnosticEngine &diagnostics);
 
     namespace {
-        void resolve_signatures_for_module(const std::string &module_path, ProgramModule &module, ProgramResult &program, DiagnosticEngine &diag) {
+        void resolve_signatures_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
             for (auto &[name, sym] : module.symbols) {
                 if (std::holds_alternative<TypeSymbol>(sym)) {
                     const auto loc = std::get<TypeSymbol>(sym).decl->location;
@@ -34,7 +34,7 @@ namespace sema {
             }
         }
 
-        void resolve_values_for_module(const std::string &module_path, ProgramModule &module, ProgramResult &program, DiagnosticEngine &diag) {
+        void resolve_values_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
             for (auto &[name, sym] : module.symbols) {
                 if (std::holds_alternative<GlobalSymbol>(sym)) {
                     const auto loc = std::get<GlobalSymbol>(sym).decl->location;
@@ -46,7 +46,7 @@ namespace sema {
             }
         }
 
-        void check_bodies_for_module(const std::string &module_path, ProgramModule &module, ProgramResult &program, DiagnosticEngine &diag) {
+        void check_bodies_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
             for (auto &sym : module.symbols | std::views::values) {
                 const auto *fn = std::get_if<FunctionSymbol>(&sym);
                 if (!fn) {
@@ -69,12 +69,12 @@ namespace sema {
         }
     }
 
-    auto check_program(const ast::Program &program, DiagnosticEngine &diag) -> ProgramResult {
+    auto check_program(const ast::Program &program, DiagnosticEngine &diag) -> Program {
         if (!program.ok) {
             return {};
         }
 
-        ProgramResult out;
+        Program out;
 
         for (auto &[path, decls] : program.modules) {
             build_symbol_table_for_module(program, path, out.modules[path], decls, diag);

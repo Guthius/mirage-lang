@@ -138,7 +138,7 @@ pub fn free(ptr: anyptr) {
     coalesce()
 }
 
-pub fn realloc(ptr: anyptr, mut size: usize) -> anyptr {
+pub fn realloc(ptr: anyptr, size: usize) -> anyptr {
     if ptr == nil {
         return malloc(size)
     }

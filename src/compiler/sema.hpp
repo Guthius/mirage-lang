@@ -40,7 +40,7 @@ namespace sema {
         std::set<std::pair<std::string, std::string>> value_resolving;
     };
 
-    struct ProgramResult {
+    struct Program {
         std::unordered_map<std::string, ProgramModule> modules;
         ResolveState resolve_state;
         bool ok = false;
@@ -57,13 +57,13 @@ namespace sema {
         return std::visit([](const auto &v) -> const void * { return &v; }, expr);
     }
 
-    auto check_program(const ast::Program &program, DiagnosticEngine &diag) -> ProgramResult;
-    auto resolve_type(const ast::Type &type, const std::string &module_path, ProgramResult &program, DiagnosticEngine &diag) -> ResolvedType;
+    auto check_program(const ast::Program &program, DiagnosticEngine &diag) -> Program;
+    auto resolve_type(const ast::Type &type, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType;
     auto is_assignable(const ResolvedType &from, const ResolvedType &to) -> bool;
     auto intern_pointer(ProgramModule &module, const ResolvedType &pointee) -> ResolvedType;
-    auto resolve_type_symbol(const std::string &module_path, const std::string &name, ProgramResult &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
-    auto resolve_global_symbol(const std::string &module_path, const std::string &name, ProgramResult &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
-    auto resolve_macro_symbol(const std::string &module_path, const std::string &name, ProgramResult &program, DiagnosticEngine &diag, const SourceLocation &loc) -> MacroSymbol &;
-    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, ProgramResult &program, DiagnosticEngine &diag, std::optional<ResolvedType> expected, int loop_depth) -> ResolvedType;
-    auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, ProgramResult &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth) -> void;
+    auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
+    auto resolve_global_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
+    auto resolve_macro_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> MacroSymbol &;
+    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, std::optional<ResolvedType> expected, int loop_depth) -> ResolvedType;
+    auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth) -> void;
 }

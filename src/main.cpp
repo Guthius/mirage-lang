@@ -16,12 +16,15 @@ auto main(const int argc, char *argv[]) -> int {
     SourceManager source_manager;
     DiagnosticEngine diagnostics(source_manager);
 
-    const auto program = ast::resolve(filename, source_manager, diagnostics);
-    if (!program.ok) {
+    const auto ast = ast::resolve(filename, source_manager, diagnostics);
+    if (!ast.ok) {
         return 1;
     }
 
-    auto res = sema::check_program(program, diagnostics);
+    const auto sema = sema::check_program(ast, diagnostics);
+    if (!sema.ok) {
+        return 1;
+    }
 
     return 0;
 }

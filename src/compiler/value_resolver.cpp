@@ -12,7 +12,7 @@ namespace sema {
         }
     }
 
-    auto resolve_global_symbol(const std::string &module_path, const std::string &name, ProgramResult &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType {
+    auto resolve_global_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType {
         const auto mod_it = program.modules.find(module_path);
         if (mod_it == program.modules.end()) {
             return error_invalid(diag, loc, std::format("internal error: module '{}' not found", module_path));
@@ -70,7 +70,7 @@ namespace sema {
         return g->type;
     }
 
-    auto resolve_macro_symbol(const std::string &module_path, const std::string &name, ProgramResult &program, DiagnosticEngine &diag, const SourceLocation &loc) -> MacroSymbol & {
+    auto resolve_macro_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> MacroSymbol & {
         static MacroSymbol invalid_sentinel{};
 
         const auto mod_it = program.modules.find(module_path);

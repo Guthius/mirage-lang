@@ -60,7 +60,7 @@ namespace sema {
             bool crossed_boundary;
         };
 
-        auto walk_namespace_chain(const std::string &start_module, const ast::NamedType &named, ProgramResult &program, DiagnosticEngine &diag) -> std::optional<ChainTarget> {
+        auto walk_namespace_chain(const std::string &start_module, const ast::NamedType &named, Program &program, DiagnosticEngine &diag) -> std::optional<ChainTarget> {
             std::string current_module = start_module;
             const auto *current = &named;
             bool crossed = false;
@@ -98,7 +98,7 @@ namespace sema {
         }
 
         struct Resolver {
-            ProgramResult &program;
+            Program &program;
             DiagnosticEngine &diag;
 
             auto find_type_symbol(ProgramModule &mod, const std::string &name, const SourceLocation &loc) const -> TypeSymbol * {
@@ -305,13 +305,13 @@ namespace sema {
         return false;
     }
 
-    auto resolve_type(const ast::Type &type, const std::string &module_path, ProgramResult &program, DiagnosticEngine &diag) -> ResolvedType {
+    auto resolve_type(const ast::Type &type, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType {
         Resolver resolver{program, diag};
         return resolver.resolve_type_impl(type, module_path);
     }
 
-    auto resolve_type_symbol(const std::string &module_path, const std::string &name, ProgramResult &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType {
-        Resolver resolver{program, diag};
+    auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType {
+        const Resolver resolver{program, diag};
         return resolver.resolve_final_full(module_path, name, false, loc);
     }
 }

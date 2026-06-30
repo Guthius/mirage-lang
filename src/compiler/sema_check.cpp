@@ -61,7 +61,7 @@ namespace sema {
             return from.is_scalar() && to.is_scalar();
         }
 
-        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, LocalScope &locals, const std::string &module_path, ProgramResult &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, const int loop_depth) -> bool {
+        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, const int loop_depth) -> bool {
             if (args.size() != params.size()) {
                 error(diag, loc, std::format("'{}' expects {} argument(s), got {}", callee_desc, params.size(), args.size()));
                 return false;
@@ -77,7 +77,7 @@ namespace sema {
             return ok;
         }
 
-        auto try_resolve_namespace_chain(const ast::Expr &expr, const std::string &module_path, LocalScope &locals, ProgramResult &program) -> std::optional<std::string> {
+        auto try_resolve_namespace_chain(const ast::Expr &expr, const std::string &module_path, LocalScope &locals, Program &program) -> std::optional<std::string> {
             if (auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
                 if (locals.contains(ident->name)) {
                     return std::nullopt;
@@ -120,7 +120,7 @@ namespace sema {
             return std::nullopt;
         }
 
-        auto check_member_cross_module(const ast::MemberExpr &m, const std::string &target_module_path, ProgramResult &program, DiagnosticEngine &diag) -> LvalueInfo {
+        auto check_member_cross_module(const ast::MemberExpr &m, const std::string &target_module_path, Program &program, DiagnosticEngine &diag) -> LvalueInfo {
             const auto mod_it = program.modules.find(target_module_path);
             if (mod_it == program.modules.end()) {
                 return {ResolvedType{.kind = TypeKind::Invalid}, false};
@@ -150,9 +150,9 @@ namespace sema {
                 sym_it->second);
         }
 
-        auto resolve_lvalue(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, ProgramResult &program, DiagnosticEngine &diag, int loop_depth) -> LvalueInfo;
+        auto resolve_lvalue(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, int loop_depth) -> LvalueInfo;
 
-        auto resolve_member(const ast::MemberExpr &m, LocalScope &locals, const std::string &module_path, ProgramResult &program, DiagnosticEngine &diag, const int loop_depth) -> LvalueInfo {
+        auto resolve_member(const ast::MemberExpr &m, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth) -> LvalueInfo {
             if (const auto target_module = try_resolve_namespace_chain(m.object, module_path, locals, program)) {
                 return check_member_cross_module(m, *target_module, program, diag);
             }
@@ -188,7 +188,7 @@ namespace sema {
             return {ResolvedType{.kind = TypeKind::Invalid}, false};
         }
 
-        auto resolve_lvalue(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, ProgramResult &program, DiagnosticEngine &diag, const int loop_depth) -> LvalueInfo {
+        auto resolve_lvalue(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth) -> LvalueInfo {
             return std::visit(
                 [&]<typename T>(const T &v) -> LvalueInfo {
                     using V = std::decay_t<T>;
@@ -235,7 +235,7 @@ namespace sema {
         }
     }
 
-    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, ProgramResult &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth) -> ResolvedType {
+    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth) -> ResolvedType {
         const auto ty = std::visit(
             [&]<typename T>(const T &v) -> ResolvedType {
                 using V = std::decay_t<T>;
@@ -483,7 +483,7 @@ namespace sema {
         return ty;
     }
 
-    auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, ProgramResult &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth) -> void {
+    auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth) -> void {
         std::visit(
             [&]<typename T>(const T &v) {
                 using V = std::decay_t<T>;
