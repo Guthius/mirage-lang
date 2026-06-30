@@ -1,4 +1,3 @@
-#include "compiler/ast.hpp"
 #include "compiler/codegen.hpp"
 #include "compiler/module_resolver.hpp"
 #include "compiler/sema.hpp"
@@ -27,7 +26,7 @@ namespace {
         bool emit_ir;
         bool freestanding;
         std::string filename;
-        std::string output = "a.out";
+        std::string output = "start.out";
     };
 
     auto parse_options(const int argc, char *argv[]) -> Options {

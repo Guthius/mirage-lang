@@ -1,2 +1,10 @@
+# CLion
 .idea
-a.out
+
+# Compile Commands
+compile_commands.json
+
+# Build Artificates
+build/
+cmake-build-*
+*.out
