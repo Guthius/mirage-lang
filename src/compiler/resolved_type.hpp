@@ -22,6 +22,8 @@ namespace sema {
         Anyptr,
         Pointer,
         Struct,
+        Array,
+        Slice,
         Namespace,
     };
 
@@ -29,6 +31,8 @@ namespace sema {
         TypeKind kind = TypeKind::Void;
         int pointee_index = -1;
         int struct_index = -1;
+        int array_index = -1;
+        int slice_index = -1;
 
         auto is_integer() const -> bool {
             switch (kind) {
@@ -76,7 +80,9 @@ namespace sema {
         auto operator==(const ResolvedType &other) const -> bool {
             return other.kind == kind &&
                    other.pointee_index == pointee_index &&
-                   other.struct_index == struct_index;
+                   other.struct_index == struct_index &&
+                   other.array_index == array_index &&
+                   other.slice_index == slice_index;
         }
 
         auto operator!=(const ResolvedType &other) const -> bool {

@@ -26,10 +26,23 @@ namespace sema {
         bool layout_done = false;
     };
 
+    struct ArrayInfo {
+        ResolvedType element_type;
+        uint64_t count = 0;
+        uint32_t size = 0;
+        uint32_t align = 1;
+    };
+
+    struct SliceInfo {
+        ResolvedType element_type;
+    };
+
     struct ProgramModule {
         SymbolTable symbols;
         std::vector<ResolvedType> pointer_pointees;
         std::vector<StructInfo> structs;
+        std::vector<ArrayInfo> arrays;
+        std::vector<SliceInfo> slices;
         std::unordered_map<const void *, ResolvedType> expr_types;
         bool ok = false;
     };
@@ -61,6 +74,7 @@ namespace sema {
     auto resolve_type(const ast::Type &type, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType;
     auto is_assignable(const ResolvedType &from, const ResolvedType &to) -> bool;
     auto intern_pointer(ProgramModule &module, const ResolvedType &pointee) -> ResolvedType;
+    auto intern_slice(ProgramModule &module, const ResolvedType &element) -> ResolvedType;
     auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
     auto resolve_global_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
     auto resolve_macro_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> MacroSymbol &;

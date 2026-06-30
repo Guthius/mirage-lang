@@ -46,11 +46,25 @@ namespace ast {
     };
 
     struct StructType;
+    struct ArrayType;
+    struct SliceType;
 
-    using Type = std::variant<std::monostate, BuiltinType, std::unique_ptr<PointerType>, NamedType, std::unique_ptr<StructType>>;
+    using Type = std::variant<
+        std::monostate,
+        BuiltinType,
+        std::unique_ptr<PointerType>,
+        NamedType,
+        std::unique_ptr<StructType>,
+        std::unique_ptr<ArrayType>,
+        std::unique_ptr<SliceType>>;
 
     struct PointerType {
         Type pointee;
+        SourceLocation location;
+    };
+
+    struct SliceType {
+        Type base_type;
         SourceLocation location;
     };
 
@@ -108,7 +122,10 @@ namespace ast {
     };
 
     struct SizeOfExpr;
+    struct LenExpr;
     struct CastExpr;
+    struct IndexExpr;
+    struct SliceExpr;
     struct MemberExpr;
 
     using Expr = std::variant<
@@ -126,8 +143,17 @@ namespace ast {
         std::unique_ptr<IncrDecrExpr>,
         ImportExpr,
         std::unique_ptr<SizeOfExpr>,
+        std::unique_ptr<LenExpr>,
         std::unique_ptr<CastExpr>,
+        std::unique_ptr<IndexExpr>,
+        std::unique_ptr<SliceExpr>,
         std::unique_ptr<MemberExpr>>;
+
+    struct ArrayType {
+        Type base_type;
+        Expr size;
+        SourceLocation location;
+    };
 
     enum class UnaryOp : uint8_t {
         Negate,
@@ -216,9 +242,28 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct LenExpr {
+        Expr operand;
+        SourceLocation location;
+    };
+
     struct CastExpr {
         Expr value;
         Type as_type;
+        std::optional<Expr> len_expr;
+        SourceLocation location;
+    };
+
+    struct IndexExpr {
+        Expr operand;
+        Expr index;
+        SourceLocation location;
+    };
+
+    struct SliceExpr {
+        Expr operand;
+        Expr start;
+        Expr end;
         SourceLocation location;
     };
 
@@ -245,7 +290,18 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct VarDeclGroupStmt {
+        bool is_mut;
+        std::vector<std::string> names;
+        Expr init;
+        SourceLocation location;
+    };
+
     struct ContinueStmt {
+        SourceLocation location;
+    };
+
+    struct BreakStmt {
         SourceLocation location;
     };
 
@@ -260,7 +316,9 @@ namespace ast {
         std::unique_ptr<WhileStmt>,
         ExprStmt,
         VarDeclStmt,
+        VarDeclGroupStmt,
         ContinueStmt,
+        BreakStmt,
         ReturnStmt>;
 
     struct BlockStmt {

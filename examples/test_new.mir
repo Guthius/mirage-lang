@@ -1,0 +1,21 @@
+
+fn func_call() -> i32, bool {
+    return 32, true
+}
+
+pub fn main() -> i32 {
+    mut my_array: [5]i32
+    mut my_slice: []bool
+
+    const my_var_a, my_var_b := func_call()
+
+    const int_ptr: *i32 = &my_var_a
+    const int_slice := cast(int_ptr, []i32, 1)
+
+    while true {
+        break
+    }
+
+    return int_slice[0]
+}
+

@@ -126,6 +126,8 @@ namespace codegen {
             case sema::TypeKind::Pointer:
             case sema::TypeKind::Anyptr:
                 return 8;
+            case sema::TypeKind::Slice:
+                return 16;
             default:
                 return 0;
             }
@@ -186,6 +188,7 @@ namespace codegen {
             const sema::ProgramModule *current_module_ = nullptr;
             llvm::Function *current_function_ = nullptr;
             std::vector<llvm::BasicBlock *> continue_targets_;
+            std::vector<llvm::BasicBlock *> break_targets_;
             std::vector<sema::ResolvedType> current_returns_;
             std::unordered_map<std::string, LocalValue> locals_;
             std::unordered_map<std::string, MacroArg> macro_args_;
@@ -224,7 +227,8 @@ namespace codegen {
             }
 
             auto type_module_for_ast_type(const ast::Type &type, const std::string &context_module, const sema::ResolvedType &resolved) const -> std::string {
-                if (resolved.kind != sema::TypeKind::Struct && resolved.kind != sema::TypeKind::Pointer) {
+                if (resolved.kind != sema::TypeKind::Struct && resolved.kind != sema::TypeKind::Pointer &&
+                    resolved.kind != sema::TypeKind::Array && resolved.kind != sema::TypeKind::Slice) {
                     return context_module;
                 }
 
@@ -244,7 +248,11 @@ namespace codegen {
             }
 
             auto llvm_type_for(const sema::ResolvedType &type, const std::string &type_module) -> llvm::Type * {
-                return llvm_type(type.kind == sema::TypeKind::Struct ? type_module : *current_module_path_, type);
+                return llvm_type(
+                    type.kind == sema::TypeKind::Struct || type.kind == sema::TypeKind::Array || type.kind == sema::TypeKind::Slice
+                        ? type_module
+                        : *current_module_path_,
+                    type);
             }
 
             auto expr_type(const ast::Expr &expr) const -> sema::ResolvedType {
@@ -258,6 +266,12 @@ namespace codegen {
             auto size_of(const std::string &module_path, const sema::ResolvedType &type) const -> uint32_t {
                 if (type.kind == sema::TypeKind::Struct) {
                     return module_for(module_path).structs.at(type.struct_index).size;
+                }
+                if (type.kind == sema::TypeKind::Array) {
+                    return module_for(module_path).arrays.at(type.array_index).size;
+                }
+                if (type.kind == sema::TypeKind::Slice) {
+                    return 16;
                 }
                 return primitive_size(type.kind);
             }
@@ -281,6 +295,12 @@ namespace codegen {
                 case sema::TypeKind::Pointer:
                 case sema::TypeKind::Anyptr:  return llvm::PointerType::getUnqual(*context_);
                 case sema::TypeKind::Struct:  return struct_lowering(module_path, type.struct_index).type;
+                case sema::TypeKind::Array: {
+                    const auto &array = module_for(module_path).arrays.at(type.array_index);
+                    return llvm::ArrayType::get(llvm_type(module_path, array.element_type), array.count);
+                }
+                case sema::TypeKind::Slice:
+                    return llvm::StructType::get(*context_, {llvm::PointerType::getUnqual(*context_), llvm::Type::getInt64Ty(*context_)});
                 default:                      return llvm::Type::getVoidTy(*context_);
                 }
             }
@@ -503,6 +523,7 @@ namespace codegen {
                 locals_.clear();
                 macro_args_.clear();
                 continue_targets_.clear();
+                break_targets_.clear();
 
                 auto *entry = llvm::BasicBlock::Create(*context_, "entry", current_function_);
                 builder_.SetInsertPoint(entry);
@@ -739,6 +760,27 @@ namespace codegen {
                 return phi;
             }
 
+            auto emit_array_to_slice(const ast::Expr &expr, const sema::ResolvedType &array_type, const sema::ResolvedType &slice_type, const std::string &array_module) -> llvm::Value * {
+                auto lv = emit_lvalue(expr);
+                const auto &array = module_for(array_module).arrays.at(array_type.array_index);
+                auto *ptr = builder_.CreateInBoundsGEP(
+                    llvm_type(array_module, array_type),
+                    lv.ptr,
+                    {builder_.getInt32(0), builder_.getInt64(0)});
+                llvm::Value *slice = llvm::UndefValue::get(llvm_type(array_module, slice_type));
+                slice = builder_.CreateInsertValue(slice, ptr, {0});
+                slice = builder_.CreateInsertValue(slice, builder_.getInt64(array.count), {1});
+                return slice;
+            }
+
+            auto emit_value_as(const ast::Expr &expr, const sema::ResolvedType &target) -> llvm::Value * {
+                const auto from = current_module_->expr_types.at(sema::get_expr_key(expr));
+                if (from.kind == sema::TypeKind::Array && target.kind == sema::TypeKind::Slice) {
+                    return emit_array_to_slice(expr, from, target, expr_type_module_hint(expr));
+                }
+                return emit_expr(expr);
+            }
+
             auto emit_macro_arg(const MacroArg &arg) -> llvm::Value * {
                 const auto *saved_path = current_module_path_;
                 const auto *saved_module = current_module_;
@@ -782,6 +824,11 @@ namespace codegen {
                             }
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                             return expr_type_module_hint(v->object);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                            const auto operand_ty = current_module_->expr_types.at(sema::get_expr_key(v->operand));
+                            if (operand_ty.kind == sema::TypeKind::Pointer || operand_ty.kind == sema::TypeKind::Array || operand_ty.kind == sema::TypeKind::Slice) {
+                                return expr_type_module_hint(v->operand);
+                            }
                         }
                         return *current_module_path_;
                     },
@@ -817,6 +864,9 @@ namespace codegen {
                             }
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                             return emit_member_lvalue(*v);
+
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                            return emit_index_lvalue(*v);
                         }
 
                         report_codegen_error(diag_, {}, "unsupported lvalue in codegen");
@@ -863,6 +913,36 @@ namespace codegen {
                 const auto llvm_index = struct_lowering(struct_module, struct_type.struct_index).field_indices.at(field_pos);
                 auto *ptr = builder_.CreateStructGEP(llvm_type(struct_module, struct_type), base, llvm_index);
                 return LValue{.ptr = ptr, .type = field_it->type, .type_module = struct_module, .storage_type = llvm_type_for(field_it->type, struct_module)};
+            }
+
+            auto emit_index_lvalue(const ast::IndexExpr &index) -> LValue {
+                const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(index.operand));
+                const auto type_module = expr_type_module_hint(index.operand);
+                auto *idx = emit_expr(index.index);
+                if (!idx->getType()->isIntegerTy(64)) {
+                    idx = integer_cast(idx, llvm::Type::getInt64Ty(*context_), current_module_->expr_types.at(sema::get_expr_key(index.index)));
+                }
+
+                if (operand_type.kind == sema::TypeKind::Pointer) {
+                    const auto element = current_module_->pointer_pointees.at(operand_type.pointee_index);
+                    auto *ptr = builder_.CreateInBoundsGEP(llvm_type_for(element, type_module), emit_expr(index.operand), idx);
+                    return LValue{.ptr = ptr, .type = element, .type_module = type_module, .storage_type = llvm_type_for(element, type_module)};
+                }
+                if (operand_type.kind == sema::TypeKind::Array) {
+                    auto base = emit_lvalue(index.operand);
+                    const auto element = module_for(type_module).arrays.at(operand_type.array_index).element_type;
+                    auto *ptr = builder_.CreateInBoundsGEP(llvm_type(type_module, operand_type), base.ptr, {builder_.getInt32(0), idx});
+                    return LValue{.ptr = ptr, .type = element, .type_module = type_module, .storage_type = llvm_type_for(element, type_module)};
+                }
+                if (operand_type.kind == sema::TypeKind::Slice) {
+                    auto *slice = emit_expr(index.operand);
+                    auto *base = builder_.CreateExtractValue(slice, {0});
+                    const auto element = module_for(type_module).slices.at(operand_type.slice_index).element_type;
+                    auto *ptr = builder_.CreateInBoundsGEP(llvm_type_for(element, type_module), base, idx);
+                    return LValue{.ptr = ptr, .type = element, .type_module = type_module, .storage_type = llvm_type_for(element, type_module)};
+                }
+                report_codegen_error(diag_, index.location, "unsupported index operand in codegen");
+                return {};
             }
 
             auto try_namespace_chain(const ast::Expr &expr) const -> std::optional<std::string> {
@@ -939,14 +1019,57 @@ namespace codegen {
                 }
 
                 std::vector<llvm::Value *> args;
-                for (const auto &arg : call.args) {
-                    args.push_back(emit_expr(arg));
+                if (const auto *fn = std::get_if<sema::FunctionSymbol>(&sym_it->second)) {
+                    for (size_t i = 0; i < call.args.size(); ++i) {
+                        args.push_back(emit_value_as(call.args[i], fn->params[i]));
+                    }
+                    return builder_.CreateCall(functions_.at(FunctionKey{target_module, name}), args);
                 }
-
-                if (std::holds_alternative<sema::ExtFunctionSymbol>(sym_it->second)) {
+                if (const auto *ef = std::get_if<sema::ExtFunctionSymbol>(&sym_it->second)) {
+                    for (size_t i = 0; i < call.args.size(); ++i) {
+                        args.push_back(emit_value_as(call.args[i], ef->params[i]));
+                    }
                     return builder_.CreateCall(ext_functions_.at(global_key(target_module, name)), args);
                 }
-                return builder_.CreateCall(functions_.at(FunctionKey{target_module, name}), args);
+                return nullptr;
+            }
+
+            auto call_return_types(const ast::CallExpr &call) -> std::pair<std::string, std::vector<sema::ResolvedType>> {
+                std::string target_module = *current_module_path_;
+                std::string name;
+
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&call.callee)) {
+                    name = ident->name;
+                } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
+                    if (auto ns = try_namespace_chain((*member)->object)) {
+                        target_module = *ns;
+                        name = (*member)->member;
+                    }
+                }
+
+                if (name.empty()) {
+                    report_codegen_error(diag_, call.location, "unsupported grouped declaration call target");
+                    return {*current_module_path_, {}};
+                }
+
+                const auto &target = module_for(target_module);
+                const auto sym_it = target.symbols.find(name);
+                if (sym_it == target.symbols.end()) {
+                    report_codegen_error(diag_, call.location, std::format("unknown callable '{}'", name));
+                    return {target_module, {}};
+                }
+
+                if (const auto *fn = std::get_if<sema::FunctionSymbol>(&sym_it->second)) {
+                    return {target_module, fn->return_types};
+                }
+                if (const auto *ef = std::get_if<sema::ExtFunctionSymbol>(&sym_it->second)) {
+                    std::vector<sema::ResolvedType> returns;
+                    if (ef->return_type) returns.push_back(*ef->return_type);
+                    return {target_module, std::move(returns)};
+                }
+
+                report_codegen_error(diag_, call.location, "grouped declaration initializer must be a function call");
+                return {target_module, {}};
             }
 
             auto emit_expr(const ast::Expr &expr) -> llvm::Value * {
@@ -999,9 +1122,24 @@ namespace codegen {
                             return emit_incr_decr(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                             return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), sizeof_operand(*v));
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) {
+                            const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(v->operand));
+                            if (operand_type.kind == sema::TypeKind::Array) {
+                                return builder_.getInt64(module_for(expr_type_module_hint(v->operand)).arrays.at(operand_type.array_index).count);
+                            }
+                            auto *slice = emit_expr(v->operand);
+                            return builder_.CreateExtractValue(slice, {1});
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                             const auto from = current_module_->expr_types.at(sema::get_expr_key(v->value));
+                            if (ty.kind == sema::TypeKind::Slice) {
+                                return emit_slice_cast(*v, from, ty);
+                            }
                             return emit_cast(emit_expr(v->value), from, ty);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                            const auto lv = emit_lvalue(expr);
+                            return builder_.CreateLoad(lv.storage_type, lv.ptr);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
+                            return emit_slice_expr(*v, ty);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                             const auto lv = emit_lvalue(expr);
                             return builder_.CreateLoad(lv.storage_type, lv.ptr);
@@ -1028,6 +1166,51 @@ namespace codegen {
                 llvm::Constant *indices[] = {builder_.getInt32(0), builder_.getInt32(0)};
                 return llvm::ConstantExpr::getInBoundsGetElementPtr(
                     array_ty, global, llvm::ArrayRef<llvm::Constant *>(indices));
+            }
+
+            auto build_slice_value(llvm::Value *ptr, llvm::Value *count, const sema::ResolvedType &slice_type, const std::string &type_module) -> llvm::Value * {
+                if (!count->getType()->isIntegerTy(64)) {
+                    count = integer_cast(count, llvm::Type::getInt64Ty(*context_), sema::ResolvedType{.kind = sema::TypeKind::USize});
+                }
+                llvm::Value *slice = llvm::UndefValue::get(llvm_type(type_module, slice_type));
+                slice = builder_.CreateInsertValue(slice, ptr, {0});
+                slice = builder_.CreateInsertValue(slice, count, {1});
+                return slice;
+            }
+
+            auto emit_slice_cast(const ast::CastExpr &expr, const sema::ResolvedType &from, const sema::ResolvedType &to) -> llvm::Value * {
+                const auto type_module = type_module_for_ast_type(expr.as_type, *current_module_path_, to);
+                if (from.kind == sema::TypeKind::Array) {
+                    return emit_array_to_slice(expr.value, from, to, expr_type_module_hint(expr.value));
+                }
+                if (from.kind == sema::TypeKind::Slice) {
+                    return emit_expr(expr.value);
+                }
+                auto *ptr = emit_expr(expr.value);
+                auto *count = expr.len_expr ? emit_expr(*expr.len_expr) : builder_.getInt64(0);
+                return build_slice_value(ptr, count, to, type_module);
+            }
+
+            auto emit_slice_expr(const ast::SliceExpr &expr, const sema::ResolvedType &result_type) -> llvm::Value * {
+                const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(expr.operand));
+                const auto type_module = expr_type_module_hint(expr.operand);
+                auto *start = emit_expr(expr.start);
+                auto *end = emit_expr(expr.end);
+                if (!start->getType()->isIntegerTy(64)) start = integer_cast(start, llvm::Type::getInt64Ty(*context_), current_module_->expr_types.at(sema::get_expr_key(expr.start)));
+                if (!end->getType()->isIntegerTy(64)) end = integer_cast(end, llvm::Type::getInt64Ty(*context_), current_module_->expr_types.at(sema::get_expr_key(expr.end)));
+                auto *count = builder_.CreateSub(end, start);
+
+                if (operand_type.kind == sema::TypeKind::Array) {
+                    auto base = emit_lvalue(expr.operand);
+                    auto *ptr = builder_.CreateInBoundsGEP(llvm_type(type_module, operand_type), base.ptr, {builder_.getInt32(0), start});
+                    return build_slice_value(ptr, count, result_type, type_module);
+                }
+
+                auto *slice = emit_expr(expr.operand);
+                auto *base = builder_.CreateExtractValue(slice, {0});
+                const auto element = module_for(type_module).slices.at(operand_type.slice_index).element_type;
+                auto *ptr = builder_.CreateInBoundsGEP(llvm_type_for(element, type_module), base, start);
+                return build_slice_value(ptr, count, result_type, type_module);
             }
 
             auto emit_ternary(const ast::TernaryExpr &expr) -> llvm::Value * {
@@ -1075,7 +1258,7 @@ namespace codegen {
 
             auto emit_assign(const ast::AssignExpr &expr) -> llvm::Value * {
                 auto lv = emit_lvalue(expr.target);
-                auto *value = emit_expr(expr.value);
+                auto *value = emit_value_as(expr.value, lv.type);
 
                 if (expr.op != ast::AssignOp::Assign) {
                     auto *old = builder_.CreateLoad(lv.storage_type, lv.ptr);
@@ -1322,12 +1505,28 @@ namespace codegen {
                             auto *slot = create_entry_alloca(current_function_, llvm_type_for(ty, type_module), v.name);
                             locals_[v.name] = LocalValue{.alloca = slot, .type = ty, .type_module = type_module};
                             if (v.init) {
-                                builder_.CreateStore(emit_expr(*v.init), slot);
+                                builder_.CreateStore(emit_value_as(*v.init, ty), slot);
                             } else {
                                 builder_.CreateStore(zero_value(type_module, ty), slot);
                             }
+                        } else if constexpr (std::is_same_v<V, ast::VarDeclGroupStmt>) {
+                            auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&v.init);
+                            auto *result = emit_call(**call);
+                            const auto [type_module, returns] = call_return_types(**call);
+                            for (size_t i = 0; i < v.names.size(); ++i) {
+                                if (v.names[i].empty()) {
+                                    continue;
+                                }
+                                auto ty = returns[i];
+                                auto *slot = create_entry_alloca(current_function_, llvm_type_for(ty, type_module), v.names[i]);
+                                auto *value = returns.size() == 1 ? result : builder_.CreateExtractValue(result, {static_cast<unsigned>(i)});
+                                builder_.CreateStore(value, slot);
+                                locals_[v.names[i]] = LocalValue{.alloca = slot, .type = ty, .type_module = type_module};
+                            }
                         } else if constexpr (std::is_same_v<V, ast::ContinueStmt>) {
                             builder_.CreateBr(continue_targets_.back());
+                        } else if constexpr (std::is_same_v<V, ast::BreakStmt>) {
+                            builder_.CreateBr(break_targets_.back());
                         } else if constexpr (std::is_same_v<V, ast::ReturnStmt>) {
                             emit_return(v);
                         }
@@ -1369,7 +1568,9 @@ namespace codegen {
 
                 builder_.SetInsertPoint(body_bb);
                 continue_targets_.push_back(cond_bb);
+                break_targets_.push_back(end_bb);
                 emit_stmt(stmt.body);
+                break_targets_.pop_back();
                 continue_targets_.pop_back();
                 if (!builder_.GetInsertBlock()->getTerminator()) builder_.CreateBr(cond_bb);
 
@@ -1382,14 +1583,14 @@ namespace codegen {
                     return;
                 }
                 if (stmt.return_values.size() == 1) {
-                    builder_.CreateRet(emit_expr(stmt.return_values.front()));
+                    builder_.CreateRet(emit_value_as(stmt.return_values.front(), current_returns_.front()));
                     return;
                 }
 
                 auto *agg_ty = llvm::cast<llvm::StructType>(return_type(*current_module_path_, current_returns_));
                 llvm::Value *agg = llvm::UndefValue::get(agg_ty);
                 for (size_t i = 0; i < stmt.return_values.size(); ++i) {
-                    agg = builder_.CreateInsertValue(agg, emit_expr(stmt.return_values[i]), {static_cast<unsigned>(i)});
+                    agg = builder_.CreateInsertValue(agg, emit_value_as(stmt.return_values[i], current_returns_[i]), {static_cast<unsigned>(i)});
                 }
                 builder_.CreateRet(agg);
             }

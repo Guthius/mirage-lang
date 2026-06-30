@@ -168,11 +168,18 @@ namespace ast {
             auto expr = parse_expr(parser);
             parser.expect(TokenKind::Comma, "','");
             auto as_type = parse_type(parser);
+
+            std::optional<Expr> len_expr = std::nullopt;
+            if (parser.match(TokenKind::Comma)) {
+                len_expr = parse_expr(parser);
+            }
+
             parser.expect(TokenKind::RParen, "')'");
 
             return std::make_unique<CastExpr>(CastExpr{
                 .value = std::move(expr),
                 .as_type = std::move(as_type),
+                .len_expr = std::move(len_expr),
                 .location = location,
             });
         }
@@ -293,6 +300,15 @@ namespace ast {
                 });
             }
 
+            if (parser.check(TokenKind::KwLen)) {
+                parser.advance();
+
+                return std::make_unique<LenExpr>(LenExpr{
+                    .operand = parse_expr(parser),
+                    .location = location,
+                });
+            }
+
             if (parser.check(TokenKind::KwCast)) {
                 return parse_cast_expr(parser);
             }
@@ -312,6 +328,33 @@ namespace ast {
                 .value = 0,
                 .location = location,
             };
+        }
+
+        auto parse_index_or_slice_expr(Expr operand, Parser &parser) -> Expr {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::LBracket, "'['");
+
+            auto index = parse_expr(parser);
+            if (parser.match(TokenKind::DotDot)) {
+                auto end = parse_expr(parser);
+                parser.expect(TokenKind::RBracket, "']'");
+
+                return make_expr(SliceExpr{
+                    .operand = std::move(operand),
+                    .start = std::move(index),
+                    .end = std::move(end),
+                    .location = location,
+                });
+            }
+
+            parser.expect(TokenKind::RBracket, "']'");
+
+            return make_expr(IndexExpr{
+                .operand = std::move(operand),
+                .index = std::move(index),
+                .location = location,
+            });
         }
 
         auto parse_postfix(Parser &parser) -> Expr {
@@ -338,6 +381,7 @@ namespace ast {
                         .args = std::move(args),
                         .location = location,
                     });
+
                 } else if (parser.check(TokenKind::Dot)) {
                     parser.advance();
 
@@ -346,6 +390,7 @@ namespace ast {
                         .member = parser.expect_identifier(),
                         .location = location,
                     });
+
                 } else if (parser.check(TokenKind::PlusPlus)) {
                     parser.advance();
 
@@ -355,6 +400,7 @@ namespace ast {
                         .is_prefix = false,
                         .location = location,
                     });
+
                 } else if (parser.check(TokenKind::MinusMinus)) {
                     parser.advance();
 
@@ -364,6 +410,10 @@ namespace ast {
                         .is_prefix = false,
                         .location = location,
                     });
+
+                } else if (parser.check(TokenKind::LBracket)) {
+                    expr = parse_index_or_slice_expr(std::move(expr), parser);
+
                 } else {
                     break;
                 }
@@ -711,7 +761,33 @@ namespace ast {
             };
         }
 
-        auto parse_var_decl_stmt(Parser &parser) -> VarDeclStmt {
+        auto parse_var_decl_group_stmt(Parser &parser, const bool is_mut, SourceLocation location, std::string first_name) -> Stmt {
+            std::vector<std::string> names;
+
+            names.push_back(std::move(first_name));
+            while (parser.match(TokenKind::Comma) && !parser.at_end()) {
+                if (parser.check(TokenKind::ColonEqual)) {
+                    names.emplace_back();
+                    break;
+                }
+                if (parser.check(TokenKind::Comma)) {
+                    names.emplace_back();
+                    continue;
+                }
+                names.push_back(parser.expect_identifier());
+            }
+
+            parser.expect(TokenKind::ColonEqual, "':='");
+
+            return VarDeclGroupStmt{
+                .is_mut = is_mut,
+                .names = std::move(names),
+                .init = parse_expr(parser),
+                .location = location,
+            };
+        }
+
+        auto parse_var_decl_stmt(Parser &parser) -> Stmt {
             const auto location = parser.current_location();
 
             const auto is_mut = parser.match(TokenKind::KwMut);
@@ -720,6 +796,9 @@ namespace ast {
             }
 
             const auto var_name = parser.expect_identifier();
+            if (parser.check(TokenKind::Comma)) {
+                return parse_var_decl_group_stmt(parser, is_mut, location, std::move(var_name));
+            }
 
             std::optional<Type> type = std::nullopt;
             if (parser.match(TokenKind::Colon)) {
@@ -791,6 +870,16 @@ namespace ast {
             parser.expect(TokenKind::KwContinue, "'continue'");
 
             return ContinueStmt{
+                .location = location,
+            };
+        }
+
+        auto parse_break_stmt(Parser &parser) -> BreakStmt {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwBreak, "'break'");
+
+            return BreakStmt{
                 .location = location,
             };
         }
@@ -931,7 +1020,7 @@ namespace ast {
             };
         }
 
-        auto parse_var_decl(Parser &parser, const bool is_pub) -> VarDecl {
+        auto parse_var_decl(Parser &parser, const bool is_pub) -> Decl {
             const auto location = parser.current_location();
 
             const auto is_mut = parser.match(TokenKind::KwMut);
@@ -1032,6 +1121,28 @@ namespace ast {
                 .location = location,
             };
         }
+
+        auto parse_array_or_slice_type(Parser &parser) -> Type {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::LBracket, "'['");
+
+            if (parser.match(TokenKind::RBracket)) {
+                return std::make_unique<SliceType>(SliceType{
+                    .base_type = parse_type(parser),
+                    .location = location,
+                });
+            }
+
+            auto size = parse_expr(parser);
+
+            parser.expect(TokenKind::RBracket, "']'");
+            return std::make_unique<ArrayType>(ArrayType{
+                .base_type = parse_type(parser),
+                .size = std::move(size),
+                .location = location,
+            });
+        }
     }
 
     auto parse_type(Parser &parser) -> Type {
@@ -1042,6 +1153,10 @@ namespace ast {
                 .pointee = parse_type(parser),
                 .location = location,
             });
+        }
+
+        if (parser.check(TokenKind::LBracket)) {
+            return parse_array_or_slice_type(parser);
         }
 
         if (parser.check(TokenKind::KwStruct)) {
@@ -1097,6 +1212,10 @@ namespace ast {
 
         if (parser.check(TokenKind::KwContinue)) {
             return parse_continue_stmt(parser);
+        }
+
+        if (parser.check(TokenKind::KwBreak)) {
+            return parse_break_stmt(parser);
         }
 
         if (parser.check(TokenKind::KwReturn)) {

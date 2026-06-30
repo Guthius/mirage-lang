@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <format>
+#include <unordered_map>
 
 namespace sema {
     auto intern_pointer(ProgramModule &module, const ResolvedType &pointee) -> ResolvedType {
@@ -14,7 +15,27 @@ namespace sema {
         return ResolvedType{.kind = TypeKind::Pointer, .pointee_index = static_cast<int>(module.pointer_pointees.size()) - 1};
     }
 
+    auto intern_slice(ProgramModule &module, const ResolvedType &element) -> ResolvedType {
+        for (size_t i = 0; i < module.slices.size(); ++i) {
+            if (module.slices[i].element_type == element) {
+                return ResolvedType{.kind = TypeKind::Slice, .slice_index = static_cast<int>(i)};
+            }
+        }
+        module.slices.push_back(SliceInfo{.element_type = element});
+        return ResolvedType{.kind = TypeKind::Slice, .slice_index = static_cast<int>(module.slices.size()) - 1};
+    }
+
     namespace {
+        auto intern_array(ProgramModule &module, const ResolvedType &element, const uint64_t count, const uint32_t size, const uint32_t align) -> ResolvedType {
+            for (size_t i = 0; i < module.arrays.size(); ++i) {
+                if (module.arrays[i].element_type == element && module.arrays[i].count == count) {
+                    return ResolvedType{.kind = TypeKind::Array, .array_index = static_cast<int>(i)};
+                }
+            }
+            module.arrays.push_back(ArrayInfo{.element_type = element, .count = count, .size = size, .align = align});
+            return ResolvedType{.kind = TypeKind::Array, .array_index = static_cast<int>(module.arrays.size()) - 1};
+        }
+
         auto primitive_size(const TypeKind kind) -> uint32_t {
             switch (kind) {
             case TypeKind::U8:
@@ -40,6 +61,9 @@ namespace sema {
             case TypeKind::Anyptr:
                 return 8;
 
+            case TypeKind::Slice:
+                return 16;
+
             default:
                 return 0;
             }
@@ -52,6 +76,21 @@ namespace sema {
             return ResolvedType{
                 .kind = TypeKind::Invalid,
             };
+        }
+
+        auto expr_location(const ast::Expr &expr) -> SourceLocation {
+            return std::visit(
+                []<typename T>(const T &v) -> SourceLocation {
+                    using V = std::decay_t<T>;
+                    if constexpr (requires { v.location; }) {
+                        return v.location;
+                    } else if constexpr (requires { v->location; }) {
+                        return v->location;
+                    } else {
+                        return {};
+                    }
+                },
+                expr);
         }
 
         struct ChainTarget {
@@ -226,12 +265,189 @@ namespace sema {
 
             [[nodiscard]] auto size_of(const std::string &module_path, const ResolvedType &t) const -> uint32_t {
                 if (t.kind == TypeKind::Struct) return program.modules.at(module_path).structs[t.struct_index].size;
+                if (t.kind == TypeKind::Array) return program.modules.at(module_path).arrays[t.array_index].size;
+                if (t.kind == TypeKind::Slice) return 16;
                 return primitive_size(t.kind);
             }
 
             [[nodiscard]] auto align_of(const std::string &module_path, const ResolvedType &t) const -> uint32_t {
                 if (t.kind == TypeKind::Struct) return program.modules.at(module_path).structs[t.struct_index].align;
+                if (t.kind == TypeKind::Array) return program.modules.at(module_path).arrays[t.array_index].align;
+                if (t.kind == TypeKind::Slice) return 8;
                 return primitive_align(t.kind);
+            }
+
+            auto sizeof_expr_operand(const std::string &module_path, const ast::SizeOfExpr &expr) -> uint64_t {
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&expr.operand)) {
+                    auto &mod = program.modules.at(module_path);
+                    if (const auto it = mod.symbols.find(ident->name); it != mod.symbols.end()) {
+                        if (std::holds_alternative<TypeSymbol>(it->second)) {
+                            return size_of(module_path, resolve_type_symbol(module_path, ident->name, program, diag, ident->location));
+                        }
+                    }
+                }
+
+                if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr.operand)) {
+                    if (const auto target = walk_namespace_chain(module_path, as_named_member(**member), program, diag)) {
+                        const auto &mod = program.modules.at(target->module_path);
+                        if (const auto it = mod.symbols.find(target->name); it != mod.symbols.end()) {
+                            if (std::holds_alternative<TypeSymbol>(it->second)) {
+                                return size_of(target->module_path, resolve_type_symbol(target->module_path, target->name, program, diag, (*member)->location));
+                            }
+                        }
+                    }
+                }
+
+                LocalScope no_locals;
+                const auto operand_type = check_expr(expr.operand, no_locals, module_path, program, diag, std::nullopt, 0);
+                return size_of(module_path, operand_type);
+            }
+
+            static auto as_named_member(const ast::MemberExpr &member) -> ast::NamedType {
+                std::vector<std::pair<std::string, SourceLocation>> parts;
+                const auto collect = [&](this const auto &self, const ast::Expr &expr) -> bool {
+                    if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
+                        parts.emplace_back(ident->name, ident->location);
+                        return true;
+                    }
+                    if (const auto *inner = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr)) {
+                        if (!self((*inner)->object)) return false;
+                        parts.emplace_back((*inner)->member, (*inner)->location);
+                        return true;
+                    }
+                    return false;
+                };
+
+                if (!collect(member.object)) return ast::NamedType{.name = member.member, .location = member.location};
+                parts.emplace_back(member.member, member.location);
+
+                ast::NamedType result{
+                    .name = parts.front().first,
+                    .location = parts.front().second,
+                };
+                ast::NamedType *tail = &result;
+                for (size_t i = 1; i < parts.size(); ++i) {
+                    tail->member = std::make_unique<ast::NamedType>(ast::NamedType{
+                        .name = parts[i].first,
+                        .location = parts[i].second,
+                    });
+                    tail = tail->member.get();
+                }
+
+                return result;
+            }
+
+            auto eval_integer_const_expr(const ast::Expr &expr, const std::string &module_path, const std::unordered_map<std::string, const ast::Expr *> &macro_args) -> std::optional<uint64_t> {
+                return std::visit(
+                    [&]<typename T>(const T &v) -> std::optional<uint64_t> {
+                        using V = std::decay_t<T>;
+
+                        if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr>) {
+                            return v.value;
+
+                        } else if constexpr (std::is_same_v<V, ast::LiteralBoolExpr>) {
+                            return v.value ? 1 : 0;
+
+                        } else if constexpr (std::is_same_v<V, ast::IdentExpr>) {
+                            if (const auto arg = macro_args.find(v.name); arg != macro_args.end()) {
+                                return eval_integer_const_expr(*arg->second, module_path, macro_args);
+                            }
+
+                            auto &mod = program.modules.at(module_path);
+                            const auto sym_it = mod.symbols.find(v.name);
+                            if (sym_it == mod.symbols.end()) return std::nullopt;
+
+                            const auto *global = std::get_if<GlobalSymbol>(&sym_it->second);
+                            if (!global || global->is_mut || !global->decl->init) return std::nullopt;
+                            resolve_global_symbol(module_path, v.name, program, diag, v.location);
+                            return eval_integer_const_expr(*global->decl->init, module_path, macro_args);
+
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
+                            return sizeof_expr_operand(module_path, *v);
+
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
+                            return eval_integer_const_expr(v->value, module_path, macro_args);
+
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
+                            const auto operand = eval_integer_const_expr(v->operand, module_path, macro_args);
+                            if (!operand) return std::nullopt;
+                            switch (v->op) {
+                            case ast::UnaryOp::Negate:     return uint64_t{0} - *operand;
+                            case ast::UnaryOp::BitwiseNot: return ~*operand;
+                            case ast::UnaryOp::LogicalNot: return *operand == 0 ? 1 : 0;
+                            default:                       return std::nullopt;
+                            }
+
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
+                            const auto lhs = eval_integer_const_expr(v->lhs, module_path, macro_args);
+                            const auto rhs = eval_integer_const_expr(v->rhs, module_path, macro_args);
+                            if (!lhs || !rhs) return std::nullopt;
+                            switch (v->op) {
+                            case ast::BinaryOp::Add:          return *lhs + *rhs;
+                            case ast::BinaryOp::Sub:          return *lhs - *rhs;
+                            case ast::BinaryOp::Mul:          return *lhs * *rhs;
+                            case ast::BinaryOp::Div:          return *rhs == 0 ? std::nullopt : std::optional<uint64_t>{*lhs / *rhs};
+                            case ast::BinaryOp::Mod:          return *rhs == 0 ? std::nullopt : std::optional<uint64_t>{*lhs % *rhs};
+                            case ast::BinaryOp::BitwiseAnd:   return *lhs & *rhs;
+                            case ast::BinaryOp::BitwiseOr:    return *lhs | *rhs;
+                            case ast::BinaryOp::BitwiseXor:   return *lhs ^ *rhs;
+                            case ast::BinaryOp::ShiftLeft:    return *rhs >= 64 ? std::nullopt : std::optional<uint64_t>{*lhs << *rhs};
+                            case ast::BinaryOp::ShiftRight:   return *rhs >= 64 ? std::nullopt : std::optional<uint64_t>{*lhs >> *rhs};
+                            case ast::BinaryOp::Equal:        return *lhs == *rhs ? 1 : 0;
+                            case ast::BinaryOp::NotEqual:     return *lhs != *rhs ? 1 : 0;
+                            case ast::BinaryOp::Less:         return *lhs < *rhs ? 1 : 0;
+                            case ast::BinaryOp::Greater:      return *lhs > *rhs ? 1 : 0;
+                            case ast::BinaryOp::LessEqual:    return *lhs <= *rhs ? 1 : 0;
+                            case ast::BinaryOp::GreaterEqual: return *lhs >= *rhs ? 1 : 0;
+                            case ast::BinaryOp::LogicalAnd:   return (*lhs != 0 && *rhs != 0) ? 1 : 0;
+                            case ast::BinaryOp::LogicalOr:    return (*lhs != 0 || *rhs != 0) ? 1 : 0;
+                            }
+                            return std::nullopt;
+
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
+                            const auto cond = eval_integer_const_expr(v->condition, module_path, macro_args);
+                            if (!cond) return std::nullopt;
+                            return eval_integer_const_expr(*cond != 0 ? v->then_expr : v->else_expr, module_path, macro_args);
+
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
+                            const auto *callee = std::get_if<ast::IdentExpr>(&v->callee);
+                            if (!callee) return std::nullopt;
+                            auto &mod = program.modules.at(module_path);
+                            const auto sym_it = mod.symbols.find(callee->name);
+                            if (sym_it == mod.symbols.end()) return std::nullopt;
+                            auto *macro = std::get_if<MacroSymbol>(&sym_it->second);
+                            if (!macro) return std::nullopt;
+                            auto &resolved_macro = resolve_macro_symbol(module_path, callee->name, program, diag, callee->location);
+
+                            std::unordered_map<std::string, const ast::Expr *> nested_args = macro_args;
+                            for (size_t i = 0; i < resolved_macro.decl->params.size(); ++i) {
+                                nested_args[resolved_macro.decl->params[i].name] = &v->args[i];
+                            }
+                            return eval_integer_const_expr(resolved_macro.decl->expr_template, module_path, nested_args);
+
+                        } else {
+                            return std::nullopt;
+                        }
+                    },
+                    expr);
+            }
+
+            auto array_len_expr_value(const ast::Expr &expr, const std::string &module_path) -> uint64_t {
+                LocalScope no_locals;
+                const auto len_type = check_expr(expr, no_locals, module_path, program, diag, ResolvedType{.kind = TypeKind::USize}, 0);
+                if (!len_type.is_integer()) {
+                    diag.report_error(DiagnosticStage::Sema, expr_location(expr), "array length must be an integer constant expression");
+                    return 0;
+                }
+                if (!is_constant_expr(expr, module_path, program)) {
+                    diag.report_error(DiagnosticStage::Sema, expr_location(expr), "array length must be a compile-time constant expression");
+                    return 0;
+                }
+                if (const auto value = eval_integer_const_expr(expr, module_path, {})) {
+                    return *value;
+                }
+                diag.report_error(DiagnosticStage::Sema, expr_location(expr), "array length constant expression could not be evaluated");
+                return 0;
             }
 
             auto resolve_type_impl(const ast::Type &type, const std::string &module_path) -> ResolvedType {
@@ -268,6 +484,15 @@ namespace sema {
                             mod.structs.push_back(StructInfo{});
                             layout_struct(module_path, slot, v);
                             return ResolvedType{.kind = TypeKind::Struct, .struct_index = slot};
+
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ArrayType>>) {
+                            auto element = resolve_type_impl(v->base_type, module_path);
+                            const auto count = array_len_expr_value(v->size, module_path);
+                            return intern_array(program.modules.at(module_path), element, count, size_of(module_path, element) * count, align_of(module_path, element));
+
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceType>>) {
+                            auto element = resolve_type_impl(v->base_type, module_path);
+                            return intern_slice(program.modules.at(module_path), element);
                         }
                     },
                     type);
@@ -302,6 +527,7 @@ namespace sema {
         if (from == to) return true;
         if (from.kind == TypeKind::Anyptr && to.kind == TypeKind::Pointer) return true;
         if (from.kind == TypeKind::Pointer && to.kind == TypeKind::Anyptr) return true;
+        if (from.kind == TypeKind::Array && to.kind == TypeKind::Slice) return true;
         return false;
     }
 

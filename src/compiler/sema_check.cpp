@@ -58,7 +58,97 @@ namespace sema {
         }
 
         auto is_cast_legal(const ResolvedType &from, const ResolvedType &to) -> bool {
+            if (to.kind == TypeKind::Slice) return from.kind == TypeKind::Pointer || from.kind == TypeKind::Anyptr || from.kind == TypeKind::Array || from.kind == TypeKind::Slice;
             return from.is_scalar() && to.is_scalar();
+        }
+
+        auto slice_element_type(const ResolvedType &slice, const std::string &module_path, Program &program) -> ResolvedType {
+            return program.modules.at(module_path).slices.at(slice.slice_index).element_type;
+        }
+
+        auto array_element_type(const ResolvedType &array, const std::string &module_path, Program &program) -> ResolvedType {
+            return program.modules.at(module_path).arrays.at(array.array_index).element_type;
+        }
+
+        auto assignable_in_module(const ResolvedType &from, const ResolvedType &to, const std::string &module_path, Program &program) -> bool {
+            if (from.kind == TypeKind::Array && to.kind == TypeKind::Slice) {
+                return array_element_type(from, module_path, program) == slice_element_type(to, module_path, program);
+            }
+            return is_assignable(from, to);
+        }
+
+        auto slice_cast_elements_match(const ResolvedType &from, const ResolvedType &to, const std::string &module_path, Program &program) -> bool {
+            if (to.kind != TypeKind::Slice) return true;
+            if (from.kind == TypeKind::Array) return array_element_type(from, module_path, program) == slice_element_type(to, module_path, program);
+            if (from.kind == TypeKind::Slice) return slice_element_type(from, module_path, program) == slice_element_type(to, module_path, program);
+            return true;
+        }
+
+        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, int loop_depth) -> bool;
+        auto try_resolve_namespace_chain(const ast::Expr &expr, const std::string &module_path, LocalScope &locals, Program &program) -> std::optional<std::string>;
+
+        auto check_group_call_returns(const ast::CallExpr &call, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth) -> std::vector<ResolvedType> {
+            std::string target_module = module_path;
+            std::string name;
+            bool check_pub = false;
+
+            if (const auto *callee_ident = std::get_if<ast::IdentExpr>(&call.callee)) {
+                if (locals.contains(callee_ident->name)) {
+                    error(diag, call.location, std::format("'{}' is not callable", callee_ident->name));
+                    return {};
+                }
+                name = callee_ident->name;
+            } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
+                if (auto ns = try_resolve_namespace_chain((*member)->object, module_path, locals, program)) {
+                    target_module = *ns;
+                    name = (*member)->member;
+                    check_pub = true;
+                } else {
+                    error(diag, call.location, "method calls on struct values are not yet supported");
+                    return {};
+                }
+            } else {
+                error(diag, call.location, "unsupported call target");
+                return {};
+            }
+
+            const auto mod_it = program.modules.find(target_module);
+            if (mod_it == program.modules.end()) {
+                error(diag, call.location, std::format("internal error: module '{}' not found", target_module));
+                return {};
+            }
+
+            const auto sym_it = mod_it->second.symbols.find(name);
+            if (sym_it == mod_it->second.symbols.end()) {
+                error(diag, call.location, std::format("unknown function '{}'", name));
+                return {};
+            }
+
+            return std::visit(
+                [&]<typename T>(const T &sym) -> std::vector<ResolvedType> {
+                    using S = std::decay_t<T>;
+                    if constexpr (std::is_same_v<S, FunctionSymbol>) {
+                        if (check_pub && !sym.is_pub) {
+                            error(diag, call.location, std::format("'{}' is not pub", name));
+                            return {};
+                        }
+                        check_call_args(call.args, sym.params, locals, module_path, program, diag, call.location, name, loop_depth);
+                        return sym.return_types;
+                    } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
+                        if (check_pub && !sym.is_pub) {
+                            error(diag, call.location, std::format("'{}' is not pub", name));
+                            return {};
+                        }
+                        check_call_args(call.args, sym.params, locals, module_path, program, diag, call.location, name, loop_depth);
+                        std::vector<ResolvedType> returns;
+                        if (sym.return_type) returns.push_back(*sym.return_type);
+                        return returns;
+                    } else {
+                        error(diag, call.location, std::format("'{}' is not callable", name));
+                        return {};
+                    }
+                },
+                sym_it->second);
         }
 
         auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, const int loop_depth) -> bool {
@@ -69,7 +159,7 @@ namespace sema {
 
             bool ok = true;
             for (size_t i = 0; i < args.size(); ++i) {
-                if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, params[i], loop_depth); !is_assignable(arg_ty, params[i])) {
+                if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, params[i], loop_depth); !assignable_in_module(arg_ty, params[i], module_path, program)) {
                     error(diag, loc, std::format("'{}' argument {} type mismatch", callee_desc, i + 1));
                     ok = false;
                 }
@@ -226,6 +316,25 @@ namespace sema {
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                         return resolve_member(*v, locals, module_path, program, diag, loop_depth);
 
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                        const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth);
+                        const auto index = check_expr(v->index, locals, module_path, program, diag, std::nullopt, loop_depth);
+                        if (!index.is_integer()) {
+                            error(diag, v->location, "index must be an integer expression");
+                        }
+                        if (operand.kind == TypeKind::Pointer) {
+                            return {program.modules.at(module_path).pointer_pointees.at(operand.pointee_index), true};
+                        }
+                        if (operand.kind == TypeKind::Array) {
+                            auto owner = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth);
+                            return {array_element_type(operand, module_path, program), owner.writable};
+                        }
+                        if (operand.kind == TypeKind::Slice) {
+                            return {slice_element_type(operand, module_path, program), true};
+                        }
+                        error(diag, v->location, "indexing requires a pointer, array, or slice operand");
+                        return {ResolvedType{.kind = TypeKind::Invalid}, false};
+
                     } else {
                         error(diag, SourceLocation{}, "not an assignable expression");
                         return {ResolvedType{.kind = TypeKind::Invalid}, false};
@@ -344,7 +453,7 @@ namespace sema {
 
                     const auto value_ty = check_expr(v->value, locals, module_path, program, diag, target.type, loop_depth);
                     if (v->op == ast::AssignOp::Assign) {
-                        if (!is_assignable(value_ty, target.type)) {
+                        if (!assignable_in_module(value_ty, target.type, module_path, program)) {
                             error(diag, v->location, "type mismatch in assignment");
                         }
                         return target.type;
@@ -370,7 +479,7 @@ namespace sema {
                     case ast::AssignOp::Assign:    break;
                     }
 
-                    if (auto op_result_ty = binary_op_result(equivalent_op, target.type, value_ty, diag, v->location); op_result_ty.kind != TypeKind::Invalid && !is_assignable(op_result_ty, target.type)) {
+                    if (auto op_result_ty = binary_op_result(equivalent_op, target.type, value_ty, diag, v->location); op_result_ty.kind != TypeKind::Invalid && !assignable_in_module(op_result_ty, target.type, module_path, program)) {
                         error(diag, v->location, "compound assignment result type does not match the left-hand side's type");
                     }
 
@@ -502,6 +611,13 @@ namespace sema {
                     check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth);
                     return ResolvedType{.kind = TypeKind::USize};
 
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) {
+                    const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth);
+                    if (operand.kind != TypeKind::Array && operand.kind != TypeKind::Slice) {
+                        return error(diag, v->location, "len() requires an array or slice operand");
+                    }
+                    return ResolvedType{.kind = TypeKind::USize};
+
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                     // cast(expr, Type) - value first, target type second.
                     const ResolvedType from = check_expr(v->value, locals, module_path, program, diag, std::nullopt, loop_depth);
@@ -509,10 +625,57 @@ namespace sema {
                     if (from.kind != TypeKind::Invalid && to.kind != TypeKind::Invalid && !is_cast_legal(from, to)) {
                         return error(diag, v->location, "illegal cast between these types");
                     }
+                    if (from.kind != TypeKind::Invalid && to.kind == TypeKind::Slice && !slice_cast_elements_match(from, to, module_path, program)) {
+                        return error(diag, v->location, "slice cast element type mismatch");
+                    }
+                    if (v->len_expr) {
+                        if (to.kind != TypeKind::Slice) {
+                            error(diag, v->location, "cast length is only valid when casting to a slice type");
+                        }
+                        const auto len_ty = check_expr(*v->len_expr, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::USize}, loop_depth);
+                        if (!len_ty.is_integer()) {
+                            error(diag, v->location, "cast length must be an integer expression");
+                        }
+                    } else if (to.kind == TypeKind::Slice && from.kind != TypeKind::Array && from.kind != TypeKind::Slice) {
+                        error(diag, v->location, "cast to slice from a pointer requires a length expression");
+                    }
                     return to;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                     return resolve_member(*v, locals, module_path, program, diag, loop_depth).type;
+
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                    const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth);
+                    const auto index = check_expr(v->index, locals, module_path, program, diag, std::nullopt, loop_depth);
+                    if (!index.is_integer()) {
+                        error(diag, v->location, "index must be an integer expression");
+                    }
+                    if (operand.kind == TypeKind::Pointer) {
+                        return program.modules.at(module_path).pointer_pointees.at(operand.pointee_index);
+                    }
+                    if (operand.kind == TypeKind::Array) {
+                        return array_element_type(operand, module_path, program);
+                    }
+                    if (operand.kind == TypeKind::Slice) {
+                        return slice_element_type(operand, module_path, program);
+                    }
+                    return error(diag, v->location, "indexing requires a pointer, array, or slice operand");
+
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
+                    const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth);
+                    const auto start = check_expr(v->start, locals, module_path, program, diag, std::nullopt, loop_depth);
+                    const auto end = check_expr(v->end, locals, module_path, program, diag, std::nullopt, loop_depth);
+                    if (!start.is_integer() || !end.is_integer()) {
+                        error(diag, v->location, "slice bounds must be integer expressions");
+                    }
+                    if (operand.kind == TypeKind::Array) {
+                        const auto element = array_element_type(operand, module_path, program);
+                        return intern_slice(program.modules.at(module_path), element);
+                    }
+                    if (operand.kind == TypeKind::Slice) {
+                        return operand;
+                    }
+                    return error(diag, v->location, "slicing requires an array or slice operand");
                 }
             },
             expr);
@@ -553,7 +716,7 @@ namespace sema {
                     if (v.init) {
                         auto init_ty = check_expr(*v.init, locals, module_path, program, diag,
                                                   has_declared_ty ? std::optional(declared_ty) : std::nullopt, loop_depth);
-                        if (has_declared_ty && !is_assignable(init_ty, declared_ty)) {
+                        if (has_declared_ty && !assignable_in_module(init_ty, declared_ty, module_path, program)) {
                             diag.report_error(DiagnosticStage::Sema, v.location, "type mismatch in variable declaration");
                         }
                         locals[v.name] = LocalBinding{.type = has_declared_ty ? declared_ty : init_ty, .is_mut = v.is_mut};
@@ -563,8 +726,34 @@ namespace sema {
                         locals[v.name] = LocalBinding{.type = declared_ty, .is_mut = v.is_mut};
                     }
 
+                } else if constexpr (std::is_same_v<V, ast::VarDeclGroupStmt>) {
+                    const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&v.init);
+                    if (!call) {
+                        diag.report_error(DiagnosticStage::Sema, v.location, "group declaration initializer must be a function call");
+                        check_expr(v.init, locals, module_path, program, diag, std::nullopt, loop_depth);
+                        return;
+                    }
+
+                    const auto returns = check_group_call_returns(**call, locals, module_path, program, diag, loop_depth);
+                    if (returns.empty()) {
+                        return;
+                    }
+
+                    if (returns.size() != v.names.size()) {
+                        diag.report_error(DiagnosticStage::Sema, v.location, std::format("group declaration expects {} return value(s), got {}", v.names.size(), returns.size()));
+                    }
+
+                    for (size_t i = 0; i < v.names.size() && i < returns.size(); ++i) {
+                        if (!v.names[i].empty()) {
+                            locals[v.names[i]] = LocalBinding{.type = returns[i], .is_mut = v.is_mut};
+                        }
+                    }
+
                 } else if constexpr (std::is_same_v<V, ast::ContinueStmt>) {
                     if (loop_depth == 0) diag.report_error(DiagnosticStage::Sema, v.location, "'continue' outside of a loop");
+
+                } else if constexpr (std::is_same_v<V, ast::BreakStmt>) {
+                    if (loop_depth == 0) diag.report_error(DiagnosticStage::Sema, v.location, "'break' outside of a loop");
 
                 } else if constexpr (std::is_same_v<V, ast::ReturnStmt>) {
                     if (v.return_values.size() != expected_returns.size()) {
@@ -576,7 +765,7 @@ namespace sema {
                     }
                     for (size_t i = 0; i < v.return_values.size(); ++i) {
                         auto ty = check_expr(v.return_values[i], locals, module_path, program, diag, expected_returns[i], loop_depth);
-                        if (!is_assignable(ty, expected_returns[i])) {
+                        if (!assignable_in_module(ty, expected_returns[i], module_path, program)) {
                             diag.report_error(DiagnosticStage::Sema, v.location, std::format("return value {} type mismatch", i + 1));
                         }
                     }
