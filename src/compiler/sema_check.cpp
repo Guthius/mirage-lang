@@ -336,14 +336,43 @@ namespace sema {
                     return then_ty;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AssignExpr>>) {
-                    LvalueInfo target = resolve_lvalue(v->target, locals, module_path, program, diag, loop_depth);
+                    auto target = resolve_lvalue(v->target, locals, module_path, program, diag, loop_depth);
                     if (target.type.kind != TypeKind::Invalid && !target.writable) {
                         error(diag, v->location, "left-hand side of assignment is not mutable");
                     }
-                    const ResolvedType value_ty = check_expr(v->value, locals, module_path, program, diag, target.type, loop_depth);
-                    if (target.type.kind != TypeKind::Invalid && !is_assignable(value_ty, target.type)) {
-                        error(diag, v->location, "type mismatch in assignment");
+
+                    const auto value_ty = check_expr(v->value, locals, module_path, program, diag, target.type, loop_depth);
+                    if (v->op == ast::AssignOp::Assign) {
+                        if (!is_assignable(value_ty, target.type)) {
+                            error(diag, v->location, "type mismatch in assignment");
+                        }
+                        return target.type;
                     }
+
+                    if (!target.type.is_scalar()) {
+                        error(diag, v->location, "compound assignment requires a scalar left-hand side");
+                        return target.type;
+                    }
+
+                    auto equivalent_op = ast::BinaryOp::Add;
+
+                    switch (v->op) {
+                    case ast::AssignOp::AddAssign: equivalent_op = ast::BinaryOp::Add; break;
+                    case ast::AssignOp::SubAssign: equivalent_op = ast::BinaryOp::Sub; break;
+                    case ast::AssignOp::MulAssign: equivalent_op = ast::BinaryOp::Mul; break;
+                    case ast::AssignOp::DivAssign: equivalent_op = ast::BinaryOp::Div; break;
+                    case ast::AssignOp::AndAssign: equivalent_op = ast::BinaryOp::BitwiseAnd; break;
+                    case ast::AssignOp::OrAssign:  equivalent_op = ast::BinaryOp::BitwiseOr; break;
+                    case ast::AssignOp::XorAssign: equivalent_op = ast::BinaryOp::BitwiseXor; break;
+                    case ast::AssignOp::ShlAssign: equivalent_op = ast::BinaryOp::ShiftLeft; break;
+                    case ast::AssignOp::ShrAssign: equivalent_op = ast::BinaryOp::ShiftRight; break;
+                    case ast::AssignOp::Assign:    break;
+                    }
+
+                    if (auto op_result_ty = binary_op_result(equivalent_op, target.type, value_ty, diag, v->location); op_result_ty.kind != TypeKind::Invalid && !is_assignable(op_result_ty, target.type)) {
+                        error(diag, v->location, "compound assignment result type does not match the left-hand side's type");
+                    }
+
                     return target.type;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
