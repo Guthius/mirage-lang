@@ -7,6 +7,7 @@
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/InlineAsm.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Type.h>
@@ -144,15 +145,17 @@ namespace codegen {
                   builder_(*context_) {}
 
             auto run() -> std::unique_ptr<llvm::Module> {
-                if (!options_.freestanding) {
-                    report_codegen_error(diag_, {}, "hosted _start generation is not implemented because the process-exit mechanism is not specified; pass --freestanding for now");
-                    return nullptr;
-                }
-
                 declare_structs();
                 declare_globals_and_functions();
+                const sema::FunctionSymbol *entry_main = nullptr;
+                if (!options_.freestanding) {
+                    entry_main = validate_hosted_main();
+                }
                 emit_global_initializers();
                 emit_functions();
+                if (!options_.freestanding && entry_main) {
+                    emit_start(*entry_main);
+                }
 
                 if (diag_.has_errors()) {
                     return nullptr;
@@ -336,6 +339,46 @@ namespace codegen {
                 return llvm::Constant::getNullValue(llvm_type(module_path, type));
             }
 
+            auto validate_hosted_main() -> const sema::FunctionSymbol * {
+                const auto root_it = sema_program_.modules.find(ast_program_.root_module_path);
+                if (root_it == sema_program_.modules.end()) {
+                    report_codegen_error(diag_, {}, "internal error: root module not found during codegen");
+                    return nullptr;
+                }
+
+                const auto sym_it = root_it->second.symbols.find("main");
+                if (sym_it == root_it->second.symbols.end()) {
+                    report_codegen_error(diag_, {}, "hosted build requires 'pub fn main()' or 'pub fn main() -> i32' in the entry module");
+                    return nullptr;
+                }
+
+                const auto *main_fn = std::get_if<sema::FunctionSymbol>(&sym_it->second);
+                if (!main_fn) {
+                    report_codegen_error(diag_, {}, "'main' in the entry module must be a function");
+                    return nullptr;
+                }
+
+                const auto &decl = *main_fn->decl;
+                if (!main_fn->is_pub) {
+                    report_codegen_error(diag_, decl.location, "hosted entry point must be declared 'pub fn main'");
+                    return nullptr;
+                }
+
+                if (!main_fn->params.empty()) {
+                    report_codegen_error(diag_, decl.location, "hosted entry point must not have parameters");
+                    return nullptr;
+                }
+
+                const bool returns_void = main_fn->return_types.empty();
+                const bool returns_i32 = main_fn->return_types.size() == 1 && main_fn->return_types.front().kind == sema::TypeKind::I32;
+                if (!returns_void && !returns_i32) {
+                    report_codegen_error(diag_, decl.location, "hosted entry point must return either no value or i32");
+                    return nullptr;
+                }
+
+                return main_fn;
+            }
+
             void emit_global_initializers() {
                 for (const auto &[path, mod] : sema_program_.modules) {
                     current_module_path_ = &path;
@@ -366,6 +409,38 @@ namespace codegen {
                         emit_function(path, name, *fn);
                     }
                 }
+            }
+
+            void emit_start(const sema::FunctionSymbol &main_fn) {
+                auto *start_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), {}, false);
+                auto *start = llvm::Function::Create(start_ty, llvm::GlobalValue::ExternalLinkage, "_start", *module_);
+                start->setDoesNotReturn();
+
+                auto *entry = llvm::BasicBlock::Create(*context_, "entry", start);
+                builder_.SetInsertPoint(entry);
+
+                auto *main = functions_.at(FunctionKey{ast_program_.root_module_path, "main"});
+                llvm::Value *exit_code = nullptr;
+                if (main_fn.return_types.empty()) {
+                    builder_.CreateCall(main);
+                    exit_code = builder_.getInt64(0);
+                } else {
+                    auto *main_result = builder_.CreateCall(main);
+                    exit_code = builder_.CreateSExt(main_result, llvm::Type::getInt64Ty(*context_));
+                }
+
+                auto *syscall_ty = llvm::FunctionType::get(
+                    llvm::Type::getVoidTy(*context_),
+                    {llvm::Type::getInt64Ty(*context_), llvm::Type::getInt64Ty(*context_)},
+                    false);
+                auto *syscall = llvm::InlineAsm::get(
+                    syscall_ty,
+                    "syscall",
+                    "{rax},{rdi},~{rcx},~{r11},~{memory}",
+                    true);
+
+                builder_.CreateCall(syscall, {builder_.getInt64(231), exit_code});
+                builder_.CreateUnreachable();
             }
 
             auto create_entry_alloca(llvm::Function *fn, llvm::Type *type, llvm::StringRef name) -> llvm::AllocaInst * {
