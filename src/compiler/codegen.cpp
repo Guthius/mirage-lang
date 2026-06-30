@@ -65,9 +65,9 @@ namespace codegen {
             diag.report_error(DiagnosticStage::Codegen, loc, std::move(msg));
         }
 
-        auto symbol_name(std::string_view module_path, std::string_view name, bool is_root_main = false) -> std::string {
-            if (is_root_main && name == "main") {
-                return "main";
+        auto symbol_name(std::string_view module_path, std::string_view name, bool is_entry_symbol = false) -> std::string {
+            if (is_entry_symbol) {
+                return std::string(name);
             }
 
             std::string out = "__mir_";
@@ -310,11 +310,11 @@ namespace codegen {
                                 global->is_pub ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::InternalLinkage,
                                 nullptr, gname);
                         } else if (const auto *fn = std::get_if<sema::FunctionSymbol>(&sym)) {
-                            const bool root_main = path == ast_program_.root_module_path && name == "main";
-                            const auto fname = symbol_name(path, name, root_main);
+                            const bool entry_symbol = path == ast_program_.root_module_path && (name == "main" || (options_.freestanding && name == "_start"));
+                            const auto fname = symbol_name(path, name, entry_symbol);
                             auto *llvm_fn = llvm::Function::Create(
                                 function_type(path, fn->params, fn->return_types),
-                                fn->is_pub || root_main ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::InternalLinkage,
+                                fn->is_pub || entry_symbol ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::InternalLinkage,
                                 fname, *module_);
                             functions_[FunctionKey{path, name}] = llvm_fn;
                         } else if (const auto *ef = std::get_if<sema::ExtFunctionSymbol>(&sym)) {
