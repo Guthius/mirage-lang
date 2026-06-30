@@ -1,0 +1,24 @@
+type test_struct = struct {
+    val: i32
+}
+
+impl test_struct {
+    fn member_func_a(self) -> i32 {
+        return self.val
+    }
+
+    fn member_func_b(mut self, add: i32) -> i32 {
+        self.val += add
+        return self.val
+    }
+}
+
+pub fn main() -> i32 {
+    mut v: test_struct
+
+    v.val = 5
+
+    const v_ptr := &v
+
+    return v.member_func_a() + v_ptr.member_func_b(10) // 20
+}

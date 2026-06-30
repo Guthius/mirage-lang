@@ -148,15 +148,21 @@ namespace codegen {
                   module_(std::make_unique<llvm::Module>("mirage", *context_)),
                   builder_(*context_) {}
 
+            auto method_fn_key(const std::string &type_name, const std::string &method_name) const -> std::string {
+                return type_name + "::" + method_name;
+            }
+
             auto run() -> std::unique_ptr<llvm::Module> {
                 declare_structs();
                 declare_globals_and_functions();
+                declare_methods();
                 const sema::FunctionSymbol *entry_main = nullptr;
                 if (!options_.freestanding) {
                     entry_main = validate_hosted_main();
                 }
                 emit_global_initializers();
                 emit_functions();
+                emit_methods();
                 if (!options_.freestanding && entry_main) {
                     emit_start(*entry_main);
                 }
@@ -484,6 +490,112 @@ namespace codegen {
                             continue;
                         }
                         emit_function(path, name, *fn);
+                    }
+                }
+            }
+
+            void declare_methods() {
+                for (const auto &[path, mod] : sema_program_.modules) {
+                    for (const auto &[type_name, method_map] : mod.methods) {
+                        for (const auto &[method_name, info] : method_map) {
+                            if (!info.is_resolved) continue;
+
+                            // First param: opaque pointer (self)
+                            std::vector<sema::ResolvedType> params_with_self;
+                            // Placeholder for pointer — we use llvm::PointerType directly below
+                            std::vector<llvm::Type *> param_types;
+                            param_types.push_back(llvm::PointerType::getUnqual(*context_));
+                            for (const auto &p : info.param_types) {
+                                param_types.push_back(llvm_type(path, p));
+                            }
+
+                            llvm::Type *ret = info.return_types.empty()
+                                                 ? llvm::Type::getVoidTy(*context_)
+                                                 : llvm_type(path, info.return_types.front());
+                            if (info.return_types.size() > 1) {
+                                // Multi-return: return struct (simplified - use first for now)
+                                // TODO: multi-return methods
+                            }
+
+                            auto *fn_type = llvm::FunctionType::get(ret, param_types, false);
+                            const auto fname = symbol_name(path, method_fn_key(type_name, method_name));
+                            auto *llvm_fn = llvm::Function::Create(
+                                fn_type, llvm::GlobalValue::InternalLinkage, fname, *module_);
+                            functions_[FunctionKey{path, method_fn_key(type_name, method_name)}] = llvm_fn;
+                        }
+                    }
+                }
+            }
+
+            // Find the pointer ResolvedType for self_type in the current module's pointees.
+            auto find_self_ptr_type(const sema::ResolvedType &self_type) -> sema::ResolvedType {
+                for (size_t i = 0; i < current_module_->pointer_pointees.size(); ++i) {
+                    if (current_module_->pointer_pointees[i] == self_type) {
+                        return sema::ResolvedType{.kind = sema::TypeKind::Pointer, .pointee_index = static_cast<int>(i)};
+                    }
+                }
+                return sema::ResolvedType{.kind = sema::TypeKind::Pointer, .pointee_index = 0};
+            }
+
+            void emit_method(const std::string &module_path, const std::string &type_name, const sema::MethodInfo &info) {
+                const auto key = method_fn_key(type_name, info.decl->name);
+                current_function_ = functions_.at(FunctionKey{module_path, key});
+                current_returns_ = info.return_types;
+                locals_.clear();
+                macro_args_.clear();
+                continue_targets_.clear();
+                break_targets_.clear();
+
+                auto *entry = llvm::BasicBlock::Create(*context_, "entry", current_function_);
+                builder_.SetInsertPoint(entry);
+
+                // First arg is self (a pointer to the struct/enum)
+                auto arg_it = current_function_->arg_begin();
+                arg_it->setName("self");
+                auto *self_slot = create_entry_alloca(current_function_, llvm::PointerType::getUnqual(*context_), "self");
+                builder_.CreateStore(&*arg_it, self_slot);
+                locals_["self"] = LocalValue{
+                    .alloca = self_slot,
+                    .type = find_self_ptr_type(info.self_type),
+                    .type_module = module_path,
+                };
+                ++arg_it;
+
+                // Remaining args
+                size_t index = 0;
+                for (; arg_it != current_function_->arg_end(); ++arg_it, ++index) {
+                    const auto &param = info.decl->params[index];
+                    arg_it->setName(param.name);
+                    auto *slot = create_entry_alloca(current_function_, llvm_type(module_path, info.param_types[index]), param.name);
+                    builder_.CreateStore(&*arg_it, slot);
+                    locals_[param.name] = LocalValue{
+                        .alloca = slot,
+                        .type = info.param_types[index],
+                        .type_module = type_module_for_ast_type(param.type, module_path, info.param_types[index]),
+                    };
+                }
+
+                emit_stmt(info.decl->body);
+
+                if (!builder_.GetInsertBlock()->getTerminator()) {
+                    if (info.return_types.empty()) {
+                        builder_.CreateRetVoid();
+                    } else {
+                        report_codegen_error(diag_, info.decl->location, std::format("method '{}' may fall through without returning a value", info.decl->name));
+                        builder_.CreateUnreachable();
+                    }
+                }
+            }
+
+            void emit_methods() {
+                for (const auto &[path, mod] : sema_program_.modules) {
+                    current_module_path_ = &path;
+                    current_module_ = &mod;
+                    for (const auto &[type_name, method_map] : mod.methods) {
+                        for (const auto &[method_name, info] : method_map) {
+                            if (!info.is_resolved) continue;
+                            emit_method(path, type_name, info);
+                        }
                     }
                 }
             }
@@ -995,6 +1107,35 @@ namespace codegen {
                     if (auto ns = try_namespace_chain((*member)->object)) {
                         target_module = *ns;
                         name = (*member)->member;
+                    } else {
+                        // Method call on a value or pointer
+                        const auto obj_type = current_module_->expr_types.at(sema::get_expr_key((*member)->object));
+                        sema::ResolvedType receiver_type = obj_type;
+                        if (obj_type.kind == sema::TypeKind::Pointer) {
+                            receiver_type = current_module_->pointer_pointees.at(obj_type.pointee_index);
+                        }
+                        const auto *method = sema::find_method(receiver_type, (*member)->member, sema_program_);
+                        if (!method) {
+                            report_codegen_error(diag_, call.location, std::format("no method '{}' on type", (*member)->member));
+                            return nullptr;
+                        }
+
+                        // Get self pointer
+                        llvm::Value *self_ptr;
+                        if (obj_type.kind == sema::TypeKind::Pointer) {
+                            self_ptr = emit_expr((*member)->object);
+                        } else {
+                            self_ptr = emit_lvalue((*member)->object).ptr;
+                        }
+
+                        std::vector<llvm::Value *> args;
+                        args.push_back(self_ptr);
+                        for (size_t i = 0; i < call.args.size(); ++i) {
+                            args.push_back(emit_value_as(call.args[i], method->param_types[i]));
+                        }
+                        return builder_.CreateCall(
+                            functions_.at(FunctionKey{method->impl_module, method_fn_key(method->type_name, method->decl->name)}),
+                            args);
                     }
                 }
 

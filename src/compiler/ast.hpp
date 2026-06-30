@@ -438,7 +438,30 @@ namespace ast {
         SourceLocation location;
     };
 
-    using Decl = std::variant<FunctionDecl, ExtFunctionDecl, VarDecl, MacroDecl, TypeDecl>;
+    struct ImplDecl {
+        struct Function {
+            struct Param {
+                std::string name;
+                Type type;
+                bool is_mut;
+                SourceLocation location;
+            };
+
+            bool is_pub;
+            bool is_mut_self;
+            std::string name;
+            std::vector<Param> params;  // non-self params
+            std::vector<Type> return_types;
+            Stmt body;
+            SourceLocation location;
+        };
+
+        NamedType target;
+        std::vector<Function> functions;
+        SourceLocation location;
+    };
+
+    using Decl = std::variant<FunctionDecl, ExtFunctionDecl, VarDecl, MacroDecl, TypeDecl, ImplDecl>;
 
     auto parse(std::span<Token> tokens, DiagnosticEngine &diagnostics) -> std::vector<Decl>;
 

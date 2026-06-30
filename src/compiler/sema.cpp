@@ -46,6 +46,28 @@ namespace sema {
             }
         }
 
+        void resolve_impl_signatures_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
+            for (auto &[type_name, method_map] : module.methods) {
+                // Resolve the self type for this type name
+                const auto self_type = resolve_type_symbol(module_path, type_name, program, diag, {});
+
+                for (auto &[method_name, info] : method_map) {
+                    if (info.is_resolved) continue;
+
+                    info.self_type = self_type;
+
+                    for (auto &p : info.decl->params) {
+                        info.param_types.push_back(resolve_type(p.type, module_path, program, diag));
+                    }
+                    for (auto &rt : info.decl->return_types) {
+                        info.return_types.push_back(resolve_type(rt, module_path, program, diag));
+                    }
+
+                    info.is_resolved = true;
+                }
+            }
+        }
+
         void check_bodies_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
             for (auto &sym : module.symbols | std::views::values) {
                 const auto *fn = std::get_if<FunctionSymbol>(&sym);
@@ -66,6 +88,33 @@ namespace sema {
 
                 check_stmt(fn->decl->body, locals, module_path, program, diag, fn->return_types, 0);
             }
+
+            // Check impl method bodies
+            for (auto &[type_name, method_map] : module.methods) {
+                for (auto &[method_name, info] : method_map) {
+                    if (!info.is_resolved) continue;
+
+                    LocalScope locals;
+                    for (auto &[gname, gsym] : module.symbols) {
+                        if (auto *g = std::get_if<GlobalSymbol>(&gsym)) {
+                            locals[gname] = LocalBinding{.type = g->type, .is_mut = g->is_mut};
+                        }
+                    }
+
+                    // Bind 'self' as a pointer to the type
+                    const auto self_ptr = intern_pointer(module, info.self_type);
+                    locals["self"] = LocalBinding{.type = self_ptr, .is_mut = info.is_mut_self};
+
+                    for (size_t i = 0; i < info.decl->params.size(); ++i) {
+                        locals[info.decl->params[i].name] = LocalBinding{
+                            .type = info.param_types[i],
+                            .is_mut = info.decl->params[i].is_mut,
+                        };
+                    }
+
+                    check_stmt(info.decl->body, locals, module_path, program, diag, info.return_types, 0);
+                }
+            }
         }
     }
 
@@ -85,6 +134,10 @@ namespace sema {
         }
 
         for (const auto &path : program.modules | std::views::keys) {
+            resolve_impl_signatures_for_module(path, out.modules.at(path), out, diag);
+        }
+
+        for (const auto &path : program.modules | std::views::keys) {
             resolve_values_for_module(path, out.modules.at(path), out, diag);
         }
 
@@ -98,5 +151,34 @@ namespace sema {
         }
 
         return out;
+    }
+
+    auto find_type_module_and_name(const ResolvedType &ty, const Program &program) -> std::pair<std::string, std::string> {
+        for (const auto &[path, mod] : program.modules) {
+            for (const auto &[name, sym] : mod.symbols) {
+                if (const auto *ts = std::get_if<TypeSymbol>(&sym)) {
+                    if (ts->resolved && *ts->resolved == ty) {
+                        return {path, name};
+                    }
+                }
+            }
+        }
+        return {"", ""};
+    }
+
+    auto find_method(const ResolvedType &ty, const std::string &method_name, const Program &program) -> const MethodInfo * {
+        const auto [mod_path, type_name] = find_type_module_and_name(ty, program);
+        if (mod_path.empty()) return nullptr;
+
+        const auto mod_it = program.modules.find(mod_path);
+        if (mod_it == program.modules.end()) return nullptr;
+
+        const auto type_it = mod_it->second.methods.find(type_name);
+        if (type_it == mod_it->second.methods.end()) return nullptr;
+
+        const auto method_it = type_it->second.find(method_name);
+        if (method_it == type_it->second.end()) return nullptr;
+
+        return &method_it->second;
     }
 }

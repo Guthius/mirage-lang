@@ -1329,6 +1329,78 @@ namespace ast {
         return parse_expr_stmt(parser);
     }
 
+        auto parse_impl_method(Parser &parser) -> ImplDecl::Function {
+            const auto location = parser.current_location();
+            const bool is_pub = parser.match(TokenKind::KwPub);
+
+            parser.expect(TokenKind::KwFn, "'fn'");
+            auto name = parser.expect_identifier();
+
+            parser.expect(TokenKind::LParen, "'('");
+
+            // Parse self parameter: `self` or `mut self`
+            bool is_mut_self = false;
+            if (parser.check(TokenKind::KwMut)) {
+                parser.advance();
+                is_mut_self = true;
+            }
+            // Consume 'self' identifier
+            const auto self_name = parser.expect_identifier();
+            if (self_name != "self") {
+                parser.report_error(location, "first parameter of impl function must be 'self' or 'mut self'");
+            }
+
+            // Parse remaining params (with types)
+            std::vector<ImplDecl::Function::Param> params;
+            while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                parser.expect(TokenKind::Comma, "','");
+                const auto param_location = parser.current_location();
+                const bool param_is_mut = parser.match(TokenKind::KwMut);
+                auto param_name = parser.expect_identifier();
+                parser.expect(TokenKind::Colon, "':'");
+                params.push_back(ImplDecl::Function::Param{
+                    .name = std::move(param_name),
+                    .type = parse_type(parser),
+                    .is_mut = param_is_mut,
+                    .location = param_location,
+                });
+            }
+
+            parser.expect(TokenKind::RParen, "')'");
+            auto return_types = parse_function_return_types(parser);
+            auto body = parse_stmt(parser);
+
+            return ImplDecl::Function{
+                .is_pub = is_pub,
+                .is_mut_self = is_mut_self,
+                .name = std::move(name),
+                .params = std::move(params),
+                .return_types = std::move(return_types),
+                .body = std::move(body),
+                .location = location,
+            };
+        }
+
+        auto parse_impl_decl(Parser &parser) -> ImplDecl {
+            const auto location = parser.current_location();
+            parser.expect(TokenKind::KwImpl, "'impl'");
+            auto target = parse_named_type(parser);
+            parser.expect(TokenKind::LBrace, "'{'");
+
+            std::vector<ImplDecl::Function> functions;
+            while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                functions.push_back(parse_impl_method(parser));
+            }
+
+            parser.expect(TokenKind::RBrace, "'}'");
+
+            return ImplDecl{
+                .target = std::move(target),
+                .functions = std::move(functions),
+                .location = location,
+            };
+        }
+
     auto parse_decl(Parser &parser, const bool top_level) -> std::optional<Decl> {
         const auto is_pub = !top_level || parser.match(TokenKind::KwPub);
 
@@ -1352,6 +1424,13 @@ namespace ast {
 
         if (parser.check(TokenKind::KwMacro)) {
             return parse_macro_decl(parser, is_pub);
+        }
+
+        if (parser.check(TokenKind::KwImpl)) {
+            if (is_pub) {
+                parser.report_error(parser.current_location(), "'impl' blocks cannot be 'pub'");
+            }
+            return parse_impl_decl(parser);
         }
 
         parser.report_error(

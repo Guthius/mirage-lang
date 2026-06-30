@@ -104,8 +104,18 @@ namespace sema {
                     name = (*member)->member;
                     check_pub = true;
                 } else {
-                    error(diag, call.location, "method calls on struct values are not yet supported");
-                    return {};
+                    // Method call on a value
+                    auto receiver_type = check_expr((*member)->object, locals, module_path, program, diag, std::nullopt, loop_depth);
+                    if (receiver_type.kind == TypeKind::Pointer) {
+                        receiver_type = program.modules.at(module_path).pointer_pointees[receiver_type.pointee_index];
+                    }
+                    const auto *method = find_method(receiver_type, (*member)->member, program);
+                    if (!method) {
+                        error(diag, call.location, std::format("no method '{}' on type", (*member)->member));
+                        return {};
+                    }
+                    check_call_args(call.args, method->param_types, locals, module_path, program, diag, call.location, (*member)->member, loop_depth);
+                    return method->return_types;
                 }
             } else {
                 error(diag, call.location, "unsupported call target");
@@ -525,7 +535,17 @@ namespace sema {
                                 },
                                 sym_it->second);
                         }
-                        return error(diag, v->location, "method calls on struct values are not yet supported");
+                        // Method call on a value
+                        auto receiver_type = check_expr((*member_callee)->object, locals, module_path, program, diag, std::nullopt, loop_depth);
+                        if (receiver_type.kind == TypeKind::Pointer) {
+                            receiver_type = program.modules.at(module_path).pointer_pointees[receiver_type.pointee_index];
+                        }
+                        const auto *method = find_method(receiver_type, (*member_callee)->member, program);
+                        if (!method) {
+                            return error(diag, v->location, std::format("no method '{}' on type", (*member_callee)->member));
+                        }
+                        check_call_args(v->args, method->param_types, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth);
+                        return method->return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : method->return_types.front();
                     }
 
                     auto *callee_ident = std::get_if<ast::IdentExpr>(&v->callee);

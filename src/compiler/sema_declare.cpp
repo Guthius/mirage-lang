@@ -101,6 +101,20 @@ namespace sema {
                         declare_symbol(module.symbols, v.name, MacroSymbol{.decl = &v, .is_pub = v.is_pub, .is_resolved = false}, v.location, diag);
                     } else if constexpr (std::is_same_v<V, ast::TypeDecl>) {
                         declare_type(v, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, ast::ImplDecl>) {
+                        // Pre-register each method as unresolved in the module's method table.
+                        // The target type name is the leaf of the named type chain.
+                        const std::string &type_name = v.target.name;
+                        for (auto &fn : v.functions) {
+                            module.methods[type_name][fn.name] = MethodInfo{
+                                .decl = &fn,
+                                .impl_module = module_path,
+                                .type_name = type_name,
+                                .is_mut_self = fn.is_mut_self,
+                                .is_pub = fn.is_pub,
+                                .is_resolved = false,
+                            };
+                        }
                     }
                 },
                 decl);

@@ -48,12 +48,26 @@ namespace sema {
         bool layout_done = false;
     };
 
+    struct MethodInfo {
+        const ast::ImplDecl::Function *decl = nullptr;
+        std::string impl_module;        // module where this impl is defined
+        std::string type_name;          // type name this method belongs to
+        ResolvedType self_type;         // resolved type of self (the struct/enum type)
+        std::vector<ResolvedType> param_types;   // non-self params
+        std::vector<ResolvedType> return_types;
+        bool is_mut_self = false;
+        bool is_pub = false;
+        bool is_resolved = false;
+    };
+
     struct ProgramModule {
         SymbolTable symbols;
         std::vector<ResolvedType> pointer_pointees;
         std::vector<StructInfo> structs;
         std::vector<ArrayInfo> arrays;
         std::vector<SliceInfo> slices;
+        // type_name -> method_name -> MethodInfo
+        std::unordered_map<std::string, std::unordered_map<std::string, MethodInfo>> methods;
         std::unordered_map<const void *, ResolvedType> expr_types;
         bool ok = false;
     };
@@ -93,4 +107,11 @@ namespace sema {
     auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, std::optional<ResolvedType> expected, int loop_depth) -> ResolvedType;
     auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth) -> void;
     auto is_constant_expr(const ast::Expr &expr, const std::string &module_path, const Program &program) -> bool;
+
+    // Returns the module path and type name for a given resolved struct/enum type,
+    // searching all modules. Returns {"", ""} if not found.
+    auto find_type_module_and_name(const ResolvedType &ty, const Program &program) -> std::pair<std::string, std::string>;
+
+    // Look up a method on a type. Searches the type's defining module's method table.
+    auto find_method(const ResolvedType &ty, const std::string &method_name, const Program &program) -> const MethodInfo *;
 }
