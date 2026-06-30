@@ -221,6 +221,15 @@ namespace sema {
                     return *ts->resolved;
                 }
 
+                if (ts->resolved && ts->resolved->kind == TypeKind::Enum) {
+                    const int slot = ts->resolved->enum_index;
+                    if (program.enums[slot].layout_done) return *ts->resolved;
+
+                    Resolver inner{program, diag};
+                    inner.layout_enum(module_path, slot, std::get<std::unique_ptr<ast::EnumType>>(ts->decl->type));
+                    return *ts->resolved;
+                }
+
                 return resolve_final_shallow(module_path, name, check_pub, loc);
             }
 
@@ -267,6 +276,7 @@ namespace sema {
                 if (t.kind == TypeKind::Struct) return program.modules.at(module_path).structs[t.struct_index].size;
                 if (t.kind == TypeKind::Array) return program.modules.at(module_path).arrays[t.array_index].size;
                 if (t.kind == TypeKind::Slice) return 16;
+                if (t.kind == TypeKind::Enum) return primitive_size(program.enums[t.enum_index].underlying_type.kind);
                 return primitive_size(t.kind);
             }
 
@@ -274,6 +284,7 @@ namespace sema {
                 if (t.kind == TypeKind::Struct) return program.modules.at(module_path).structs[t.struct_index].align;
                 if (t.kind == TypeKind::Array) return program.modules.at(module_path).arrays[t.array_index].align;
                 if (t.kind == TypeKind::Slice) return 8;
+                if (t.kind == TypeKind::Enum) return primitive_align(program.enums[t.enum_index].underlying_type.kind);
                 return primitive_align(t.kind);
             }
 
@@ -337,12 +348,34 @@ namespace sema {
                 return result;
             }
 
-            auto eval_integer_const_expr(const ast::Expr &expr, const std::string &module_path, const std::unordered_map<std::string, const ast::Expr *> &macro_args) -> std::optional<uint64_t> {
+            static auto contains_iota(const ast::Expr &expr) -> bool {
+                return std::visit(
+                    []<typename T>(const T &v) -> bool {
+                        using V = std::decay_t<T>;
+                        if constexpr (std::is_same_v<V, ast::IotaExpr>) {
+                            return true;
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
+                            return contains_iota(v->operand);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
+                            return contains_iota(v->lhs) || contains_iota(v->rhs);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
+                            return contains_iota(v->condition) || contains_iota(v->then_expr) || contains_iota(v->else_expr);
+                        } else {
+                            return false;
+                        }
+                    },
+                    expr);
+            }
+
+            auto eval_integer_const_expr(const ast::Expr &expr, const std::string &module_path, const std::unordered_map<std::string, const ast::Expr *> &macro_args, uint64_t iota_value = 0) -> std::optional<uint64_t> {
                 return std::visit(
                     [&]<typename T>(const T &v) -> std::optional<uint64_t> {
                         using V = std::decay_t<T>;
 
-                        if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr>) {
+                        if constexpr (std::is_same_v<V, ast::IotaExpr>) {
+                            return iota_value;
+
+                        } else if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr>) {
                             return v.value;
 
                         } else if constexpr (std::is_same_v<V, ast::LiteralBoolExpr>) {
@@ -450,6 +483,61 @@ namespace sema {
                 return 0;
             }
 
+            void layout_enum(const std::string &module_path, const int slot, const std::unique_ptr<ast::EnumType> &decl) {
+                auto &mod = program.modules.at(module_path);
+
+                // Resolve underlying type (default: i32)
+                ResolvedType underlying;
+                if (decl->underlying_type) {
+                    underlying = resolve_type_impl(*decl->underlying_type, module_path);
+                } else {
+                    underlying = ResolvedType{.kind = TypeKind::I32};
+                }
+
+                EnumInfo info;
+                info.underlying_type = underlying;
+
+                uint64_t iota_counter = 0;
+                const ast::Expr *iota_template = nullptr; // nullptr = just use iota value directly
+
+                for (const auto &field : decl->fields) {
+                    int64_t field_value;
+                    if (field.init) {
+                        const auto result = eval_integer_const_expr(*field.init, module_path, {}, iota_counter);
+                        if (!result) {
+                            diag.report_error(DiagnosticStage::Sema, field.location, std::format("enum field '{}' is not a compile-time constant", field.name));
+                            field_value = static_cast<int64_t>(iota_counter);
+                        } else {
+                            field_value = static_cast<int64_t>(*result);
+                        }
+                        if (contains_iota(*field.init)) {
+                            iota_template = &*field.init;
+                        } else {
+                            iota_template = nullptr;
+                        }
+                    } else {
+                        if (iota_template) {
+                            const auto result = eval_integer_const_expr(*iota_template, module_path, {}, iota_counter);
+                            field_value = result ? static_cast<int64_t>(*result) : static_cast<int64_t>(iota_counter);
+                        } else {
+                            field_value = static_cast<int64_t>(iota_counter);
+                        }
+                    }
+
+                    for (const auto &existing : info.fields) {
+                        if (existing.name == field.name) {
+                            diag.report_error(DiagnosticStage::Sema, field.location, std::format("duplicate enum field name '{}'", field.name));
+                        }
+                    }
+
+                    info.fields.push_back(EnumFieldInfo{.name = field.name, .value = field_value});
+                    ++iota_counter;
+                }
+
+                info.layout_done = true;
+                program.enums[slot] = std::move(info);
+            }
+
             auto resolve_type_impl(const ast::Type &type, const std::string &module_path) -> ResolvedType {
                 return std::visit(
                     [&]<typename T>(const T &v) -> ResolvedType {
@@ -493,6 +581,14 @@ namespace sema {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceType>>) {
                             auto element = resolve_type_impl(v->base_type, module_path);
                             return intern_slice(program.modules.at(module_path), element);
+
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnumType>>) {
+                            const int slot = static_cast<int>(program.enums.size());
+                            program.enums.push_back(EnumInfo{});
+                            layout_enum(module_path, slot, v);
+                            return ResolvedType{.kind = TypeKind::Enum, .enum_index = slot};
+                        } else {
+                            return ResolvedType{.kind = TypeKind::Invalid};
                         }
                     },
                     type);

@@ -676,6 +676,71 @@ namespace sema {
                         return operand;
                     }
                     return error(diag, v->location, "slicing requires an array or slice operand");
+
+                } else if constexpr (std::is_same_v<V, ast::IotaExpr>) {
+                    return error(diag, v.location, "'iota' is only valid inside enum field initializers");
+
+                } else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
+                    // Dot-prefixed enum field literal: .field_name
+                    // Requires an expected enum type to resolve which enum this belongs to
+                    if (!expected || expected->kind != TypeKind::Enum) {
+                        return error(diag, v.location, std::format("cannot resolve enum field '.{}' without an expected enum type", v.name));
+                    }
+                    const auto &enum_info = program.enums[expected->enum_index];
+                    for (const auto &field : enum_info.fields) {
+                        if (field.name == v.name) {
+                            return *expected;
+                        }
+                    }
+                    return error(diag, v.location, std::format("no enum field named '{}'", v.name));
+
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) {
+                    const auto operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth);
+                    if (operand_type.kind != TypeKind::Enum) {
+                        return error(diag, v->location, "match operand must be an enum type");
+                    }
+
+                    const auto &enum_info = program.enums[operand_type.enum_index];
+
+                    // Check each arm
+                    ResolvedType arm_type{.kind = TypeKind::Invalid};
+                    bool first_arm = true;
+                    std::vector<bool> covered(enum_info.fields.size(), false);
+
+                    for (const auto &arm : v->arms) {
+                        // Find field in enum
+                        bool found = false;
+                        for (size_t i = 0; i < enum_info.fields.size(); ++i) {
+                            if (enum_info.fields[i].name == arm.field) {
+                                if (covered[i]) {
+                                    error(diag, arm.location, std::format("duplicate match arm for enum field '{}'", arm.field));
+                                }
+                                covered[i] = true;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) {
+                            error(diag, arm.location, std::format("no enum field named '{}'", arm.field));
+                        }
+
+                        const auto val_type = check_expr(arm.value, locals, module_path, program, diag, first_arm ? std::nullopt : std::optional<ResolvedType>{arm_type}, loop_depth);
+                        if (first_arm) {
+                            arm_type = val_type;
+                            first_arm = false;
+                        } else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
+                            error(diag, arm.location, "all match arms must have the same type");
+                        }
+                    }
+
+                    // Exhaustiveness check
+                    for (size_t i = 0; i < enum_info.fields.size(); ++i) {
+                        if (!covered[i]) {
+                            error(diag, v->location, std::format("match is not exhaustive: missing arm for '{}'", enum_info.fields[i].name));
+                        }
+                    }
+
+                    return arm_type.kind == TypeKind::Invalid ? ResolvedType{.kind = TypeKind::Void} : arm_type;
                 }
             },
             expr);

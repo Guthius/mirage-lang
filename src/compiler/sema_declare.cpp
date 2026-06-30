@@ -22,15 +22,22 @@ namespace sema {
     }
 
     namespace {
-        void declare_type(const ast::TypeDecl &decl, ProgramModule &module, DiagnosticEngine &diag) {
+        void declare_type(const ast::TypeDecl &decl, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
             std::optional<ResolvedType> resolved = std::nullopt;
 
             int struct_slot = -1;
+            int enum_slot = -1;
             if (std::holds_alternative<std::unique_ptr<ast::StructType>>(decl.type)) {
                 struct_slot = static_cast<int>(module.structs.size());
                 resolved = ResolvedType{
                     .kind = TypeKind::Struct,
                     .struct_index = struct_slot,
+                };
+            } else if (std::holds_alternative<std::unique_ptr<ast::EnumType>>(decl.type)) {
+                enum_slot = static_cast<int>(sema_program.enums.size());
+                resolved = ResolvedType{
+                    .kind = TypeKind::Enum,
+                    .enum_index = enum_slot,
                 };
             }
 
@@ -40,6 +47,9 @@ namespace sema {
 
             if (struct_slot >= 0) {
                 module.structs.push_back(StructInfo{.is_packed = std::get<std::unique_ptr<ast::StructType>>(decl.type)->is_packed});
+            }
+            if (enum_slot >= 0) {
+                sema_program.enums.push_back(EnumInfo{});
             }
         }
 
@@ -75,7 +85,7 @@ namespace sema {
         }
     }
 
-    void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, const ast::Module &decls, DiagnosticEngine &diag) {
+    void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, const ast::Module &decls, DiagnosticEngine &diag) {
         for (auto &decl : decls) {
             std::visit(
                 [&]<typename T>(const T &v) {
@@ -90,7 +100,7 @@ namespace sema {
                     } else if constexpr (std::is_same_v<V, ast::MacroDecl>) {
                         declare_symbol(module.symbols, v.name, MacroSymbol{.decl = &v, .is_pub = v.is_pub, .is_resolved = false}, v.location, diag);
                     } else if constexpr (std::is_same_v<V, ast::TypeDecl>) {
-                        declare_type(v, module, diag);
+                        declare_type(v, module, sema_program, diag);
                     }
                 },
                 decl);

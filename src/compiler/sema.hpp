@@ -37,6 +37,17 @@ namespace sema {
         ResolvedType element_type;
     };
 
+    struct EnumFieldInfo {
+        std::string name;
+        int64_t value = 0;
+    };
+
+    struct EnumInfo {
+        ResolvedType underlying_type;
+        std::vector<EnumFieldInfo> fields;
+        bool layout_done = false;
+    };
+
     struct ProgramModule {
         SymbolTable symbols;
         std::vector<ResolvedType> pointer_pointees;
@@ -55,6 +66,7 @@ namespace sema {
 
     struct Program {
         std::unordered_map<std::string, ProgramModule> modules;
+        std::vector<EnumInfo> enums;
         ResolveState resolve_state;
         bool ok = false;
     };

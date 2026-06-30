@@ -1,0 +1,13 @@
+const my := import("example_enum_def")
+
+fn get_value(e: my.enum_type) -> i32 {
+    return match e {
+        .val_a: 1,
+        .val_b: 3,
+        .val_c: 6
+    }
+}
+
+pub fn main() -> i32 {
+    return get_value(.val_a) + get_value(.val_b) + get_value(.val_c) // should return 10
+}

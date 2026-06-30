@@ -249,7 +249,8 @@ namespace codegen {
 
             auto llvm_type_for(const sema::ResolvedType &type, const std::string &type_module) -> llvm::Type * {
                 return llvm_type(
-                    type.kind == sema::TypeKind::Struct || type.kind == sema::TypeKind::Array || type.kind == sema::TypeKind::Slice
+                    type.kind == sema::TypeKind::Struct || type.kind == sema::TypeKind::Array ||
+                            type.kind == sema::TypeKind::Slice || type.kind == sema::TypeKind::Enum
                         ? type_module
                         : *current_module_path_,
                     type);
@@ -272,6 +273,9 @@ namespace codegen {
                 }
                 if (type.kind == sema::TypeKind::Slice) {
                     return 16;
+                }
+                if (type.kind == sema::TypeKind::Enum) {
+                    return primitive_size(sema_program_.enums.at(type.enum_index).underlying_type.kind);
                 }
                 return primitive_size(type.kind);
             }
@@ -301,6 +305,10 @@ namespace codegen {
                 }
                 case sema::TypeKind::Slice:
                     return llvm::StructType::get(*context_, {llvm::PointerType::getUnqual(*context_), llvm::Type::getInt64Ty(*context_)});
+                case sema::TypeKind::Enum: {
+                    const auto &enum_info = sema_program_.enums.at(type.enum_index);
+                    return llvm_type(module_path, enum_info.underlying_type);
+                }
                 default:                      return llvm::Type::getVoidTy(*context_);
                 }
             }
@@ -1143,6 +1151,24 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                             const auto lv = emit_lvalue(expr);
                             return builder_.CreateLoad(lv.storage_type, lv.ptr);
+                        } else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
+                            // Enum field literal: .field_name
+                            // ty is the enum type; look up the field value
+                            const auto &enum_info = sema_program_.enums.at(ty.enum_index);
+                            for (const auto &field : enum_info.fields) {
+                                if (field.name == v.name) {
+                                    return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty),
+                                                                  static_cast<uint64_t>(field.value),
+                                                                  enum_info.underlying_type.is_signed());
+                                }
+                            }
+                            report_codegen_error(diag_, v.location, std::format("unknown enum field '{}'", v.name));
+                            return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) {
+                            return emit_match(*v, ty);
+                        } else if constexpr (std::is_same_v<V, ast::IotaExpr>) {
+                            report_codegen_error(diag_, v.location, "iota is not valid in this context");
+                            return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
                         } else {
                             report_codegen_error(diag_, {}, "unsupported expression in codegen");
                             return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
@@ -1211,6 +1237,58 @@ namespace codegen {
                 const auto element = module_for(type_module).slices.at(operand_type.slice_index).element_type;
                 auto *ptr = builder_.CreateInBoundsGEP(llvm_type_for(element, type_module), base, start);
                 return build_slice_value(ptr, count, result_type, type_module);
+            }
+
+            auto emit_match(const ast::MatchExpr &expr, const sema::ResolvedType &result_type) -> llvm::Value * {
+                auto *fn = builder_.GetInsertBlock()->getParent();
+                auto *unreachable_bb = llvm::BasicBlock::Create(*context_, "match.unreachable", fn);
+                auto *merge_bb = llvm::BasicBlock::Create(*context_, "match.end", fn);
+
+                const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(expr.operand));
+                auto *operand = emit_expr(expr.operand);
+
+                // Underlying integer type for the enum
+                const auto &enum_info = sema_program_.enums.at(operand_type.enum_index);
+                auto *underlying_llvm_ty = llvm_type(*current_module_path_, enum_info.underlying_type);
+
+                auto *sw = builder_.CreateSwitch(operand, unreachable_bb, static_cast<unsigned>(expr.arms.size()));
+
+                std::vector<std::pair<llvm::BasicBlock *, llvm::Value *>> arm_results;
+
+                for (const auto &arm : expr.arms) {
+                    // Find the enum field value
+                    int64_t field_val = 0;
+                    for (const auto &field : enum_info.fields) {
+                        if (field.name == arm.field) {
+                            field_val = field.value;
+                            break;
+                        }
+                    }
+
+                    auto *arm_bb = llvm::BasicBlock::Create(*context_, std::format("match.arm.{}", arm.field), fn);
+                    sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(underlying_llvm_ty, static_cast<uint64_t>(field_val), enum_info.underlying_type.is_signed())), arm_bb);
+
+                    builder_.SetInsertPoint(arm_bb);
+                    auto *arm_val = emit_expr(arm.value);
+                    auto *arm_done = builder_.GetInsertBlock();
+                    builder_.CreateBr(merge_bb);
+                    arm_results.emplace_back(arm_done, arm_val);
+                }
+
+                // Unreachable block (match is exhaustive)
+                builder_.SetInsertPoint(unreachable_bb);
+                builder_.CreateUnreachable();
+
+                builder_.SetInsertPoint(merge_bb);
+                if (result_type.kind == sema::TypeKind::Void || arm_results.empty()) {
+                    return llvm::UndefValue::get(llvm::Type::getInt32Ty(*context_));
+                }
+
+                auto *phi = builder_.CreatePHI(llvm_type(*current_module_path_, result_type), static_cast<unsigned>(arm_results.size()));
+                for (auto &[bb, val] : arm_results) {
+                    phi->addIncoming(val, bb);
+                }
+                return phi;
             }
 
             auto emit_ternary(const ast::TernaryExpr &expr) -> llvm::Value * {

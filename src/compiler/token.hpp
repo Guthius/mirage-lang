@@ -46,6 +46,7 @@ enum class TokenKind : uint8_t {
     KwDefault,
     KwUndefined,
     KwLen,
+    KwMatch,
 
     // Primitive type keywords
     KwU8,

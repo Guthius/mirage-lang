@@ -48,6 +48,7 @@ namespace ast {
     struct StructType;
     struct ArrayType;
     struct SliceType;
+    struct EnumType;
 
     using Type = std::variant<
         std::monostate,
@@ -56,7 +57,8 @@ namespace ast {
         NamedType,
         std::unique_ptr<StructType>,
         std::unique_ptr<ArrayType>,
-        std::unique_ptr<SliceType>>;
+        std::unique_ptr<SliceType>,
+        std::unique_ptr<EnumType>>;
 
     struct PointerType {
         Type pointee;
@@ -127,6 +129,16 @@ namespace ast {
     struct IndexExpr;
     struct SliceExpr;
     struct MemberExpr;
+    struct MatchExpr;
+
+    struct IotaExpr {
+        SourceLocation location;
+    };
+
+    struct DotIdentExpr {
+        std::string name;
+        SourceLocation location;
+    };
 
     using Expr = std::variant<
         LiteralIntegerExpr,
@@ -147,11 +159,26 @@ namespace ast {
         std::unique_ptr<CastExpr>,
         std::unique_ptr<IndexExpr>,
         std::unique_ptr<SliceExpr>,
-        std::unique_ptr<MemberExpr>>;
+        std::unique_ptr<MemberExpr>,
+        IotaExpr,
+        DotIdentExpr,
+        std::unique_ptr<MatchExpr>>;
 
     struct ArrayType {
         Type base_type;
         Expr size;
+        SourceLocation location;
+    };
+
+    struct EnumType {
+        struct Field {
+            std::string name;
+            std::optional<Expr> init;
+            SourceLocation location;
+        };
+
+        std::optional<Type> underlying_type;
+        std::vector<Field> fields;
         SourceLocation location;
     };
 
@@ -270,6 +297,18 @@ namespace ast {
     struct MemberExpr {
         Expr object;
         std::string member;
+        SourceLocation location;
+    };
+
+    struct MatchExpr {
+        struct Arm {
+            std::string field;
+            Expr value;
+            SourceLocation location;
+        };
+
+        Expr operand;
+        std::vector<Arm> arms;
         SourceLocation location;
     };
 

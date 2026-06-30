@@ -42,6 +42,7 @@ namespace lexer {
             {"default",   TokenKind::KwDefault  },
             {"undefined", TokenKind::KwUndefined},
             {"len",       TokenKind::KwLen      },
+            {"match",     TokenKind::KwMatch    },
 
             // Primitive types
             {"u8",        TokenKind::KwU8       },

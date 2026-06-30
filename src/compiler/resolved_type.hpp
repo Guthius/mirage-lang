@@ -25,6 +25,7 @@ namespace sema {
         Array,
         Slice,
         Namespace,
+        Enum,
     };
 
     struct ResolvedType {
@@ -33,6 +34,7 @@ namespace sema {
         int struct_index = -1;
         int array_index = -1;
         int slice_index = -1;
+        int enum_index = -1;
 
         auto is_integer() const -> bool {
             switch (kind) {
@@ -82,7 +84,8 @@ namespace sema {
                    other.pointee_index == pointee_index &&
                    other.struct_index == struct_index &&
                    other.array_index == array_index &&
-                   other.slice_index == slice_index;
+                   other.slice_index == slice_index &&
+                   other.enum_index == enum_index;
         }
 
         auto operator!=(const ResolvedType &other) const -> bool {

@@ -1,0 +1,5 @@
+pub type enum_type = enum(i32) {
+    val_a
+    val_b
+    val_c
+}

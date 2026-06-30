@@ -85,6 +85,51 @@ namespace ast {
             });
         }
 
+        auto parse_enum_field(Parser &parser) -> EnumType::Field {
+            const auto location = parser.current_location();
+
+            auto name = parser.expect_identifier();
+
+            std::optional<Expr> init;
+            if (parser.match(TokenKind::Equal)) {
+                init = parse_expr(parser);
+            }
+
+            return EnumType::Field{
+                .name = std::move(name),
+                .init = std::move(init),
+                .location = location,
+            };
+        }
+
+        auto parse_enum_type(Parser &parser) -> Type {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwEnum, "'enum'");
+
+            std::optional<Type> underlying_type;
+            if (parser.match(TokenKind::LParen)) {
+                underlying_type = parse_type(parser);
+
+                parser.expect(TokenKind::RParen, "')'");
+            }
+
+            parser.expect(TokenKind::LBrace, "'{'");
+
+            std::vector<EnumType::Field> fields;
+            while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                fields.push_back(parse_enum_field(parser));
+            }
+
+            parser.expect(TokenKind::RBrace, "'}'");
+
+            return std::make_unique<EnumType>(EnumType{
+                .underlying_type = std::move(underlying_type),
+                .fields = std::move(fields),
+                .location = location,
+            });
+        }
+
         template <typename T>
         auto make_expr(T &&value) -> std::unique_ptr<T> {
             return std::make_unique<T>(std::forward<T>(value));
@@ -108,6 +153,9 @@ namespace ast {
             case TokenKind::KwSizeOf:
             case TokenKind::KwLen:
             case TokenKind::KwDefault:
+            case TokenKind::KwMatch:
+            case TokenKind::KwIota:
+            case TokenKind::Dot:
                 return true;
             default:
                 return false;
@@ -319,6 +367,58 @@ namespace ast {
                 parser.expect(TokenKind::RParen, "')'");
 
                 return inner;
+            }
+
+            if (parser.check(TokenKind::KwIota)) {
+                parser.advance();
+
+                return IotaExpr{
+                    .location = location,
+                };
+            }
+
+            if (parser.check(TokenKind::Dot)) {
+                parser.advance();
+                const auto name = parser.expect_identifier();
+
+                return DotIdentExpr{
+                    .name = name,
+                    .location = location,
+                };
+            }
+
+            if (parser.check(TokenKind::KwMatch)) {
+                parser.advance();
+
+                auto operand = parse_expr(parser);
+                parser.expect(TokenKind::LBrace, "'{'");
+
+                std::vector<MatchExpr::Arm> arms;
+                while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                    const auto arm_location = parser.current_location();
+                    parser.expect(TokenKind::Dot, "'.'");
+                    auto field = parser.expect_identifier();
+                    parser.expect(TokenKind::Colon, "':'");
+                    auto arm_value = parse_expr(parser);
+
+                    arms.push_back(MatchExpr::Arm{
+                        .field = std::move(field),
+                        .value = std::move(arm_value),
+                        .location = arm_location,
+                    });
+
+                    if (!parser.check(TokenKind::RBrace)) {
+                        parser.expect(TokenKind::Comma, "','");
+                    }
+                }
+
+                parser.expect(TokenKind::RBrace, "'}'");
+
+                return make_expr(MatchExpr{
+                    .operand = std::move(operand),
+                    .arms = std::move(arms),
+                    .location = location,
+                });
             }
 
             parser.report_error(location, std::format("expected expression, got '{}'", parser.current_lexeme()));
@@ -1161,6 +1261,10 @@ namespace ast {
 
         if (parser.check(TokenKind::KwStruct)) {
             return parse_struct_type(parser);
+        }
+
+        if (parser.check(TokenKind::KwEnum)) {
+            return parse_enum_type(parser);
         }
 
         if (parser.check(TokenKind::Identifier)) {

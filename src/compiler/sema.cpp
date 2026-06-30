@@ -3,7 +3,7 @@
 #include <ranges>
 
 namespace sema {
-    void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, const ast::Module &decls, DiagnosticEngine &diagnostics);
+    void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, const ast::Module &decls, DiagnosticEngine &diagnostics);
 
     namespace {
         void resolve_signatures_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
@@ -77,7 +77,7 @@ namespace sema {
         Program out;
 
         for (auto &[path, decls] : program.modules) {
-            build_symbol_table_for_module(program, path, out.modules[path], decls, diag);
+            build_symbol_table_for_module(program, path, out.modules[path], out, decls, diag);
         }
 
         for (const auto &path : program.modules | std::views::keys) {
