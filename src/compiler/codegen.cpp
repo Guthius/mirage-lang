@@ -27,6 +27,7 @@ namespace codegen {
         struct LocalValue {
             llvm::AllocaInst *alloca = nullptr;
             sema::ResolvedType type;
+            std::string type_module;
         };
 
         struct MacroArg {
@@ -38,6 +39,7 @@ namespace codegen {
         struct LValue {
             llvm::Value *ptr = nullptr;
             sema::ResolvedType type;
+            std::string type_module;
             llvm::Type *storage_type = nullptr;
         };
 
@@ -196,6 +198,53 @@ namespace codegen {
 
             auto module_for(const std::string &path) const -> const sema::ProgramModule & {
                 return sema_program_.modules.at(path);
+            }
+
+            auto named_type_module(const std::string &start_module, const ast::NamedType &named) const -> std::string {
+                std::string module_path = start_module;
+                const auto *current = &named;
+
+                while (current->member) {
+                    const auto &mod = module_for(module_path);
+                    const auto sym_it = mod.symbols.find(current->name);
+                    if (sym_it == mod.symbols.end()) {
+                        return start_module;
+                    }
+
+                    const auto *import = std::get_if<sema::ImportSymbol>(&sym_it->second);
+                    if (!import) {
+                        return start_module;
+                    }
+
+                    module_path = import->module_path;
+                    current = current->member.get();
+                }
+
+                return module_path;
+            }
+
+            auto type_module_for_ast_type(const ast::Type &type, const std::string &context_module, const sema::ResolvedType &resolved) const -> std::string {
+                if (resolved.kind != sema::TypeKind::Struct && resolved.kind != sema::TypeKind::Pointer) {
+                    return context_module;
+                }
+
+                return std::visit(
+                    [&]<typename T>(const T &v) -> std::string {
+                        using V = std::decay_t<T>;
+
+                        if constexpr (std::is_same_v<V, ast::NamedType>) {
+                            return named_type_module(context_module, v);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::PointerType>>) {
+                            return type_module_for_ast_type(v->pointee, context_module, resolved);
+                        } else {
+                            return context_module;
+                        }
+                    },
+                    type);
+            }
+
+            auto llvm_type_for(const sema::ResolvedType &type, const std::string &type_module) -> llvm::Type * {
+                return llvm_type(type.kind == sema::TypeKind::Struct ? type_module : *current_module_path_, type);
             }
 
             auto expr_type(const ast::Expr &expr) const -> sema::ResolvedType {
@@ -464,7 +513,11 @@ namespace codegen {
                     arg.setName(param.name);
                     auto *slot = create_entry_alloca(current_function_, llvm_type(module_path, fn.params[index]), param.name);
                     builder_.CreateStore(&arg, slot);
-                    locals_[param.name] = LocalValue{.alloca = slot, .type = fn.params[index]};
+                    locals_[param.name] = LocalValue{
+                        .alloca = slot,
+                        .type = fn.params[index],
+                        .type_module = type_module_for_ast_type(param.type, module_path, fn.params[index]),
+                    };
                     ++index;
                 }
 
@@ -708,6 +761,33 @@ namespace codegen {
                 return value;
             }
 
+            auto expr_type_module_hint(const ast::Expr &expr) -> std::string {
+                return std::visit(
+                    [&]<typename T>(const T &v) -> std::string {
+                        using V = std::decay_t<T>;
+                        if constexpr (std::is_same_v<V, ast::IdentExpr>) {
+                            if (const auto it = locals_.find(v.name); it != locals_.end()) {
+                                return it->second.type_module;
+                            }
+                            if (const auto sym = current_module_->symbols.find(v.name); sym != current_module_->symbols.end()) {
+                                if (const auto *g = std::get_if<sema::GlobalSymbol>(&sym->second)) {
+                                    if (g->decl->type) {
+                                        return type_module_for_ast_type(*g->decl->type, *current_module_path_, g->type);
+                                    }
+                                }
+                            }
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
+                            if (v->op == ast::UnaryOp::AddressOf || v->op == ast::UnaryOp::Deref) {
+                                return expr_type_module_hint(v->operand);
+                            }
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                            return expr_type_module_hint(v->object);
+                        }
+                        return *current_module_path_;
+                    },
+                    expr);
+            }
+
             auto emit_lvalue(const ast::Expr &expr) -> LValue {
                 return std::visit(
                     [&]<typename T>(const T &v) -> LValue {
@@ -718,18 +798,22 @@ namespace codegen {
                                 return {};
                             }
                             if (const auto it = locals_.find(v.name); it != locals_.end()) {
-                                return LValue{.ptr = it->second.alloca, .type = it->second.type, .storage_type = llvm_type(*current_module_path_, it->second.type)};
+                                return LValue{.ptr = it->second.alloca, .type = it->second.type, .type_module = it->second.type_module, .storage_type = llvm_type_for(it->second.type, it->second.type_module)};
                             }
                             if (auto sym = current_module_->symbols.find(v.name); sym != current_module_->symbols.end()) {
                                 if (const auto *g = std::get_if<sema::GlobalSymbol>(&sym->second)) {
-                                    return LValue{.ptr = globals_.at(global_key(*current_module_path_, v.name)), .type = g->type, .storage_type = llvm_type(*current_module_path_, g->type)};
+                                    const auto type_module = g->decl->type
+                                                                 ? type_module_for_ast_type(*g->decl->type, *current_module_path_, g->type)
+                                                                 : *current_module_path_;
+                                    return LValue{.ptr = globals_.at(global_key(*current_module_path_, v.name)), .type = g->type, .type_module = type_module, .storage_type = llvm_type_for(g->type, type_module)};
                                 }
                             }
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
                             if (v->op == ast::UnaryOp::Deref) {
                                 const auto ptr_type = current_module_->expr_types.at(sema::get_expr_key(v->operand));
                                 const auto pointee = current_module_->pointer_pointees.at(ptr_type.pointee_index);
-                                return LValue{.ptr = emit_expr(v->operand), .type = pointee, .storage_type = llvm_type(*current_module_path_, pointee)};
+                                const auto pointee_module = expr_type_module_hint(v->operand);
+                                return LValue{.ptr = emit_expr(v->operand), .type = pointee, .type_module = pointee_module, .storage_type = llvm_type_for(pointee, pointee_module)};
                             }
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                             return emit_member_lvalue(*v);
@@ -746,33 +830,39 @@ namespace codegen {
                     const auto &target = module_for(*target_module);
                     if (const auto sym = target.symbols.find(member.member); sym != target.symbols.end()) {
                         if (const auto *g = std::get_if<sema::GlobalSymbol>(&sym->second)) {
-                            return LValue{.ptr = globals_.at(global_key(*target_module, member.member)), .type = g->type, .storage_type = llvm_type(*target_module, g->type)};
+                            const auto type_module = g->decl->type
+                                                         ? type_module_for_ast_type(*g->decl->type, *target_module, g->type)
+                                                         : *target_module;
+                            return LValue{.ptr = globals_.at(global_key(*target_module, member.member)), .type = g->type, .type_module = type_module, .storage_type = llvm_type_for(g->type, type_module)};
                         }
                     }
                 }
 
                 const auto object_type = current_module_->expr_types.at(sema::get_expr_key(member.object));
                 sema::ResolvedType struct_type;
+                std::string struct_module = *current_module_path_;
                 llvm::Value *base = nullptr;
                 if (object_type.kind == sema::TypeKind::Pointer) {
                     struct_type = current_module_->pointer_pointees.at(object_type.pointee_index);
+                    struct_module = expr_type_module_hint(member.object);
                     base = emit_expr(member.object);
                 } else {
                     auto lv = emit_lvalue(member.object);
                     struct_type = lv.type;
+                    struct_module = lv.type_module;
                     base = lv.ptr;
                 }
 
-                const auto &info = current_module_->structs.at(struct_type.struct_index);
+                const auto &info = module_for(struct_module).structs.at(struct_type.struct_index);
                 const auto field_it = std::ranges::find(info.fields, member.member, &sema::StructField::name);
                 if (field_it == info.fields.end()) {
                     report_codegen_error(diag_, member.location, std::format("unknown struct field '{}'", member.member));
                     return {};
                 }
                 const auto field_pos = static_cast<size_t>(std::distance(info.fields.begin(), field_it));
-                const auto llvm_index = struct_lowering(*current_module_path_, struct_type.struct_index).field_indices.at(field_pos);
-                auto *ptr = builder_.CreateStructGEP(llvm_type(*current_module_path_, struct_type), base, llvm_index);
-                return LValue{.ptr = ptr, .type = field_it->type, .storage_type = llvm_type(*current_module_path_, field_it->type)};
+                const auto llvm_index = struct_lowering(struct_module, struct_type.struct_index).field_indices.at(field_pos);
+                auto *ptr = builder_.CreateStructGEP(llvm_type(struct_module, struct_type), base, llvm_index);
+                return LValue{.ptr = ptr, .type = field_it->type, .type_module = struct_module, .storage_type = llvm_type_for(field_it->type, struct_module)};
             }
 
             auto try_namespace_chain(const ast::Expr &expr) const -> std::optional<std::string> {
@@ -1226,12 +1316,15 @@ namespace codegen {
                             const auto ty = v.type
                                                 ? sema::resolve_type(*v.type, *current_module_path_, const_cast<sema::Program &>(sema_program_), diag_)
                                                 : current_module_->expr_types.at(sema::get_expr_key(*v.init));
-                            auto *slot = create_entry_alloca(current_function_, llvm_type(*current_module_path_, ty), v.name);
-                            locals_[v.name] = LocalValue{.alloca = slot, .type = ty};
+                            const auto type_module = v.type
+                                                         ? type_module_for_ast_type(*v.type, *current_module_path_, ty)
+                                                         : *current_module_path_;
+                            auto *slot = create_entry_alloca(current_function_, llvm_type_for(ty, type_module), v.name);
+                            locals_[v.name] = LocalValue{.alloca = slot, .type = ty, .type_module = type_module};
                             if (v.init) {
                                 builder_.CreateStore(emit_expr(*v.init), slot);
                             } else {
-                                builder_.CreateStore(zero_value(*current_module_path_, ty), slot);
+                                builder_.CreateStore(zero_value(type_module, ty), slot);
                             }
                         } else if constexpr (std::is_same_v<V, ast::ContinueStmt>) {
                             builder_.CreateBr(continue_targets_.back());
