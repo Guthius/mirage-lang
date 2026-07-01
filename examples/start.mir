@@ -6,7 +6,7 @@ pub fn main() -> i32 {
     mut v: vec.vector
     vec.init(&v, sizeof(x))
     vec.push(&v, &x)
-    const result: i32 = *cast(vec.at(&v, 0), *i32)
+    const result := *cast(vec.at(&v, 0), *i32)
     vec.destroy(&v)
     return result
 }

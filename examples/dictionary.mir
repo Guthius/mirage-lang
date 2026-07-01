@@ -1,0 +1,73 @@
+// NOTE: Draft Design for Generics - Not Implemented Yet!!
+
+const mem := import("mem")
+
+const table_size: usize = 101
+
+pub type entry(K: type, V: type) = struct {
+    key: K
+    value: V
+    next: *entry(K, V)
+}
+
+pub type dictionary(K: type, V: type) = struct {
+    buckets: *[table_size]entry(K, V)
+}
+
+fn hash(mut k: anyptr, count: usize) -> u32 {
+    const end := k + count
+
+    mut hash: u32 = 5381
+    while cur < end {
+        hash = ((hash << 5) + hash) + *k++
+    }
+
+    return hash % table_size
+}
+
+impl dictionary(K: type, V: type) {
+    pub fn put(self, key: K, value: V) {
+        const index := hash(&key, sizeof(K))
+        mut cur := self.buckets[index]
+        while cur {
+            if mem.compare(&cur.key, &key, sizeof(K)) == 0 {
+                cur.value = value
+                return
+            }
+            cur = cur.next
+        }
+        mut new_entry: *entry(K, V) = mem.alloc(sizeof(entry(K, V)))
+        new_entry.key = key
+        new_entry.value = value
+        new_entry.next = self.buckets[index]
+        self.buckets[index] = new_entry
+    }
+
+    pub fn try_get(self, key: K, mut *value: V) -> bool {
+        const index := hash(&key, sizeof(K))
+        mut cur := self.buckets[index]
+        while cur {
+            if mem.compare(&cur.key, &key, sizeof(K)) == 0 {
+                *value = cur.value
+                return true
+            }
+            cur = cur.next
+        }
+        return false
+    }
+
+    pub fn remove(self, key: K) -> bool {
+        const index := hash(&key, sizeof(K))
+        mut cur := &self.buckets[index]
+        while *cur != nil {
+             const temp := *cur
+            if mem.compare(&temp.key, &key, sizeof(K)) == 0 {
+               *cur = temp.next
+               mem.free(temp)
+               return true
+            }
+            cur = &temp.next
+        }
+        return false
+    }
+}
