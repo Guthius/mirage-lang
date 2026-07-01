@@ -202,7 +202,7 @@ namespace codegen {
             std::unordered_map<std::string, llvm::GlobalVariable *> globals_;
             std::unordered_map<FunctionKey, llvm::Function *, FunctionKeyHash> functions_;
             std::unordered_map<std::string, llvm::Function *> ext_functions_;
-            std::unordered_map<std::string, StructLowering> structs_;
+            std::unordered_map<int, StructLowering> structs_;
             size_t string_counter_ = 0;
 
             auto module_for(const std::string &path) const -> const sema::ProgramModule & {
@@ -272,7 +272,7 @@ namespace codegen {
 
             auto size_of(const std::string &module_path, const sema::ResolvedType &type) const -> uint32_t {
                 if (type.kind == sema::TypeKind::Struct) {
-                    return module_for(module_path).structs.at(type.struct_index).size;
+                    return sema_program_.structs.at(type.struct_index).size;
                 }
                 if (type.kind == sema::TypeKind::Array) {
                     return module_for(module_path).arrays.at(type.array_index).size;
@@ -304,7 +304,7 @@ namespace codegen {
                 case sema::TypeKind::F64:     return llvm::Type::getDoubleTy(*context_);
                 case sema::TypeKind::Pointer:
                 case sema::TypeKind::Anyptr:  return llvm::PointerType::getUnqual(*context_);
-                case sema::TypeKind::Struct:  return struct_lowering(module_path, type.struct_index).type;
+                case sema::TypeKind::Struct:  return struct_lowering(type.struct_index).type;
                 case sema::TypeKind::Array: {
                     const auto &array = module_for(module_path).arrays.at(type.array_index);
                     return llvm::ArrayType::get(llvm_type(module_path, array.element_type), array.count);
@@ -334,44 +334,38 @@ namespace codegen {
                 return llvm::StructType::get(*context_, elements, false);
             }
 
-            auto struct_key(const std::string &module_path, int index) const -> std::string {
-                return std::format("{}#{}", module_path, index);
-            }
-
-            auto struct_lowering(const std::string &module_path, int index) -> StructLowering & {
-                return structs_.at(struct_key(module_path, index));
+            auto struct_lowering(int index) -> StructLowering & {
+                return structs_.at(index);
             }
 
             void declare_structs() {
-                for (const auto &[path, mod] : sema_program_.modules) {
-                    for (size_t i = 0; i < mod.structs.size(); ++i) {
-                        const auto key = struct_key(path, static_cast<int>(i));
-                        structs_[key].type = llvm::StructType::create(*context_, symbol_name(path, std::format("struct_{}", i)));
-                    }
+                for (size_t i = 0; i < sema_program_.structs.size(); ++i) {
+                    const auto &info = sema_program_.structs[i];
+                    structs_[static_cast<int>(i)].type = llvm::StructType::create(
+                        *context_, symbol_name(info.module_path, std::format("struct_{}", i)));
                 }
 
-                for (const auto &[path, mod] : sema_program_.modules) {
-                    for (size_t i = 0; i < mod.structs.size(); ++i) {
-                        const auto &info = mod.structs[i];
-                        std::vector<llvm::Type *> elements;
-                        uint32_t cursor = 0;
-                        auto &lowering = struct_lowering(path, static_cast<int>(i));
+                for (size_t i = 0; i < sema_program_.structs.size(); ++i) {
+                    const auto &info = sema_program_.structs[i];
+                    const auto &path = info.module_path;
+                    std::vector<llvm::Type *> elements;
+                    uint32_t cursor = 0;
+                    auto &lowering = struct_lowering(static_cast<int>(i));
 
-                        for (const auto &field : info.fields) {
-                            if (field.offset > cursor) {
-                                elements.push_back(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), field.offset - cursor));
-                            }
-                            lowering.field_indices.push_back(static_cast<unsigned>(elements.size()));
-                            elements.push_back(llvm_type(path, field.type));
-                            cursor = field.offset + size_of(path, field.type);
+                    for (const auto &field : info.fields) {
+                        if (field.offset > cursor) {
+                            elements.push_back(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), field.offset - cursor));
                         }
-
-                        if (info.size > cursor) {
-                            elements.push_back(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), info.size - cursor));
-                        }
-
-                        lowering.type->setBody(elements, true);
+                        lowering.field_indices.push_back(static_cast<unsigned>(elements.size()));
+                        elements.push_back(llvm_type(path, field.type));
+                        cursor = field.offset + size_of(path, field.type);
                     }
+
+                    if (info.size > cursor) {
+                        elements.push_back(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), info.size - cursor));
+                    }
+
+                    lowering.type->setBody(elements, true);
                 }
             }
 
@@ -1023,14 +1017,14 @@ namespace codegen {
                     base = lv.ptr;
                 }
 
-                const auto &info = module_for(struct_module).structs.at(struct_type.struct_index);
+                const auto &info = sema_program_.structs.at(struct_type.struct_index);
                 const auto field_it = std::ranges::find(info.fields, member.member, &sema::StructField::name);
                 if (field_it == info.fields.end()) {
                     report_codegen_error(diag_, member.location, std::format("unknown struct field '{}'", member.member));
                     return {};
                 }
                 const auto field_pos = static_cast<size_t>(std::distance(info.fields.begin(), field_it));
-                const auto llvm_index = struct_lowering(struct_module, struct_type.struct_index).field_indices.at(field_pos);
+                const auto llvm_index = struct_lowering(struct_type.struct_index).field_indices.at(field_pos);
                 auto *ptr = builder_.CreateStructGEP(llvm_type(struct_module, struct_type), base, llvm_index);
                 return LValue{.ptr = ptr, .type = field_it->type, .type_module = struct_module, .storage_type = llvm_type_for(field_it->type, struct_module)};
             }

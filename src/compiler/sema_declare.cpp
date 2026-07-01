@@ -22,13 +22,13 @@ namespace sema {
     }
 
     namespace {
-        void declare_type(const ast::TypeDecl &decl, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
+        void declare_type(const ast::TypeDecl &decl, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
             std::optional<ResolvedType> resolved = std::nullopt;
 
             int struct_slot = -1;
             int enum_slot = -1;
             if (std::holds_alternative<std::unique_ptr<ast::StructType>>(decl.type)) {
-                struct_slot = static_cast<int>(module.structs.size());
+                struct_slot = static_cast<int>(sema_program.structs.size());
                 resolved = ResolvedType{
                     .kind = TypeKind::Struct,
                     .struct_index = struct_slot,
@@ -46,7 +46,7 @@ namespace sema {
             }
 
             if (struct_slot >= 0) {
-                module.structs.push_back(StructInfo{.is_packed = std::get<std::unique_ptr<ast::StructType>>(decl.type)->is_packed});
+                sema_program.structs.push_back(StructInfo{.module_path = module_path, .is_packed = std::get<std::unique_ptr<ast::StructType>>(decl.type)->is_packed});
             }
             if (enum_slot >= 0) {
                 sema_program.enums.push_back(EnumInfo{});
@@ -100,7 +100,7 @@ namespace sema {
                     } else if constexpr (std::is_same_v<V, ast::MacroDecl>) {
                         declare_symbol(module.symbols, v.name, MacroSymbol{.decl = &v, .is_pub = v.is_pub, .is_resolved = false}, v.location, diag);
                     } else if constexpr (std::is_same_v<V, ast::TypeDecl>) {
-                        declare_type(v, module, sema_program, diag);
+                        declare_type(v, module_path, module, sema_program, diag);
                     } else if constexpr (std::is_same_v<V, ast::ImplDecl>) {
                         // Pre-register each method as unresolved in the module's method table.
                         // The target type name is the leaf of the named type chain.

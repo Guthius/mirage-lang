@@ -277,8 +277,7 @@ namespace sema {
                 return {ResolvedType{.kind = TypeKind::Invalid}, false};
             }
 
-            const auto &mod = program.modules.at(module_path);
-            for (const auto &info = mod.structs[effective_type.struct_index]; auto &field : info.fields) {
+            for (const auto &info = program.structs[effective_type.struct_index]; auto &field : info.fields) {
                 if (field.name == m.member) {
                     return {field.type, writable};
                 }

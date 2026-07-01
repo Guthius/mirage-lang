@@ -36,29 +36,31 @@ fn reserve(v: *vector, new_capacity: usize) -> bool {
     return true
 }
 
-pub fn push(v: *vector, element: anyptr) -> bool {
-    if v.length == v.capacity {
-        const new_capacity: usize = v.capacity == 0 ? 8 : v.capacity * 2
-        if !reserve(v, new_capacity) {
-            return false
+impl vector {
+    pub fn push(self, element: anyptr) -> bool {
+        if self.length == self.capacity {
+            const new_capacity: usize = self.capacity == 0 ? 8 : self.capacity * 2
+            if !reserve(self, new_capacity) {
+                return false
+            }
         }
+        const dest := self.data + self.length * self.element_size
+        mem.copy(dest, element, self.element_size)
+        self.length++
+        return true
     }
-    const dest := v.data + v.length * v.element_size
-    mem.copy(dest, element, v.element_size)
-    v.length++
-    return true
-}
 
-pub fn pop(v: *vector) {
-    if v.length == 0 {
-        return
+    pub fn pop(self) {
+        if self.length == 0 {
+            return
+        }
+        self.length--
     }
-    v.length--
-}
 
-pub fn at(v: *vector, idx: usize) -> anyptr {
-    if idx >= v.length {
-        return nil
+    pub fn at(self, idx: usize) -> anyptr {
+        if idx >= self.length {
+            return nil
+        }
+        return self.data + idx * self.element_size
     }
-    return v.data + idx * v.element_size
 }

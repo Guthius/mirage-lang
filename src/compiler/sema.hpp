@@ -19,6 +19,7 @@ namespace sema {
     };
 
     struct StructInfo {
+        std::string module_path;  // module where this struct is declared
         std::vector<StructField> fields;
         uint32_t size = 0;
         uint32_t align = 1;
@@ -63,7 +64,6 @@ namespace sema {
     struct ProgramModule {
         SymbolTable symbols;
         std::vector<ResolvedType> pointer_pointees;
-        std::vector<StructInfo> structs;
         std::vector<ArrayInfo> arrays;
         std::vector<SliceInfo> slices;
         // type_name -> method_name -> MethodInfo
@@ -80,6 +80,7 @@ namespace sema {
 
     struct Program {
         std::unordered_map<std::string, ProgramModule> modules;
+        std::vector<StructInfo> structs;  // global; struct_index is unique across all modules
         std::vector<EnumInfo> enums;
         ResolveState resolve_state;
         bool ok = false;

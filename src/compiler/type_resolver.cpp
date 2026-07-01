@@ -206,7 +206,7 @@ namespace sema {
 
                 if (ts->resolved && ts->resolved->kind == TypeKind::Struct) {
                     const int slot = ts->resolved->struct_index;
-                    if (mod.structs[slot].layout_done) return *ts->resolved;
+                    if (program.structs[slot].layout_done) return *ts->resolved;
 
                     const auto key = std::make_pair(module_path, name);
                     if (program.resolve_state.struct_resolving.contains(key)) {
@@ -258,7 +258,7 @@ namespace sema {
                 info.align = decl->is_packed ? 1 : max_align;
                 info.layout_done = true;
 
-                program.modules.at(module_path).structs[slot] = std::move(info);
+                program.structs[slot] = std::move(info);
             }
 
             auto resolve_field_type(const std::string &module_path, const ast::Type &field_type, SourceLocation loc) -> ResolvedType {
@@ -273,7 +273,7 @@ namespace sema {
             }
 
             [[nodiscard]] auto size_of(const std::string &module_path, const ResolvedType &t) const -> uint32_t {
-                if (t.kind == TypeKind::Struct) return program.modules.at(module_path).structs[t.struct_index].size;
+                if (t.kind == TypeKind::Struct) return program.structs[t.struct_index].size;
                 if (t.kind == TypeKind::Array) return program.modules.at(module_path).arrays[t.array_index].size;
                 if (t.kind == TypeKind::Slice) return 16;
                 if (t.kind == TypeKind::Enum) return primitive_size(program.enums[t.enum_index].underlying_type.kind);
@@ -281,7 +281,7 @@ namespace sema {
             }
 
             [[nodiscard]] auto align_of(const std::string &module_path, const ResolvedType &t) const -> uint32_t {
-                if (t.kind == TypeKind::Struct) return program.modules.at(module_path).structs[t.struct_index].align;
+                if (t.kind == TypeKind::Struct) return program.structs[t.struct_index].align;
                 if (t.kind == TypeKind::Array) return program.modules.at(module_path).arrays[t.array_index].align;
                 if (t.kind == TypeKind::Slice) return 8;
                 if (t.kind == TypeKind::Enum) return primitive_align(program.enums[t.enum_index].underlying_type.kind);
@@ -567,9 +567,8 @@ namespace sema {
                             return resolve_final_shallow(target->module_path, target->name, target->crossed_boundary, v.location);
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StructType>>) {
-                            auto &mod = program.modules.at(module_path);
-                            int slot = static_cast<int>(mod.structs.size());
-                            mod.structs.push_back(StructInfo{});
+                            int slot = static_cast<int>(program.structs.size());
+                            program.structs.push_back(StructInfo{.module_path = module_path});
                             layout_struct(module_path, slot, v);
                             return ResolvedType{.kind = TypeKind::Struct, .struct_index = slot};
 

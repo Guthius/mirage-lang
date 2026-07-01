@@ -31,7 +31,7 @@ namespace sema {
     struct ResolvedType {
         TypeKind kind = TypeKind::Void;
         int pointee_index = -1;
-        int struct_index = -1;
+        int struct_index = -1;  // global index into Program::structs
         int array_index = -1;
         int slice_index = -1;
         int enum_index = -1;
