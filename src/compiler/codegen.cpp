@@ -478,6 +478,7 @@ namespace codegen {
 
                 // Insert fields in StructExpr order
                 for (const auto &sf : se.fields) {
+                    if (std::holds_alternative<ast::UndefinedExpr>(sf.expr)) continue;
                     const auto it = std::ranges::find(info.fields, sf.name, &sema::StructField::name);
                     if (it == info.fields.end()) continue;
                     const auto field_pos = static_cast<size_t>(std::distance(info.fields.begin(), it));
@@ -511,6 +512,7 @@ namespace codegen {
                 auto *ll_ty = llvm_type(*current_module_path_, ty);
                 llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
                 for (size_t i = 0; i < ae.values.size(); ++i) {
+                    if (std::holds_alternative<ast::UndefinedExpr>(ae.values[i])) continue;
                     auto *elem = emit_value_as(ae.values[i], array_info.element_type);
                     agg = builder_.CreateInsertValue(agg, elem, {static_cast<unsigned>(i)});
                 }
@@ -1409,6 +1411,13 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, ast::IotaExpr>) {
                             report_codegen_error(diag_, v.location, "iota is not valid in this context");
                             return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
+                        } else if constexpr (std::is_same_v<V, ast::DefaultExpr>) {
+                            const auto tm = ty.kind == sema::TypeKind::Struct
+                                ? sema_program_.structs.at(ty.struct_index).module_path
+                                : *current_module_path_;
+                            return emit_default_value(tm, ty);
+                        } else if constexpr (std::is_same_v<V, ast::UndefinedExpr>) {
+                            return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
                             return std::visit(
                                 [&]<typename BV>(const BV &bv) -> llvm::Value * {
@@ -1839,7 +1848,9 @@ namespace codegen {
                             auto *slot = create_entry_alloca(current_function_, llvm_type_for(ty, type_module), v.name);
                             locals_[v.name] = LocalValue{.alloca = slot, .type = ty, .type_module = type_module};
                             if (v.init) {
-                                builder_.CreateStore(emit_value_as(*v.init, ty), slot);
+                                if (!std::holds_alternative<ast::UndefinedExpr>(*v.init)) {
+                                    builder_.CreateStore(emit_value_as(*v.init, ty), slot);
+                                }
                             } else {
                                 builder_.CreateStore(emit_default_value(type_module, ty), slot);
                             }

@@ -134,6 +134,14 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct DefaultExpr {
+        SourceLocation location;
+    };
+
+    struct UndefinedExpr {
+        SourceLocation location;
+    };
+
     using BracedInitializerExpr = std::variant<StructExpr, ArrayExpr, EmptyExpr>;
 
     using Expr = std::variant<
@@ -159,7 +167,9 @@ namespace ast {
         IotaExpr,
         DotIdentExpr,
         std::unique_ptr<MatchExpr>,
-        std::unique_ptr<BracedInitializerExpr>>;
+        std::unique_ptr<BracedInitializerExpr>,
+        DefaultExpr,
+        UndefinedExpr>;
 
     struct StructType {
         struct Field {

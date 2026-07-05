@@ -161,6 +161,7 @@ namespace ast {
             case TokenKind::KwSizeOf:
             case TokenKind::KwLen:
             case TokenKind::KwDefault:
+            case TokenKind::KwUndefined:
             case TokenKind::KwMatch:
             case TokenKind::KwIota:
             case TokenKind::Dot:
@@ -439,6 +440,16 @@ namespace ast {
                 return IotaExpr{
                     .location = location,
                 };
+            }
+
+            if (parser.check(TokenKind::KwDefault)) {
+                parser.advance();
+                return DefaultExpr{.location = location};
+            }
+
+            if (parser.check(TokenKind::KwUndefined)) {
+                parser.advance();
+                return UndefinedExpr{.location = location};
             }
 
             if (parser.check(TokenKind::LBrace)) {

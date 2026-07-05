@@ -59,6 +59,34 @@ namespace sema {
             return ResolvedType{.kind = TypeKind::Invalid};
         }
 
+        auto contains_undefined(const ast::Expr &expr) -> bool;
+
+        auto contains_undefined_in_braced(const ast::BracedInitializerExpr &bi) -> bool {
+            return std::visit([]<typename BV>(const BV &bv) -> bool {
+                using BVT = std::decay_t<BV>;
+                if constexpr (std::is_same_v<BVT, ast::StructExpr>) {
+                    return std::ranges::any_of(bv.fields, [](const auto &sf) { return contains_undefined(sf.expr); });
+                } else if constexpr (std::is_same_v<BVT, ast::ArrayExpr>) {
+                    return std::ranges::any_of(bv.values, [](const auto &val) { return contains_undefined(val); });
+                } else {
+                    return false;
+                }
+            }, bi);
+        }
+
+        auto contains_undefined(const ast::Expr &expr) -> bool {
+            return std::visit([]<typename V>(const V &v) -> bool {
+                using VT = std::decay_t<V>;
+                if constexpr (std::is_same_v<VT, ast::UndefinedExpr>) {
+                    return true;
+                } else if constexpr (std::is_same_v<VT, std::unique_ptr<ast::BracedInitializerExpr>>) {
+                    return contains_undefined_in_braced(*v);
+                } else {
+                    return false;
+                }
+            }, expr);
+        }
+
         auto is_cast_legal(const ResolvedType &from, const ResolvedType &to) -> bool {
             if (to.kind == TypeKind::Slice) return from.kind == TypeKind::Pointer || from.kind == TypeKind::Anyptr || from.kind == TypeKind::Array || from.kind == TypeKind::Slice;
             return from.is_scalar() && to.is_scalar();
@@ -763,6 +791,16 @@ namespace sema {
 
                     return arm_type.kind == TypeKind::Invalid ? ResolvedType{.kind = TypeKind::Void} : arm_type;
 
+                } else if constexpr (std::is_same_v<V, ast::DefaultExpr>) {
+                    if (!expected) {
+                        return error(diag, v.location, "'default' requires a known target type");
+                    }
+                    return *expected;
+                } else if constexpr (std::is_same_v<V, ast::UndefinedExpr>) {
+                    if (!expected) {
+                        return error(diag, v.location, "'undefined' requires a known target type");
+                    }
+                    return *expected;
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
                     return std::visit(
                         [&]<typename BV>(const BV &bv) -> ResolvedType {
@@ -873,6 +911,9 @@ namespace sema {
                         has_declared_ty = true;
                     }
                     if (v.init) {
+                        if (!v.is_mut && contains_undefined(*v.init)) {
+                            diag.report_error(DiagnosticStage::Sema, v.location, "'undefined' is not allowed in a 'const' declaration");
+                        }
                         auto init_ty = check_expr(*v.init, locals, module_path, program, diag,
                                                   has_declared_ty ? std::optional(declared_ty) : std::nullopt, loop_depth);
                         if (has_declared_ty && !assignable_in_module(init_ty, declared_ty, module_path, program)) {

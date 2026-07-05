@@ -1,0 +1,50 @@
+// Example: default and undefined initializer expressions
+
+type Point = struct {
+    x: i32
+    y: i32
+}
+
+type Pair = struct {
+    first: i32 = 10
+    second: i32 = 20
+}
+
+pub fn main() -> i32 {
+    // 'default' on a primitive — same as zero
+    mut a: i32 = default       // a == 0
+
+    // 'default' on a struct with field defaults
+    mut p: Pair = default      // p.first == 10, p.second == 20
+
+    // 'default' on a plain struct — all fields zeroed
+    mut q: Point = default     // q.x == 0, q.y == 0
+
+    // 'default' as a field value in a StructExpr
+    mut r: Point = { x = 5, y = default }  // r.x == 5, r.y == 0
+
+    // 'default' as an array element
+    mut arr: [3]i32 = { 1, default, 3 }    // arr[0]==1, arr[1]==0, arr[2]==3
+
+    // 'undefined' on a variable — storage allocated, no initializer emitted
+    mut u: i32 = undefined
+    u = 42                     // u == 42
+
+    // 'undefined' in a struct initializer — that field is left unspecified
+    mut s: Point = { x = 7, y = undefined }
+    s.y = 99                   // s.y == 99
+
+    // 'undefined' in an array — that element is left unspecified
+    mut brr: [3]i32 = { undefined, 2, 3 }
+    brr[0] = 11                // brr[0] == 11
+
+    // Compute a result to verify:
+    // a==0, p.first==10, p.second==20, r.x==5, r.y==0,
+    // arr[0]==1, arr[1]==0, arr[2]==3, u==42, s.x==7, s.y==99,
+    // brr[0]==11, brr[1]==2, brr[2]==3
+    // sum = 0+10+20+5+0+1+0+3+42+7+99+11+2+3 = 203
+    return a + p.first + p.second + r.x + r.y
+         + arr[0] + arr[1] + arr[2]
+         + u + s.x + s.y
+         + brr[0] + brr[1] + brr[2]
+}

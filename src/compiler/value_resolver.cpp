@@ -52,6 +52,10 @@ namespace sema {
                         return true;
                     }
 
+                    if constexpr (std::is_same_v<V, ast::DefaultExpr>) {
+                        return true;
+                    }
+
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
                         if (v->op == ast::UnaryOp::AddressOf || v->op == ast::UnaryOp::Deref) {
                             return false;
