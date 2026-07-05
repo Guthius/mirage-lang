@@ -1,6 +1,8 @@
 #include "sema.hpp"
 
+#include <algorithm>
 #include <format>
+#include <unordered_set>
 
 namespace sema {
     namespace {
@@ -760,6 +762,79 @@ namespace sema {
                     }
 
                     return arm_type.kind == TypeKind::Invalid ? ResolvedType{.kind = TypeKind::Void} : arm_type;
+
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
+                    return std::visit(
+                        [&]<typename BV>(const BV &bv) -> ResolvedType {
+                            using BVT = std::decay_t<BV>;
+
+                            if constexpr (std::is_same_v<BVT, ast::EmptyExpr>) {
+                                if (!expected || (expected->kind != TypeKind::Struct && expected->kind != TypeKind::Array)) {
+                                    return error(diag, bv.location, "braced initializer '{}' requires a struct or array type");
+                                }
+                                return *expected;
+
+                            } else if constexpr (std::is_same_v<BVT, ast::StructExpr>) {
+                                if (!expected) {
+                                    return error(diag, bv.location, "struct initializer requires an expected type");
+                                }
+                                if (expected->kind == TypeKind::Array) {
+                                    return error(diag, bv.location, "struct initializer used where array type is expected");
+                                }
+                                if (expected->kind != TypeKind::Struct) {
+                                    return error(diag, bv.location, "struct initializer requires a struct type");
+                                }
+                                const auto &info = program.structs.at(expected->struct_index);
+                                // Check for unknown and duplicate field names
+                                std::unordered_set<std::string> seen;
+                                for (const auto &sf : bv.fields) {
+                                    if (!seen.insert(sf.name).second) {
+                                        error(diag, sf.location, std::format("duplicate field '{}' in struct initializer", sf.name));
+                                    }
+                                    const auto it = std::ranges::find(info.fields, sf.name, &sema::StructField::name);
+                                    if (it == info.fields.end()) {
+                                        error(diag, sf.location, std::format("no field '{}' on struct", sf.name));
+                                        continue;
+                                    }
+                                    const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth);
+                                    if (!assignable_in_module(val_ty, it->type, module_path, program)) {
+                                        error(diag, sf.location, std::format("type mismatch for field '{}'", sf.name));
+                                    }
+                                }
+                                // Check that all fields without a default are provided
+                                for (const auto &f : info.fields) {
+                                    if (f.init_expr != nullptr) continue;
+                                    const bool provided = std::ranges::any_of(bv.fields, [&](const auto &sf) { return sf.name == f.name; });
+                                    if (!provided) {
+                                        error(diag, bv.location, std::format("missing field '{}' in struct initializer", f.name));
+                                    }
+                                }
+                                return *expected;
+
+                            } else { // ast::ArrayExpr
+                                if (!expected) {
+                                    return error(diag, bv.location, "array initializer requires an expected type");
+                                }
+                                if (expected->kind == TypeKind::Struct) {
+                                    return error(diag, bv.location, "array initializer used where struct type is expected");
+                                }
+                                if (expected->kind != TypeKind::Array) {
+                                    return error(diag, bv.location, "array initializer requires an array type");
+                                }
+                                const auto &array_info = program.modules.at(module_path).arrays.at(expected->array_index);
+                                if (bv.values.size() > array_info.count) {
+                                    return error(diag, bv.location, std::format("too many elements in array initializer: array has {} element(s), got {}", array_info.count, bv.values.size()));
+                                }
+                                for (const auto &val : bv.values) {
+                                    const auto val_ty = check_expr(val, locals, module_path, program, diag, array_info.element_type, loop_depth);
+                                    if (!assignable_in_module(val_ty, array_info.element_type, module_path, program)) {
+                                        error(diag, bv.location, "type mismatch in array initializer element");
+                                    }
+                                }
+                                return *expected;
+                            }
+                        },
+                        *v);
                 }
             },
             expr);

@@ -417,6 +417,110 @@ namespace codegen {
                 return llvm::Constant::getNullValue(llvm_type(module_path, type));
             }
 
+            // Emit a value that default-initializes `type` in `type_module`.
+            // Applies struct field-level init exprs recursively; zeros everything else.
+            auto emit_default_value(const std::string &type_module, const sema::ResolvedType &type) -> llvm::Value * {
+                if (type.kind == sema::TypeKind::Struct) {
+                    const auto &info = sema_program_.structs.at(type.struct_index);
+                    const auto &struct_module = info.module_path;
+                    auto *ll_ty = llvm_type(struct_module, type);
+                    llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
+                    const auto &lowering = struct_lowering(type.struct_index);
+
+                    const auto *saved_path = current_module_path_;
+                    const auto *saved_module = current_module_;
+                    current_module_path_ = &struct_module;
+                    current_module_ = &module_for(struct_module);
+
+                    for (size_t i = 0; i < info.fields.size(); ++i) {
+                        const auto &field = info.fields[i];
+                        const auto ll_idx = lowering.field_indices.at(i);
+                        llvm::Value *fval;
+                        if (field.init_expr) {
+                            fval = emit_expr(*field.init_expr);
+                        } else {
+                            fval = emit_default_value(struct_module, field.type);
+                        }
+                        agg = builder_.CreateInsertValue(agg, fval, {ll_idx});
+                    }
+
+                    current_module_path_ = saved_path;
+                    current_module_ = saved_module;
+                    return agg;
+                }
+                if (type.kind == sema::TypeKind::Array) {
+                    const auto &array_info = module_for(type_module).arrays.at(type.array_index);
+                    auto *ll_ty = llvm_type(type_module, type);
+                    llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
+                    for (uint64_t i = 0; i < array_info.count; ++i) {
+                        auto *elem = emit_default_value(type_module, array_info.element_type);
+                        agg = builder_.CreateInsertValue(agg, elem, {static_cast<unsigned>(i)});
+                    }
+                    return agg;
+                }
+                return zero_value(type_module, type);
+            }
+
+            // Emit a struct value from an explicit StructExpr, filling in field defaults
+            // for any fields not provided in the initializer.
+            auto emit_struct_expr_value(const ast::StructExpr &se, const sema::ResolvedType &ty) -> llvm::Value * {
+                const auto &info = sema_program_.structs.at(ty.struct_index);
+                const auto &struct_module = info.module_path;
+                auto *ll_ty = llvm_type(struct_module, ty);
+                llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
+                const auto &lowering = struct_lowering(ty.struct_index);
+
+                // Track which fields are covered by the StructExpr
+                std::unordered_map<std::string, const ast::StructExpr::Field *> provided;
+                for (const auto &sf : se.fields) {
+                    provided[sf.name] = &sf;
+                }
+
+                // Insert fields in StructExpr order
+                for (const auto &sf : se.fields) {
+                    const auto it = std::ranges::find(info.fields, sf.name, &sema::StructField::name);
+                    if (it == info.fields.end()) continue;
+                    const auto field_pos = static_cast<size_t>(std::distance(info.fields.begin(), it));
+                    const auto ll_idx = lowering.field_indices.at(field_pos);
+                    agg = builder_.CreateInsertValue(agg, emit_value_as(sf.expr, it->type), {ll_idx});
+                }
+
+                // Insert remaining fields from their default init exprs (in declaration order)
+                const auto *saved_path = current_module_path_;
+                const auto *saved_module = current_module_;
+                current_module_path_ = &struct_module;
+                current_module_ = &module_for(struct_module);
+
+                for (size_t i = 0; i < info.fields.size(); ++i) {
+                    const auto &field = info.fields[i];
+                    if (provided.contains(field.name)) continue;
+                    if (!field.init_expr) continue;
+                    const auto ll_idx = lowering.field_indices.at(i);
+                    agg = builder_.CreateInsertValue(agg, emit_expr(*field.init_expr), {ll_idx});
+                }
+
+                current_module_path_ = saved_path;
+                current_module_ = saved_module;
+                return agg;
+            }
+
+            // Emit an array value from an explicit ArrayExpr; trailing elements are
+            // default-initialized (per rule 1) if not all provided.
+            auto emit_array_expr_value(const ast::ArrayExpr &ae, const sema::ResolvedType &ty) -> llvm::Value * {
+                const auto &array_info = module_for(*current_module_path_).arrays.at(ty.array_index);
+                auto *ll_ty = llvm_type(*current_module_path_, ty);
+                llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
+                for (size_t i = 0; i < ae.values.size(); ++i) {
+                    auto *elem = emit_value_as(ae.values[i], array_info.element_type);
+                    agg = builder_.CreateInsertValue(agg, elem, {static_cast<unsigned>(i)});
+                }
+                for (uint64_t i = ae.values.size(); i < array_info.count; ++i) {
+                    auto *elem = emit_default_value(*current_module_path_, array_info.element_type);
+                    agg = builder_.CreateInsertValue(agg, elem, {static_cast<unsigned>(i)});
+                }
+                return agg;
+            }
+
             auto validate_hosted_main() const -> const sema::FunctionSymbol * {
                 const auto root_it = sema_program_.modules.find(ast_program_.root_module_path);
                 if (root_it == sema_program_.modules.end()) {
@@ -1305,6 +1409,22 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, ast::IotaExpr>) {
                             report_codegen_error(diag_, v.location, "iota is not valid in this context");
                             return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
+                            return std::visit(
+                                [&]<typename BV>(const BV &bv) -> llvm::Value * {
+                                    using BVT = std::decay_t<BV>;
+                                    if constexpr (std::is_same_v<BVT, ast::EmptyExpr>) {
+                                        const auto tm = ty.kind == sema::TypeKind::Struct
+                                            ? sema_program_.structs.at(ty.struct_index).module_path
+                                            : *current_module_path_;
+                                        return emit_default_value(tm, ty);
+                                    } else if constexpr (std::is_same_v<BVT, ast::StructExpr>) {
+                                        return emit_struct_expr_value(bv, ty);
+                                    } else {  // ast::ArrayExpr
+                                        return emit_array_expr_value(bv, ty);
+                                    }
+                                },
+                                *v);
                         } else {
                             report_codegen_error(diag_, {}, "unsupported expression in codegen");
                             return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
@@ -1721,7 +1841,7 @@ namespace codegen {
                             if (v.init) {
                                 builder_.CreateStore(emit_value_as(*v.init, ty), slot);
                             } else {
-                                builder_.CreateStore(zero_value(type_module, ty), slot);
+                                builder_.CreateStore(emit_default_value(type_module, ty), slot);
                             }
                         } else if constexpr (std::is_same_v<V, ast::VarDeclGroupStmt>) {
                             auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&v.init);

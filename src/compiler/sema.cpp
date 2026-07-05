@@ -1,5 +1,6 @@
 #include "sema.hpp"
 
+#include <format>
 #include <ranges>
 
 namespace sema {
@@ -64,6 +65,31 @@ namespace sema {
                     }
 
                     info.is_resolved = true;
+                }
+            }
+        }
+
+        void check_struct_field_defaults_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
+            for (const auto &sym : module.symbols | std::views::values) {
+                const auto *ts = std::get_if<TypeSymbol>(&sym);
+                if (!ts || !ts->resolved || ts->resolved->kind != TypeKind::Struct) continue;
+
+                const auto *struct_decl = std::get_if<std::unique_ptr<ast::StructType>>(&ts->decl->type);
+                if (!struct_decl) continue;
+
+                const auto &struct_info = program.structs.at(ts->resolved->struct_index);
+                LocalScope empty;
+
+                for (size_t i = 0; i < (*struct_decl)->fields.size() && i < struct_info.fields.size(); ++i) {
+                    const auto &field = (*struct_decl)->fields[i];
+                    if (!field.init) continue;
+
+                    const auto &field_type = struct_info.fields[i].type;
+                    const auto init_ty = check_expr(*field.init, empty, module_path, program, diag, field_type, 0);
+                    if (!is_assignable(init_ty, field_type)) {
+                        diag.report_error(DiagnosticStage::Sema, field.location,
+                                          std::format("default value type mismatch for field '{}'", field.name));
+                    }
                 }
             }
         }
@@ -139,6 +165,10 @@ namespace sema {
 
         for (const auto &path : program.modules | std::views::keys) {
             resolve_values_for_module(path, out.modules.at(path), out, diag);
+        }
+
+        for (const auto &path : program.modules | std::views::keys) {
+            check_struct_field_defaults_for_module(path, out.modules.at(path), out, diag);
         }
 
         for (const auto &path : program.modules | std::views::keys) {

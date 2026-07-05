@@ -235,6 +235,7 @@ namespace sema {
 
             void layout_struct(const std::string &module_path, const int slot, const std::unique_ptr<ast::StructType> &decl) {
                 StructInfo info;
+                info.module_path = module_path;
                 info.is_packed = decl->is_packed;
 
                 uint32_t offset = 0;
@@ -249,7 +250,12 @@ namespace sema {
                         offset = (offset + f_align - 1) / f_align * f_align;
                     }
 
-                    info.fields.push_back(StructField{.name = field.name, .type = field_type, .offset = offset});
+                    info.fields.push_back(StructField{
+                        .name = field.name,
+                        .type = field_type,
+                        .offset = offset,
+                        .init_expr = field.init ? &field.init.value() : nullptr,
+                    });
                     offset += f_size;
                     max_align = std::max(max_align, f_align);
                 }

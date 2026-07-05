@@ -441,6 +441,10 @@ namespace ast {
                 };
             }
 
+            if (parser.check(TokenKind::LBrace)) {
+                return parse_braced_initializer(parser);
+            }
+
             if (parser.check(TokenKind::Dot)) {
                 parser.advance();
                 const auto name = parser.expect_identifier();
@@ -961,7 +965,7 @@ namespace ast {
 
             const auto var_name = parser.expect_identifier();
             if (parser.check(TokenKind::Comma)) {
-                return parse_var_decl_group_stmt(parser, is_mut, location, std::move(var_name));
+                return parse_var_decl_group_stmt(parser, is_mut, location, var_name);
             }
 
             std::optional<Type> type = std::nullopt;
@@ -1408,6 +1412,7 @@ namespace ast {
             parser.advance();
             is_mut_self = true;
         }
+
         // Consume 'self' identifier
         const auto self_name = parser.expect_identifier();
         if (self_name != "self") {

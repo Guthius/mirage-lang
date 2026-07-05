@@ -11,15 +11,15 @@
 #include <unordered_map>
 
 namespace sema {
-
     struct StructField {
         std::string name;
         ResolvedType type;
         uint32_t offset = 0;
+        const ast::Expr *init_expr = nullptr; // null if no field-level default initializer
     };
 
     struct StructInfo {
-        std::string module_path;  // module where this struct is declared
+        std::string module_path; // module where this struct is declared
         std::vector<StructField> fields;
         uint32_t size = 0;
         uint32_t align = 1;
@@ -51,10 +51,10 @@ namespace sema {
 
     struct MethodInfo {
         const ast::ImplDecl::Function *decl = nullptr;
-        std::string impl_module;        // module where this impl is defined
-        std::string type_name;          // type name this method belongs to
-        ResolvedType self_type;         // resolved type of self (the struct/enum type)
-        std::vector<ResolvedType> param_types;   // non-self params
+        std::string impl_module;               // module where this impl is defined
+        std::string type_name;                 // type name this method belongs to
+        ResolvedType self_type;                // resolved type of self (the struct/enum type)
+        std::vector<ResolvedType> param_types; // non-self params
         std::vector<ResolvedType> return_types;
         bool is_mut_self = false;
         bool is_pub = false;
@@ -80,7 +80,7 @@ namespace sema {
 
     struct Program {
         std::unordered_map<std::string, ProgramModule> modules;
-        std::vector<StructInfo> structs;  // global; struct_index is unique across all modules
+        std::vector<StructInfo> structs; // global; struct_index is unique across all modules
         std::vector<EnumInfo> enums;
         ResolveState resolve_state;
         bool ok = false;

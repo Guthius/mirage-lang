@@ -1,0 +1,30 @@
+// Struct with a field default, to exercise recursive default-init inside arrays.
+type Item = struct {
+    val: i32 = 7
+}
+
+pub fn main() -> i32 {
+    // No init expr: all elements zero-initialized (i32 default is 0).
+    // arr1 = [0, 0, 0]
+    mut arr1: [3]i32
+
+    // Partial ArrayExpr: first two elements set, third default-initialized (0).
+    // arr2 = [1, 2, 0]
+    mut arr2: [3]i32 = {1, 2}
+
+    // Exact-size ArrayExpr: all three elements provided.
+    // arr3 = [10, 20, 30]
+    mut arr3: [3]i32 = {10, 20, 30}
+
+    // Empty braces: equivalent to no init expr — zero-initialize all elements.
+    // arr4 = [0, 0, 0]
+    mut arr4: [3]i32 = {}
+
+    // Array of structs: no init expr; each Item is recursively default-initialized
+    // using Item's field default (val = 7).
+    // items = [{val=7}, {val=7}]
+    mut items: [2]Item
+
+    return arr1[0] + arr2[0] + arr2[1] + arr3[2] + arr4[0] + items[0].val
+    // 0 + 1 + 2 + 30 + 0 + 7 = 40
+}
