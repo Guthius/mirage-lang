@@ -31,6 +31,8 @@ namespace sema {
                     if (ef->decl->return_type) {
                         ef->return_type = resolve_type(*ef->decl->return_type, module_path, program, diag);
                     }
+
+                    ef->is_variadic = ef->decl->is_variadic;
                 }
             }
         }

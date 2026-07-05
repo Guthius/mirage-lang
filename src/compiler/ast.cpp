@@ -1089,6 +1089,13 @@ namespace ast {
             std::vector<FunctionDecl::Param> params;
 
             while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                if (parser.check(TokenKind::DotDotDot)) {
+                    parser.report_error(parser.current_location(),
+                        "variadic parameters ('...') are only allowed on 'ext fn' declarations, not 'fn'");
+                    parser.advance();
+                    break;
+                }
+
                 const auto param_location = parser.current_location();
                 const auto param_is_mutable = parser.match(TokenKind::KwMut);
                 const auto param_name = parser.expect_identifier();
@@ -1146,12 +1153,26 @@ namespace ast {
             };
         }
 
-        auto parse_ext_function_params(Parser &parser) -> std::vector<ExtFunctionDecl::Param> {
+        auto parse_ext_function_params(Parser &parser, bool &out_is_variadic) -> std::vector<ExtFunctionDecl::Param> {
             parser.expect(TokenKind::LParen, "'('");
 
             std::vector<ExtFunctionDecl::Param> params;
+            out_is_variadic = false;
 
             while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                if (parser.check(TokenKind::DotDotDot)) {
+                    if (params.empty()) {
+                        parser.report_error(parser.current_location(),
+                            "'...' requires at least one named parameter before it in 'ext fn'");
+                    }
+                    if (out_is_variadic) {
+                        parser.report_error(parser.current_location(), "duplicate '...' in parameter list");
+                    }
+                    parser.advance();
+                    out_is_variadic = true;
+                    break;
+                }
+
                 const auto param_location = parser.current_location();
                 const auto param_name = parser.expect_identifier();
 
@@ -1187,11 +1208,13 @@ namespace ast {
             parser.expect(TokenKind::KwFn, "'fn'");
 
             const auto fn_name = parser.expect_identifier();
-            auto fn_params = parse_ext_function_params(parser);
+            bool is_variadic = false;
+            auto fn_params = parse_ext_function_params(parser, is_variadic);
             auto fn_return_type = parse_ext_function_return_type(parser);
 
             return ExtFunctionDecl{
                 .is_pub = is_pub,
+                .is_variadic = is_variadic,
                 .name = fn_name,
                 .params = std::move(fn_params),
                 .return_type = std::move(fn_return_type),

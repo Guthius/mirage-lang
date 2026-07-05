@@ -114,7 +114,7 @@ namespace sema {
             return true;
         }
 
-        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, int loop_depth) -> bool;
+        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, int loop_depth) -> bool;
         auto try_resolve_namespace_chain(const ast::Expr &expr, const std::string &module_path, LocalScope &locals, Program &program) -> std::optional<std::string>;
 
         auto check_group_call_returns(const ast::CallExpr &call, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth) -> std::vector<ResolvedType> {
@@ -144,7 +144,7 @@ namespace sema {
                         error(diag, call.location, std::format("no method '{}' on type", (*member)->member));
                         return {};
                     }
-                    check_call_args(call.args, method->param_types, locals, module_path, program, diag, call.location, (*member)->member, loop_depth);
+                    check_call_args(call.args, method->param_types, false, locals, module_path, program, diag, call.location, (*member)->member, loop_depth);
                     return method->return_types;
                 }
             } else {
@@ -172,14 +172,14 @@ namespace sema {
                             error(diag, call.location, std::format("'{}' is not pub", name));
                             return {};
                         }
-                        check_call_args(call.args, sym.params, locals, module_path, program, diag, call.location, name, loop_depth);
+                        check_call_args(call.args, sym.params, false, locals, module_path, program, diag, call.location, name, loop_depth);
                         return sym.return_types;
                     } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
                         if (check_pub && !sym.is_pub) {
                             error(diag, call.location, std::format("'{}' is not pub", name));
                             return {};
                         }
-                        check_call_args(call.args, sym.params, locals, module_path, program, diag, call.location, name, loop_depth);
+                        check_call_args(call.args, sym.params, sym.is_variadic, locals, module_path, program, diag, call.location, name, loop_depth);
                         std::vector<ResolvedType> returns;
                         if (sym.return_type) returns.push_back(*sym.return_type);
                         return returns;
@@ -191,17 +191,49 @@ namespace sema {
                 sym_it->second);
         }
 
-        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, const int loop_depth) -> bool {
-            if (args.size() != params.size()) {
-                error(diag, loc, std::format("'{}' expects {} argument(s), got {}", callee_desc, params.size(), args.size()));
+        static auto is_valid_variadic_arg(const ResolvedType &ty) -> bool {
+            switch (ty.kind) {
+            case TypeKind::I32: case TypeKind::U32:
+            case TypeKind::I64: case TypeKind::U64:
+            case TypeKind::USize: case TypeKind::Error:
+            case TypeKind::F64:
+            case TypeKind::Pointer: case TypeKind::Anyptr:
+                return true;
+            default:
                 return false;
+            }
+        }
+
+        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, const bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, const int loop_depth) -> bool {
+            if (is_variadic) {
+                if (args.size() < params.size()) {
+                    error(diag, loc, std::format("'{}' expects at least {} argument(s), got {}", callee_desc, params.size(), args.size()));
+                    return false;
+                }
+            } else {
+                if (args.size() != params.size()) {
+                    error(diag, loc, std::format("'{}' expects {} argument(s), got {}", callee_desc, params.size(), args.size()));
+                    return false;
+                }
             }
 
             bool ok = true;
-            for (size_t i = 0; i < args.size(); ++i) {
+            for (size_t i = 0; i < params.size(); ++i) {
                 if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, params[i], loop_depth); !assignable_in_module(arg_ty, params[i], module_path, program)) {
                     error(diag, loc, std::format("'{}' argument {} type mismatch", callee_desc, i + 1));
                     ok = false;
+                }
+            }
+            if (is_variadic) {
+                for (size_t i = params.size(); i < args.size(); ++i) {
+                    const auto arg_ty = check_expr(args[i], locals, module_path, program, diag, std::nullopt, loop_depth);
+                    if (!is_valid_variadic_arg(arg_ty)) {
+                        error(diag, loc, std::format(
+                            "'{}' variadic argument {} has a type that violates C default argument promotions: "
+                            "variadic arguments must be at least 32 bits wide and floats must be f64; use cast()",
+                            callee_desc, i + 1));
+                        ok = false;
+                    }
                 }
             }
             return ok;
@@ -544,19 +576,19 @@ namespace sema {
                                     using S = std::decay_t<T1>;
                                     if constexpr (std::is_same_v<S, FunctionSymbol>) {
                                         if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
-                                        check_call_args(v->args, sym.params, locals, module_path, program, diag, v->location, fn_name, loop_depth);
+                                        check_call_args(v->args, sym.params, false, locals, module_path, program, diag, v->location, fn_name, loop_depth);
                                         if (sym.return_types.size() > 1) {
                                             return error(diag, v->location, "multi-value capture is not yet supported here");
                                         }
                                         return sym.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sym.return_types.front();
                                     } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
                                         if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
-                                        check_call_args(v->args, sym.params, locals, module_path, program, diag, v->location, fn_name, loop_depth);
+                                        check_call_args(v->args, sym.params, sym.is_variadic, locals, module_path, program, diag, v->location, fn_name, loop_depth);
                                         return sym.return_type.value_or(ResolvedType{.kind = TypeKind::Void});
                                     } else if constexpr (std::is_same_v<S, MacroSymbol>) {
                                         if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
                                         auto &resolved_macro = resolve_macro_symbol(*target_module, fn_name, program, diag, v->location);
-                                        check_call_args(v->args, resolved_macro.params, locals, module_path, program, diag, v->location, fn_name, loop_depth);
+                                        check_call_args(v->args, resolved_macro.params, false, locals, module_path, program, diag, v->location, fn_name, loop_depth);
                                         return resolved_macro.result_type;
                                     } else {
                                         return error(diag, v->location, std::format("'{}' is not callable", fn_name));
@@ -573,7 +605,7 @@ namespace sema {
                         if (!method) {
                             return error(diag, v->location, std::format("no method '{}' on type", (*member_callee)->member));
                         }
-                        check_call_args(v->args, method->param_types, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth);
+                        check_call_args(v->args, method->param_types, false, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth);
                         return method->return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : method->return_types.front();
                     }
 
@@ -600,17 +632,17 @@ namespace sema {
                         [&]<typename T1>(const T1 &sym) -> ResolvedType {
                             using S = std::decay_t<T1>;
                             if constexpr (std::is_same_v<S, FunctionSymbol>) {
-                                check_call_args(v->args, sym.params, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth);
+                                check_call_args(v->args, sym.params, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth);
                                 if (sym.return_types.size() > 1) {
                                     return error(diag, v->location, "multi-value capture is not yet supported here");
                                 }
                                 return sym.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sym.return_types.front();
                             } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
-                                check_call_args(v->args, sym.params, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth);
+                                check_call_args(v->args, sym.params, sym.is_variadic, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth);
                                 return sym.return_type.value_or(ResolvedType{.kind = TypeKind::Void});
                             } else if constexpr (std::is_same_v<S, MacroSymbol>) {
                                 auto &resolved_macro = resolve_macro_symbol(module_path, callee_ident->name, program, diag, v->location);
-                                check_call_args(v->args, resolved_macro.params, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth);
+                                check_call_args(v->args, resolved_macro.params, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth);
                                 return resolved_macro.result_type;
                             } else {
                                 return error(diag, v->location, std::format("'{}' is not callable", callee_ident->name));

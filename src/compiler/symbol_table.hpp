@@ -26,6 +26,7 @@ namespace sema {
         std::vector<ResolvedType> params;
         std::optional<ResolvedType> return_type;
         bool is_pub = false;
+        bool is_variadic = false;
     };
 
     struct MacroSymbol {

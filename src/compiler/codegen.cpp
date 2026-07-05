@@ -370,12 +370,12 @@ namespace codegen {
                 }
             }
 
-            auto function_type(const std::string &module_path, const std::vector<sema::ResolvedType> &params, const std::vector<sema::ResolvedType> &returns) -> llvm::FunctionType * {
+            auto function_type(const std::string &module_path, const std::vector<sema::ResolvedType> &params, const std::vector<sema::ResolvedType> &returns, const bool is_vararg = false) -> llvm::FunctionType * {
                 std::vector<llvm::Type *> param_types;
                 for (const auto &param : params) {
                     param_types.push_back(llvm_type(module_path, param));
                 }
-                return llvm::FunctionType::get(return_type(module_path, returns), param_types, false);
+                return llvm::FunctionType::get(return_type(module_path, returns), param_types, is_vararg);
             }
 
             void declare_globals_and_functions() {
@@ -401,7 +401,7 @@ namespace codegen {
                                 returns.push_back(*ef->return_type);
                             }
                             ext_functions_[path + "\n" + name] = llvm::Function::Create(
-                                function_type(path, ef->params, returns),
+                                function_type(path, ef->params, returns, ef->is_variadic),
                                 llvm::GlobalValue::ExternalLinkage,
                                 name, *module_);
                         }
@@ -709,27 +709,45 @@ namespace codegen {
                 auto *entry = llvm::BasicBlock::Create(*context_, "entry", start);
                 builder_.SetInsertPoint(entry);
 
+                // _start is an OS entry point: %rsp is 16-byte aligned on entry, not 8-byte
+                // as LLVM assumes for normal functions. Force realignment so that calling main
+                // (which pops %rsp by 8 via the call instruction) satisfies the x86-64 ABI.
+                auto *align_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), {}, false);
+                auto *align_asm = llvm::InlineAsm::get(align_ty, "and $$-16, %rsp",
+                    "~{rsp},~{dirflag},~{fpsr},~{flags}", true);
+                builder_.CreateCall(align_asm);
+
                 auto *main = functions_.at(FunctionKey{ast_program_.root_module_path, "main"});
-                llvm::Value *exit_code = nullptr;
+                llvm::Value *exit_code_i32 = nullptr;
                 if (main_fn.return_types.empty()) {
                     builder_.CreateCall(main);
-                    exit_code = builder_.getInt64(0);
+                    exit_code_i32 = builder_.getInt32(0);
                 } else {
-                    auto *main_result = builder_.CreateCall(main);
-                    exit_code = builder_.CreateSExt(main_result, llvm::Type::getInt64Ty(*context_));
+                    exit_code_i32 = builder_.CreateCall(main);
                 }
 
-                auto *syscall_ty = llvm::FunctionType::get(
-                    llvm::Type::getVoidTy(*context_),
-                    {llvm::Type::getInt64Ty(*context_), llvm::Type::getInt64Ty(*context_)},
-                    false);
-                auto *syscall = llvm::InlineAsm::get(
-                    syscall_ty,
-                    "syscall",
-                    "{rax},{rdi},~{rcx},~{r11},~{memory}",
-                    true);
-
-                builder_.CreateCall(syscall, {builder_.getInt64(231), exit_code});
+                if (options_.freestanding) {
+                    auto *exit_code_i64 = builder_.CreateSExt(exit_code_i32, llvm::Type::getInt64Ty(*context_));
+                    auto *syscall_ty = llvm::FunctionType::get(
+                        llvm::Type::getVoidTy(*context_),
+                        {llvm::Type::getInt64Ty(*context_), llvm::Type::getInt64Ty(*context_)},
+                        false);
+                    auto *syscall = llvm::InlineAsm::get(
+                        syscall_ty,
+                        "syscall",
+                        "{rax},{rdi},~{rcx},~{r11},~{memory}",
+                        true);
+                    builder_.CreateCall(syscall, {builder_.getInt64(231), exit_code_i64});
+                } else {
+                    // Call libc exit() so that stdio buffers are flushed and atexit handlers run.
+                    auto *exit_ty = llvm::FunctionType::get(
+                        llvm::Type::getVoidTy(*context_),
+                        {llvm::Type::getInt32Ty(*context_)},
+                        false);
+                    auto *exit_fn = llvm::Function::Create(exit_ty, llvm::GlobalValue::ExternalLinkage, "exit", *module_);
+                    exit_fn->setDoesNotReturn();
+                    builder_.CreateCall(exit_fn, {exit_code_i32});
+                }
                 builder_.CreateUnreachable();
             }
 
@@ -1277,7 +1295,11 @@ namespace codegen {
                 }
                 if (const auto *ef = std::get_if<sema::ExtFunctionSymbol>(&sym_it->second)) {
                     for (size_t i = 0; i < call.args.size(); ++i) {
-                        args.push_back(emit_value_as(call.args[i], ef->params[i]));
+                        if (i < ef->params.size()) {
+                            args.push_back(emit_value_as(call.args[i], ef->params[i]));
+                        } else {
+                            args.push_back(emit_expr(call.args[i]));
+                        }
                     }
                     return builder_.CreateCall(ext_functions_.at(global_key(target_module, name)), args);
                 }

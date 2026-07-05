@@ -438,6 +438,7 @@ namespace ast {
         };
 
         bool is_pub;
+        bool is_variadic = false;
         std::string name;
         std::vector<Param> params;
         std::optional<Type> return_type;

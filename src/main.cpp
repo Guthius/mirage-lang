@@ -131,6 +131,7 @@ namespace {
         } else {
             args.emplace_back("-nostartfiles");
         }
+        args.emplace_back("-no-pie");
 
         args.push_back(object_path.string());
         args.emplace_back("-o");
