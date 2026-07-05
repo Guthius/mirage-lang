@@ -14,6 +14,7 @@ namespace ast {
         virtual auto peek() const -> const Token & = 0;
         virtual auto advance() -> const Token & = 0;
         virtual auto check(TokenKind kind) const -> bool = 0;
+        virtual auto check_next(TokenKind kind) const -> bool = 0;
         virtual auto match(TokenKind kind) -> bool = 0;
         virtual auto match_identifier(std::string_view lexeme) -> bool = 0;
         virtual auto expect(TokenKind kind, std::string_view message) -> const Token = 0;

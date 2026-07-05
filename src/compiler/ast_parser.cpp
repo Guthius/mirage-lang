@@ -52,6 +52,13 @@ namespace ast {
                 return current().kind == kind;
             }
 
+            [[nodiscard]] auto check_next(const TokenKind kind) const -> bool override {
+                if (pos_ + 1 < tokens_.size()) {
+                    return tokens_[pos_ + 1].kind == kind;
+                }
+                return false;
+            }
+
             auto match(const TokenKind kind) -> bool override {
                 if (check(kind)) {
                     advance();

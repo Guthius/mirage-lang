@@ -70,18 +70,6 @@ namespace ast {
         SourceLocation location;
     };
 
-    struct StructType {
-        struct Field {
-            std::string name;
-            Type type;
-            SourceLocation location;
-        };
-
-        bool is_packed;
-        std::vector<Field> fields;
-        SourceLocation location;
-    };
-
     struct LiteralIntegerExpr {
         uint64_t value;
         SourceLocation location;
@@ -140,6 +128,14 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct StructExpr;
+    struct ArrayExpr;
+    struct EmptyExpr {
+        SourceLocation location;
+    };
+
+    using BracedInitializerExpr = std::variant<StructExpr, ArrayExpr, EmptyExpr>;
+
     using Expr = std::variant<
         LiteralIntegerExpr,
         LiteralFloatExpr,
@@ -162,7 +158,21 @@ namespace ast {
         std::unique_ptr<MemberExpr>,
         IotaExpr,
         DotIdentExpr,
-        std::unique_ptr<MatchExpr>>;
+        std::unique_ptr<MatchExpr>,
+        std::unique_ptr<BracedInitializerExpr>>;
+
+    struct StructType {
+        struct Field {
+            std::string name;
+            Type type;
+            std::optional<Expr> init;
+            SourceLocation location;
+        };
+
+        bool is_packed;
+        std::vector<Field> fields;
+        SourceLocation location;
+    };
 
     struct ArrayType {
         Type base_type;
@@ -312,6 +322,22 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct StructExpr {
+        struct Field {
+            std::string name;
+            Expr expr;
+            SourceLocation location;
+        };
+
+        std::vector<Field> fields;
+        SourceLocation location;
+    };
+
+    struct ArrayExpr {
+        std::vector<Expr> values;
+        SourceLocation location;
+    };
+
     struct BlockStmt;
     struct IfStmt;
     struct WhileStmt;
@@ -450,7 +476,7 @@ namespace ast {
             bool is_pub;
             bool is_mut_self;
             std::string name;
-            std::vector<Param> params;  // non-self params
+            std::vector<Param> params; // non-self params
             std::vector<Type> return_types;
             Stmt body;
             SourceLocation location;
