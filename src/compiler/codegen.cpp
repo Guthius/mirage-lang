@@ -1,7 +1,6 @@
 #include "codegen.hpp"
 
 #include <llvm/ADT/APFloat.h>
-#include <llvm/ADT/APInt.h>
 #include <llvm/IR/ConstantFold.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
@@ -148,7 +147,7 @@ namespace codegen {
                   module_(std::make_unique<llvm::Module>("mirage", *context_)),
                   builder_(*context_) {}
 
-            auto method_fn_key(const std::string &type_name, const std::string &method_name) const -> std::string {
+            static auto method_fn_key(const std::string &type_name, const std::string &method_name) -> std::string {
                 return type_name + "::" + method_name;
             }
 
@@ -305,17 +304,19 @@ namespace codegen {
                 case sema::TypeKind::Pointer:
                 case sema::TypeKind::Anyptr:  return llvm::PointerType::getUnqual(*context_);
                 case sema::TypeKind::Struct:  return struct_lowering(type.struct_index).type;
-                case sema::TypeKind::Array: {
-                    const auto &array = module_for(module_path).arrays.at(type.array_index);
-                    return llvm::ArrayType::get(llvm_type(module_path, array.element_type), array.count);
-                }
+                case sema::TypeKind::Array:
+                    {
+                        const auto &array = module_for(module_path).arrays.at(type.array_index);
+                        return llvm::ArrayType::get(llvm_type(module_path, array.element_type), array.count);
+                    }
                 case sema::TypeKind::Slice:
                     return llvm::StructType::get(*context_, {llvm::PointerType::getUnqual(*context_), llvm::Type::getInt64Ty(*context_)});
-                case sema::TypeKind::Enum: {
-                    const auto &enum_info = sema_program_.enums.at(type.enum_index);
-                    return llvm_type(module_path, enum_info.underlying_type);
-                }
-                default:                      return llvm::Type::getVoidTy(*context_);
+                case sema::TypeKind::Enum:
+                    {
+                        const auto &enum_info = sema_program_.enums.at(type.enum_index);
+                        return llvm_type(module_path, enum_info.underlying_type);
+                    }
+                default: return llvm::Type::getVoidTy(*context_);
                 }
             }
 
@@ -408,7 +409,7 @@ namespace codegen {
                 }
             }
 
-            auto global_key(const std::string &module_path, const std::string &name) const -> std::string {
+            static auto global_key(const std::string &module_path, const std::string &name) -> std::string {
                 return module_path + "\n" + name;
             }
 
@@ -416,7 +417,7 @@ namespace codegen {
                 return llvm::Constant::getNullValue(llvm_type(module_path, type));
             }
 
-            auto validate_hosted_main() -> const sema::FunctionSymbol * {
+            auto validate_hosted_main() const -> const sema::FunctionSymbol * {
                 const auto root_it = sema_program_.modules.find(ast_program_.root_module_path);
                 if (root_it == sema_program_.modules.end()) {
                     report_codegen_error(diag_, {}, "internal error: root module not found during codegen");
@@ -504,8 +505,8 @@ namespace codegen {
                             }
 
                             llvm::Type *ret = info.return_types.empty()
-                                                 ? llvm::Type::getVoidTy(*context_)
-                                                 : llvm_type(path, info.return_types.front());
+                                                  ? llvm::Type::getVoidTy(*context_)
+                                                  : llvm_type(path, info.return_types.front());
                             if (info.return_types.size() > 1) {
                                 // Multi-return: return struct (simplified - use first for now)
                                 // TODO: multi-return methods
@@ -522,7 +523,7 @@ namespace codegen {
             }
 
             // Find the pointer ResolvedType for self_type in the current module's pointees.
-            auto find_self_ptr_type(const sema::ResolvedType &self_type) -> sema::ResolvedType {
+            auto find_self_ptr_type(const sema::ResolvedType &self_type) const -> sema::ResolvedType {
                 for (size_t i = 0; i < current_module_->pointer_pointees.size(); ++i) {
                     if (current_module_->pointer_pointees[i] == self_type) {
                         return sema::ResolvedType{.kind = sema::TypeKind::Pointer, .pointee_index = static_cast<int>(i)};
@@ -547,7 +548,7 @@ namespace codegen {
                 auto arg_it = current_function_->arg_begin();
                 arg_it->setName("self");
                 auto *self_slot = create_entry_alloca(current_function_, llvm::PointerType::getUnqual(*context_), "self");
-                builder_.CreateStore(&*arg_it, self_slot);
+                builder_.CreateStore(arg_it, self_slot);
                 locals_["self"] = LocalValue{
                     .alloca = self_slot,
                     .type = find_self_ptr_type(info.self_type),
@@ -561,7 +562,7 @@ namespace codegen {
                     const auto &param = info.decl->params[index];
                     arg_it->setName(param.name);
                     auto *slot = create_entry_alloca(current_function_, llvm_type(module_path, info.param_types[index]), param.name);
-                    builder_.CreateStore(&*arg_it, slot);
+                    builder_.CreateStore(arg_it, slot);
                     locals_[param.name] = LocalValue{
                         .alloca = slot,
                         .type = info.param_types[index],
@@ -586,7 +587,7 @@ namespace codegen {
                     current_module_path_ = &path;
                     current_module_ = &mod;
                     for (const auto &[type_name, method_map] : mod.methods) {
-                        for (const auto &[method_name, info] : method_map) {
+                        for (const auto &info : method_map | std::views::values) {
                             if (!info.is_resolved) continue;
                             emit_method(path, type_name, info);
                         }
@@ -626,8 +627,8 @@ namespace codegen {
                 builder_.CreateUnreachable();
             }
 
-            auto create_entry_alloca(llvm::Function *fn, llvm::Type *type, llvm::StringRef name) -> llvm::AllocaInst * {
-                llvm::IRBuilder<> tmp(&fn->getEntryBlock(), fn->getEntryBlock().begin());
+            static auto create_entry_alloca(llvm::Function *fn, llvm::Type *type, llvm::StringRef name) -> llvm::AllocaInst * {
+                llvm::IRBuilder tmp(&fn->getEntryBlock(), fn->getEntryBlock().begin());
                 return tmp.CreateAlloca(type, nullptr, name);
             }
 
@@ -681,7 +682,7 @@ namespace codegen {
                 return builder_.CreateICmpNE(value, llvm::ConstantInt::get(llvm_type(*current_module_path_, type), 0));
             }
 
-            auto signedness(const sema::ResolvedType &type) const -> bool {
+            static auto signedness(const sema::ResolvedType &type) -> bool {
                 return type.is_signed();
             }
 
@@ -1326,7 +1327,7 @@ namespace codegen {
                     std::format(".str.{}", string_counter_++));
                 llvm::Constant *indices[] = {builder_.getInt32(0), builder_.getInt32(0)};
                 return llvm::ConstantExpr::getInBoundsGetElementPtr(
-                    array_ty, global, llvm::ArrayRef<llvm::Constant *>(indices));
+                    array_ty, global, llvm::ArrayRef(indices));
             }
 
             auto build_slice_value(llvm::Value *ptr, llvm::Value *count, const sema::ResolvedType &slice_type, const std::string &type_module) -> llvm::Value * {
@@ -1453,7 +1454,7 @@ namespace codegen {
                 return phi;
             }
 
-            auto compound_op(ast::AssignOp op) -> ast::BinaryOp {
+            static auto compound_op(ast::AssignOp op) -> ast::BinaryOp {
                 switch (op) {
                 case ast::AssignOp::AddAssign: return ast::BinaryOp::Add;
                 case ast::AssignOp::SubAssign: return ast::BinaryOp::Sub;
@@ -1509,7 +1510,7 @@ namespace codegen {
                 return expr.is_prefix ? next : old;
             }
 
-            auto sizeof_operand(const ast::SizeOfExpr &expr) -> uint64_t {
+            auto sizeof_operand(const ast::SizeOfExpr &expr) const -> uint64_t {
                 if (const auto *ident = std::get_if<ast::IdentExpr>(&expr.operand)) {
                     if (const auto it = current_module_->symbols.find(ident->name); it != current_module_->symbols.end()) {
                         if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second); ts && ts->resolved) {
@@ -1629,7 +1630,7 @@ namespace codegen {
                     expr);
             }
 
-            auto cast_opcode(const sema::ResolvedType &from, const sema::ResolvedType &to) const -> unsigned {
+            static auto cast_opcode(const sema::ResolvedType &from, const sema::ResolvedType &to) -> unsigned {
                 if (from.is_integer() && to.is_integer()) {
                     const auto from_bits = int_bits(from);
                     const auto to_bits = int_bits(to);
@@ -1645,7 +1646,7 @@ namespace codegen {
                 return llvm::Instruction::BitCast;
             }
 
-            auto const_binary(const ast::BinaryExpr &expr, llvm::Constant *lhs, llvm::Constant *rhs) -> llvm::Constant * {
+            auto const_binary(const ast::BinaryExpr &expr, llvm::Constant *lhs, llvm::Constant *rhs) const -> llvm::Constant * {
                 const auto lhs_type = current_module_->expr_types.at(sema::get_expr_key(expr.lhs));
                 if (expr.op == ast::BinaryOp::Equal || expr.op == ast::BinaryOp::NotEqual ||
                     expr.op == ast::BinaryOp::Less || expr.op == ast::BinaryOp::Greater ||

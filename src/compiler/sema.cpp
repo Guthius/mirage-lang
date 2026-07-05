@@ -51,7 +51,7 @@ namespace sema {
                 // Resolve the self type for this type name
                 const auto self_type = resolve_type_symbol(module_path, type_name, program, diag, {});
 
-                for (auto &[method_name, info] : method_map) {
+                for (auto &info : method_map | std::views::values) {
                     if (info.is_resolved) continue;
 
                     info.self_type = self_type;
@@ -90,8 +90,8 @@ namespace sema {
             }
 
             // Check impl method bodies
-            for (auto &[type_name, method_map] : module.methods) {
-                for (auto &[method_name, info] : method_map) {
+            for (auto &method_map : module.methods | std::views::values) {
+                for (auto &info : method_map | std::views::values) {
                     if (!info.is_resolved) continue;
 
                     LocalScope locals;
