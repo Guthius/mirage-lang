@@ -90,6 +90,7 @@ auto token_kind_name(const TokenKind kind) -> const char * {
     case TokenKind::ColonEqual:      return "COLON_EQ";
     case TokenKind::Arrow:           return "ARROW";
     case TokenKind::DotDot:          return "DOT_DOT";
+    case TokenKind::DotDotDot:       return "DOT_DOT_DOT";
     case TokenKind::Question:        return "QUESTION";
     case TokenKind::Colon:           return "COLON";
     case TokenKind::LParen:          return "LPAREN";

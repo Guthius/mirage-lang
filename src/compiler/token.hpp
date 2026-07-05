@@ -101,6 +101,7 @@ enum class TokenKind : uint8_t {
     ColonEqual,
     Arrow,
     DotDot,
+    DotDotDot,
     Question,
     Colon,
 

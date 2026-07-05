@@ -330,7 +330,13 @@ namespace lexer {
                 case '~': return make_token(TokenKind::Tilde, start);
                 case '?': return make_token(TokenKind::Question, start);
                 case ';': return make_token(TokenKind::Semicolon, start);
-                case '.': return match_double('.', TokenKind::DotDot, TokenKind::Dot);
+
+                case '.':
+                    if (match('.')) {
+                        if (match('.')) return make_token(TokenKind::DotDotDot, start);
+                        return make_token(TokenKind::DotDot, start);
+                    }
+                    return make_token(TokenKind::Dot, start);
 
                 case '+':
                     if (match('+')) return make_token(TokenKind::PlusPlus, start);
