@@ -338,10 +338,21 @@ namespace ast {
     };
 
     struct MatchExpr {
-        struct Arm {
-            std::string field;
+        // Arm pattern variants
+        struct VariantPattern {
+            std::string name;
             std::optional<std::string> capture_name; // nullopt if no capture
             bool capture_by_ref = false;             // true for (&v) capture
+        };
+        struct LiteralPattern {
+            std::unique_ptr<Expr> expr; // compile-time constant; type-checked against operand type
+        };
+        struct DefaultPattern {}; // the '_' wildcard arm
+
+        using ArmPattern = std::variant<VariantPattern, LiteralPattern, DefaultPattern>;
+
+        struct Arm {
+            ArmPattern pattern;
             Expr value;
             SourceLocation location;
         };
@@ -379,6 +390,7 @@ namespace ast {
     struct BlockStmt;
     struct IfStmt;
     struct WhileStmt;
+    struct SwitchStmt;
 
     struct ExprStmt {
         Expr expr;
@@ -417,6 +429,7 @@ namespace ast {
         std::unique_ptr<BlockStmt>,
         std::unique_ptr<IfStmt>,
         std::unique_ptr<WhileStmt>,
+        std::unique_ptr<SwitchStmt>,
         ExprStmt,
         VarDeclStmt,
         VarDeclGroupStmt,
@@ -439,6 +452,21 @@ namespace ast {
     struct WhileStmt {
         Expr condition;
         Stmt body;
+        SourceLocation location;
+    };
+
+    // switch EXPR { PATTERN: STMT, PATTERN: STMT, ... }
+    // Statement-level switch: no result type, no exhaustiveness requirement.
+    // Same arm patterns as MatchExpr; arm bodies are statements.
+    struct SwitchStmt {
+        struct Arm {
+            MatchExpr::ArmPattern pattern;
+            Stmt body;
+            SourceLocation location;
+        };
+
+        Expr operand;
+        std::vector<Arm> arms;
         SourceLocation location;
     };
 

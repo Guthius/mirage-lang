@@ -41,6 +41,7 @@ auto token_kind_name(const TokenKind kind) -> const char * {
     case TokenKind::KwLen:           return "KW_LEN";
     case TokenKind::KwMatch:         return "KW_MATCH";
     case TokenKind::KwUnion:         return "KW_UNION";
+    case TokenKind::KwSwitch:        return "KW_SWITCH";
     case TokenKind::KwU8:            return "KW_U8";
     case TokenKind::KwU16:           return "KW_U16";
     case TokenKind::KwU32:           return "KW_U32";

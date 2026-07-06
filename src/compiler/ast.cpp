@@ -567,27 +567,43 @@ namespace ast {
                 std::vector<MatchExpr::Arm> arms;
                 while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
                     const auto arm_location = parser.current_location();
-                    parser.expect(TokenKind::Dot, "'.'");
-                    auto field = parser.expect_identifier();
 
-                    // Optional capture: (name) or (&name)
-                    std::optional<std::string> capture_name;
-                    bool capture_by_ref = false;
-                    if (parser.match(TokenKind::LParen)) {
-                        if (parser.match(TokenKind::Ampersand)) {
-                            capture_by_ref = true;
+                    // Parse arm pattern
+                    auto pattern = [&]() -> MatchExpr::ArmPattern {
+                        if (parser.check(TokenKind::Dot)) {
+                            // VariantPattern: .name or .name(capture) or .name(&capture)
+                            parser.advance();
+                            auto vname = parser.expect_identifier();
+                            std::optional<std::string> capture_name;
+                            bool capture_by_ref = false;
+                            if (parser.match(TokenKind::LParen)) {
+                                if (parser.match(TokenKind::Ampersand)) {
+                                    capture_by_ref = true;
+                                }
+                                capture_name = parser.expect_identifier();
+                                parser.expect(TokenKind::RParen, "')'");
+                            }
+                            return MatchExpr::VariantPattern{
+                                .name = std::move(vname),
+                                .capture_name = std::move(capture_name),
+                                .capture_by_ref = capture_by_ref,
+                            };
                         }
-                        capture_name = parser.expect_identifier();
-                        parser.expect(TokenKind::RParen, "')'");
-                    }
+                        if (parser.check(TokenKind::Identifier) && parser.current_lexeme() == "_") {
+                            // DefaultPattern: _
+                            parser.advance();
+                            return MatchExpr::DefaultPattern{};
+                        }
+                        // LiteralPattern: constant expression
+                        auto lp_expr = std::make_unique<Expr>(parse_expr(parser));
+                        return MatchExpr::LiteralPattern{std::move(lp_expr)};
+                    }();
 
                     parser.expect(TokenKind::Colon, "':'");
                     auto arm_value = parse_expr(parser);
 
                     arms.push_back(MatchExpr::Arm{
-                        .field = std::move(field),
-                        .capture_name = std::move(capture_name),
-                        .capture_by_ref = capture_by_ref,
+                        .pattern = std::move(pattern),
                         .value = std::move(arm_value),
                         .location = arm_location,
                     });
@@ -1541,6 +1557,67 @@ namespace ast {
         return parse_assign_expr(parser);
     }
 
+    auto parse_switch_stmt(Parser &parser) -> Stmt {
+        const auto location = parser.current_location();
+        parser.expect(TokenKind::KwSwitch, "'switch'");
+
+        auto operand = parse_expr(parser);
+        parser.expect(TokenKind::LBrace, "'{'");
+
+        std::vector<SwitchStmt::Arm> arms;
+        while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+            const auto arm_location = parser.current_location();
+
+            auto arm_pattern = [&]() -> MatchExpr::ArmPattern {
+                if (parser.check(TokenKind::Dot)) {
+                    parser.advance();
+                    auto vname = parser.expect_identifier();
+                    std::optional<std::string> capture_name;
+                    bool capture_by_ref = false;
+                    if (parser.match(TokenKind::LParen)) {
+                        if (parser.match(TokenKind::Ampersand)) {
+                            capture_by_ref = true;
+                        }
+                        capture_name = parser.expect_identifier();
+                        parser.expect(TokenKind::RParen, "')'");
+                    }
+                    return MatchExpr::VariantPattern{
+                        .name = std::move(vname),
+                        .capture_name = std::move(capture_name),
+                        .capture_by_ref = capture_by_ref,
+                    };
+                }
+                if (parser.check(TokenKind::Identifier) && parser.current_lexeme() == "_") {
+                    parser.advance();
+                    return MatchExpr::DefaultPattern{};
+                }
+                auto lp_expr = std::make_unique<Expr>(parse_expr(parser));
+                return MatchExpr::LiteralPattern{std::move(lp_expr)};
+            }();
+
+            parser.expect(TokenKind::Colon, "':'");
+            auto body = parse_stmt(parser);
+
+            arms.push_back(SwitchStmt::Arm{
+                .pattern = std::move(arm_pattern),
+                .body = std::move(body),
+                .location = arm_location,
+            });
+
+            if (!parser.check(TokenKind::RBrace)) {
+                parser.expect(TokenKind::Comma, "','");
+            }
+        }
+
+        parser.expect(TokenKind::RBrace, "'}'");
+
+        return std::make_unique<SwitchStmt>(SwitchStmt{
+            .operand = std::move(operand),
+            .arms = std::move(arms),
+            .location = location,
+        });
+    }
+
     auto parse_stmt(Parser &parser) -> Stmt {
         if (parser.check(TokenKind::LBrace)) {
             return parse_block_stmt(parser);
@@ -1556,6 +1633,10 @@ namespace ast {
 
         if (parser.check(TokenKind::KwWhile)) {
             return parse_while_stmt(parser);
+        }
+
+        if (parser.check(TokenKind::KwSwitch)) {
+            return parse_switch_stmt(parser);
         }
 
         if (parser.check(TokenKind::KwContinue)) {

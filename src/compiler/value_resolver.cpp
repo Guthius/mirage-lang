@@ -250,4 +250,67 @@ namespace sema {
     auto is_constant_expr(const ast::Expr &expr, const std::string &module_path, const Program &program) -> bool {
         return is_constant_expr_impl(expr, module_path, program, {});
     }
+
+    auto evaluate_integer_constant(const ast::Expr &expr, const std::string &module_path, const Program &program) -> std::optional<int64_t> {
+        return std::visit(
+            [&]<typename T>(const T &v) -> std::optional<int64_t> {
+                using V = std::decay_t<T>;
+
+                if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr>) {
+                    return static_cast<int64_t>(v.value);
+                }
+
+                if constexpr (std::is_same_v<V, ast::LiteralBoolExpr>) {
+                    return v.value ? int64_t{1} : int64_t{0};
+                }
+
+                if constexpr (std::is_same_v<V, ast::IdentExpr>) {
+                    const auto mod_it = program.modules.find(module_path);
+                    if (mod_it == program.modules.end()) return std::nullopt;
+                    const auto sym_it = mod_it->second.symbols.find(v.name);
+                    if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
+                    const auto *g = std::get_if<GlobalSymbol>(&sym_it->second);
+                    if (!g || g->is_mut || !g->decl->init) return std::nullopt;
+                    return evaluate_integer_constant(*g->decl->init, module_path, program);
+                }
+
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
+                    if (v->op == ast::UnaryOp::Negate) {
+                        auto inner = evaluate_integer_constant(v->operand, module_path, program);
+                        if (inner) return -(*inner);
+                    }
+                    if (v->op == ast::UnaryOp::BitwiseNot) {
+                        auto inner = evaluate_integer_constant(v->operand, module_path, program);
+                        if (inner) return ~(*inner);
+                    }
+                    return std::nullopt;
+                }
+
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
+                    auto lhs = evaluate_integer_constant(v->lhs, module_path, program);
+                    auto rhs = evaluate_integer_constant(v->rhs, module_path, program);
+                    if (!lhs || !rhs) return std::nullopt;
+                    switch (v->op) {
+                    case ast::BinaryOp::Add:        return *lhs + *rhs;
+                    case ast::BinaryOp::Sub:        return *lhs - *rhs;
+                    case ast::BinaryOp::Mul:        return *lhs * *rhs;
+                    case ast::BinaryOp::Div:        return *rhs != 0 ? std::optional<int64_t>{*lhs / *rhs} : std::nullopt;
+                    case ast::BinaryOp::Mod:        return *rhs != 0 ? std::optional<int64_t>{*lhs % *rhs} : std::nullopt;
+                    case ast::BinaryOp::BitwiseAnd: return *lhs & *rhs;
+                    case ast::BinaryOp::BitwiseOr:  return *lhs | *rhs;
+                    case ast::BinaryOp::BitwiseXor: return *lhs ^ *rhs;
+                    case ast::BinaryOp::ShiftLeft:  return *lhs << *rhs;
+                    case ast::BinaryOp::ShiftRight: return *lhs >> *rhs;
+                    default:                        return std::nullopt;
+                    }
+                }
+
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
+                    return evaluate_integer_constant(v->value, module_path, program);
+                }
+
+                return std::nullopt;
+            },
+            expr);
+    }
 }

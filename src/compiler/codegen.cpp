@@ -1693,139 +1693,311 @@ namespace codegen {
                 return build_slice_value(ptr, count, result_type, type_module);
             }
 
+            // Emit a tagged-union payload capture binding for a match/switch arm.
+            // Returns the arm_locals (with capture bound if present).
+            auto emit_variant_capture(
+                    llvm::Function *fn,
+                    llvm::Value *union_slot,
+                    const sema::UnionInfo &union_info,
+                    const sema::TaggedUnionVariant &variant,
+                    const ast::MatchExpr::VariantPattern &vp) -> void {
+                if (!vp.capture_name || variant.payload_struct_index < 0) return;
+                const sema::ResolvedType payload_ty{.kind = sema::TypeKind::Struct, .struct_index = variant.payload_struct_index};
+                const auto &payload_struct = sema_program_.structs.at(variant.payload_struct_index);
+                const auto &struct_module = payload_struct.module_path;
+                auto *payload_ll_ty = llvm_type(struct_module, payload_ty);
+                auto *payload_ptr = builder_.CreateConstInBoundsGEP1_64(
+                    llvm::Type::getInt8Ty(*context_), union_slot, union_info.payload_offset, "match.payload");
+                if (vp.capture_by_ref) {
+                    auto *ref_slot = create_entry_alloca(fn, llvm::PointerType::getUnqual(*context_), *vp.capture_name);
+                    builder_.CreateStore(payload_ptr, ref_slot);
+                    const auto ptr_ty = find_self_ptr_type(payload_ty);
+                    locals_[*vp.capture_name] = LocalValue{.alloca = ref_slot, .type = ptr_ty, .type_module = *current_module_path_};
+                } else {
+                    auto *val_slot = create_entry_alloca(fn, payload_ll_ty, *vp.capture_name);
+                    auto *loaded = builder_.CreateLoad(payload_ll_ty, payload_ptr);
+                    builder_.CreateStore(loaded, val_slot);
+                    locals_[*vp.capture_name] = LocalValue{.alloca = val_slot, .type = payload_ty, .type_module = struct_module};
+                }
+            }
+
             auto emit_match(const ast::MatchExpr &expr, const sema::ResolvedType &result_type) -> llvm::Value * {
                 auto *fn = builder_.GetInsertBlock()->getParent();
-                auto *unreachable_bb = llvm::BasicBlock::Create(*context_, "match.unreachable", fn);
                 auto *merge_bb = llvm::BasicBlock::Create(*context_, "match.end", fn);
 
                 const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(expr.operand));
 
-                // Tagged union match
+                // Find default arm (if any)
+                const ast::MatchExpr::Arm *default_arm = nullptr;
+                for (const auto &arm : expr.arms) {
+                    if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
+                        default_arm = &arm;
+                        break;
+                    }
+                }
+                // Default successor: the default arm's BB, or an unreachable sentinel
+                auto *default_bb = default_arm
+                    ? llvm::BasicBlock::Create(*context_, "match.default", fn)
+                    : llvm::BasicBlock::Create(*context_, "match.unreachable", fn);
+
+                std::vector<std::pair<llvm::BasicBlock *, llvm::Value *>> arm_results;
+                const unsigned non_default_count = static_cast<unsigned>(
+                    std::ranges::count_if(expr.arms, [](const auto &a) {
+                        return !std::holds_alternative<ast::MatchExpr::DefaultPattern>(a.pattern);
+                    }));
+
+                // ---- Tagged union match ----
                 if (operand_type.kind == sema::TypeKind::Union) {
                     const auto &union_info = sema_program_.unions.at(operand_type.union_index);
                     auto *union_ll_ty = unions_.at(operand_type.union_index);
-
-                    // Always alloca the operand so we can GEP into it for captures
                     auto *union_slot = builder_.CreateAlloca(union_ll_ty, nullptr, "match.union");
                     auto *operand_val = emit_expr(expr.operand);
                     builder_.CreateStore(operand_val, union_slot);
-
-                    // Load tag (u32) from byte 0
                     auto *tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), union_slot, "match.tag");
-                    auto *sw = builder_.CreateSwitch(tag, unreachable_bb, static_cast<unsigned>(expr.arms.size()));
+                    auto *sw = builder_.CreateSwitch(tag, default_bb, non_default_count);
 
-                    std::vector<std::pair<llvm::BasicBlock *, llvm::Value *>> arm_results;
                     const auto saved_locals = locals_;
-
                     for (const auto &arm : expr.arms) {
-                        // Find variant tag value
+                        if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) continue;
+                        const auto &vp = std::get<ast::MatchExpr::VariantPattern>(arm.pattern);
                         int32_t tag_val = 0;
-                        int32_t payload_idx = -1;
+                        const sema::TaggedUnionVariant *matched_variant = nullptr;
                         for (const auto &variant : union_info.variants) {
-                            if (variant.name == arm.field) {
+                            if (variant.name == vp.name) {
                                 tag_val = variant.tag_value;
-                                payload_idx = variant.payload_struct_index;
+                                matched_variant = &variant;
                                 break;
                             }
                         }
-
-                        auto *arm_bb = llvm::BasicBlock::Create(*context_, std::format("match.arm.{}", arm.field), fn);
+                        auto *arm_bb = llvm::BasicBlock::Create(*context_, std::format("match.arm.{}", vp.name), fn);
                         sw->addCase(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), static_cast<uint64_t>(tag_val), false), arm_bb);
-
                         builder_.SetInsertPoint(arm_bb);
-
-                        // Bind capture if present
-                        if (arm.capture_name && payload_idx >= 0) {
-                            const sema::ResolvedType payload_ty{.kind = sema::TypeKind::Struct, .struct_index = payload_idx};
-                            const auto &payload_struct = sema_program_.structs.at(payload_idx);
-                            const auto &struct_module = payload_struct.module_path;
-                            auto *payload_ll_ty = llvm_type(struct_module, payload_ty);
-
-                            // GEP to payload_offset
-                            auto *payload_ptr = builder_.CreateConstInBoundsGEP1_64(
-                                llvm::Type::getInt8Ty(*context_), union_slot, union_info.payload_offset, "match.payload");
-
-                            if (arm.capture_by_ref) {
-                                // Bind as pointer-to-payload
-                                auto *ref_slot = create_entry_alloca(fn, llvm::PointerType::getUnqual(*context_), *arm.capture_name);
-                                builder_.CreateStore(payload_ptr, ref_slot);
-                                const auto ptr_ty = find_self_ptr_type(payload_ty);
-                                locals_[*arm.capture_name] = LocalValue{.alloca = ref_slot, .type = ptr_ty, .type_module = *current_module_path_};
-                            } else {
-                                // Bind as value: load the struct
-                                auto *val_slot = create_entry_alloca(fn, payload_ll_ty, *arm.capture_name);
-                                auto *loaded = builder_.CreateLoad(payload_ll_ty, payload_ptr);
-                                builder_.CreateStore(loaded, val_slot);
-                                locals_[*arm.capture_name] = LocalValue{.alloca = val_slot, .type = payload_ty, .type_module = struct_module};
-                            }
-                        }
-
+                        if (matched_variant) emit_variant_capture(fn, union_slot, union_info, *matched_variant, vp);
                         auto *arm_val = emit_expr(arm.value);
                         auto *arm_done = builder_.GetInsertBlock();
                         builder_.CreateBr(merge_bb);
                         arm_results.emplace_back(arm_done, arm_val);
-
-                        // Restore locals after arm (captures are arm-scoped)
                         locals_ = saved_locals;
                     }
-
-                    builder_.SetInsertPoint(unreachable_bb);
-                    builder_.CreateUnreachable();
-
+                    // Emit default arm or unreachable
+                    builder_.SetInsertPoint(default_bb);
+                    if (default_arm) {
+                        auto *arm_val = emit_expr(default_arm->value);
+                        auto *arm_done = builder_.GetInsertBlock();
+                        builder_.CreateBr(merge_bb);
+                        arm_results.emplace_back(arm_done, arm_val);
+                    } else {
+                        builder_.CreateUnreachable();
+                    }
                     builder_.SetInsertPoint(merge_bb);
                     if (result_type.kind == sema::TypeKind::Void || arm_results.empty()) {
                         return llvm::UndefValue::get(llvm::Type::getInt32Ty(*context_));
                     }
                     auto *phi = builder_.CreatePHI(llvm_type(*current_module_path_, result_type), static_cast<unsigned>(arm_results.size()));
-                    for (auto &[bb, val] : arm_results) {
-                        phi->addIncoming(val, bb);
-                    }
+                    for (auto &[bb, val] : arm_results) phi->addIncoming(val, bb);
                     return phi;
                 }
 
-                // Enum match
+                // ---- Enum match ----
+                if (operand_type.kind == sema::TypeKind::Enum) {
+                    auto *operand = emit_expr(expr.operand);
+                    const auto &enum_info = sema_program_.enums.at(operand_type.enum_index);
+                    auto *underlying_llvm_ty = llvm_type(*current_module_path_, enum_info.underlying_type);
+                    auto *sw = builder_.CreateSwitch(operand, default_bb, non_default_count);
+
+                    for (const auto &arm : expr.arms) {
+                        if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) continue;
+                        const auto &vp = std::get<ast::MatchExpr::VariantPattern>(arm.pattern);
+                        int64_t field_val = 0;
+                        for (const auto &field : enum_info.fields) {
+                            if (field.name == vp.name) { field_val = field.value; break; }
+                        }
+                        auto *arm_bb = llvm::BasicBlock::Create(*context_, std::format("match.arm.{}", vp.name), fn);
+                        sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(underlying_llvm_ty, static_cast<uint64_t>(field_val), enum_info.underlying_type.is_signed())), arm_bb);
+                        builder_.SetInsertPoint(arm_bb);
+                        auto *arm_val = emit_expr(arm.value);
+                        auto *arm_done = builder_.GetInsertBlock();
+                        builder_.CreateBr(merge_bb);
+                        arm_results.emplace_back(arm_done, arm_val);
+                    }
+                    builder_.SetInsertPoint(default_bb);
+                    if (default_arm) {
+                        auto *arm_val = emit_expr(default_arm->value);
+                        auto *arm_done = builder_.GetInsertBlock();
+                        builder_.CreateBr(merge_bb);
+                        arm_results.emplace_back(arm_done, arm_val);
+                    } else {
+                        builder_.CreateUnreachable();
+                    }
+                    builder_.SetInsertPoint(merge_bb);
+                    if (result_type.kind == sema::TypeKind::Void || arm_results.empty()) {
+                        return llvm::UndefValue::get(llvm::Type::getInt32Ty(*context_));
+                    }
+                    auto *phi = builder_.CreatePHI(llvm_type(*current_module_path_, result_type), static_cast<unsigned>(arm_results.size()));
+                    for (auto &[bb, val] : arm_results) phi->addIncoming(val, bb);
+                    return phi;
+                }
+
+                // ---- Scalar match (integer or bool) ----
                 auto *operand = emit_expr(expr.operand);
-                const auto &enum_info = sema_program_.enums.at(operand_type.enum_index);
-                auto *underlying_llvm_ty = llvm_type(*current_module_path_, enum_info.underlying_type);
-
-                auto *sw = builder_.CreateSwitch(operand, unreachable_bb, static_cast<unsigned>(expr.arms.size()));
-
-                std::vector<std::pair<llvm::BasicBlock *, llvm::Value *>> arm_results;
+                auto *operand_ll_ty = llvm_type(*current_module_path_, operand_type);
+                auto *sw = builder_.CreateSwitch(operand, default_bb, non_default_count);
 
                 for (const auto &arm : expr.arms) {
-                    // Find the enum field value
-                    int64_t field_val = 0;
-                    for (const auto &field : enum_info.fields) {
-                        if (field.name == arm.field) {
-                            field_val = field.value;
-                            break;
-                        }
-                    }
-
-                    auto *arm_bb = llvm::BasicBlock::Create(*context_, std::format("match.arm.{}", arm.field), fn);
-                    sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(underlying_llvm_ty, static_cast<uint64_t>(field_val), enum_info.underlying_type.is_signed())), arm_bb);
-
+                    if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) continue;
+                    const auto &lp = std::get<ast::MatchExpr::LiteralPattern>(arm.pattern);
+                    // Evaluate the constant for the LLVM switch case
+                    const auto case_val = sema::evaluate_integer_constant(*lp.expr, *current_module_path_, sema_program_);
+                    auto *case_ci = llvm::ConstantInt::get(operand_ll_ty, static_cast<uint64_t>(*case_val), operand_type.is_signed());
+                    auto *arm_bb = llvm::BasicBlock::Create(*context_, "match.arm", fn);
+                    sw->addCase(llvm::cast<llvm::ConstantInt>(case_ci), arm_bb);
                     builder_.SetInsertPoint(arm_bb);
                     auto *arm_val = emit_expr(arm.value);
                     auto *arm_done = builder_.GetInsertBlock();
                     builder_.CreateBr(merge_bb);
                     arm_results.emplace_back(arm_done, arm_val);
                 }
-
-                // Unreachable block (match is exhaustive)
-                builder_.SetInsertPoint(unreachable_bb);
-                builder_.CreateUnreachable();
-
+                builder_.SetInsertPoint(default_bb);
+                if (default_arm) {
+                    auto *arm_val = emit_expr(default_arm->value);
+                    auto *arm_done = builder_.GetInsertBlock();
+                    builder_.CreateBr(merge_bb);
+                    arm_results.emplace_back(arm_done, arm_val);
+                } else {
+                    builder_.CreateUnreachable();
+                }
                 builder_.SetInsertPoint(merge_bb);
                 if (result_type.kind == sema::TypeKind::Void || arm_results.empty()) {
                     return llvm::UndefValue::get(llvm::Type::getInt32Ty(*context_));
                 }
-
                 auto *phi = builder_.CreatePHI(llvm_type(*current_module_path_, result_type), static_cast<unsigned>(arm_results.size()));
-                for (auto &[bb, val] : arm_results) {
-                    phi->addIncoming(val, bb);
-                }
+                for (auto &[bb, val] : arm_results) phi->addIncoming(val, bb);
                 return phi;
+            }
+
+            void emit_switch_stmt(const ast::SwitchStmt &stmt) {
+                auto *fn = builder_.GetInsertBlock()->getParent();
+                auto *after_bb = llvm::BasicBlock::Create(*context_, "switch.end", fn);
+
+                const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(stmt.operand));
+
+                // Find default arm
+                const ast::SwitchStmt::Arm *default_arm = nullptr;
+                for (const auto &arm : stmt.arms) {
+                    if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
+                        default_arm = &arm;
+                        break;
+                    }
+                }
+                auto *default_bb = default_arm
+                    ? llvm::BasicBlock::Create(*context_, "switch.default", fn)
+                    : after_bb; // unmatched falls through to after-switch
+
+                const unsigned non_default_count = static_cast<unsigned>(
+                    std::ranges::count_if(stmt.arms, [](const auto &a) {
+                        return !std::holds_alternative<ast::MatchExpr::DefaultPattern>(a.pattern);
+                    }));
+
+                const auto saved_locals = locals_;
+
+                // ---- Tagged union switch ----
+                if (operand_type.kind == sema::TypeKind::Union) {
+                    const auto &union_info = sema_program_.unions.at(operand_type.union_index);
+                    auto *union_ll_ty = unions_.at(operand_type.union_index);
+                    auto *union_slot = builder_.CreateAlloca(union_ll_ty, nullptr, "switch.union");
+                    auto *operand_val = emit_expr(stmt.operand);
+                    builder_.CreateStore(operand_val, union_slot);
+                    auto *tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), union_slot, "switch.tag");
+                    auto *sw = builder_.CreateSwitch(tag, default_bb, non_default_count);
+
+                    for (const auto &arm : stmt.arms) {
+                        if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) continue;
+                        const auto &vp = std::get<ast::MatchExpr::VariantPattern>(arm.pattern);
+                        int32_t tag_val = 0;
+                        const sema::TaggedUnionVariant *matched_variant = nullptr;
+                        for (const auto &variant : union_info.variants) {
+                            if (variant.name == vp.name) {
+                                tag_val = variant.tag_value;
+                                matched_variant = &variant;
+                                break;
+                            }
+                        }
+                        auto *arm_bb = llvm::BasicBlock::Create(*context_, std::format("switch.arm.{}", vp.name), fn);
+                        sw->addCase(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), static_cast<uint64_t>(tag_val), false), arm_bb);
+                        builder_.SetInsertPoint(arm_bb);
+                        locals_ = saved_locals;
+                        if (matched_variant) emit_variant_capture(fn, union_slot, union_info, *matched_variant, vp);
+                        emit_stmt(arm.body);
+                        if (!builder_.GetInsertBlock()->getTerminator()) builder_.CreateBr(after_bb);
+                    }
+                    if (default_arm) {
+                        builder_.SetInsertPoint(default_bb);
+                        locals_ = saved_locals;
+                        emit_stmt(default_arm->body);
+                        if (!builder_.GetInsertBlock()->getTerminator()) builder_.CreateBr(after_bb);
+                    }
+                    locals_ = saved_locals;
+                    builder_.SetInsertPoint(after_bb);
+                    return;
+                }
+
+                // ---- Enum switch ----
+                if (operand_type.kind == sema::TypeKind::Enum) {
+                    auto *operand = emit_expr(stmt.operand);
+                    const auto &enum_info = sema_program_.enums.at(operand_type.enum_index);
+                    auto *underlying_llvm_ty = llvm_type(*current_module_path_, enum_info.underlying_type);
+                    auto *sw = builder_.CreateSwitch(operand, default_bb, non_default_count);
+
+                    for (const auto &arm : stmt.arms) {
+                        if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) continue;
+                        const auto &vp = std::get<ast::MatchExpr::VariantPattern>(arm.pattern);
+                        int64_t field_val = 0;
+                        for (const auto &field : enum_info.fields) {
+                            if (field.name == vp.name) { field_val = field.value; break; }
+                        }
+                        auto *arm_bb = llvm::BasicBlock::Create(*context_, std::format("switch.arm.{}", vp.name), fn);
+                        sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(underlying_llvm_ty, static_cast<uint64_t>(field_val), enum_info.underlying_type.is_signed())), arm_bb);
+                        builder_.SetInsertPoint(arm_bb);
+                        locals_ = saved_locals;
+                        emit_stmt(arm.body);
+                        if (!builder_.GetInsertBlock()->getTerminator()) builder_.CreateBr(after_bb);
+                    }
+                    if (default_arm) {
+                        builder_.SetInsertPoint(default_bb);
+                        locals_ = saved_locals;
+                        emit_stmt(default_arm->body);
+                        if (!builder_.GetInsertBlock()->getTerminator()) builder_.CreateBr(after_bb);
+                    }
+                    locals_ = saved_locals;
+                    builder_.SetInsertPoint(after_bb);
+                    return;
+                }
+
+                // ---- Scalar switch (integer or bool) ----
+                auto *operand = emit_expr(stmt.operand);
+                auto *operand_ll_ty = llvm_type(*current_module_path_, operand_type);
+                auto *sw = builder_.CreateSwitch(operand, default_bb, non_default_count);
+
+                for (const auto &arm : stmt.arms) {
+                    if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) continue;
+                    const auto &lp = std::get<ast::MatchExpr::LiteralPattern>(arm.pattern);
+                    const auto case_val = sema::evaluate_integer_constant(*lp.expr, *current_module_path_, sema_program_);
+                    auto *case_ci = llvm::ConstantInt::get(operand_ll_ty, static_cast<uint64_t>(*case_val), operand_type.is_signed());
+                    auto *arm_bb = llvm::BasicBlock::Create(*context_, "switch.arm", fn);
+                    sw->addCase(llvm::cast<llvm::ConstantInt>(case_ci), arm_bb);
+                    builder_.SetInsertPoint(arm_bb);
+                    locals_ = saved_locals;
+                    emit_stmt(arm.body);
+                    if (!builder_.GetInsertBlock()->getTerminator()) builder_.CreateBr(after_bb);
+                }
+                if (default_arm) {
+                    builder_.SetInsertPoint(default_bb);
+                    locals_ = saved_locals;
+                    emit_stmt(default_arm->body);
+                    if (!builder_.GetInsertBlock()->getTerminator()) builder_.CreateBr(after_bb);
+                }
+                locals_ = saved_locals;
+                builder_.SetInsertPoint(after_bb);
             }
 
             auto emit_ternary(const ast::TernaryExpr &expr) -> llvm::Value * {
@@ -2108,6 +2280,8 @@ namespace codegen {
                             emit_if(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhileStmt>>) {
                             emit_while(*v);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SwitchStmt>>) {
+                            emit_switch_stmt(*v);
                         } else if constexpr (std::is_same_v<V, ast::ExprStmt>) {
                             emit_expr(v.expr);
                         } else if constexpr (std::is_same_v<V, ast::VarDeclStmt>) {
