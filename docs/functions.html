@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Functions — Mirage</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <nav>
+      <div class="sidebar-section">Introduction</div>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="getting-started.html">Getting Started</a></li>
+      </ul>
+      <div class="sidebar-section">Language</div>
+      <ul>
+        <li><a href="types.html">Types</a></li>
+        <li><a href="functions.html" class="active">Functions</a></li>
+        <li><a href="control-flow.html">Control Flow</a></li>
+        <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="error-handling.html">Error Handling</a></li>
+        <li><a href="modules.html">Modules</a></li>
+      </ul>
+      <div class="sidebar-section">Reference</div>
+      <ul>
+        <li><a href="grammar.html">Grammar</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="main">
+    <div class="content">
+
+      <h1>Functions</h1>
+      <p class="subtitle">Declaring, calling, and passing functions in Mirage.</p>
+
+      <h2>Basic Function Declarations</h2>
+
+      <pre><code><span class="kw">fn</span> <span class="fn">add</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
+    <span class="kw">return</span> <span class="var">a</span> + <span class="var">b</span>
+}
+
+<span class="cmt">// No return value (void)</span>
+<span class="kw">fn</span> <span class="fn">greet</span>(<span class="var">name</span>: *<span class="ty">u8</span>) {
+    <span class="fn">printf</span>(<span class="str">"Hello, %s!\n"</span>, <span class="var">name</span>)
+}</code></pre>
+
+      <h3>Mutable Parameters</h3>
+      <p>Function parameters are immutable by default. Declare a parameter <code>mut</code> to make it mutable inside the function:</p>
+      <pre><code><span class="kw">fn</span> <span class="fn">countdown</span>(<span class="kw">mut</span> <span class="var">n</span>: <span class="ty">i32</span>) {
+    <span class="kw">while</span> <span class="var">n</span> &gt; <span class="num">0</span> {
+        <span class="fn">printf</span>(<span class="str">"%d\n"</span>, <span class="var">n</span>--)
+    }
+}</code></pre>
+
+      <div class="callout">
+        <div class="callout-title">Note</div>
+        Making a parameter <code>mut</code> does not affect callers — Mirage passes by value. To modify
+        the caller's variable, pass a pointer.
+      </div>
+
+      <h2>Multi-Return Functions</h2>
+      <p>
+        Functions can return multiple values. The return types are listed in parentheses after <code>-&gt;</code>.
+        Callers use group declarations to capture them.
+      </p>
+
+      <pre><code><span class="kw">fn</span> <span class="fn">divmod</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">i32</span>) {
+    <span class="kw">return</span> <span class="var">a</span> / <span class="var">b</span>, <span class="var">a</span> % <span class="var">b</span>
+}
+
+<span class="kw">mut</span> <span class="var">q</span>, <span class="var">r</span> := <span class="fn">divmod</span>(<span class="num">17</span>, <span class="num">5</span>)   <span class="cmt">// q=3, r=2</span></code></pre>
+
+      <h3>Discarding Return Values</h3>
+      <p>Use <code>_</code> to discard one or more return values:</p>
+      <pre><code><span class="kw">mut</span> <span class="var">q</span>, <span class="var">_</span> := <span class="fn">divmod</span>(<span class="num">17</span>, <span class="num">5</span>)   <span class="cmt">// only keep quotient</span></code></pre>
+
+      <h2>Fallible Functions (Error Return)</h2>
+      <p>
+        By convention, a function that can fail has <code>error</code> as its last return type.
+        Callers must capture the error or use <code>try</code>.
+      </p>
+
+      <pre><code><span class="kw">fn</span> <span class="fn">divide</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>) {
+    <span class="kw">if</span> <span class="var">b</span> == <span class="num">0</span> { <span class="kw">return</span> <span class="num">0</span>, <span class="num">1</span> }
+    <span class="kw">return</span> <span class="var">a</span> / <span class="var">b</span>, <span class="num">0</span>
+}
+
+<span class="cmt">// Must capture error</span>
+<span class="kw">mut</span> <span class="var">result</span>, <span class="var">err</span> := <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">2</span>)
+<span class="kw">if</span> <span class="var">err</span> != <span class="num">0</span> { <span class="cmt">/* handle */</span> }
+
+<span class="cmt">// Or propagate with try (enclosing fn must return error)</span>
+<span class="kw">mut</span> <span class="var">val</span>: <span class="ty">i32</span> = <span class="kw">try</span> <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">2</span>)</code></pre>
+
+      <p>See <a href="error-handling.html">Error Handling</a> for full details.</p>
+
+      <h2>Visibility: <code>pub</code></h2>
+      <p>
+        By default, functions are module-private. Add <code>pub</code> to make them accessible from
+        other modules:
+      </p>
+      <pre><code><span class="kw">pub fn</span> <span class="fn">compute</span>(<span class="var">x</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
+    <span class="kw">return</span> <span class="var">x</span> * <span class="num">2</span>
+}
+
+<span class="cmt">// Private — only callable within this module</span>
+<span class="kw">fn</span> <span class="fn">helper</span>(<span class="var">x</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
+    <span class="kw">return</span> <span class="var">x</span> + <span class="num">1</span>
+}</code></pre>
+
+      <h2>Extern Functions</h2>
+      <p>
+        Use <code>ext fn</code> to declare external C functions. The declaration provides the Mirage-visible
+        type signature; the linker resolves the actual symbol.
+      </p>
+
+      <pre><code><span class="cmt">// C standard library declarations</span>
+<span class="kw">ext fn</span> <span class="fn">puts</span>(<span class="var">s</span>: *<span class="ty">u8</span>) -&gt; <span class="ty">i32</span>
+<span class="kw">ext fn</span> <span class="fn">malloc</span>(<span class="var">size</span>: <span class="ty">usize</span>) -&gt; <span class="ty">anyptr</span>
+<span class="kw">ext fn</span> <span class="fn">free</span>(<span class="var">ptr</span>: <span class="ty">anyptr</span>)
+<span class="kw">ext fn</span> <span class="fn">memcpy</span>(<span class="var">dest</span>: <span class="ty">anyptr</span>, <span class="var">src</span>: <span class="ty">anyptr</span>, <span class="var">n</span>: <span class="ty">usize</span>) -&gt; <span class="ty">anyptr</span></code></pre>
+
+      <h3>Variadic Extern Functions</h3>
+      <p>
+        Add <code>...</code> at the end of the parameter list to declare a variadic extern function.
+        At least one named parameter must come before <code>...</code>.
+      </p>
+      <pre><code><span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
+<span class="kw">ext fn</span> <span class="fn">snprintf</span>(<span class="var">buf</span>: *<span class="ty">u8</span>, <span class="var">n</span>: <span class="ty">u64</span>, <span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
+
+<span class="fn">printf</span>(<span class="str">"%d %f\n"</span>, <span class="num">42</span>, <span class="num">3.14</span>)</code></pre>
+
+      <div class="callout warning">
+        <div class="callout-title">Variadic Argument Types</div>
+        Variadic arguments must be at least 32 bits wide and match C's default argument promotion rules.
+        Valid types: <code>i32</code>, <code>u32</code>, <code>i64</code>, <code>u64</code>, <code>usize</code>,
+        <code>error</code>, <code>f64</code>, typed pointers, <code>anyptr</code>. Narrower types
+        (e.g. <code>f32</code>, <code>u8</code>) must be explicitly <code>cast</code> first.
+      </div>
+
+      <h2>Entry Points</h2>
+      <p>The root module must define exactly one of:</p>
+      <pre><code><span class="kw">pub fn</span> <span class="fn">main</span>() { <span class="cmt">/* ... */</span> }                    <span class="cmt">// exits with code 0</span>
+<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">i32</span> { <span class="kw">return</span> <span class="num">0</span> }                <span class="cmt">// returns exit code</span>
+<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span> { <span class="kw">return</span> <span class="num">0</span> }              <span class="cmt">// error truncated to i32</span></code></pre>
+
+      <p>
+        For freestanding builds (<code>--freestanding</code>), define <code>fn _start()</code> instead.
+        The <code>pub</code> modifier is not required for <code>_start</code>.
+      </p>
+
+      <h2>Function Pointers</h2>
+      <p>Functions are first-class values. They can be stored in variables, passed to functions, and stored in structs.</p>
+
+      <h3>Storing and Calling</h3>
+      <pre><code><span class="kw">fn</span> <span class="fn">square</span>(<span class="var">x</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> { <span class="kw">return</span> <span class="var">x</span> * <span class="var">x</span> }
+
+<span class="kw">mut</span> <span class="var">fp</span>: <span class="ty">fn</span>(<span class="ty">i32</span>) -&gt; <span class="ty">i32</span> = <span class="var">square</span>
+<span class="kw">const</span> <span class="var">r</span>: <span class="ty">i32</span> = <span class="var">fp</span>(<span class="num">9</span>)   <span class="cmt">// 81</span></code></pre>
+
+      <h3>Higher-Order Functions</h3>
+      <pre><code><span class="kw">fn</span> <span class="fn">apply</span>(<span class="var">op</span>: <span class="ty">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; <span class="ty">i32</span>, <span class="var">x</span>: <span class="ty">i32</span>, <span class="var">y</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
+    <span class="kw">return</span> <span class="var">op</span>(<span class="var">x</span>, <span class="var">y</span>)
+}
+
+<span class="kw">const</span> <span class="var">sum</span> := <span class="fn">apply</span>(<span class="var">add</span>, <span class="num">3</span>, <span class="num">4</span>)   <span class="cmt">// 7</span></code></pre>
+
+      <h3>Variadic Function Pointer</h3>
+      <pre><code><span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
+
+<span class="kw">mut</span> <span class="var">vfp</span>: <span class="ty">fn</span>(*<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span> = <span class="var">printf</span>
+<span class="var">vfp</span>(<span class="str">"%d\n"</span>, <span class="num">42</span>)</code></pre>
+
+      <h3>Multi-Return Function Pointer</h3>
+      <pre><code><span class="kw">fn</span> <span class="fn">divide</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>) {
+    <span class="kw">if</span> <span class="var">b</span> == <span class="num">0</span> { <span class="kw">return</span> <span class="num">0</span>, <span class="num">1</span> }
+    <span class="kw">return</span> <span class="var">a</span> / <span class="var">b</span>, <span class="num">0</span>
+}
+
+<span class="kw">mut</span> <span class="var">fp</span>: <span class="ty">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>) = <span class="var">divide</span>
+<span class="kw">mut</span> <span class="var">val</span>, <span class="var">err</span> := <span class="var">fp</span>(<span class="num">10</span>, <span class="num">2</span>)
+
+<span class="cmt">// try also works through fn ptrs</span>
+<span class="kw">mut</span> <span class="var">v</span>: <span class="ty">i32</span> = <span class="kw">try</span> <span class="var">fp</span>(<span class="num">8</span>, <span class="num">2</span>)</code></pre>
+
+      <h2>Macros</h2>
+      <p>
+        Macros are expression-level compile-time substitutions. They look like function calls but expand
+        to an inline expression.
+      </p>
+
+      <pre><code><span class="kw">macro</span> <span class="fn">max</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; <span class="var">a</span> &gt; <span class="var">b</span> ? <span class="var">a</span> : <span class="var">b</span>
+<span class="kw">macro</span> <span class="fn">align_up</span>(<span class="var">n</span>: <span class="ty">usize</span>) -&gt; (<span class="var">n</span> + (<span class="num">15</span>)) &amp; ~(<span class="ty">usize</span>)<span class="num">15</span>
+
+<span class="kw">const</span> <span class="var">m</span> := <span class="fn">max</span>(<span class="num">3</span>, <span class="num">7</span>)        <span class="cmt">// expands to: 3 > 7 ? 3 : 7 → 7</span>
+<span class="kw">const</span> <span class="var">aligned</span> := <span class="fn">align_up</span>(<span class="var">size</span>)</code></pre>
+
+      <p>Macros can be exported with <code>pub</code>:</p>
+      <pre><code><span class="kw">pub macro</span> <span class="fn">min</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; <span class="var">a</span> &lt; <span class="var">b</span> ? <span class="var">a</span> : <span class="var">b</span></code></pre>
+
+      <div class="callout">
+        <div class="callout-title">Macros vs Functions</div>
+        Macros are syntactic substitution — they cannot be stored as function pointers and cannot recurse.
+        They are ideal for small, performance-critical inline expressions.
+      </div>
+
+    </div>
+  </main>
+
+</div>
+</body>
+</html>

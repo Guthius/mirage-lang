@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Types — Mirage</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <nav>
+      <div class="sidebar-section">Introduction</div>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="getting-started.html">Getting Started</a></li>
+      </ul>
+      <div class="sidebar-section">Language</div>
+      <ul>
+        <li><a href="types.html" class="active">Types</a></li>
+        <li><a href="functions.html">Functions</a></li>
+        <li><a href="control-flow.html">Control Flow</a></li>
+        <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="error-handling.html">Error Handling</a></li>
+        <li><a href="modules.html">Modules</a></li>
+      </ul>
+      <div class="sidebar-section">Reference</div>
+      <ul>
+        <li><a href="grammar.html">Grammar</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="main">
+    <div class="content">
+
+      <h1>Types</h1>
+      <p class="subtitle">Mirage's type system: primitives, pointers, arrays, slices, and function pointers.</p>
+
+      <h2>Integer Types</h2>
+      <table>
+        <tr><th>Type</th><th>Width</th><th>Signedness</th><th>Range</th></tr>
+        <tr><td><code>u8</code></td><td>8-bit</td><td>unsigned</td><td>0 – 255</td></tr>
+        <tr><td><code>u16</code></td><td>16-bit</td><td>unsigned</td><td>0 – 65,535</td></tr>
+        <tr><td><code>u32</code></td><td>32-bit</td><td>unsigned</td><td>0 – 4,294,967,295</td></tr>
+        <tr><td><code>u64</code></td><td>64-bit</td><td>unsigned</td><td>0 – 2⁶⁴−1</td></tr>
+        <tr><td><code>i8</code></td><td>8-bit</td><td>signed</td><td>−128 – 127</td></tr>
+        <tr><td><code>i16</code></td><td>16-bit</td><td>signed</td><td>−32,768 – 32,767</td></tr>
+        <tr><td><code>i32</code></td><td>32-bit</td><td>signed</td><td>−2,147,483,648 – 2,147,483,647</td></tr>
+        <tr><td><code>i64</code></td><td>64-bit</td><td>signed</td><td>−2⁶³ – 2⁶³−1</td></tr>
+        <tr><td><code>usize</code></td><td>pointer-wide</td><td>unsigned</td><td>platform-dependent</td></tr>
+      </table>
+
+      <p>Integer literals can be written in decimal, hex (<code>0x</code>), or binary (<code>0b</code>). Underscores are allowed as separators:</p>
+      <pre><code><span class="kw">const</span> <span class="var">a</span> := <span class="num">1_000_000</span>
+<span class="kw">const</span> <span class="var">b</span> := <span class="num">0xFF</span>
+<span class="kw">const</span> <span class="var">c</span> := <span class="num">0b1010_1010</span></code></pre>
+
+      <div class="callout warning">
+        <div class="callout-title">No Implicit Coercion</div>
+        Mirage does not promote or widen integer types automatically. Mixing types in arithmetic is a compile error.
+        Use <code>cast(expr, TargetType)</code> to convert.
+      </div>
+
+      <h2>Floating-Point Types</h2>
+      <table>
+        <tr><th>Type</th><th>Width</th><th>Precision</th></tr>
+        <tr><td><code>f32</code></td><td>32-bit</td><td>IEEE 754 single</td></tr>
+        <tr><td><code>f64</code></td><td>64-bit</td><td>IEEE 754 double</td></tr>
+      </table>
+
+      <pre><code><span class="kw">mut</span> <span class="var">pi</span>: <span class="ty">f64</span> = <span class="num">3.14159</span>
+<span class="kw">mut</span> <span class="var">small</span>: <span class="ty">f32</span> = <span class="num">1.0</span></code></pre>
+
+      <h2>Boolean Type</h2>
+      <p>The <code>bool</code> type has two values: <code>true</code> and <code>false</code>. It is 1 byte.</p>
+      <pre><code><span class="kw">const</span> <span class="var">flag</span>: <span class="ty">bool</span> = <span class="lit">true</span>
+<span class="kw">const</span> <span class="var">result</span> := <span class="var">x</span> &gt; <span class="num">0</span>   <span class="cmt">// comparison produces bool</span></code></pre>
+
+      <h2>The <code>byte</code> Type</h2>
+      <p><code>byte</code> is an alias for <code>u8</code>. It is conventionally used for raw byte buffers:</p>
+      <pre><code><span class="kw">mut</span> <span class="var">buf</span>: [<span class="num">512</span>]<span class="ty">byte</span>
+<span class="kw">mut</span> <span class="var">p</span>: *<span class="ty">byte</span> = <span class="kw">cast</span>(<span class="var">ptr</span>, *<span class="ty">byte</span>)</code></pre>
+
+      <h2>The <code>error</code> Type</h2>
+      <p>
+        <code>error</code> is an unsigned 64-bit integer. By convention, <code>0</code> means success
+        and any non-zero value is an error code. See <a href="error-handling.html">Error Handling</a>
+        for details.
+      </p>
+
+      <h2>The <code>anyptr</code> Type</h2>
+      <p>
+        <code>anyptr</code> is an untyped pointer — equivalent to <code>void*</code> in C. It can hold any
+        pointer value and supports arithmetic with integer operands. All typed pointers are implicitly
+        assignable to and from <code>anyptr</code>.
+      </p>
+      <pre><code><span class="kw">mut</span> <span class="var">raw</span>: <span class="ty">anyptr</span> = <span class="lit">nil</span>
+<span class="var">raw</span> = <span class="kw">cast</span>(<span class="var">my_struct_ptr</span>, <span class="ty">anyptr</span>)
+<span class="kw">mut</span> <span class="var">next</span>: <span class="ty">anyptr</span> = <span class="var">raw</span> + <span class="num">16</span>    <span class="cmt">// pointer arithmetic</span></code></pre>
+
+      <hr>
+
+      <h2>Pointer Types</h2>
+      <p>A pointer type <code>*T</code> points to a value of type <code>T</code>.</p>
+
+      <pre><code><span class="kw">mut</span> <span class="var">x</span>: <span class="ty">i32</span> = <span class="num">42</span>
+<span class="kw">const</span> <span class="var">p</span>: *<span class="ty">i32</span> = &amp;<span class="var">x</span>    <span class="cmt">// address-of</span>
+<span class="kw">const</span> <span class="var">v</span>: <span class="ty">i32</span> = *<span class="var">p</span>   <span class="cmt">// dereference</span>
+*<span class="var">p</span> = <span class="num">99</span>              <span class="cmt">// write through pointer</span></code></pre>
+
+      <p>
+        <strong>Auto-deref:</strong> When accessing a struct field or calling a method on a pointer-to-struct,
+        the pointer is automatically dereferenced. There is no need for <code>-&gt;</code>:
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">ptr</span>: *<span class="ty">Vec2</span> = &amp;<span class="var">v</span>
+<span class="fn">printf</span>(<span class="str">"%f\n"</span>, <span class="var">ptr</span>.<span class="var">x</span>)       <span class="cmt">// same as (*ptr).x</span>
+<span class="var">ptr</span>.<span class="fn">length_sq</span>()              <span class="cmt">// method call through pointer</span></code></pre>
+
+      <h2>Array Types</h2>
+      <p>An array <code>[N]T</code> holds exactly <code>N</code> elements of type <code>T</code>. The size must be a compile-time constant.</p>
+
+      <pre><code><span class="kw">mut</span> <span class="var">arr</span>: [<span class="num">5</span>]<span class="ty">i32</span> = {<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>}   <span class="cmt">// partial init; remaining elements zeroed</span>
+<span class="kw">const</span> <span class="var">n</span>: <span class="ty">usize</span> = <span class="kw">len</span>(<span class="var">arr</span>)      <span class="cmt">// 5</span>
+<span class="kw">const</span> <span class="var">sz</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(<span class="var">arr</span>)   <span class="cmt">// 20 bytes</span>
+<span class="var">arr</span>[<span class="num">0</span>] = <span class="num">99</span>                      <span class="cmt">// index access</span></code></pre>
+
+      <p>Arrays are <strong>value types</strong> — assigning an array copies all elements.</p>
+
+      <h3>Array Initialization</h3>
+      <pre><code><span class="cmt">// No init: all elements default-initialized to 0</span>
+<span class="kw">mut</span> <span class="var">a</span>: [<span class="num">3</span>]<span class="ty">i32</span>
+
+<span class="cmt">// Partial: first 2 set, remaining zeroed</span>
+<span class="kw">mut</span> <span class="var">b</span>: [<span class="num">3</span>]<span class="ty">i32</span> = {<span class="num">1</span>, <span class="num">2</span>}
+
+<span class="cmt">// Full</span>
+<span class="kw">mut</span> <span class="var">c</span>: [<span class="num">3</span>]<span class="ty">i32</span> = {<span class="num">10</span>, <span class="num">20</span>, <span class="num">30</span>}
+
+<span class="cmt">// Empty braces: same as no init</span>
+<span class="kw">mut</span> <span class="var">d</span>: [<span class="num">3</span>]<span class="ty">i32</span> = {}</code></pre>
+
+      <h2>Slice Types</h2>
+      <p>
+        A slice <code>[]T</code> is a (pointer, length) pair. It does not own memory.
+        Slices are 16 bytes (pointer + 64-bit length).
+      </p>
+
+      <pre><code><span class="kw">mut</span> <span class="var">arr</span>: [<span class="num">5</span>]<span class="ty">i32</span> = {<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>, <span class="num">4</span>, <span class="num">5</span>}
+
+<span class="cmt">// Slice from array (implicit coercion)</span>
+<span class="kw">mut</span> <span class="var">s</span>: []<span class="ty">i32</span> = <span class="var">arr</span>
+
+<span class="cmt">// Slice sub-range</span>
+<span class="kw">const</span> <span class="var">sub</span> := <span class="var">arr</span>[<span class="num">1</span>..<span class="num">3</span>]     <span class="cmt">// elements [1] and [2]</span>
+
+<span class="cmt">// Slice from pointer + length</span>
+<span class="kw">const</span> <span class="var">ps</span> := <span class="kw">cast</span>(<span class="var">ptr</span>, []<span class="ty">u8</span>, <span class="num">64</span>)
+
+<span class="kw">const</span> <span class="var">n</span>: <span class="ty">usize</span> = <span class="kw">len</span>(<span class="var">s</span>)    <span class="cmt">// length</span></code></pre>
+
+      <h2>Function Pointer Types</h2>
+      <p>
+        Function pointer types describe callable values. They are opaque 8-byte pointers internally.
+      </p>
+
+      <pre><code><span class="cmt">// Type syntax</span>
+<span class="ty">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; <span class="ty">i32</span>
+<span class="ty">fn</span>(<span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>)      <span class="cmt">// multi-return</span>
+<span class="ty">fn</span>(*<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>           <span class="cmt">// variadic</span>
+<span class="ty">fn</span>()                           <span class="cmt">// void, no params</span></code></pre>
+
+      <pre><code><span class="kw">fn</span> <span class="fn">add</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> { <span class="kw">return</span> <span class="var">a</span> + <span class="var">b</span> }
+<span class="kw">fn</span> <span class="fn">mul</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> { <span class="kw">return</span> <span class="var">a</span> * <span class="var">b</span> }
+
+<span class="cmt">// Store a function pointer</span>
+<span class="kw">mut</span> <span class="var">fp</span>: <span class="ty">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> = <span class="var">add</span>
+<span class="var">fp</span>(<span class="num">3</span>, <span class="num">4</span>)   <span class="cmt">// returns 7</span>
+
+<span class="var">fp</span> = <span class="var">mul</span>
+<span class="var">fp</span>(<span class="num">3</span>, <span class="num">4</span>)   <span class="cmt">// returns 12</span>
+
+<span class="cmt">// nil / default are valid null function pointers</span>
+<span class="kw">mut</span> <span class="var">nullable</span>: <span class="ty">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> = <span class="lit">nil</span>
+<span class="kw">if</span> <span class="var">nullable</span> == <span class="lit">nil</span> {
+    <span class="fn">printf</span>(<span class="str">"null\n"</span>)
+}</code></pre>
+
+      <h3>Function Pointers in Structs</h3>
+      <pre><code><span class="kw">type</span> <span class="ty">Transform</span> = <span class="kw">struct</span> {
+    <span class="var">f</span>: <span class="ty">fn</span>(<span class="ty">i32</span>) -&gt; <span class="ty">i32</span>
+    <span class="var">label</span>: *<span class="ty">u8</span>
+}
+
+<span class="kw">mut</span> <span class="var">t</span>: <span class="ty">Transform</span>
+<span class="var">t</span>.<span class="var">f</span> = <span class="var">square</span>
+<span class="kw">const</span> <span class="var">result</span>: <span class="ty">i32</span> = <span class="var">t</span>.<span class="var">f</span>(<span class="num">5</span>)   <span class="cmt">// call via struct field</span></code></pre>
+
+      <h3>Casting Function Pointers</h3>
+      <p>Function pointers can be cast to/from <code>anyptr</code> for C interop:</p>
+      <pre><code><span class="kw">mut</span> <span class="var">raw</span>: <span class="ty">anyptr</span> = <span class="kw">cast</span>(<span class="var">fp</span>, <span class="ty">anyptr</span>)
+<span class="kw">mut</span> <span class="var">fp2</span>: <span class="ty">fn</span>(<span class="ty">i32</span>) -&gt; <span class="ty">i32</span> = <span class="kw">cast</span>(<span class="var">raw</span>, <span class="ty">fn</span>(<span class="ty">i32</span>) -&gt; <span class="ty">i32</span>)</code></pre>
+
+      <hr>
+
+      <h2>The <code>cast</code> Operator</h2>
+      <p>
+        All type conversions are explicit in Mirage. The <code>cast</code> operator converts a value
+        to a target type.
+      </p>
+      <pre><code><span class="kw">cast</span>(<span class="var">expr</span>, <span class="ty">TargetType</span>)
+<span class="kw">cast</span>(<span class="var">ptr</span>, []<span class="ty">T</span>, <span class="var">length</span>)    <span class="cmt">// pointer → slice</span></code></pre>
+
+      <p>Valid cast combinations:</p>
+      <ul>
+        <li>Any scalar type ↔ any scalar type (integers, floats, <code>bool</code>, <code>anyptr</code>, pointers)</li>
+        <li><code>anyptr</code> ↔ any typed pointer</li>
+        <li><code>anyptr</code> ↔ any function pointer type</li>
+        <li>Array <code>[N]T</code> → slice <code>[]T</code></li>
+        <li>Pointer or <code>anyptr</code> → slice with length: <code>cast(p, []T, n)</code></li>
+      </ul>
+
+      <h2>The <code>sizeof</code> and <code>len</code> Operators</h2>
+      <pre><code><span class="kw">const</span> <span class="var">sz</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(<span class="var">my_struct</span>)   <span class="cmt">// size of a value or named type</span>
+<span class="kw">const</span> <span class="var">n</span>:  <span class="ty">usize</span> = <span class="kw">len</span>(<span class="var">my_array</span>)        <span class="cmt">// element count of array or slice</span></code></pre>
+
+      <div class="callout">
+        <div class="callout-title">Note</div>
+        <code>sizeof</code> cannot take built-in type keywords directly (e.g. <code>sizeof(i32)</code> is unsupported).
+        Use a variable of that type: <code>sizeof(my_i32_variable)</code>.
+      </div>
+
+      <h2>Type Compatibility Summary</h2>
+      <table>
+        <tr><th>From</th><th>To</th><th>How</th></tr>
+        <tr><td><code>*T</code></td><td><code>anyptr</code></td><td>Implicit</td></tr>
+        <tr><td><code>anyptr</code></td><td><code>*T</code></td><td>Implicit (unsafe)</td></tr>
+        <tr><td>fn ptr</td><td><code>anyptr</code></td><td>Implicit</td></tr>
+        <tr><td><code>anyptr</code></td><td>fn ptr</td><td>Implicit (nil coercion)</td></tr>
+        <tr><td><code>[N]T</code></td><td><code>[]T</code></td><td>Implicit</td></tr>
+        <tr><td>Any scalar</td><td>Any scalar</td><td><code>cast()</code></td></tr>
+        <tr><td>Pointer</td><td>Slice</td><td><code>cast(p, []T, len)</code></td></tr>
+      </table>
+
+    </div>
+  </main>
+
+</div>
+</body>
+</html>

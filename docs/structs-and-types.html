@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Structs &amp; Types — Mirage</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <nav>
+      <div class="sidebar-section">Introduction</div>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="getting-started.html">Getting Started</a></li>
+      </ul>
+      <div class="sidebar-section">Language</div>
+      <ul>
+        <li><a href="types.html">Types</a></li>
+        <li><a href="functions.html">Functions</a></li>
+        <li><a href="control-flow.html">Control Flow</a></li>
+        <li><a href="structs-and-types.html" class="active">Structs &amp; Types</a></li>
+        <li><a href="error-handling.html">Error Handling</a></li>
+        <li><a href="modules.html">Modules</a></li>
+      </ul>
+      <div class="sidebar-section">Reference</div>
+      <ul>
+        <li><a href="grammar.html">Grammar</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="main">
+    <div class="content">
+
+      <h1>Structs &amp; Types</h1>
+      <p class="subtitle">Structs, enums, tagged and untagged unions, impl blocks.</p>
+
+      <h2>Type Declarations</h2>
+      <p>Named types are declared with the <code>type</code> keyword:</p>
+      <pre><code><span class="kw">type</span> <span class="ty">Point</span> = <span class="kw">struct</span> {
+    <span class="var">x</span>: <span class="ty">f64</span>
+    <span class="var">y</span>: <span class="ty">f64</span>
+}
+
+<span class="kw">pub type</span> <span class="ty">Color</span> = <span class="kw">enum</span>(<span class="ty">u8</span>) {
+    <span class="var">red</span>
+    <span class="var">green</span>
+    <span class="var">blue</span>
+}</code></pre>
+
+      <p>Add <code>pub</code> to make the type visible to importing modules.</p>
+
+      <hr>
+
+      <h2>Structs</h2>
+      <p>Structs are product types — they hold named fields of (potentially different) types. Fields are separated by newlines in the definition.</p>
+
+      <pre><code><span class="kw">type</span> <span class="ty">Vec2</span> = <span class="kw">struct</span> {
+    <span class="var">x</span>: <span class="ty">f64</span> = <span class="num">0.0</span>    <span class="cmt">// field-level default</span>
+    <span class="var">y</span>: <span class="ty">f64</span> = <span class="num">0.0</span>
+}</code></pre>
+
+      <h3>Creating Struct Values</h3>
+      <pre><code><span class="cmt">// No init: all fields use their defaults (or zero)</span>
+<span class="kw">mut</span> <span class="var">a</span>: <span class="ty">Vec2</span>
+
+<span class="cmt">// Partial init: x overridden, y uses its default (0.0)</span>
+<span class="kw">mut</span> <span class="var">b</span>: <span class="ty">Vec2</span> = {<span class="var">x</span> = <span class="num">5.0</span>}
+
+<span class="cmt">// Full init</span>
+<span class="kw">mut</span> <span class="var">c</span>: <span class="ty">Vec2</span> = {<span class="var">x</span> = <span class="num">3.0</span>, <span class="var">y</span> = <span class="num">4.0</span>}
+
+<span class="cmt">// Empty braces: same as no init</span>
+<span class="kw">mut</span> <span class="var">d</span>: <span class="ty">Vec2</span> = {}
+
+<span class="cmt">// 'default' keyword: explicitly default-initialize</span>
+<span class="kw">mut</span> <span class="var">e</span>: <span class="ty">Vec2</span> = <span class="kw">default</span></code></pre>
+
+      <h3>Accessing Fields</h3>
+      <pre><code><span class="kw">const</span> <span class="var">len</span> := <span class="var">c</span>.<span class="var">x</span> * <span class="var">c</span>.<span class="var">x</span> + <span class="var">c</span>.<span class="var">y</span> * <span class="var">c</span>.<span class="var">y</span>
+
+<span class="cmt">// Through pointer: auto-dereference</span>
+<span class="kw">const</span> <span class="var">p</span>: *<span class="ty">Vec2</span> = &amp;<span class="var">c</span>
+<span class="fn">printf</span>(<span class="str">"%f\n"</span>, <span class="var">p</span>.<span class="var">x</span>)   <span class="cmt">// same as (*p).x</span></code></pre>
+
+      <h3>Packed Structs</h3>
+      <p>A packed struct has no alignment padding between fields:</p>
+      <pre><code><span class="kw">type</span> <span class="ty">Header</span> = <span class="kw">struct</span>(<span class="var">packed</span>) {
+    <span class="var">magic</span>:   <span class="ty">u32</span>
+    <span class="var">version</span>: <span class="ty">u8</span>
+    <span class="var">flags</span>:   <span class="ty">u16</span>
+}</code></pre>
+
+      <hr>
+
+      <h2>Enums</h2>
+      <p>
+        Enums are integer-backed named constants. The underlying integer type is specified in parentheses;
+        if omitted, it defaults to <code>i32</code>.
+      </p>
+
+      <pre><code><span class="kw">type</span> <span class="ty">Direction</span> = <span class="kw">enum</span>(<span class="ty">u8</span>) {
+    <span class="var">north</span>
+    <span class="var">south</span>
+    <span class="var">east</span>
+    <span class="var">west</span>
+}</code></pre>
+
+      <h3>Custom Values and Iota</h3>
+      <p>
+        Fields are assigned values starting at 0 by default. Use explicit initializers to override.
+        The <code>iota</code> keyword represents the field's sequential index (0, 1, 2, …):
+      </p>
+      <pre><code><span class="kw">type</span> <span class="ty">Flag</span> = <span class="kw">enum</span>(<span class="ty">u32</span>) {
+    <span class="var">none</span>  = <span class="num">0</span>
+    <span class="var">read</span>  = <span class="num">1</span>
+    <span class="var">write</span> = <span class="num">2</span>
+    <span class="var">exec</span>  = <span class="num">4</span>
+}
+
+<span class="cmt">// iota used as a power-of-two template</span>
+<span class="kw">type</span> <span class="ty">Bits</span> = <span class="kw">enum</span>(<span class="ty">u32</span>) {
+    <span class="var">a</span> = <span class="num">1</span> &lt;&lt; <span class="var">iota</span>    <span class="cmt">// template: 1&lt;&lt;0=1, 1&lt;&lt;1=2, 1&lt;&lt;2=4</span>
+    <span class="var">b</span>
+    <span class="var">c</span>
+}</code></pre>
+
+      <h3>Using Enum Values</h3>
+      <pre><code><span class="cmt">// Contextual (type inferred from annotation)</span>
+<span class="kw">const</span> <span class="var">d</span>: <span class="ty">Direction</span> = .<span class="var">north</span>
+
+<span class="cmt">// Qualified</span>
+<span class="kw">const</span> <span class="var">d2</span> := <span class="ty">Direction</span>.<span class="var">south</span>
+
+<span class="cmt">// Match on enum</span>
+<span class="kw">const</span> <span class="var">label</span> := <span class="kw">match</span> <span class="var">d</span> {
+    .<span class="var">north</span>: <span class="str">"N"</span>,
+    .<span class="var">south</span>: <span class="str">"S"</span>,
+    .<span class="var">east</span>:  <span class="str">"E"</span>,
+    .<span class="var">west</span>:  <span class="str">"W"</span>
+}</code></pre>
+
+      <hr>
+
+      <h2>Untagged Unions</h2>
+      <p>
+        Untagged unions overlay all members at offset 0. The size is the size of the largest member
+        rounded up to the maximum alignment. All members share the same storage.
+      </p>
+
+      <pre><code><span class="kw">type</span> <span class="ty">NumUnion</span> = <span class="kw">union</span> {
+    <span class="var">as_i64</span>: <span class="ty">i64</span>
+    <span class="var">as_f64</span>: <span class="ty">f64</span>
+    <span class="var">as_u8</span>:  <span class="ty">u8</span>
+}
+
+<span class="cmt">// Initialize with exactly one member</span>
+<span class="kw">mut</span> <span class="var">u</span>: <span class="ty">NumUnion</span> = {<span class="var">as_i64</span> = <span class="num">42</span>}
+
+<span class="cmt">// Read/write any member</span>
+<span class="var">u</span>.<span class="var">as_f64</span> = <span class="num">3.14</span>
+<span class="kw">const</span> <span class="var">bits</span>: <span class="ty">i64</span> = <span class="var">u</span>.<span class="var">as_i64</span>   <span class="cmt">// reinterpret bits</span>
+
+<span class="cmt">// Undefined init is legal</span>
+<span class="kw">mut</span> <span class="var">v</span>: <span class="ty">NumUnion</span> = <span class="kw">undefined</span>
+<span class="var">v</span>.<span class="var">as_i64</span> = <span class="num">100</span></code></pre>
+
+      <div class="callout warning">
+        <div class="callout-title">Restrictions</div>
+        <ul>
+          <li>Exactly one member must be named in the braced initializer (0 or 2+ is a sema error).</li>
+          <li>Member default initializers are not allowed in union definitions.</li>
+          <li><code>default</code> and <code>{}</code> are not valid initializers for untagged unions.</li>
+          <li>Untagged unions cannot be used in <code>ext fn</code> parameter or return types.</li>
+        </ul>
+      </div>
+
+      <hr>
+
+      <h2>Tagged Unions</h2>
+      <p>
+        Tagged unions (<code>union(enum)</code>) are discriminated unions — a runtime tag identifies which
+        variant is active. They are the safe alternative to untagged unions for sum types.
+      </p>
+
+      <pre><code><span class="kw">type</span> <span class="ty">Shape</span> = <span class="kw">union</span>(<span class="kw">enum</span>) {
+    <span class="var">circle</span>: <span class="kw">struct</span> { <span class="var">radius</span>: <span class="ty">f64</span> }
+    <span class="var">rect</span>:   <span class="kw">struct</span> {
+        <span class="var">w</span>: <span class="ty">f64</span>
+        <span class="var">h</span>: <span class="ty">f64</span>
+    }
+    <span class="var">point</span>              <span class="cmt">// payload-free variant</span>
+}</code></pre>
+
+      <h3>Layout</h3>
+      <p>
+        A tagged union always contains a <code>u32</code> discriminant tag at offset 0.
+        The payload follows at an alignment-padded offset. The overall size equals
+        <code>align_up(payload_offset + max_payload_size, align)</code>.
+      </p>
+
+      <h3>Constructing Tagged Union Values</h3>
+      <pre><code><span class="cmt">// Qualified form: TypeName.variant{.field = val}</span>
+<span class="kw">const</span> <span class="var">c</span>: <span class="ty">Shape</span> = <span class="ty">Shape</span>.<span class="var">circle</span>{.<span class="var">radius</span> = <span class="num">3.0</span>}
+
+<span class="cmt">// Contextual form: .variant{.field = val} (type from annotation)</span>
+<span class="kw">mut</span> <span class="var">r</span>: <span class="ty">Shape</span> = .<span class="var">rect</span>{.<span class="var">w</span> = <span class="num">4.0</span>, .<span class="var">h</span> = <span class="num">5.0</span>}
+
+<span class="cmt">// Payload-free variant</span>
+<span class="kw">const</span> <span class="var">p</span>: <span class="ty">Shape</span> = .<span class="var">point</span></code></pre>
+
+      <h3>Destructuring with Match</h3>
+      <p>Tagged union members cannot be accessed directly — use <code>match</code>:</p>
+      <pre><code><span class="kw">const</span> <span class="var">a</span>: <span class="ty">f64</span> = <span class="kw">match</span> <span class="var">s</span> {
+    .<span class="var">circle</span>(<span class="var">c</span>): <span class="var">c</span>.<span class="var">radius</span> * <span class="var">c</span>.<span class="var">radius</span> * <span class="num">3.14159</span>,
+    .<span class="var">rect</span>(<span class="var">r</span>):   <span class="var">r</span>.<span class="var">w</span> * <span class="var">r</span>.<span class="var">h</span>,
+    .<span class="var">point</span>:     <span class="num">0.0</span>
+}
+
+<span class="cmt">// By-reference capture: c is *PayloadStruct (no copy)</span>
+<span class="kw">match</span> <span class="var">s</span> {
+    .<span class="var">circle</span>(&amp;<span class="var">c</span>): <span class="var">c</span>.<span class="var">radius</span> = <span class="num">10.0</span>,    <span class="cmt">// mutate in-place</span>
+    .<span class="var">rect</span>(&amp;<span class="var">r</span>):   <span class="var">r</span>.<span class="var">w</span>    = <span class="num">0.0</span>,
+    .<span class="var">point</span>:     <span class="num">0.0</span>
+}</code></pre>
+
+      <hr>
+
+      <h2>Impl Blocks</h2>
+      <p>
+        <code>impl</code> blocks add methods to a named type (struct or enum). Methods receive <code>self</code>
+        — an implicit pointer to the receiver — as their first parameter.
+      </p>
+
+      <pre><code><span class="kw">type</span> <span class="ty">Counter</span> = <span class="kw">struct</span> {
+    <span class="var">value</span>: <span class="ty">i32</span>
+}
+
+<span class="kw">impl</span> <span class="ty">Counter</span> {
+    <span class="cmt">// Read-only method: self is implicitly *Counter (const view)</span>
+    <span class="kw">pub fn</span> <span class="fn">get</span>(<span class="var">self</span>) -&gt; <span class="ty">i32</span> {
+        <span class="kw">return</span> <span class="var">self</span>.<span class="var">value</span>
+    }
+
+    <span class="cmt">// Mutating method: mut self allows field writes</span>
+    <span class="kw">pub fn</span> <span class="fn">increment</span>(<span class="kw">mut</span> <span class="var">self</span>) {
+        <span class="var">self</span>.<span class="var">value</span>++
+    }
+
+    <span class="kw">pub fn</span> <span class="fn">add</span>(<span class="kw">mut</span> <span class="var">self</span>, <span class="var">n</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
+        <span class="var">self</span>.<span class="var">value</span> += <span class="var">n</span>
+        <span class="kw">return</span> <span class="var">self</span>.<span class="var">value</span>
+    }
+}</code></pre>
+
+      <h3>Calling Methods</h3>
+      <pre><code><span class="kw">mut</span> <span class="var">c</span>: <span class="ty">Counter</span>
+<span class="var">c</span>.<span class="var">value</span> = <span class="num">0</span>
+<span class="var">c</span>.<span class="fn">increment</span>()
+<span class="kw">const</span> <span class="var">v</span>: <span class="ty">i32</span> = <span class="var">c</span>.<span class="fn">get</span>()        <span class="cmt">// 1</span>
+<span class="kw">const</span> <span class="var">v2</span>: <span class="ty">i32</span> = <span class="var">c</span>.<span class="fn">add</span>(<span class="num">5</span>)      <span class="cmt">// 6</span>
+
+<span class="cmt">// Calling through a pointer: auto-deref</span>
+<span class="kw">const</span> <span class="var">ptr</span>: *<span class="ty">Counter</span> = &amp;<span class="var">c</span>
+<span class="var">ptr</span>.<span class="fn">increment</span>()</code></pre>
+
+      <h3>Impl Rules</h3>
+      <ul>
+        <li><code>impl</code> blocks cannot be marked <code>pub</code>; use <code>pub</code> on individual methods instead.</li>
+        <li>Methods are defined in the same module as the type (cross-module impl is not supported).</li>
+        <li><code>self</code> is internally a pointer; field access auto-derefs.</li>
+        <li>Methods cannot be stored in function pointers because their first argument is the implicit receiver pointer.</li>
+      </ul>
+
+      <h3>Methods on Enums</h3>
+      <pre><code><span class="kw">type</span> <span class="ty">Direction</span> = <span class="kw">enum</span>(<span class="ty">u8</span>) { <span class="var">north</span>  <span class="var">south</span>  <span class="var">east</span>  <span class="var">west</span> }
+
+<span class="kw">impl</span> <span class="ty">Direction</span> {
+    <span class="kw">pub fn</span> <span class="fn">opposite</span>(<span class="var">self</span>) -&gt; <span class="ty">Direction</span> {
+        <span class="kw">return</span> <span class="kw">match</span> *<span class="var">self</span> {
+            .<span class="var">north</span>: .<span class="var">south</span>,
+            .<span class="var">south</span>: .<span class="var">north</span>,
+            .<span class="var">east</span>:  .<span class="var">west</span>,
+            .<span class="var">west</span>:  .<span class="var">east</span>
+        }
+    }
+}</code></pre>
+
+      <hr>
+
+      <h2>Default and Undefined Initializers</h2>
+
+      <h3><code>default</code></h3>
+      <p>Produces the type's default zero value. For structs with field defaults, those defaults are applied recursively.</p>
+      <pre><code><span class="kw">mut</span> <span class="var">x</span>: <span class="ty">i32</span>    = <span class="kw">default</span>   <span class="cmt">// 0</span>
+<span class="kw">mut</span> <span class="var">v</span>: <span class="ty">Vec2</span>   = <span class="kw">default</span>   <span class="cmt">// {x=0.0, y=0.0} (or field defaults)</span>
+<span class="kw">mut</span> <span class="var">fp</span>: <span class="ty">fn</span>(<span class="ty">i32</span>) -&gt; <span class="ty">i32</span> = <span class="kw">default</span>  <span class="cmt">// nil</span></code></pre>
+
+      <h3><code>undefined</code></h3>
+      <p>Allocates storage but does not initialize it. Useful for performance-sensitive code where you immediately assign a value.</p>
+      <pre><code><span class="kw">mut</span> <span class="var">buf</span>: [<span class="num">1024</span>]<span class="ty">byte</span> = <span class="kw">undefined</span>
+<span class="cmt">// Must initialize before reading buf!</span>
+<span class="fn">fill_buffer</span>(&amp;<span class="var">buf</span>[<span class="num">0</span>], <span class="kw">len</span>(<span class="var">buf</span>))</code></pre>
+
+      <div class="callout warning">
+        <div class="callout-title">Warning</div>
+        <code>undefined</code> is not valid in <code>const</code> declarations. Reading an uninitialized
+        value before assignment is undefined behavior.
+      </div>
+
+    </div>
+  </main>
+
+</div>
+</body>
+</html>

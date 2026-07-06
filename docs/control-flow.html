@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Control Flow — Mirage</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <nav>
+      <div class="sidebar-section">Introduction</div>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="getting-started.html">Getting Started</a></li>
+      </ul>
+      <div class="sidebar-section">Language</div>
+      <ul>
+        <li><a href="types.html">Types</a></li>
+        <li><a href="functions.html">Functions</a></li>
+        <li><a href="control-flow.html" class="active">Control Flow</a></li>
+        <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="error-handling.html">Error Handling</a></li>
+        <li><a href="modules.html">Modules</a></li>
+      </ul>
+      <div class="sidebar-section">Reference</div>
+      <ul>
+        <li><a href="grammar.html">Grammar</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="main">
+    <div class="content">
+
+      <h1>Control Flow</h1>
+      <p class="subtitle">Conditionals, loops, and pattern matching.</p>
+
+      <h2>If / Else</h2>
+      <p>The <code>if</code> statement evaluates a <code>bool</code> condition and executes the <em>then</em> branch if true.</p>
+
+      <pre><code><span class="kw">if</span> <span class="var">x</span> &gt; <span class="num">0</span> {
+    <span class="fn">printf</span>(<span class="str">"positive\n"</span>)
+} <span class="kw">else if</span> <span class="var">x</span> &lt; <span class="num">0</span> {
+    <span class="fn">printf</span>(<span class="str">"negative\n"</span>)
+} <span class="kw">else</span> {
+    <span class="fn">printf</span>(<span class="str">"zero\n"</span>)
+}</code></pre>
+
+      <ul>
+        <li>The condition must be exactly <code>bool</code> — no implicit integer-to-bool coercion.</li>
+        <li>The <code>else</code> branch is optional.</li>
+        <li>The body can be any statement, including a non-block single statement.</li>
+      </ul>
+
+      <h3>Ternary Expression</h3>
+      <p>For simple conditional values, use the ternary operator:</p>
+      <pre><code><span class="kw">const</span> <span class="var">abs</span>: <span class="ty">i32</span> = <span class="var">x</span> &lt; <span class="num">0</span> ? <span class="num">0</span> - <span class="var">x</span> : <span class="var">x</span></code></pre>
+
+      <hr>
+
+      <h2>While Loop</h2>
+      <p>
+        <code>while</code> is the only looping construct in Mirage. It repeatedly executes the body
+        block as long as the condition is <code>true</code>.
+      </p>
+
+      <pre><code><span class="kw">mut</span> <span class="var">i</span>: <span class="ty">i32</span> = <span class="num">0</span>
+<span class="kw">while</span> <span class="var">i</span> &lt; <span class="num">10</span> {
+    <span class="fn">printf</span>(<span class="str">"%d\n"</span>, <span class="var">i</span>)
+    <span class="var">i</span>++
+}</code></pre>
+
+      <h3>Infinite Loop</h3>
+      <pre><code><span class="kw">while</span> <span class="lit">true</span> {
+    <span class="cmt">// runs forever until break</span>
+    <span class="kw">if</span> <span class="var">done</span> { <span class="kw">break</span> }
+}</code></pre>
+
+      <h3>Loop with Decrement Condition</h3>
+      <p>Since <code>--</code> is a post-decrement expression, it can be used directly as the while condition:</p>
+      <pre><code><span class="kw">mut</span> <span class="var">n</span>: <span class="ty">usize</span> = <span class="num">5</span>
+<span class="kw">while</span> <span class="var">n</span>-- {
+    <span class="cmt">// runs 5 times: n is tested before decrement</span>
+}</code></pre>
+
+      <h3>Break and Continue</h3>
+      <pre><code><span class="kw">mut</span> <span class="var">i</span>: <span class="ty">i32</span> = <span class="num">0</span>
+<span class="kw">while</span> <span class="var">i</span> &lt; <span class="num">10</span> {
+    <span class="var">i</span>++
+    <span class="kw">if</span> <span class="var">i</span> == <span class="num">3</span> { <span class="kw">continue</span> }  <span class="cmt">// skip 3</span>
+    <span class="kw">if</span> <span class="var">i</span> == <span class="num">7</span> { <span class="kw">break</span> }     <span class="cmt">// stop at 7</span>
+    <span class="fn">printf</span>(<span class="str">"%d\n"</span>, <span class="var">i</span>)
+}</code></pre>
+
+      <div class="callout">
+        <div class="callout-title">Defer in Loops</div>
+        A <code>defer</code> inside a loop body fires on every iteration (including on <code>break</code>
+        and <code>continue</code>). See <a href="error-handling.html">Error Handling</a>.
+      </div>
+
+      <hr>
+
+      <h2>Match Expression</h2>
+      <p>
+        <code>match</code> is an <em>expression</em> — it has a result value. All arms must produce
+        the same type. Match is exhaustive: the compiler checks that all possible values are covered.
+      </p>
+
+      <h3>Matching on Enums</h3>
+      <pre><code><span class="kw">type</span> <span class="ty">Color</span> = <span class="kw">enum</span>(<span class="ty">i32</span>) {
+    <span class="var">red</span>
+    <span class="var">green</span>
+    <span class="var">blue</span>
+}
+
+<span class="kw">fn</span> <span class="fn">color_name</span>(<span class="var">c</span>: <span class="ty">Color</span>) -&gt; *<span class="ty">u8</span> {
+    <span class="kw">return</span> <span class="kw">match</span> <span class="var">c</span> {
+        .<span class="var">red</span>:   <span class="str">"red"</span>,
+        .<span class="var">green</span>: <span class="str">"green"</span>,
+        .<span class="var">blue</span>:  <span class="str">"blue"</span>
+    }
+}</code></pre>
+
+      <h3>Matching on Integers</h3>
+      <p>Integer match requires a <code>_</code> default arm (exhaustiveness cannot be verified for large domains):</p>
+      <pre><code><span class="kw">fn</span> <span class="fn">classify</span>(<span class="var">x</span>: <span class="ty">i32</span>) -&gt; *<span class="ty">u8</span> {
+    <span class="kw">return</span> <span class="kw">match</span> <span class="var">x</span> {
+        <span class="num">0</span>:  <span class="str">"zero"</span>,
+        <span class="num">1</span>:  <span class="str">"one"</span>,
+        <span class="op">-</span><span class="num">1</span>: <span class="str">"minus one"</span>,
+        <span class="var">_</span>:  <span class="str">"other"</span>
+    }
+}</code></pre>
+
+      <h3>Matching on Booleans</h3>
+      <p>Boolean match is exhaustive when both <code>true</code> and <code>false</code> are covered:</p>
+      <pre><code><span class="kw">fn</span> <span class="fn">bool_label</span>(<span class="var">b</span>: <span class="ty">bool</span>) -&gt; <span class="ty">i32</span> {
+    <span class="kw">return</span> <span class="kw">match</span> <span class="var">b</span> {
+        <span class="lit">true</span>:  <span class="num">1</span>,
+        <span class="lit">false</span>: <span class="num">0</span>
+    }
+}</code></pre>
+
+      <h3>Matching on Tagged Unions</h3>
+      <pre><code><span class="kw">type</span> <span class="ty">Shape</span> = <span class="kw">union</span>(<span class="kw">enum</span>) {
+    <span class="var">circle</span>: <span class="kw">struct</span> { <span class="var">radius</span>: <span class="ty">f64</span> }
+    <span class="var">rect</span>:   <span class="kw">struct</span> { <span class="var">w</span>: <span class="ty">f64</span>; <span class="var">h</span>: <span class="ty">f64</span> }
+    <span class="var">point</span>
+}
+
+<span class="kw">fn</span> <span class="fn">area</span>(<span class="var">s</span>: <span class="ty">Shape</span>) -&gt; <span class="ty">f64</span> {
+    <span class="kw">return</span> <span class="kw">match</span> <span class="var">s</span> {
+        .<span class="var">circle</span>(<span class="var">c</span>): <span class="var">c</span>.<span class="var">radius</span> * <span class="var">c</span>.<span class="var">radius</span> * <span class="num">3.14159</span>,
+        .<span class="var">rect</span>(<span class="var">r</span>):   <span class="var">r</span>.<span class="var">w</span> * <span class="var">r</span>.<span class="var">h</span>,
+        .<span class="var">point</span>:     <span class="num">0.0</span>
+    }
+}
+
+<span class="cmt">// By-reference capture: s is *PayloadStruct</span>
+<span class="kw">const</span> <span class="var">desc</span> := <span class="kw">match</span> <span class="var">shape</span> {
+    .<span class="var">circle</span>(&amp;<span class="var">c</span>): <span class="var">c</span>.<span class="var">radius</span>,
+    .<span class="var">rect</span>(<span class="var">r</span>):   <span class="var">r</span>.<span class="var">w</span>,
+    .<span class="var">point</span>:     <span class="num">0.0</span>
+}</code></pre>
+
+      <h3>Default / Wildcard Arm</h3>
+      <p>
+        Use <code>_</code> as the last arm to match any remaining value. For enums, a <code>_</code>
+        after full coverage is a compile error. <code>_</code> must always be last.
+      </p>
+      <pre><code><span class="kw">match</span> <span class="var">code</span> {
+    <span class="num">200</span>: <span class="str">"ok"</span>,
+    <span class="num">404</span>: <span class="str">"not found"</span>,
+    <span class="var">_</span>:   <span class="str">"other"</span>
+}</code></pre>
+
+      <hr>
+
+      <h2>Switch Statement</h2>
+      <p>
+        <code>switch</code> is the statement-level counterpart to <code>match</code>. Arm bodies are
+        statements (not expressions). There is no exhaustiveness requirement and no result type.
+      </p>
+
+      <pre><code><span class="kw">mut</span> <span class="var">result</span>: <span class="ty">i32</span> = <span class="num">0</span>
+<span class="kw">switch</span> <span class="var">x</span> {
+    <span class="num">0</span>: <span class="var">result</span> = <span class="num">10</span>,
+    <span class="num">1</span>: <span class="var">result</span> = <span class="num">20</span>,
+    <span class="var">_</span>: <span class="var">result</span> = <span class="num">99</span>
+}</code></pre>
+
+      <p>
+        Switch arms use the same pattern syntax as <code>match</code>: variant patterns (<code>.name</code>),
+        literal patterns, and the default wildcard <code>_</code>.
+      </p>
+
+      <h3>Switch on Enum</h3>
+      <pre><code><span class="kw">switch</span> <span class="var">color</span> {
+    .<span class="var">red</span>:   <span class="fn">printf</span>(<span class="str">"red\n"</span>),
+    .<span class="var">green</span>: <span class="fn">printf</span>(<span class="str">"green\n"</span>),
+    .<span class="var">blue</span>:  <span class="fn">printf</span>(<span class="str">"blue\n"</span>)
+}</code></pre>
+
+      <h3>Switch on Tagged Union</h3>
+      <pre><code><span class="kw">switch</span> <span class="var">shape</span> {
+    .<span class="var">circle</span>(<span class="var">c</span>): <span class="fn">printf</span>(<span class="str">"circle r=%.1f\n"</span>, <span class="var">c</span>.<span class="var">radius</span>),
+    .<span class="var">rect</span>(<span class="var">r</span>):   <span class="fn">printf</span>(<span class="str">"rect %.1fx%.1f\n"</span>, <span class="var">r</span>.<span class="var">w</span>, <span class="var">r</span>.<span class="var">h</span>),
+    .<span class="var">point</span>:     <span class="fn">printf</span>(<span class="str">"point\n"</span>)
+}</code></pre>
+
+      <div class="callout">
+        <div class="callout-title">Switch vs Match</div>
+        Use <code>match</code> when you need a result value (it's an expression). Use <code>switch</code>
+        when you need to execute statements per arm. Only <code>match</code> checks exhaustiveness.
+      </div>
+
+      <h2>Arm Pattern Reference</h2>
+      <table>
+        <tr><th>Pattern</th><th>Syntax</th><th>Matches</th></tr>
+        <tr><td>Variant (no capture)</td><td><code>.name</code></td><td>An enum or tagged union variant</td></tr>
+        <tr><td>Variant (capture by value)</td><td><code>.name(capture)</code></td><td>Binds the payload struct</td></tr>
+        <tr><td>Variant (capture by ref)</td><td><code>.name(&amp;capture)</code></td><td>Binds <code>*PayloadStruct</code></td></tr>
+        <tr><td>Literal</td><td><code>42</code>, <code>-1</code>, <code>true</code></td><td>Exact constant value</td></tr>
+        <tr><td>Default</td><td><code>_</code></td><td>Any remaining value (must be last)</td></tr>
+      </table>
+
+    </div>
+  </main>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mirage — Systems Programming Language</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <nav>
+      <div class="sidebar-section">Introduction</div>
+      <ul>
+        <li><a href="index.html" class="active">Overview</a></li>
+        <li><a href="getting-started.html">Getting Started</a></li>
+      </ul>
+      <div class="sidebar-section">Language</div>
+      <ul>
+        <li><a href="types.html">Types</a></li>
+        <li><a href="functions.html">Functions</a></li>
+        <li><a href="control-flow.html">Control Flow</a></li>
+        <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="error-handling.html">Error Handling</a></li>
+        <li><a href="modules.html">Modules</a></li>
+      </ul>
+      <div class="sidebar-section">Reference</div>
+      <ul>
+        <li><a href="grammar.html">Grammar</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <div class="content">
+
+      <div class="hero">
+        <h1>Mirage</h1>
+        <p>A compiled, statically-typed systems language targeting native code via LLVM IR. Designed for low-level programming with a clean, expression-oriented syntax.</p>
+        <a href="getting-started.html" class="btn">Get Started</a>
+        <a href="grammar.html" class="btn secondary">Grammar Reference</a>
+      </div>
+
+      <h2>What is Mirage?</h2>
+      <p>
+        Mirage is a systems programming language that compiles directly to native machine code through LLVM.
+        It features a type system built around value semantics, explicit mutability, and C interoperability
+        via <code>ext fn</code> declarations — without a garbage collector or runtime.
+      </p>
+      <p>
+        The language provides fine-grained control over memory layout while keeping the syntax readable.
+        Error handling is built into the type system via the <code>error</code> type and the
+        <code>try</code>/<code>defer</code> mechanism.
+      </p>
+
+      <h2>Key Features</h2>
+      <div class="features">
+        <div class="feature-card">
+          <h3>Native Compilation</h3>
+          <p>Compiles to machine code via LLVM. Produces small, fast executables with no runtime overhead.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Strong Static Typing</h3>
+          <p>Every value has a known type at compile time. No implicit numeric promotions — casts are explicit.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Explicit Mutability</h3>
+          <p>All variables are immutable by default (<code>const</code>). Mutable state requires <code>mut</code>.</p>
+        </div>
+        <div class="feature-card">
+          <h3>C Interop</h3>
+          <p>Call any C library function with <code>ext fn</code> declarations, including variadic functions.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Algebraic Types</h3>
+          <p>Structs, enums, tagged unions, and untagged unions with exhaustive <code>match</code>.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Error Handling</h3>
+          <p>First-class <code>error</code> type with <code>try</code> propagation and <code>defer</code> cleanup.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Function Pointers</h3>
+          <p>First-class function pointer types with full type safety and C callback interop.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Module System</h3>
+          <p>Explicit module imports with <code>pub</code> visibility control. No header files.</p>
+        </div>
+      </div>
+
+      <h2>Quick Look</h2>
+      <p>A taste of Mirage syntax — a simple program using structs, methods, and error handling:</p>
+      <pre><code><span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
+
+<span class="kw">type</span> <span class="ty">Vec2</span> = <span class="kw">struct</span> {
+    <span class="var">x</span>: <span class="ty">f64</span>
+    <span class="var">y</span>: <span class="ty">f64</span>
+}
+
+<span class="kw">impl</span> <span class="ty">Vec2</span> {
+    <span class="kw">pub fn</span> <span class="fn">length_sq</span>(<span class="var">self</span>) -&gt; <span class="ty">f64</span> {
+        <span class="kw">return</span> <span class="var">self</span>.<span class="var">x</span> * <span class="var">self</span>.<span class="var">x</span> + <span class="var">self</span>.<span class="var">y</span> * <span class="var">self</span>.<span class="var">y</span>
+    }
+}
+
+<span class="kw">fn</span> <span class="fn">divide</span>(<span class="var">a</span>: <span class="ty">f64</span>, <span class="var">b</span>: <span class="ty">f64</span>) -&gt; (<span class="ty">f64</span>, <span class="ty">error</span>) {
+    <span class="kw">if</span> <span class="var">b</span> == <span class="num">0.0</span> { <span class="kw">return</span> <span class="num">0.0</span>, <span class="num">1</span> }
+    <span class="kw">return</span> <span class="var">a</span> / <span class="var">b</span>, <span class="num">0</span>
+}
+
+<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span> {
+    <span class="kw">mut</span> <span class="var">v</span>: <span class="ty">Vec2</span> = {<span class="var">x</span> = <span class="num">3.0</span>, <span class="var">y</span> = <span class="num">4.0</span>}
+    <span class="fn">printf</span>(<span class="str">"length_sq = %.1f\n"</span>, <span class="var">v</span>.<span class="fn">length_sq</span>())
+
+    <span class="kw">mut</span> <span class="var">result</span>: <span class="ty">f64</span> = <span class="kw">try</span> <span class="fn">divide</span>(<span class="var">v</span>.<span class="var">x</span>, <span class="var">v</span>.<span class="var">y</span>)
+    <span class="fn">printf</span>(<span class="str">"x / y = %.4f\n"</span>, <span class="var">result</span>)
+
+    <span class="kw">return</span> <span class="num">0</span>
+}</code></pre>
+
+      <h2>Language at a Glance</h2>
+      <table>
+        <tr><th>Feature</th><th>Mirage</th></tr>
+        <tr><td>Paradigm</td><td>Imperative, structured</td></tr>
+        <tr><td>Type system</td><td>Static, nominally-typed composites</td></tr>
+        <tr><td>Memory model</td><td>Manual (no GC); <code>anyptr</code> for raw memory</td></tr>
+        <tr><td>Loops</td><td><code>while</code></td></tr>
+        <tr><td>Generics</td><td>Not yet implemented</td></tr>
+        <tr><td>Closures</td><td>Not yet implemented (function pointers only)</td></tr>
+        <tr><td>Exceptions</td><td>No — use <code>error</code> + <code>try</code></td></tr>
+        <tr><td>Null safety</td><td>Explicit — pointers can hold <code>nil</code></td></tr>
+        <tr><td>Backend</td><td>LLVM IR</td></tr>
+      </table>
+
+    </div>
+  </main>
+
+</div>
+</body>
+</html>

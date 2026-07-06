@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Getting Started — Mirage</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <nav>
+      <div class="sidebar-section">Introduction</div>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="getting-started.html" class="active">Getting Started</a></li>
+      </ul>
+      <div class="sidebar-section">Language</div>
+      <ul>
+        <li><a href="types.html">Types</a></li>
+        <li><a href="functions.html">Functions</a></li>
+        <li><a href="control-flow.html">Control Flow</a></li>
+        <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="error-handling.html">Error Handling</a></li>
+        <li><a href="modules.html">Modules</a></li>
+      </ul>
+      <div class="sidebar-section">Reference</div>
+      <ul>
+        <li><a href="grammar.html">Grammar</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="main">
+    <div class="content">
+
+      <h1>Getting Started</h1>
+      <p class="subtitle">Build Mirage from source and write your first program.</p>
+
+      <h2>Building the Compiler</h2>
+      <p>Mirage requires <strong>LLVM</strong> and a C++ compiler. The project uses <code>just</code> as its build tool.</p>
+
+      <pre><code><span class="cmt"># Clone and build</span>
+git clone &lt;repo-url&gt;
+cd Mirage
+just build</code></pre>
+
+      <p>The compiler binary is produced at <code>./build/mirage</code>.</p>
+
+      <h2>Compiler Flags</h2>
+      <table>
+        <tr><th>Flag</th><th>Description</th></tr>
+        <tr><td><code>--emit-ir</code></td><td>Print the generated LLVM IR to stdout instead of producing a binary</td></tr>
+        <tr><td><code>--freestanding</code></td><td>Build without a hosted entry point; use <code>fn _start()</code> instead of <code>main</code></td></tr>
+        <tr><td><code>-o &lt;file&gt;</code></td><td>Set the output file name</td></tr>
+      </table>
+
+      <pre><code><span class="cmt"># Compile a program</span>
+./build/mirage hello.mir -o hello
+
+<span class="cmt"># Inspect the generated LLVM IR</span>
+./build/mirage hello.mir --emit-ir
+
+<span class="cmt"># Freestanding (no libc, custom entry)</span>
+./build/mirage kernel.mir --freestanding -o kernel.o</code></pre>
+
+      <h2>Hello, World</h2>
+      <p>
+        Mirage does not have a built-in print function. Instead, it calls the C standard library's
+        <code>printf</code> via an <code>ext fn</code> declaration. This is typical for Mirage programs
+        that run in a hosted environment.
+      </p>
+
+      <pre><code><span class="cmt">// hello.mir</span>
+
+<span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
+
+<span class="kw">pub fn</span> <span class="fn">main</span>() {
+    <span class="fn">printf</span>(<span class="str">"Hello, World!\n"</span>)
+}</code></pre>
+
+      <pre><code>./build/mirage hello.mir -o hello
+./hello
+<span class="cmt"># Hello, World!</span></code></pre>
+
+      <h2>Entry Points</h2>
+      <p>
+        The root module must define a <code>pub fn main</code> in one of three signatures:
+      </p>
+
+      <pre><code><span class="cmt">// No return value — exits with code 0</span>
+<span class="kw">pub fn</span> <span class="fn">main</span>() {
+    <span class="cmt">// ...</span>
+}
+
+<span class="cmt">// Returns an explicit exit code</span>
+<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">i32</span> {
+    <span class="kw">return</span> <span class="num">0</span>
+}
+
+<span class="cmt">// Returns an error value (truncated to i32 for the exit code)</span>
+<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span> {
+    <span class="kw">return</span> <span class="num">0</span>
+}</code></pre>
+
+      <h2>Basic Program Walkthrough</h2>
+      <p>
+        Let's walk through a small but complete Mirage program that shows variables, conditionals,
+        loops, and C interop.
+      </p>
+
+      <pre><code><span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
+
+<span class="kw">fn</span> <span class="fn">fizzbuzz</span>(<span class="var">n</span>: <span class="ty">i32</span>) {
+    <span class="kw">mut</span> <span class="var">i</span>: <span class="ty">i32</span> = <span class="num">1</span>
+    <span class="kw">while</span> <span class="var">i</span> &lt;= <span class="var">n</span> {
+        <span class="kw">if</span> <span class="var">i</span> % <span class="num">15</span> == <span class="num">0</span> {
+            <span class="fn">printf</span>(<span class="str">"FizzBuzz\n"</span>)
+        } <span class="kw">else if</span> <span class="var">i</span> % <span class="num">3</span> == <span class="num">0</span> {
+            <span class="fn">printf</span>(<span class="str">"Fizz\n"</span>)
+        } <span class="kw">else if</span> <span class="var">i</span> % <span class="num">5</span> == <span class="num">0</span> {
+            <span class="fn">printf</span>(<span class="str">"Buzz\n"</span>)
+        } <span class="kw">else</span> {
+            <span class="fn">printf</span>(<span class="str">"%d\n"</span>, <span class="var">i</span>)
+        }
+        <span class="var">i</span>++
+    }
+}
+
+<span class="kw">pub fn</span> <span class="fn">main</span>() {
+    <span class="fn">fizzbuzz</span>(<span class="num">20</span>)
+}</code></pre>
+
+      <p>Key points in this example:</p>
+      <ul>
+        <li><code>ext fn printf</code> — declares the C <code>printf</code> function as a variadic extern.</li>
+        <li><code>mut i: i32 = 1</code> — declares a mutable variable with an explicit type.</li>
+        <li><code>while i &lt;= n { ... }</code> — the only loop construct in Mirage.</li>
+        <li><code>i++</code> — post-increment expression.</li>
+        <li><code>i % 15</code> — modulo operator.</li>
+      </ul>
+
+      <h2>Variables and Constants</h2>
+      <pre><code><span class="cmt">// Mutable variable — type inferred</span>
+<span class="kw">mut</span> <span class="var">x</span> := <span class="num">42</span>
+
+<span class="cmt">// Mutable variable — explicit type</span>
+<span class="kw">mut</span> <span class="var">y</span>: <span class="ty">f64</span> = <span class="num">3.14</span>
+
+<span class="cmt">// Immutable constant — cannot be reassigned</span>
+<span class="kw">const</span> <span class="var">limit</span> := <span class="num">100</span>
+
+<span class="cmt">// Default initialization — struct/array fields zeroed</span>
+<span class="kw">mut</span> <span class="var">buf</span>: [<span class="num">256</span>]<span class="ty">u8</span>
+
+<span class="cmt">// Uninitialized — storage allocated, no write</span>
+<span class="kw">mut</span> <span class="var">tmp</span>: <span class="ty">i32</span> = <span class="kw">undefined</span>
+<span class="var">tmp</span> = <span class="num">99</span></code></pre>
+
+      <h2>Type Inference</h2>
+      <p>
+        Mirage infers the type of a variable from its initializer when no annotation is given.
+        The <code>:=</code> syntax means "infer the type":
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">a</span> := <span class="num">10</span>         <span class="cmt">// a: i32</span>
+<span class="kw">mut</span>   <span class="var">b</span> := <span class="num">3.14</span>       <span class="cmt">// b: f64</span>
+<span class="kw">const</span> <span class="var">c</span> := <span class="lit">true</span>        <span class="cmt">// c: bool</span>
+<span class="kw">const</span> <span class="var">s</span> := <span class="str">"hello"</span>    <span class="cmt">// s: *u8</span></code></pre>
+
+      <div class="callout">
+        <div class="callout-title">Note</div>
+        Mirage does <strong>not</strong> implicitly promote or coerce numeric types. To mix types in
+        arithmetic, use <code>cast(expr, TargetType)</code>.
+      </div>
+
+      <h2>Next Steps</h2>
+      <ul>
+        <li><a href="types.html">Types</a> — all built-in and composite types</li>
+        <li><a href="functions.html">Functions</a> — declarations, multi-return, extern</li>
+        <li><a href="control-flow.html">Control Flow</a> — if/else, while, match, switch</li>
+        <li><a href="structs-and-types.html">Structs &amp; Types</a> — structs, enums, unions, impl</li>
+        <li><a href="error-handling.html">Error Handling</a> — error, try, defer</li>
+        <li><a href="modules.html">Modules</a> — import and pub visibility</li>
+      </ul>
+
+    </div>
+  </main>
+
+</div>
+</body>
+</html>

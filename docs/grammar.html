@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Grammar Reference — Mirage</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    /* Override pre/code for BNF grammar to de-emphasize syntax colors */
+    .grammar pre {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 1.25rem;
+      font-size: 0.85rem;
+      line-height: 1.7;
+      overflow-x: auto;
+      color: #e6edf3;
+    }
+    .grammar pre code {
+      background: none;
+      border: none;
+      padding: 0;
+    }
+    .bnf-nt  { color: #d2a8ff; }   /* non-terminals */
+    .bnf-t   { color: #a5d6ff; }   /* terminals / literals */
+    .bnf-op  { color: #ff7b72; }   /* ::= | [ ] { } */
+    .bnf-cm  { color: #8b949e; font-style: italic; }  /* comments */
+  </style>
+</head>
+<body>
+<div class="layout">
+
+  <aside class="sidebar">
+    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <nav>
+      <div class="sidebar-section">Introduction</div>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="getting-started.html">Getting Started</a></li>
+      </ul>
+      <div class="sidebar-section">Language</div>
+      <ul>
+        <li><a href="types.html">Types</a></li>
+        <li><a href="functions.html">Functions</a></li>
+        <li><a href="control-flow.html">Control Flow</a></li>
+        <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="error-handling.html">Error Handling</a></li>
+        <li><a href="modules.html">Modules</a></li>
+      </ul>
+      <div class="sidebar-section">Reference</div>
+      <ul>
+        <li><a href="grammar.html" class="active">Grammar</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main class="main">
+    <div class="content grammar">
+
+      <h1>Grammar Reference</h1>
+      <p class="subtitle">
+        Complete EBNF grammar derived from the Mirage parser (<code>src/compiler/ast.cpp</code>).
+        Terminals appear in <code>'single quotes'</code> or as UPPERCASE token classes.
+        <code>[...]</code> = optional, <code>{...}</code> = zero or more, <code>|</code> = alternative.
+      </p>
+
+      <h2>Top-Level Structure</h2>
+      <pre><code>program       ::= { declaration } EOF
+
+declaration   ::= [ 'pub' ] fn_decl
+               | [ 'pub' ] ext_fn_decl
+               | [ 'pub' ] type_decl
+               | [ 'pub' ] var_decl
+               | [ 'pub' ] macro_decl
+               | impl_decl           <span class="bnf-cm">-- impl cannot be pub</span></code></pre>
+
+      <h2>Declarations</h2>
+
+      <h3>Function Declaration</h3>
+      <pre><code>fn_decl       ::= 'fn' IDENT '(' [ param { ',' param } ] ')' [ return_types ] stmt
+
+param         ::= [ 'mut' ] IDENT ':' type
+
+return_types  ::= '->' type
+               | '->' '(' type { ',' type } ')'</code></pre>
+
+      <h3>Extern Function Declaration</h3>
+      <pre><code>ext_fn_decl   ::= 'ext' 'fn' IDENT '(' [ ext_params ] ')' [ '->' type ]
+
+ext_params    ::= ext_param { ',' ext_param } [ ',' '...' ]
+
+ext_param     ::= IDENT ':' type
+
+<span class="bnf-cm">-- 'ext' is lexed as an identifier, not a keyword</span></code></pre>
+
+      <h3>Type Declaration</h3>
+      <pre><code>type_decl     ::= 'type' IDENT '=' type</code></pre>
+
+      <h3>Variable / Constant Declaration</h3>
+      <pre><code>var_decl      ::= ( 'mut' | 'const' ) IDENT
+                  ( ':' type [ '=' expr ]
+                  | ':=' expr )
+
+<span class="bnf-cm">-- 'const' requires an initializer
+-- top-level 'const' initializer may be import(...)</span></code></pre>
+
+      <h3>Macro Declaration</h3>
+      <pre><code>macro_decl    ::= 'macro' IDENT '(' [ macro_param { ',' macro_param } ] ')' '->' expr
+
+macro_param   ::= IDENT ':' type</code></pre>
+
+      <h3>Impl Block</h3>
+      <pre><code>impl_decl     ::= 'impl' named_type '{' { method_decl } '}'
+
+method_decl   ::= [ 'pub' ] 'fn' IDENT
+                  '(' ( 'self' | 'mut' 'self' )
+                      { ',' IDENT ':' type }
+                  ')'
+                  [ return_types ]
+                  stmt</code></pre>
+
+      <h2>Types</h2>
+      <pre><code>type          ::= '*' type                              <span class="bnf-cm">-- pointer</span>
+               | '[' ']' type                          <span class="bnf-cm">-- slice</span>
+               | '[' expr ']' type                     <span class="bnf-cm">-- array</span>
+               | struct_type
+               | enum_type
+               | union_type
+               | fn_type
+               | named_type
+               | builtin_type
+
+struct_type   ::= 'struct' [ '(' 'packed' ')' ] '{'
+                    { IDENT ':' type [ '=' expr ] }   <span class="bnf-cm">-- newline-separated fields</span>
+                  '}'
+
+enum_type     ::= 'enum' [ '(' type ')' ] '{'
+                    { IDENT [ '=' expr ] }             <span class="bnf-cm">-- newline-separated variants</span>
+                  '}'
+
+union_type    ::= 'union' '{'                          <span class="bnf-cm">-- untagged</span>
+                    { IDENT ':' type }
+                  '}'
+               | 'union' '(' 'enum' ')' '{'            <span class="bnf-cm">-- tagged</span>
+                    { IDENT [ ':' type ] }
+                  '}'
+
+fn_type       ::= 'fn' '(' [ fn_type_params ] ')'
+                    [ '->' type | '->' '(' type { ',' type } ')' ]
+
+fn_type_params ::= type { ',' type } [ ',' '...' ]
+
+named_type    ::= IDENT { '.' IDENT }
+
+builtin_type  ::= 'u8' | 'u16' | 'u32' | 'u64'
+               | 'i8' | 'i16' | 'i32' | 'i64'
+               | 'f32' | 'f64'
+               | 'usize' | 'bool' | 'byte' | 'error' | 'anyptr'</code></pre>
+
+      <h2>Statements</h2>
+      <pre><code>stmt          ::= block_stmt
+               | if_stmt
+               | while_stmt
+               | switch_stmt
+               | var_decl_stmt
+               | continue_stmt
+               | break_stmt
+               | return_stmt
+               | defer_stmt
+               | expr_stmt
+
+block_stmt    ::= '{' { stmt } '}'
+
+if_stmt       ::= 'if' expr stmt [ 'else' stmt ]
+
+while_stmt    ::= 'while' expr block_stmt
+
+switch_stmt   ::= 'switch' expr '{' [ switch_arm { ',' switch_arm } [ ',' ] ] '}'
+
+switch_arm    ::= arm_pattern ':' stmt
+
+var_decl_stmt ::= ( 'mut' | 'const' ) IDENT
+                  ( ':' type [ '=' expr ]
+                  | ',' IDENT { ',' IDENT } ':=' expr   <span class="bnf-cm">-- group decl</span>
+                  | ':=' expr )
+
+continue_stmt ::= 'continue'
+break_stmt    ::= 'break'
+return_stmt   ::= 'return' [ expr { ',' expr } ]
+defer_stmt    ::= 'defer' stmt
+expr_stmt     ::= expr
+
+<span class="bnf-cm">-- In group decl, any name may be '_' (identifier) to discard that slot</span></code></pre>
+
+      <h2>Expressions — Precedence (low → high)</h2>
+      <pre><code>expr          ::= assign_expr | import_expr
+
+import_expr   ::= 'import' '(' STRING ')'
+                  <span class="bnf-cm">-- only valid as initializer of const := with no type annotation</span>
+
+assign_expr   ::= ternary_expr [ assign_op assign_expr ]   <span class="bnf-cm">-- right-associative</span>
+
+assign_op     ::= '=' | '+=' | '-=' | '*=' | '/='
+               | '&amp;=' | '|=' | '^=' | '&lt;&lt;=' | '&gt;&gt;='
+
+ternary_expr  ::= logical_or_expr [ '?' expr ':' expr ]   <span class="bnf-cm">-- right-assoc</span>
+
+logical_or_expr  ::= logical_and_expr { '||' logical_and_expr }
+
+logical_and_expr ::= bitwise_or_expr  { '&amp;&amp;' bitwise_or_expr }
+
+bitwise_or_expr  ::= bitwise_xor_expr { '|'  bitwise_xor_expr }
+
+bitwise_xor_expr ::= bitwise_and_expr { '^'  bitwise_and_expr }
+
+bitwise_and_expr ::= equality_expr    { '&amp;'  equality_expr }
+
+equality_expr    ::= comparison_expr  { ( '==' | '!=' ) comparison_expr }
+
+comparison_expr  ::= shift_expr  { ( '&lt;' | '>' | '&lt;=' | '&gt;=' ) shift_expr }
+
+shift_expr    ::= additive_expr { ( '&lt;&lt;' | '&gt;&gt;' ) additive_expr }
+
+additive_expr ::= mult_expr     { ( '+' | '-' ) mult_expr }
+
+mult_expr     ::= unary_expr    { ( '*' | '/' | '%' ) unary_expr }
+
+unary_expr    ::= 'try' postfix_expr
+               | ( '-' | '!' | '~' | '&amp;' | '*' ) unary_expr
+               | postfix_expr
+
+<span class="bnf-cm">-- 'try' has tighter binding than binary operators</span>
+
+postfix_expr  ::= primary_expr { postfix_op }
+
+postfix_op    ::= '(' [ expr { ',' expr } ] ')'            <span class="bnf-cm">-- call</span>
+               | '.' IDENT                                  <span class="bnf-cm">-- member</span>
+               | '.' IDENT '{.' field_init { ',' field_init } '}'  <span class="bnf-cm">-- qualified tagged variant</span>
+               | '[' expr ']'                               <span class="bnf-cm">-- index</span>
+               | '[' expr '..' expr ']'                     <span class="bnf-cm">-- slice range</span>
+               | '++'                                       <span class="bnf-cm">-- post-increment</span>
+               | '--'                                       <span class="bnf-cm">-- post-decrement</span></code></pre>
+
+      <h2>Primary Expressions</h2>
+      <pre><code>primary_expr  ::= INT_LITERAL
+               | FLOAT_LITERAL
+               | STRING_LITERAL
+               | 'true'
+               | 'false'
+               | 'nil'
+               | 'iota'
+               | 'default'
+               | 'undefined'
+               | IDENT
+               | '(' expr ')'
+               | sizeof_expr
+               | len_expr
+               | cast_expr
+               | match_expr
+               | braced_initializer
+               | dot_ident_expr
+               | contextual_tagged_variant
+
+sizeof_expr   ::= 'sizeof' expr
+
+len_expr      ::= 'len' expr
+
+cast_expr     ::= 'cast' '(' expr ',' type [ ',' expr ] ')'
+
+match_expr    ::= 'match' expr '{' [ match_arm { ',' match_arm } [ ',' ] ] '}'
+
+match_arm     ::= arm_pattern ':' expr
+
+arm_pattern   ::= '.' IDENT [ '(' [ '&amp;' ] IDENT ')' ]   <span class="bnf-cm">-- variant (enum/tagged-union)</span>
+               | '_'                                       <span class="bnf-cm">-- default / wildcard (must be last)</span>
+               | expr                                      <span class="bnf-cm">-- literal constant (integer or bool)</span>
+
+dot_ident_expr              ::= '.' IDENT
+                                <span class="bnf-cm">-- enum literal; requires expected type context</span>
+
+contextual_tagged_variant   ::= '.' IDENT '{.' field_init { ',' field_init } '}'
+                                <span class="bnf-cm">-- '{.' disambiguates from block statements</span>
+
+field_init    ::= '.' IDENT '=' expr
+
+braced_initializer ::= '{' '}'                                    <span class="bnf-cm">-- empty (full default)</span>
+               | '{' IDENT '=' expr { ',' IDENT '=' expr } '}'   <span class="bnf-cm">-- struct fields</span>
+               | '{' expr { ',' expr } '}'                        <span class="bnf-cm">-- array values</span>
+               <span class="bnf-cm">-- Disambiguation: '{' IDENT '=' detects struct form; else array form</span></code></pre>
+
+      <h2>Literals</h2>
+      <pre><code>INT_LITERAL   ::= decimal_int | hex_int | bin_int
+
+decimal_int   ::= DIGIT { DIGIT | '_' }
+hex_int       ::= ( '0x' | '0X' ) HEX_DIGIT { HEX_DIGIT | '_' }
+bin_int       ::= ( '0b' | '0B' ) BIN_DIGIT { BIN_DIGIT | '_' }
+
+FLOAT_LITERAL ::= DIGIT { DIGIT } '.' DIGIT { DIGIT }
+
+STRING_LITERAL ::= '"' { char | escape_seq } '"'
+
+escape_seq    ::= '\\' | '\"' | '\n' | '\t' | '\r' | '\0'
+
+IDENT         ::= LETTER { LETTER | DIGIT | '_' }
+
+DIGIT         ::= '0' .. '9'
+HEX_DIGIT     ::= '0' .. '9' | 'a' .. 'f' | 'A' .. 'F'
+BIN_DIGIT     ::= '0' | '1'
+LETTER        ::= 'a' .. 'z' | 'A' .. 'Z' | '_'</code></pre>
+
+      <h2>Syntax Notes</h2>
+
+      <h3>Field Separators</h3>
+      <table>
+        <tr><th>Context</th><th>Separator</th></tr>
+        <tr><td>Struct fields in type definition</td><td>Newline (no commas)</td></tr>
+        <tr><td>Enum fields in type definition</td><td>Newline (no commas)</td></tr>
+        <tr><td>Tagged union variants in type definition</td><td>Newline (no commas)</td></tr>
+        <tr><td>Struct braced initializer <code>{x = 1, y = 2}</code></td><td>Comma</td></tr>
+        <tr><td>Array braced initializer <code>{1, 2, 3}</code></td><td>Comma</td></tr>
+        <tr><td>Match / switch arms</td><td>Comma (trailing comma optional)</td></tr>
+        <tr><td>Function parameters</td><td>Comma</td></tr>
+        <tr><td>Multiple return values in <code>return</code></td><td>Comma</td></tr>
+      </table>
+
+      <h3>Tagged Variant Disambiguation</h3>
+      <p>
+        The sequence <code>{.</code> (left-brace immediately followed by dot) signals a tagged union
+        payload constructor. Any other content after <code>{</code> is a braced initializer or block.
+        This disambiguation applies both in postfix position (<code>Type.variant{.</code>) and in
+        primary position (<code>.variant{.</code>).
+      </p>
+
+      <h3>Multi-Return Syntax</h3>
+      <p>
+        Multi-return type annotations require parentheses: <code>-&gt; (T1, T2)</code>.
+        Multi-return <code>return</code> statements use commas: <code>return a, b</code>.
+        Multi-return calls use group declarations: <code>mut a, b := call()</code>.
+      </p>
+
+      <h3><code>try</code> Precedence</h3>
+      <p>
+        <code>try</code> is parsed at the unary level, tighter than binary operators.
+        <code>try f(x) + g()</code> parses as <code>(try f(x)) + g()</code>.
+        Use parentheses to chain member access: <code>(try f(x)).field</code>.
+      </p>
+
+      <h3>Reserved Keywords</h3>
+      <p>
+        <code>break</code> <code>byte</code> <code>cast</code> <code>const</code> <code>continue</code>
+        <code>default</code> <code>defer</code> <code>else</code> <code>enum</code> <code>error</code>
+        <code>false</code> <code>fn</code> <code>for</code> <code>if</code> <code>impl</code>
+        <code>import</code> <code>iota</code> <code>len</code> <code>macro</code> <code>match</code>
+        <code>mut</code> <code>nil</code> <code>return</code> <code>sizeof</code> <code>struct</code>
+        <code>switch</code> <code>true</code> <code>try</code> <code>type</code> <code>undefined</code>
+        <code>union</code> <code>while</code>
+      </p>
+      <p>Note: <code>for</code> is reserved but not yet implemented. <code>ext</code> is scanned as an identifier.</p>
+
+    </div>
+  </main>
+
+</div>
+</body>
+</html>
