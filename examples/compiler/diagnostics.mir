@@ -1,0 +1,68 @@
+const std := import("std")
+const source := import("source")
+
+const MAX_ERRORS: usize = 20
+
+pub type Level = enum(u8) {
+    Error
+    Warning
+}
+
+pub type Stage = enum(u8) {
+    Lexer
+}
+
+pub type Diagnostic = struct {
+    level: Level
+    stage: Stage
+    location: source.Location
+    message: []u8
+}
+
+pub type Engine = struct {
+    diagnostics: std.Vector
+    errors: usize
+}
+
+fn print_diagnostic(diagnostic: *Diagnostic) {
+    // TODO: Implement me
+}
+
+impl Engine {
+    pub fn report(mut self, level: Level, stage: Stage, location: source.Location, message: []u8) {
+        if self.errors >= MAX_ERRORS {
+            return
+        }
+
+        const diag: Diagnostic = {
+            .level = level,
+            .stage = stage,
+            .location = location,
+            .message = message,
+        }
+
+        self.diagnostic.push(&diag)
+        
+        print_diagnostic(&diag)
+
+        if level == .Error {
+            self.errors++
+            if self.errors == MAX_ERRORS {
+                // TODO:  std::cerr << "mirage: too many errors emitted, stopping.\n";
+                return
+            }
+        }
+    }
+
+    pub fn report_error(mut self, stage: Stage, location: source.Location, message: []u8) {
+        self.report(.Error, stage, location, message)
+    }
+
+    pub fn has_errors(self) -> bool {
+        return self.errors > 0
+    }
+
+    pub fn has_reached_max_errors(self) -> bool {
+        return self.errors >= MAX_ERRORS
+    }
+}

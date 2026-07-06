@@ -2,6 +2,24 @@ const io := import("io")
 
 ext fn printf(fmt: *u8, ...) -> i32
 
+pub type TokenKind = enum(u8) {
+    LitInteger
+    LitFloat
+    LitString
+
+    Identifier
+}
+
+pub fn token_kind_name(kind: TokenKind) -> *u8 {
+    return match kind {
+        .LitInteger: "LIT_INT",
+        .LitFloat:   "LIT_FLOAT",
+        .LitString:  "LIT_STRING",
+        
+        .Identifier: "IDENT"
+    }
+}
+
 pub fn main() -> error {
     const f := try io.open("Justfile", "r")
     defer f.close()
@@ -9,8 +27,12 @@ pub fn main() -> error {
     mut buf: [256]u8
     const bytes_read := f.read(buf, 256)
 
-    printf("Read %u bytes from Justfile\n", bytes_read)
-    printf("%.*s\n", bytes_read, cast(buf, *u8))
+    const file_len, file_data := try io.load_file("Justfile")
+    defer io.free(file_data)
+
+    printf("Read %u bytes from Justfile\n", file_len)
+    printf("%.*s\n", file_len, cast(file_data, *u8))
+    //printf("%s\n", token_kind_name(.LitInteger))
 
     return 0
 }

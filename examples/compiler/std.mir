@@ -1,0 +1,68 @@
+const mem := import("memory")
+
+ext fn memcpy(s1: anyptr, s2: anyptr, n: usize) -> anyptr
+
+pub type Vector = struct {
+    data: anyptr
+    length: usize
+    capacity: usize
+    element_size: usize
+}
+
+pub fn init(v: *Vector, element_size: usize) -> bool {
+    v.data = nil
+    v.length = 0
+    v.capacity = 0
+    v.element_size = element_size
+    return true
+}
+
+pub fn destroy(v: *Vector) {
+    if v.data != nil {
+        mem.free(v.data)
+    }
+    v.data = nil
+    v.length = v.capacity = 0
+}
+
+fn reserve(v: *Vector, new_capacity: usize) -> bool {
+    if new_capacity <= v.capacity {
+        return true
+    }
+    mut new_data := mem.realloc(v.data, new_capacity * v.element_size)
+    if new_data == nil {
+        return false
+    }
+    v.data = new_data
+    v.capacity = new_capacity
+    return true
+}
+
+impl Vector {
+    pub fn push(self, element: anyptr) -> bool {
+        if self.length == self.capacity {
+            const new_capacity: usize = self.capacity == 0 ? 8 : self.capacity * 2
+            if !reserve(self, new_capacity) {
+                return false
+            }
+        }
+        const dest := self.data + self.length * self.element_size
+        memcpy(dest, element, self.element_size)
+        self.length++
+        return true
+    }
+
+    pub fn pop(self) {
+        if self.length == 0 {
+            return
+        }
+        self.length--
+    }
+
+    pub fn at(self, idx: usize) -> anyptr {
+        if idx >= self.length {
+            return nil
+        }
+        return self.data + idx * self.element_size
+    }
+}

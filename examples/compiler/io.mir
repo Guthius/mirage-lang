@@ -1,3 +1,5 @@
+pub ext fn printf(fmt: *u8, ...) -> i32
+
 ext fn fopen(path: *u8, mode: *u8) -> anyptr
 ext fn fclose(stream: anyptr) -> i32
 ext fn fread(buf: *u8, size: usize, count: usize, stream: anyptr) -> usize
@@ -5,12 +7,7 @@ ext fn fseek(stream: anyptr, offset: i64, whence: i32) -> i32
 ext fn ftell(stream: anyptr) -> i64
 ext fn rewind(stream: anyptr)
 
-ext fn malloc(size: usize) -> anyptr
-pub ext fn free(ptr: anyptr)
-
-pub type file = struct {
-    fd: anyptr
-}
+const mem := import("memory")
 
 const SEEK_SET: i32 = 0
 const SEEK_CUR: i32 = 1
@@ -19,7 +16,7 @@ const SEEK_END: i32 = 2
 const E_OK: error = 0
 const E_FAILED: error = 1
 
-pub fn load_file(path: *u8) -> (usize, *u8, error) {
+pub fn load_file(path: []u8) -> (usize, *u8, error) {
     const f := fopen(path, "rb")
     if f == nil {
         return 0, nil, E_FAILED
@@ -38,39 +35,15 @@ pub fn load_file(path: *u8) -> (usize, *u8, error) {
 
     rewind(f)
 
-    const data := malloc(cast(count, usize))
+    const data := mem.malloc(cast(count, usize))
     if data == nil {
         return 0, nil, E_FAILED
     }
 
     if fread(data, 1, cast(count, usize), f) != cast(count, usize) {
-        free(data)
+        mem.free(data)
         return 0, nil, E_FAILED
     }
 
     return cast(count, usize), data, E_OK
-}
-
-
-pub fn open(path: *u8, mode: *u8) -> (file, error) {
-    const fd := fopen(path, mode)
-    if fd == nil {
-        return default, 1
-    }
-    return {.fd = fd}, 0
-}
-
-impl file {
-    pub fn close(mut self) {
-        if self.fd == nil {
-            return
-        }
-        if fclose(self.fd) == 0 {
-            self.fd = nil
-        }
-    }
-
-    pub fn read(self, buf: *u8, size: usize) -> usize {
-        return fread(buf, 1, size, self.fd)
-    }
 }

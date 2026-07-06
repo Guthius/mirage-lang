@@ -1,0 +1,23 @@
+pub type Token = struct {
+    kind: TokenKind
+    lexeme: []u8
+    location: SourceLocation
+}
+
+pub type TokenKind = enum(u8) {
+    LitInteger
+    LitFloat
+    LitString
+
+    Identifier
+}
+
+pub fn token_kind_name(kind: TokenKind) -> *u8 {
+    return kind match {
+        .LitInteger: "LIT_INT",
+        .LitFloat:   "LIT_FLOAT",
+        .LitString:  "LIT_STRING",
+        
+        .Identifier: "IDENT"
+    }
+}

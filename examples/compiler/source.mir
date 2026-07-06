@@ -1,0 +1,48 @@
+pub type Location = struct {
+    filename: []u8
+    line: usize = 1
+    column: usize = 1
+    offset: usize = 0
+}
+
+fn get_source(filename: []u8) -> ([]u8, bool) {
+    return nil, false
+}
+
+pub fn load(canonical_path: []u8) -> []u8 {
+    const source, was_present := get_source(canonical_path)
+    if was_present {
+        return source
+    }
+
+    // TODO: Load the file content from disk...
+
+    return nil
+}
+
+pub fn get_source_line(filename: []u8, line: usize) -> []u8 {
+    const source, was_present := get_source(filename)
+    if !was_present {
+        return nil
+    }
+
+    mut current_line: usize = 1
+    mut start: usize = 0
+
+    for idx, ch in source {
+        if current_line == line {
+            start = idx
+            
+            mut end := start
+            while end < len(source) && source[end] != '\n' {
+                ++end
+            }
+
+            return cast(&source[i], []u8, end - start)
+        }
+
+        if ch == '\n' {
+            ++current_line
+        }
+    }
+}

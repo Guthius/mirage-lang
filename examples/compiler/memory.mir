@@ -1,0 +1,3 @@
+pub ext fn malloc(size: usize) -> anyptr
+pub ext fn realloc(ptr: anyptr, size: usize) -> anyptr
+pub ext fn free(ptr: anyptr)
