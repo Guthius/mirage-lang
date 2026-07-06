@@ -190,12 +190,19 @@ namespace codegen {
             std::unique_ptr<llvm::Module> module_;
             llvm::IRBuilder<> builder_;
 
+            struct DeferScope {
+                std::vector<const ast::DeferStmt *> defers; // emit LIFO
+                bool is_loop_body = false;
+            };
+
             const std::string *current_module_path_ = nullptr;
             const sema::ProgramModule *current_module_ = nullptr;
             llvm::Function *current_function_ = nullptr;
             std::vector<llvm::BasicBlock *> continue_targets_;
             std::vector<llvm::BasicBlock *> break_targets_;
             std::vector<sema::ResolvedType> current_returns_;
+            std::vector<DeferScope> defer_scopes_;
+            bool next_block_is_loop_body_ = false;
             std::unordered_map<std::string, LocalValue> locals_;
             std::unordered_map<std::string, MacroArg> macro_args_;
 
@@ -641,8 +648,9 @@ namespace codegen {
 
                 const bool returns_void = main_fn->return_types.empty();
                 const bool returns_i32 = main_fn->return_types.size() == 1 && main_fn->return_types.front().kind == sema::TypeKind::I32;
-                if (!returns_void && !returns_i32) {
-                    report_codegen_error(diag_, decl.location, "hosted entry point must return either no value or i32");
+                const bool returns_error = main_fn->return_types.size() == 1 && main_fn->return_types.front().kind == sema::TypeKind::Error;
+                if (!returns_void && !returns_i32 && !returns_error) {
+                    report_codegen_error(diag_, decl.location, "hosted entry point must return either no value, i32, or error");
                     return nullptr;
                 }
 
@@ -732,6 +740,8 @@ namespace codegen {
                 macro_args_.clear();
                 continue_targets_.clear();
                 break_targets_.clear();
+                defer_scopes_.clear();
+                next_block_is_loop_body_ = false;
 
                 auto *entry = llvm::BasicBlock::Create(*context_, "entry", current_function_);
                 builder_.SetInsertPoint(entry);
@@ -787,6 +797,30 @@ namespace codegen {
                 }
             }
 
+            // Pass by value: emit_stmt called inside can push/pop defer_scopes_,
+            // so we must not hold a reference into defer_scopes_ across those calls.
+            void emit_defers_in_scope(DeferScope scope) {
+                for (auto it = scope.defers.rbegin(); it != scope.defers.rend(); ++it) {
+                    emit_stmt((*it)->body);
+                }
+            }
+
+            void emit_defers_for_return() {
+                // Snapshot scopes so that inner push/pop during emission cannot invalidate iteration.
+                const auto scopes = defer_scopes_;
+                for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+                    emit_defers_in_scope(*it);
+                }
+            }
+
+            void emit_defers_for_loop_exit() {
+                const auto scopes = defer_scopes_;
+                for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+                    emit_defers_in_scope(*it);
+                    if (it->is_loop_body) break;
+                }
+            }
+
             void emit_start(const sema::FunctionSymbol &main_fn) {
                 auto *start_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), {}, false);
                 auto *start = llvm::Function::Create(start_ty, llvm::GlobalValue::ExternalLinkage, "_start", *module_);
@@ -808,6 +842,10 @@ namespace codegen {
                 if (main_fn.return_types.empty()) {
                     builder_.CreateCall(main);
                     exit_code_i32 = builder_.getInt32(0);
+                } else if (!main_fn.return_types.empty() && main_fn.return_types.front().kind == sema::TypeKind::Error) {
+                    // error is u64; truncate to i32 for exit code (0 = success, non-zero = error code)
+                    auto *error_val = builder_.CreateCall(main);
+                    exit_code_i32 = builder_.CreateTrunc(error_val, llvm::Type::getInt32Ty(*context_));
                 } else {
                     exit_code_i32 = builder_.CreateCall(main);
                 }
@@ -849,6 +887,8 @@ namespace codegen {
                 macro_args_.clear();
                 continue_targets_.clear();
                 break_targets_.clear();
+                defer_scopes_.clear();
+                next_block_is_loop_body_ = false;
 
                 auto *entry = llvm::BasicBlock::Create(*context_, "entry", current_function_);
                 builder_.SetInsertPoint(entry);
@@ -1475,6 +1515,70 @@ namespace codegen {
                 return {target_module, {}};
             }
 
+            // Emit the error-propagation branch for a try expression or try group decl.
+            // err_val: the LLVM i64 error value extracted from the call result.
+            // Returns the ok_bb where execution continues if no error.
+            auto emit_try_propagation(llvm::Value *err_val, const SourceLocation &loc) -> llvm::BasicBlock * {
+                auto *fn = builder_.GetInsertBlock()->getParent();
+                auto *propagate_bb = llvm::BasicBlock::Create(*context_, "try.propagate", fn);
+                auto *ok_bb = llvm::BasicBlock::Create(*context_, "try.ok", fn);
+                auto *zero = llvm::ConstantInt::get(err_val->getType(), 0, false);
+                auto *is_err = builder_.CreateICmpNE(err_val, zero);
+                builder_.CreateCondBr(is_err, propagate_bb, ok_bb);
+
+                builder_.SetInsertPoint(propagate_bb);
+                emit_defers_for_return();
+
+                // Propagate error into enclosing function's return
+                if (current_returns_.empty()) {
+                    // Sema should have caught this; emit unreachable as a safeguard
+                    builder_.CreateUnreachable();
+                } else if (current_returns_.size() == 1) {
+                    // Enclosing fn returns just error
+                    builder_.CreateRet(err_val);
+                } else {
+                    // Enclosing fn returns (T1, ..., error): zero-value T slots, propagate error
+                    auto *agg_ty = llvm::cast<llvm::StructType>(return_type(*current_module_path_, current_returns_));
+                    llvm::Value *agg = llvm::UndefValue::get(agg_ty);
+                    for (size_t i = 0; i < current_returns_.size() - 1; ++i) {
+                        agg = builder_.CreateInsertValue(agg, zero_value(*current_module_path_, current_returns_[i]), {static_cast<unsigned>(i)});
+                    }
+                    agg = builder_.CreateInsertValue(agg, err_val, {static_cast<unsigned>(current_returns_.size() - 1)});
+                    builder_.CreateRet(agg);
+                }
+
+                builder_.SetInsertPoint(ok_bb);
+                return ok_bb;
+            }
+
+            auto emit_try_expr(const ast::TryExpr &expr) -> llvm::Value * {
+                const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&expr.call);
+                auto *result = emit_call(**call);
+                const auto [type_module, returns] = call_return_types(**call);
+
+                // Extract the error value (last return slot)
+                llvm::Value *err_val;
+                if (returns.size() == 1) {
+                    err_val = result; // f() -> error: result IS the error
+                } else {
+                    err_val = builder_.CreateExtractValue(result, {static_cast<unsigned>(returns.size() - 1)});
+                }
+
+                emit_try_propagation(err_val, expr.location);
+
+                // On the ok path: return the non-error value (if any)
+                if (returns.size() == 1) {
+                    // f() -> error: expression is void; return a dummy value
+                    return llvm::UndefValue::get(llvm::Type::getInt8Ty(*context_));
+                }
+                if (returns.size() == 2) {
+                    // f() -> T, error: extract T from the aggregate
+                    return builder_.CreateExtractValue(result, {0});
+                }
+                // Multi-value try in expression position: sema rejects this; return first value
+                return builder_.CreateExtractValue(result, {0});
+            }
+
             auto emit_expr(const ast::Expr &expr) -> llvm::Value * {
                 return std::visit(
                     [&]<typename T>(const T &v) -> llvm::Value * {
@@ -1603,6 +1707,8 @@ namespace codegen {
                             return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TaggedVariantExpr>>) {
                             return emit_tagged_variant_expr(*v, ty);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TryExpr>>) {
+                            return emit_try_expr(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
                             return std::visit(
                                 [&]<typename BV>(const BV &bv) -> llvm::Value * {
@@ -2271,10 +2377,18 @@ namespace codegen {
                         using V = std::decay_t<T>;
                         if constexpr (std::is_same_v<V, std::unique_ptr<ast::BlockStmt>>) {
                             const auto saved = locals_;
+                            const bool is_loop_body = next_block_is_loop_body_;
+                            next_block_is_loop_body_ = false;
+                            defer_scopes_.push_back(DeferScope{.is_loop_body = is_loop_body});
                             for (const auto &s : v->stmts) {
                                 if (builder_.GetInsertBlock()->getTerminator()) break;
                                 emit_stmt(s);
                             }
+                            // Emit defers for fall-through (not already terminated by return/break/continue)
+                            if (!builder_.GetInsertBlock()->getTerminator()) {
+                                emit_defers_in_scope(defer_scopes_.back());
+                            }
+                            defer_scopes_.pop_back();
                             locals_ = saved;
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IfStmt>>) {
                             emit_if(*v);
@@ -2301,25 +2415,53 @@ namespace codegen {
                                 builder_.CreateStore(emit_default_value(type_module, ty), slot);
                             }
                         } else if constexpr (std::is_same_v<V, ast::VarDeclGroupStmt>) {
-                            auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&v.init);
-                            auto *result = emit_call(**call);
-                            const auto [type_module, returns] = call_return_types(**call);
-                            for (size_t i = 0; i < v.names.size(); ++i) {
-                                if (v.names[i].empty()) {
-                                    continue;
+                            const ast::CallExpr *call_ptr = nullptr;
+                            bool is_try = false;
+                            if (const auto *c = std::get_if<std::unique_ptr<ast::CallExpr>>(&v.init)) {
+                                call_ptr = c->get();
+                            } else if (const auto *t = std::get_if<std::unique_ptr<ast::TryExpr>>(&v.init)) {
+                                is_try = true;
+                                call_ptr = std::get_if<std::unique_ptr<ast::CallExpr>>(&(*t)->call)->get();
+                            }
+                            auto *result = emit_call(*call_ptr);
+                            const auto [type_module, all_returns] = call_return_types(*call_ptr);
+
+                            if (is_try) {
+                                // Extract error (last slot), branch on it
+                                auto *err_val = all_returns.size() == 1
+                                    ? result
+                                    : builder_.CreateExtractValue(result, {static_cast<unsigned>(all_returns.size() - 1)});
+                                emit_try_propagation(err_val, {});
+                                // On ok path: bind non-error names (all_returns[0..n-2])
+                                for (size_t i = 0; i < v.names.size(); ++i) {
+                                    if (v.names[i].empty() || v.names[i] == "_") continue;
+                                    auto ty = all_returns[i];
+                                    auto *slot = create_entry_alloca(current_function_, llvm_type_for(ty, type_module), v.names[i]);
+                                    auto *value = builder_.CreateExtractValue(result, {static_cast<unsigned>(i)});
+                                    builder_.CreateStore(value, slot);
+                                    locals_[v.names[i]] = LocalValue{.alloca = slot, .type = ty, .type_module = type_module};
                                 }
-                                auto ty = returns[i];
-                                auto *slot = create_entry_alloca(current_function_, llvm_type_for(ty, type_module), v.names[i]);
-                                auto *value = returns.size() == 1 ? result : builder_.CreateExtractValue(result, {static_cast<unsigned>(i)});
-                                builder_.CreateStore(value, slot);
-                                locals_[v.names[i]] = LocalValue{.alloca = slot, .type = ty, .type_module = type_module};
+                            } else {
+                                for (size_t i = 0; i < v.names.size(); ++i) {
+                                    if (v.names[i].empty() || v.names[i] == "_") continue;
+                                    auto ty = all_returns[i];
+                                    auto *slot = create_entry_alloca(current_function_, llvm_type_for(ty, type_module), v.names[i]);
+                                    auto *value = all_returns.size() == 1 ? result : builder_.CreateExtractValue(result, {static_cast<unsigned>(i)});
+                                    builder_.CreateStore(value, slot);
+                                    locals_[v.names[i]] = LocalValue{.alloca = slot, .type = ty, .type_module = type_module};
+                                }
                             }
                         } else if constexpr (std::is_same_v<V, ast::ContinueStmt>) {
+                            emit_defers_for_loop_exit();
                             builder_.CreateBr(continue_targets_.back());
                         } else if constexpr (std::is_same_v<V, ast::BreakStmt>) {
+                            emit_defers_for_loop_exit();
                             builder_.CreateBr(break_targets_.back());
                         } else if constexpr (std::is_same_v<V, ast::ReturnStmt>) {
                             emit_return(v);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::DeferStmt>>) {
+                            // Register defer in the current scope; emit at scope exit
+                            defer_scopes_.back().defers.push_back(v.get());
                         }
                     },
                     stmt);
@@ -2360,6 +2502,7 @@ namespace codegen {
                 builder_.SetInsertPoint(body_bb);
                 continue_targets_.push_back(cond_bb);
                 break_targets_.push_back(end_bb);
+                next_block_is_loop_body_ = true;
                 emit_stmt(stmt.body);
                 break_targets_.pop_back();
                 continue_targets_.pop_back();
@@ -2369,19 +2512,28 @@ namespace codegen {
             }
 
             void emit_return(const ast::ReturnStmt &stmt) {
-                if (stmt.return_values.empty()) {
+                // Evaluate return values first, before running defers
+                std::vector<llvm::Value *> ret_vals;
+                ret_vals.reserve(stmt.return_values.size());
+                for (size_t i = 0; i < stmt.return_values.size(); ++i) {
+                    ret_vals.push_back(emit_value_as(stmt.return_values[i], current_returns_[i]));
+                }
+
+                // Run all defers in LIFO order
+                emit_defers_for_return();
+
+                if (ret_vals.empty()) {
                     builder_.CreateRetVoid();
                     return;
                 }
-                if (stmt.return_values.size() == 1) {
-                    builder_.CreateRet(emit_value_as(stmt.return_values.front(), current_returns_.front()));
+                if (ret_vals.size() == 1) {
+                    builder_.CreateRet(ret_vals.front());
                     return;
                 }
-
                 auto *agg_ty = llvm::cast<llvm::StructType>(return_type(*current_module_path_, current_returns_));
                 llvm::Value *agg = llvm::UndefValue::get(agg_ty);
-                for (size_t i = 0; i < stmt.return_values.size(); ++i) {
-                    agg = builder_.CreateInsertValue(agg, emit_value_as(stmt.return_values[i], current_returns_[i]), {static_cast<unsigned>(i)});
+                for (size_t i = 0; i < ret_vals.size(); ++i) {
+                    agg = builder_.CreateInsertValue(agg, ret_vals[i], {static_cast<unsigned>(i)});
                 }
                 builder_.CreateRet(agg);
             }

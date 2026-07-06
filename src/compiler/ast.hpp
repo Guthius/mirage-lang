@@ -137,6 +137,7 @@ namespace ast {
     };
 
     struct TaggedVariantExpr;
+    struct TryExpr;
 
     struct DefaultExpr {
         SourceLocation location;
@@ -174,7 +175,8 @@ namespace ast {
         std::unique_ptr<BracedInitializerExpr>,
         std::unique_ptr<TaggedVariantExpr>,
         DefaultExpr,
-        UndefinedExpr>;
+        UndefinedExpr,
+        std::unique_ptr<TryExpr>>;
 
     struct StructType {
         struct Field {
@@ -387,6 +389,11 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct TryExpr {
+        Expr call; // must resolve to a CallExpr (validated in sema)
+        SourceLocation location;
+    };
+
     struct BlockStmt;
     struct IfStmt;
     struct WhileStmt;
@@ -425,6 +432,8 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct DeferStmt;
+
     using Stmt = std::variant<
         std::unique_ptr<BlockStmt>,
         std::unique_ptr<IfStmt>,
@@ -435,7 +444,13 @@ namespace ast {
         VarDeclGroupStmt,
         ContinueStmt,
         BreakStmt,
-        ReturnStmt>;
+        ReturnStmt,
+        std::unique_ptr<DeferStmt>>;
+
+    struct DeferStmt {
+        Stmt body;
+        SourceLocation location;
+    };
 
     struct BlockStmt {
         std::vector<Stmt> stmts;

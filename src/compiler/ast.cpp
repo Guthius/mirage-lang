@@ -227,6 +227,7 @@ namespace ast {
             case TokenKind::KwDefault:
             case TokenKind::KwUndefined:
             case TokenKind::KwMatch:
+            case TokenKind::KwTry:
             case TokenKind::KwIota:
             case TokenKind::Dot:
                 return true;
@@ -766,6 +767,17 @@ namespace ast {
                 default:                   return std::nullopt;
                 }
             };
+
+            if (parser.check(TokenKind::KwTry)) {
+                const auto location = parser.current_location();
+                parser.advance();
+                // `try` binds tighter than binary ops: `try f(x) + g()` → `(try f(x)) + g()`.
+                // For chained access after try, write `(try f(x)).field`.
+                return make_expr(TryExpr{
+                    .call = parse_postfix(parser),
+                    .location = location,
+                });
+            }
 
             if (const auto op = match_unary_op(parser.current().kind)) {
                 const auto location = parser.current_location();
@@ -1649,6 +1661,15 @@ namespace ast {
 
         if (parser.check(TokenKind::KwReturn)) {
             return parse_return_stmt(parser);
+        }
+
+        if (parser.check(TokenKind::KwDefer)) {
+            const auto location = parser.current_location();
+            parser.advance();
+            return std::make_unique<DeferStmt>(DeferStmt{
+                .body = parse_stmt(parser),
+                .location = location,
+            });
         }
 
         return parse_expr_stmt(parser);

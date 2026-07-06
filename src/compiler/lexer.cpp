@@ -45,6 +45,7 @@ namespace lexer {
             {"match",     TokenKind::KwMatch    },
             {"union",     TokenKind::KwUnion    },
             {"switch",    TokenKind::KwSwitch   },
+            {"defer",     TokenKind::KwDefer    },
 
             // Primitive types
             {"u8",        TokenKind::KwU8       },
