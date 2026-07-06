@@ -1,7 +1,12 @@
-const d := import("dictionary")
+const dictionary := import("dictionary")
+
+type Dictionary = dictionary.Dictionary
 
 pub fn main() {
-    mut hash_map: d.Dictionary
+    mut hash_map: Dictionary
 
-    
+    const x: u32 = 5
+
+    hash_map.init(sizeof(x))
+    hash_map.put("key_a", &x)
 }

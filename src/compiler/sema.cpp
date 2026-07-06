@@ -206,13 +206,32 @@ namespace sema {
     }
 
     auto find_type_module_and_name(const ResolvedType &ty, const Program &program) -> std::pair<std::string, std::string> {
+        // For struct/union, the defining module is stored directly on the info struct.
+        // Use it to avoid accidentally matching a type alias in an importing module that
+        // resolves to the same ResolvedType.
+        const std::string *defining_module = nullptr;
+        if (ty.kind == TypeKind::Struct && ty.struct_index >= 0)
+            defining_module = &program.structs[ty.struct_index].module_path;
+        else if (ty.kind == TypeKind::Union && ty.union_index >= 0)
+            defining_module = &program.unions[ty.union_index].module_path;
+
+        if (defining_module && !defining_module->empty()) {
+            if (const auto mod_it = program.modules.find(*defining_module);
+                mod_it != program.modules.end()) {
+                for (const auto &[name, sym] : mod_it->second.symbols) {
+                    if (const auto *ts = std::get_if<TypeSymbol>(&sym))
+                        if (ts->resolved && *ts->resolved == ty)
+                            return {*defining_module, name};
+                }
+            }
+        }
+
+        // Fallback for enums and other types that don't store a module_path.
         for (const auto &[path, mod] : program.modules) {
             for (const auto &[name, sym] : mod.symbols) {
-                if (const auto *ts = std::get_if<TypeSymbol>(&sym)) {
-                    if (ts->resolved && *ts->resolved == ty) {
+                if (const auto *ts = std::get_if<TypeSymbol>(&sym))
+                    if (ts->resolved && *ts->resolved == ty)
                         return {path, name};
-                    }
-                }
             }
         }
         return {"", ""};

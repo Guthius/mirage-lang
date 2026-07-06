@@ -1485,11 +1485,13 @@ namespace sema {
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ForInStmt>>) {
                     const auto iterable_type = check_expr(v->iterable, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
-                    if (iterable_type.kind != TypeKind::Slice) {
-                        diag.report_error(DiagnosticStage::Sema, v->location, "'for-in' requires a slice operand");
+                    if (iterable_type.kind != TypeKind::Slice && iterable_type.kind != TypeKind::Array) {
+                        diag.report_error(DiagnosticStage::Sema, v->location, "'for-in' requires a slice or array operand");
                         return;
                     }
-                    const auto elem_type = slice_element_type(iterable_type, module_path, program);
+                    const auto elem_type = iterable_type.kind == TypeKind::Array
+                        ? array_element_type(iterable_type, module_path, program)
+                        : slice_element_type(iterable_type, module_path, program);
                     auto inner = locals;
                     if (v->index_name != "_") {
                         inner[v->index_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::USize}, .is_mut = false};

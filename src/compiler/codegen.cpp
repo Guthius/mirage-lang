@@ -2674,10 +2674,25 @@ namespace codegen {
                 auto *fn = builder_.GetInsertBlock()->getParent();
                 const auto saved_locals = locals_;
 
-                auto *slice_val = emit_expr(stmt.iterable);
-                const auto slice_type = current_module_->expr_types.at(sema::get_expr_key(stmt.iterable));
+                const auto iterable_type = current_module_->expr_types.at(sema::get_expr_key(stmt.iterable));
                 const auto type_module = expr_type_module_hint(stmt.iterable);
-                const auto elem_type = module_for(type_module).slices.at(slice_type.slice_index).element_type;
+                const bool is_array = (iterable_type.kind == sema::TypeKind::Array);
+
+                sema::ResolvedType elem_type;
+                llvm::Value *base = nullptr;
+                llvm::Value *len_val = nullptr;
+
+                if (is_array) {
+                    const auto &array_info = module_for(type_module).arrays.at(iterable_type.array_index);
+                    elem_type = array_info.element_type;
+                    base = emit_lvalue(stmt.iterable).ptr;
+                    len_val = builder_.getInt64(array_info.count);
+                } else {
+                    auto *slice_val = emit_expr(stmt.iterable);
+                    elem_type = module_for(type_module).slices.at(iterable_type.slice_index).element_type;
+                    base = builder_.CreateExtractValue(slice_val, {0}, "for.base");
+                    len_val = builder_.CreateExtractValue(slice_val, {1}, "for.len");
+                }
 
                 auto *idx_slot = create_entry_alloca(current_function_, llvm::Type::getInt64Ty(*context_), "for.idx");
                 builder_.CreateStore(builder_.getInt64(0), idx_slot);
@@ -2712,13 +2727,17 @@ namespace codegen {
 
                 builder_.SetInsertPoint(cond_bb);
                 auto *idx = builder_.CreateLoad(llvm::Type::getInt64Ty(*context_), idx_slot, "for.idx");
-                auto *len = builder_.CreateExtractValue(slice_val, {1}, "for.len");
-                builder_.CreateCondBr(builder_.CreateICmpULT(idx, len, "for.cond"), body_bb, end_bb);
+                builder_.CreateCondBr(builder_.CreateICmpULT(idx, len_val, "for.cond"), body_bb, end_bb);
 
                 builder_.SetInsertPoint(body_bb);
-                auto *base = builder_.CreateExtractValue(slice_val, {0}, "for.base");
                 auto *elem_ll_ty = llvm_type_for(elem_type, type_module);
-                auto *elem_ptr = builder_.CreateInBoundsGEP(elem_ll_ty, base, idx, "for.elem.ptr");
+                llvm::Value *elem_ptr;
+                if (is_array) {
+                    llvm::Value *indices[] = {builder_.getInt64(0), idx};
+                    elem_ptr = builder_.CreateInBoundsGEP(llvm_type_for(iterable_type, type_module), base, indices, "for.elem.ptr");
+                } else {
+                    elem_ptr = builder_.CreateInBoundsGEP(elem_ll_ty, base, idx, "for.elem.ptr");
+                }
                 if (elem_slot) {
                     if (stmt.element_by_ref) {
                         builder_.CreateStore(elem_ptr, elem_slot);
