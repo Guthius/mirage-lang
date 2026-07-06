@@ -124,6 +124,7 @@ namespace codegen {
             case sema::TypeKind::Error:
             case sema::TypeKind::Pointer:
             case sema::TypeKind::Anyptr:
+            case sema::TypeKind::Function:
                 return 8;
             case sema::TypeKind::Slice:
                 return 16;
@@ -332,8 +333,33 @@ namespace codegen {
                     }
                 case sema::TypeKind::Union:
                     return unions_.at(type.union_index);
+                case sema::TypeKind::Function:
+                    return llvm::PointerType::getUnqual(*context_);
                 default: return llvm::Type::getVoidTy(*context_);
                 }
+            }
+
+            // Build an llvm::FunctionType for an indirect call through a sema function type.
+            auto llvm_function_type(const sema::FunctionTypeInfo &sig) -> llvm::FunctionType * {
+                std::vector<llvm::Type *> params;
+                for (const auto &pt : sig.param_types) {
+                    params.push_back(llvm_type(*current_module_path_, pt));
+                }
+                auto *ret = return_type(*current_module_path_, sig.return_types);
+                return llvm::FunctionType::get(ret, params, sig.is_variadic);
+            }
+
+            // Emit an indirect function-pointer call.
+            auto emit_indirect_call(const ast::CallExpr &call, llvm::Value *fn_ptr, const sema::FunctionTypeInfo &sig) -> llvm::Value * {
+                std::vector<llvm::Value *> args;
+                for (size_t i = 0; i < call.args.size(); ++i) {
+                    if (i < sig.param_types.size()) {
+                        args.push_back(emit_value_as(call.args[i], sig.param_types[i]));
+                    } else {
+                        args.push_back(emit_expr(call.args[i]));
+                    }
+                }
+                return builder_.CreateCall(llvm_function_type(sig), fn_ptr, args);
             }
 
             auto return_type(const std::string &module_path, const std::vector<sema::ResolvedType> &returns) -> llvm::Type * {
@@ -979,6 +1005,12 @@ namespace codegen {
                 if (is_pointer_like(from) && is_pointer_like(to)) {
                     return value;
                 }
+                // Function pointers and anyptr are both opaque pointers in LLVM
+                if ((from.kind == sema::TypeKind::Function && to.kind == sema::TypeKind::Anyptr) ||
+                    (from.kind == sema::TypeKind::Anyptr && to.kind == sema::TypeKind::Function) ||
+                    (from.kind == sema::TypeKind::Function && to.kind == sema::TypeKind::Function)) {
+                    return value;
+                }
                 if (from.kind == sema::TypeKind::Bool && to.is_float()) {
                     return builder_.CreateUIToFP(builder_.CreateZExt(value, llvm::Type::getInt8Ty(*context_)), to_ty);
                 }
@@ -1019,7 +1051,7 @@ namespace codegen {
                     }
                 }
 
-                if (is_pointer_like(type)) {
+                if (is_pointer_like(type) || type.kind == sema::TypeKind::Function) {
                     lhs = builder_.CreatePtrToInt(lhs, llvm::Type::getInt64Ty(*context_));
                     rhs = builder_.CreatePtrToInt(rhs, llvm::Type::getInt64Ty(*context_));
                 }
@@ -1078,11 +1110,7 @@ namespace codegen {
                 if (expr.op == ast::BinaryOp::Equal || expr.op == ast::BinaryOp::NotEqual ||
                     expr.op == ast::BinaryOp::Less || expr.op == ast::BinaryOp::Greater ||
                     expr.op == ast::BinaryOp::LessEqual || expr.op == ast::BinaryOp::GreaterEqual) {
-                    if (is_pointer_like(lhs_type) && rhs_type == sema::ResolvedType{.kind = sema::TypeKind::Anyptr}) {
-                        rhs = emit_cast(rhs, rhs_type, lhs_type);
-                    } else if (lhs_type == sema::ResolvedType{.kind = sema::TypeKind::Anyptr} && is_pointer_like(rhs_type)) {
-                        lhs = emit_cast(lhs, lhs_type, rhs_type);
-                    }
+                    // All pointer-like and function types are opaque pointers in LLVM; no explicit cast needed
                     return emit_compare(expr.op, lhs, rhs, lhs_type);
                 }
 
@@ -1392,6 +1420,14 @@ namespace codegen {
                 std::string name;
 
                 if (const auto *ident = std::get_if<ast::IdentExpr>(&call.callee)) {
+                    // Local variable with function type → indirect call
+                    if (const auto it = locals_.find(ident->name); it != locals_.end()) {
+                        if (it->second.type.kind == sema::TypeKind::Function) {
+                            const auto &sig = sema_program_.fn_signatures.at(it->second.type.fn_index);
+                            auto *fn_ptr = builder_.CreateLoad(llvm::PointerType::getUnqual(*context_), it->second.alloca);
+                            return emit_indirect_call(call, fn_ptr, sig);
+                        }
+                    }
                     name = ident->name;
                 } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
                     if (auto ns = try_namespace_chain((*member)->object)) {
@@ -1406,6 +1442,17 @@ namespace codegen {
                         }
                         const auto *method = sema::find_method(receiver_type, (*member)->member, sema_program_);
                         if (!method) {
+                            // Struct field with function type → indirect call through field
+                            if (receiver_type.kind == sema::TypeKind::Struct) {
+                                for (const auto &field : sema_program_.structs.at(receiver_type.struct_index).fields) {
+                                    if (field.name == (*member)->member && field.type.kind == sema::TypeKind::Function) {
+                                        const auto &sig = sema_program_.fn_signatures.at(field.type.fn_index);
+                                        auto field_lv = emit_lvalue(call.callee);
+                                        auto *fn_ptr = builder_.CreateLoad(llvm::PointerType::getUnqual(*context_), field_lv.ptr);
+                                        return emit_indirect_call(call, fn_ptr, sig);
+                                    }
+                                }
+                            }
                             report_codegen_error(diag_, call.location, std::format("no method '{}' on type", (*member)->member));
                             return nullptr;
                         }
@@ -1427,6 +1474,16 @@ namespace codegen {
                             functions_.at(FunctionKey{method->impl_module, method_fn_key(method->type_name, method->decl->name)}),
                             args);
                     }
+                } else {
+                    // General expression callee (e.g. indexed array of fn ptrs, dereferenced ptr-to-fn)
+                    const auto callee_ty = current_module_->expr_types.at(sema::get_expr_key(call.callee));
+                    if (callee_ty.kind == sema::TypeKind::Function) {
+                        const auto &sig = sema_program_.fn_signatures.at(callee_ty.fn_index);
+                        auto *fn_ptr = emit_expr(call.callee);
+                        return emit_indirect_call(call, fn_ptr, sig);
+                    }
+                    report_codegen_error(diag_, call.location, "unsupported call target");
+                    return llvm::UndefValue::get(llvm::PointerType::getUnqual(*context_));
                 }
 
                 if (name.empty()) {
@@ -1482,12 +1539,46 @@ namespace codegen {
                 std::string name;
 
                 if (const auto *ident = std::get_if<ast::IdentExpr>(&call.callee)) {
+                    // Local fn-ptr
+                    if (const auto it = locals_.find(ident->name); it != locals_.end()) {
+                        if (it->second.type.kind == sema::TypeKind::Function) {
+                            return {*current_module_path_, sema_program_.fn_signatures.at(it->second.type.fn_index).return_types};
+                        }
+                    }
                     name = ident->name;
                 } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
                     if (auto ns = try_namespace_chain((*member)->object)) {
                         target_module = *ns;
                         name = (*member)->member;
+                    } else {
+                        // Method call or struct-field fn-ptr
+                        const auto obj_type = current_module_->expr_types.at(sema::get_expr_key((*member)->object));
+                        sema::ResolvedType receiver_type = obj_type;
+                        if (obj_type.kind == sema::TypeKind::Pointer) {
+                            receiver_type = current_module_->pointer_pointees.at(obj_type.pointee_index);
+                        }
+                        if (const auto *method = sema::find_method(receiver_type, (*member)->member, sema_program_)) {
+                            return {*current_module_path_, method->return_types};
+                        }
+                        // Struct field fn-ptr
+                        if (receiver_type.kind == sema::TypeKind::Struct) {
+                            for (const auto &field : sema_program_.structs.at(receiver_type.struct_index).fields) {
+                                if (field.name == (*member)->member && field.type.kind == sema::TypeKind::Function) {
+                                    return {*current_module_path_, sema_program_.fn_signatures.at(field.type.fn_index).return_types};
+                                }
+                            }
+                        }
+                        report_codegen_error(diag_, call.location, "unsupported grouped declaration call target");
+                        return {*current_module_path_, {}};
                     }
+                } else {
+                    // General expression callee
+                    const auto callee_ty = current_module_->expr_types.at(sema::get_expr_key(call.callee));
+                    if (callee_ty.kind == sema::TypeKind::Function) {
+                        return {*current_module_path_, sema_program_.fn_signatures.at(callee_ty.fn_index).return_types};
+                    }
+                    report_codegen_error(diag_, call.location, "unsupported grouped declaration call target");
+                    return {*current_module_path_, {}};
                 }
 
                 if (name.empty()) {
@@ -1599,6 +1690,18 @@ namespace codegen {
                             if (const auto macro = macro_args_.find(v.name); macro != macro_args_.end()) {
                                 return emit_macro_arg(macro->second);
                             }
+                            // Taking a named function as a value (fn-ptr)
+                            if (ty.kind == sema::TypeKind::Function) {
+                                const auto sym_it = current_module_->symbols.find(v.name);
+                                if (sym_it != current_module_->symbols.end()) {
+                                    if (std::holds_alternative<sema::FunctionSymbol>(sym_it->second)) {
+                                        return functions_.at(FunctionKey{*current_module_path_, v.name});
+                                    }
+                                    if (std::holds_alternative<sema::ExtFunctionSymbol>(sym_it->second)) {
+                                        return ext_functions_.at(global_key(*current_module_path_, v.name));
+                                    }
+                                }
+                            }
                             const auto lv = emit_lvalue(expr);
                             return builder_.CreateLoad(lv.storage_type, lv.ptr);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
@@ -1648,6 +1751,21 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
                             return emit_slice_expr(*v, ty);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                            // Cross-module function pointer taking: mod.fn_name
+                            if (ty.kind == sema::TypeKind::Function) {
+                                if (const auto target_mod = try_namespace_chain(v->object)) {
+                                    const auto &target = module_for(*target_mod);
+                                    const auto sym_it = target.symbols.find(v->member);
+                                    if (sym_it != target.symbols.end()) {
+                                        if (std::holds_alternative<sema::FunctionSymbol>(sym_it->second)) {
+                                            return functions_.at(FunctionKey{*target_mod, v->member});
+                                        }
+                                        if (std::holds_alternative<sema::ExtFunctionSymbol>(sym_it->second)) {
+                                            return ext_functions_.at(global_key(*target_mod, v->member));
+                                        }
+                                    }
+                                }
+                            }
                             // Handle fully-qualified enum field: e.g. EnumType.field or module.EnumType.field
                             if (ty.kind == sema::TypeKind::Enum && try_type_chain(v->object)) {
                                 const auto &enum_info = sema_program_.enums.at(ty.enum_index);
@@ -2240,6 +2358,15 @@ namespace codegen {
                             if (sym != current_module_->symbols.end()) {
                                 if (const auto *g = std::get_if<sema::GlobalSymbol>(&sym->second); g && !g->is_mut && g->decl->init) {
                                     return emit_const_or_runtime(*g->decl->init, true);
+                                }
+                                // Function pointer constant initializer
+                                if (ty.kind == sema::TypeKind::Function) {
+                                    if (std::holds_alternative<sema::FunctionSymbol>(sym->second)) {
+                                        return functions_.at(FunctionKey{*current_module_path_, v.name});
+                                    }
+                                    if (std::holds_alternative<sema::ExtFunctionSymbol>(sym->second)) {
+                                        return ext_functions_.at(global_key(*current_module_path_, v.name));
+                                    }
                                 }
                             }
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {

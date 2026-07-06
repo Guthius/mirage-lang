@@ -29,6 +29,12 @@ namespace sema {
                         if (pt.kind == TypeKind::Union) {
                             diag.report_error(DiagnosticStage::Sema, p.location, "union types are not yet supported in extern function signatures");
                         }
+                        if (pt.kind == TypeKind::Function) {
+                            const auto &sig = program.fn_signatures.at(pt.fn_index);
+                            if (sig.return_types.size() > 1) {
+                                diag.report_error(DiagnosticStage::Sema, p.location, "multi-return function types cannot be used in extern function signatures (no C ABI representation)");
+                            }
+                        }
                         ef->params.push_back(pt);
                     }
 
@@ -36,6 +42,12 @@ namespace sema {
                         const auto rt = resolve_type(*ef->decl->return_type, module_path, program, diag);
                         if (rt.kind == TypeKind::Union) {
                             diag.report_error(DiagnosticStage::Sema, ef->decl->location, "union types are not yet supported in extern function signatures");
+                        }
+                        if (rt.kind == TypeKind::Function) {
+                            const auto &sig = program.fn_signatures.at(rt.fn_index);
+                            if (sig.return_types.size() > 1) {
+                                diag.report_error(DiagnosticStage::Sema, ef->decl->location, "multi-return function types cannot be used in extern function signatures (no C ABI representation)");
+                            }
                         }
                         ef->return_type = rt;
                     }

@@ -38,6 +38,7 @@ namespace ast {
     };
 
     struct PointerType;
+    struct FunctionType;
 
     struct NamedType {
         std::string name;
@@ -60,7 +61,8 @@ namespace ast {
         std::unique_ptr<ArrayType>,
         std::unique_ptr<SliceType>,
         std::unique_ptr<EnumType>,
-        std::unique_ptr<UnionType>>;
+        std::unique_ptr<UnionType>,
+        std::unique_ptr<FunctionType>>;
 
     struct PointerType {
         Type pointee;
@@ -69,6 +71,17 @@ namespace ast {
 
     struct SliceType {
         Type base_type;
+        SourceLocation location;
+    };
+
+    // fn(ParamType, ...) -> RetType          — single return
+    // fn(ParamType, ...) -> (Ret1, Ret2)     — multi-return (parens required)
+    // fn(ParamType, ...)                     — no return
+    // fn(ParamType, ..., ...)                — variadic (last param is ...)
+    struct FunctionType {
+        std::vector<Type> param_types;
+        std::vector<Type> return_types; // empty = void, 1 = single, 2+ = multi
+        bool is_variadic = false;
         SourceLocation location;
     };
 

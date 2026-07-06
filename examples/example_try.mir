@@ -13,7 +13,7 @@ fn maybe_fail(should_fail: bool) -> error {
 }
 
 // A fallible function returning a value and error
-fn divide(a: i32, b: i32) -> i32, error {
+fn divide(a: i32, b: i32) -> (i32, error) {
     if b == 0 {
         return 0, 1  // error: division by zero
     }
@@ -34,7 +34,7 @@ fn test_no_propagate() -> error {
 }
 
 // Test 3: try with value capture
-fn test_value_try() -> i32, error {
+fn test_value_try() -> (i32, error) {
     mut result, err := divide(10, 2)
     if err != 0 {
         return 0, err

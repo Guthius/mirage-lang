@@ -1289,14 +1289,70 @@ namespace ast {
             std::vector<Type> return_types;
 
             if (parser.match(TokenKind::Arrow)) {
-                return_types.push_back(parse_type(parser));
-
-                while (parser.match(TokenKind::Comma)) {
+                if (parser.match(TokenKind::LParen)) {
+                    // Multi-return: -> (T1, T2, ...)
+                    while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                        return_types.push_back(parse_type(parser));
+                        if (!parser.check(TokenKind::RParen)) {
+                            parser.expect(TokenKind::Comma, "','");
+                        }
+                    }
+                    parser.expect(TokenKind::RParen, "')'");
+                } else {
+                    // Single return: -> T
                     return_types.push_back(parse_type(parser));
                 }
             }
 
             return return_types;
+        }
+
+        // fn(ParamType, ...) -> RetType  or  fn(ParamType, ...) -> (R1, R2)
+        auto parse_function_type(Parser &parser) -> Type {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwFn, "'fn'");
+            parser.expect(TokenKind::LParen, "'('");
+
+            std::vector<Type> param_types;
+            bool is_variadic = false;
+
+            while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                if (parser.check(TokenKind::DotDotDot)) {
+                    parser.advance();
+                    is_variadic = true;
+                    break;
+                }
+                param_types.push_back(parse_type(parser));
+                if (!parser.check(TokenKind::RParen)) {
+                    parser.expect(TokenKind::Comma, "','");
+                }
+            }
+            parser.expect(TokenKind::RParen, "')'");
+
+            std::vector<Type> return_types;
+            if (parser.match(TokenKind::Arrow)) {
+                if (parser.match(TokenKind::LParen)) {
+                    // Multi-return: -> (T1, T2, ...)
+                    while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                        return_types.push_back(parse_type(parser));
+                        if (!parser.check(TokenKind::RParen)) {
+                            parser.expect(TokenKind::Comma, "','");
+                        }
+                    }
+                    parser.expect(TokenKind::RParen, "')'");
+                } else {
+                    // Single return: -> T
+                    return_types.push_back(parse_type(parser));
+                }
+            }
+
+            return std::make_unique<FunctionType>(FunctionType{
+                .param_types = std::move(param_types),
+                .return_types = std::move(return_types),
+                .is_variadic = is_variadic,
+                .location = location,
+            });
         }
 
         auto parse_function_decl(Parser &parser, const bool is_pub) -> FunctionDecl {
@@ -1537,6 +1593,10 @@ namespace ast {
 
         if (parser.check(TokenKind::KwUnion)) {
             return parse_union_type(parser);
+        }
+
+        if (parser.check(TokenKind::KwFn)) {
+            return parse_function_type(parser);
         }
 
         if (parser.check(TokenKind::Identifier)) {

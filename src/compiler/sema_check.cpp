@@ -17,6 +17,14 @@ namespace sema {
         }
 
         auto binary_op_result(const ast::BinaryOp op, const ResolvedType &lhs, const ResolvedType &rhs, DiagnosticEngine &diag, SourceLocation loc) -> ResolvedType {
+            // Function pointers do not support arithmetic; only equality comparison is allowed
+            const bool is_cmp = op == ast::BinaryOp::Equal || op == ast::BinaryOp::NotEqual ||
+                                 op == ast::BinaryOp::Less || op == ast::BinaryOp::Greater ||
+                                 op == ast::BinaryOp::LessEqual || op == ast::BinaryOp::GreaterEqual;
+            if (!is_cmp && (lhs.kind == TypeKind::Function || rhs.kind == TypeKind::Function)) {
+                return error(diag, loc, "arithmetic is not allowed on function pointer types");
+            }
+
             switch (op) {
             case ast::BinaryOp::Add:
             case ast::BinaryOp::Sub:
@@ -89,7 +97,15 @@ namespace sema {
 
         auto is_cast_legal(const ResolvedType &from, const ResolvedType &to) -> bool {
             if (to.kind == TypeKind::Slice) return from.kind == TypeKind::Pointer || from.kind == TypeKind::Anyptr || from.kind == TypeKind::Array || from.kind == TypeKind::Slice;
+            // Function pointers can be cast to/from anyptr (C callback interop)
+            if (from.kind == TypeKind::Function && to.kind == TypeKind::Anyptr) return true;
+            if (from.kind == TypeKind::Anyptr && to.kind == TypeKind::Function) return true;
             return from.is_scalar() && to.is_scalar();
+        }
+
+        // Returns the FunctionTypeInfo for a function-kind ResolvedType.
+        auto fn_sig(const ResolvedType &ty, const Program &program) -> const FunctionTypeInfo & {
+            return program.fn_signatures.at(ty.fn_index);
         }
 
         auto slice_element_type(const ResolvedType &slice, const std::string &module_path, Program &program) -> ResolvedType {
@@ -123,7 +139,13 @@ namespace sema {
             bool check_pub = false;
 
             if (const auto *callee_ident = std::get_if<ast::IdentExpr>(&call.callee)) {
-                if (locals.contains(callee_ident->name)) {
+                if (auto local_it = locals.find(callee_ident->name); local_it != locals.end()) {
+                    const auto &local_ty = local_it->second.type;
+                    if (local_ty.kind == TypeKind::Function) {
+                        const auto &sig = fn_sig(local_ty, program);
+                        check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, callee_ident->name, loop_depth, defer_loop_base);
+                        return sig.return_types;
+                    }
                     error(diag, call.location, std::format("'{}' is not callable", callee_ident->name));
                     return {};
                 }
@@ -141,6 +163,16 @@ namespace sema {
                     }
                     const auto *method = find_method(receiver_type, (*member)->member, program);
                     if (!method) {
+                        // Struct field with function type
+                        if (receiver_type.kind == TypeKind::Struct) {
+                            for (const auto &field : program.structs[receiver_type.struct_index].fields) {
+                                if (field.name == (*member)->member && field.type.kind == TypeKind::Function) {
+                                    const auto &sig = fn_sig(field.type, program);
+                                    check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, (*member)->member, loop_depth, defer_loop_base);
+                                    return sig.return_types;
+                                }
+                            }
+                        }
                         error(diag, call.location, std::format("no method '{}' on type", (*member)->member));
                         return {};
                     }
@@ -148,6 +180,13 @@ namespace sema {
                     return method->return_types;
                 }
             } else {
+                // General expression callee (e.g. deref of fn ptr, indexed fn ptr array)
+                const auto callee_ty = check_expr(call.callee, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
+                if (callee_ty.kind == TypeKind::Function) {
+                    const auto &sig = fn_sig(callee_ty, program);
+                    check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, "<fn ptr>", loop_depth, defer_loop_base);
+                    return sig.return_types;
+                }
                 error(diag, call.location, "unsupported call target");
                 return {};
             }
@@ -531,10 +570,35 @@ namespace sema {
                             } else if constexpr (std::is_same_v<S, ImportSymbol>) {
                                 return ResolvedType{.kind = TypeKind::Namespace};
                             } else if constexpr (std::is_same_v<S, FunctionSymbol>) {
+                                // Allow taking address when expected type is a matching function type
+                                if (expected && expected->kind == TypeKind::Function) {
+                                    const auto &exp_sig = fn_sig(*expected, program);
+                                    if (sym.params == exp_sig.param_types &&
+                                        sym.return_types == exp_sig.return_types &&
+                                        !exp_sig.is_variadic) {
+                                        return *expected;
+                                    }
+                                    return error(diag, v.location, std::format("'{}' has a different signature from the expected function type", v.name));
+                                }
                                 return error(diag, v.location, std::format("'{}' is a function; did you mean to call it?", v.name));
                             } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
+                                // Allow taking address when expected type is a matching function type
+                                if (expected && expected->kind == TypeKind::Function) {
+                                    const auto &exp_sig = fn_sig(*expected, program);
+                                    std::vector<ResolvedType> ext_returns;
+                                    if (sym.return_type) ext_returns.push_back(*sym.return_type);
+                                    if (sym.params == exp_sig.param_types &&
+                                        ext_returns == exp_sig.return_types &&
+                                        sym.is_variadic == exp_sig.is_variadic) {
+                                        return *expected;
+                                    }
+                                    return error(diag, v.location, std::format("'{}' has a different signature from the expected function type", v.name));
+                                }
                                 return error(diag, v.location, std::format("'{}' is an external function; did you mean to call it?", v.name));
                             } else if constexpr (std::is_same_v<S, MacroSymbol>) {
+                                if (expected && expected->kind == TypeKind::Function) {
+                                    return error(diag, v.location, std::format("cannot take the address of macro '{}'", v.name));
+                                }
                                 return error(diag, v.location, std::format("'{}' is a macro; did you mean to call it?", v.name));
                             } else {
                                 return error(diag, v.location, std::format("'{}' is a type, not a value", v.name));
@@ -676,18 +740,54 @@ namespace sema {
                         }
                         const auto *method = find_method(receiver_type, (*member_callee)->member, program);
                         if (!method) {
+                            // Maybe it's a struct field with function type
+                            if (receiver_type.kind == TypeKind::Struct) {
+                                for (const auto &field : program.structs[receiver_type.struct_index].fields) {
+                                    if (field.name == (*member_callee)->member) {
+                                        if (field.type.kind == TypeKind::Function) {
+                                            const auto &sig = fn_sig(field.type, program);
+                                            check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base);
+                                            if (sig.return_types.size() > 1) {
+                                                return error(diag, v->location, "multi-value capture is not yet supported here");
+                                            }
+                                            return sig.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sig.return_types.front();
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
                             return error(diag, v->location, std::format("no method '{}' on type", (*member_callee)->member));
                         }
                         check_call_args(v->args, method->param_types, false, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base);
                         return method->return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : method->return_types.front();
                     }
 
-                    auto *callee_ident = std::get_if<ast::IdentExpr>(&v->callee);
-                    if (!callee_ident) {
+                    // General expression callee: evaluate, then call through if it's a function type
+                    if (!std::holds_alternative<ast::IdentExpr>(v->callee)) {
+                        const auto callee_ty = check_expr(v->callee, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
+                        if (callee_ty.kind == TypeKind::Function) {
+                            const auto &sig = fn_sig(callee_ty, program);
+                            check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, "<fn ptr>", loop_depth, defer_loop_base);
+                            if (sig.return_types.size() > 1) {
+                                return error(diag, v->location, "multi-value capture is not yet supported here");
+                            }
+                            return sig.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sig.return_types.front();
+                        }
                         return error(diag, v->location, "unsupported call target");
                     }
 
-                    if (locals.contains(callee_ident->name)) {
+                    auto *callee_ident = std::get_if<ast::IdentExpr>(&v->callee);
+
+                    if (auto local_it = locals.find(callee_ident->name); local_it != locals.end()) {
+                        const auto &local_ty = local_it->second.type;
+                        if (local_ty.kind == TypeKind::Function) {
+                            const auto &sig = fn_sig(local_ty, program);
+                            check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base);
+                            if (sig.return_types.size() > 1) {
+                                return error(diag, v->location, "multi-value capture is not yet supported here");
+                            }
+                            return sig.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sig.return_types.front();
+                        }
                         return error(diag, v->location, std::format("'{}' is not callable", callee_ident->name));
                     }
 
@@ -796,6 +896,38 @@ namespace sema {
                     return to;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                    // Cross-module function pointer taking: mod.fn_name when expected type is a function type
+                    if (expected && expected->kind == TypeKind::Function) {
+                        if (const auto target_mod = try_resolve_namespace_chain(v->object, module_path, locals, program)) {
+                            const auto mod_it = program.modules.find(*target_mod);
+                            if (mod_it != program.modules.end()) {
+                                const auto sym_it = mod_it->second.symbols.find(v->member);
+                                if (sym_it != mod_it->second.symbols.end()) {
+                                    const auto &exp_sig = fn_sig(*expected, program);
+                                    if (const auto *fn = std::get_if<FunctionSymbol>(&sym_it->second)) {
+                                        if (!fn->is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
+                                        if (fn->params == exp_sig.param_types &&
+                                            fn->return_types == exp_sig.return_types &&
+                                            !exp_sig.is_variadic) {
+                                            return *expected;
+                                        }
+                                        return error(diag, v->location, std::format("'{}' has a different signature from the expected function type", v->member));
+                                    }
+                                    if (const auto *ef = std::get_if<ExtFunctionSymbol>(&sym_it->second)) {
+                                        if (!ef->is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
+                                        std::vector<ResolvedType> ext_returns;
+                                        if (ef->return_type) ext_returns.push_back(*ef->return_type);
+                                        if (ef->params == exp_sig.param_types &&
+                                            ext_returns == exp_sig.return_types &&
+                                            ef->is_variadic == exp_sig.is_variadic) {
+                                            return *expected;
+                                        }
+                                        return error(diag, v->location, std::format("'{}' has a different signature from the expected function type", v->member));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base).type;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {

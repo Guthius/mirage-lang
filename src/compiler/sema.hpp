@@ -75,6 +75,13 @@ namespace sema {
     // The tag field of a tagged union is always u32.
     inline const ResolvedType TAG_TYPE{.kind = TypeKind::U32};
 
+    // Signature stored for a function-pointer type: fn(ParamTypes) -> ReturnTypes
+    struct FunctionTypeInfo {
+        std::vector<ResolvedType> param_types;
+        std::vector<ResolvedType> return_types; // empty=void, 1=single, 2+=multi
+        bool is_variadic = false;
+    };
+
     struct MethodInfo {
         const ast::ImplDecl::Function *decl = nullptr;
         std::string impl_module;               // module where this impl is defined
@@ -107,9 +114,10 @@ namespace sema {
 
     struct Program {
         std::unordered_map<std::string, ProgramModule> modules;
-        std::vector<StructInfo> structs; // global; struct_index is unique across all modules
+        std::vector<StructInfo> structs;          // global; struct_index is unique across all modules
         std::vector<EnumInfo> enums;
-        std::vector<UnionInfo> unions;   // global; union_index is unique across all modules
+        std::vector<UnionInfo> unions;            // global; union_index is unique across all modules
+        std::vector<FunctionTypeInfo> fn_signatures; // global; fn_index is unique across all modules
         ResolveState resolve_state;
         bool ok = false;
     };
@@ -130,6 +138,7 @@ namespace sema {
     auto is_assignable(const ResolvedType &from, const ResolvedType &to) -> bool;
     auto intern_pointer(ProgramModule &module, const ResolvedType &pointee) -> ResolvedType;
     auto intern_slice(ProgramModule &module, const ResolvedType &element) -> ResolvedType;
+    auto intern_function_type(Program &program, FunctionTypeInfo sig) -> ResolvedType;
     auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
     auto resolve_global_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
     auto resolve_macro_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> MacroSymbol &;

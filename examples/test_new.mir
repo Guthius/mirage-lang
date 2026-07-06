@@ -1,5 +1,5 @@
 
-fn func_call() -> i32, bool {
+fn func_call() -> (i32, bool) {
     return 32, true
 }
 

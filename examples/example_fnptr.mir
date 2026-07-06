@@ -1,0 +1,53 @@
+// example_fnptr.mir — demonstrates function pointer types
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+fn add(a: i32, b: i32) -> i32 {
+    return a + b
+}
+
+fn mul(a: i32, b: i32) -> i32 {
+    return a * b
+}
+
+fn apply(op: fn(i32, i32) -> i32, x: i32, y: i32) -> i32 {
+    return op(x, y)
+}
+
+pub fn main() {
+    // Taking address of a named function
+    mut fp: fn(i32, i32) -> i32 = add
+    mut result: i32 = fp(3, 4)
+    printf("%d\n", result)  // 7
+
+    fp = mul
+    result = fp(3, 4)
+    printf("%d\n", result)  // 12
+
+    // Passing function pointer to another function
+    result = apply(add, 10, 5)
+    printf("%d\n", result)  // 15
+
+    result = apply(mul, 10, 5)
+    printf("%d\n", result)  // 50
+
+    // Nil function pointer and comparison
+    mut nullable: fn(i32, i32) -> i32 = nil
+    if nullable == nil {
+        printf("nil\n")
+    }
+    nullable = add
+    if nullable != nil {
+        printf("not nil\n")
+    }
+
+    // Call through nullable after checking
+    result = nullable(2, 3)
+    printf("%d\n", result)  // 5
+
+    // default fn ptr is nil
+    mut dfp: fn(i32, i32) -> i32 = default
+    if dfp == nil {
+        printf("default is nil\n")
+    }
+}

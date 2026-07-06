@@ -1,0 +1,38 @@
+// example_fnptr3.mir — multi-return function pointers and fn ptr in struct
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+fn divide(a: i32, b: i32) -> (i32, error) {
+    if b == 0 {
+        return 0, 1
+    }
+    return a / b, 0
+}
+
+type Callback = struct {
+    op: fn(i32, i32) -> (i32, error)
+}
+
+pub fn main() -> error {
+    // Multi-return fn ptr
+    mut fp: fn(i32, i32) -> (i32, error) = divide
+
+    mut val, err := fp(10, 2)
+    printf("%d %d\n", val, err)  // 5 0
+
+    mut val2, err2 := fp(10, 0)
+    printf("%d %d\n", val2, err2)  // 0 1
+
+    // Struct field fn ptr with multi-return
+    mut cb: Callback
+    cb.op = divide
+
+    mut val3, err3 := cb.op(20, 4)
+    printf("%d %d\n", val3, err3)  // 5 0
+
+    // try through fn ptr
+    mut val4: i32 = try fp(8, 2)
+    printf("%d\n", val4)  // 4
+
+    return 0
+}

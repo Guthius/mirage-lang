@@ -15,6 +15,19 @@ namespace sema {
         return ResolvedType{.kind = TypeKind::Pointer, .pointee_index = static_cast<int>(module.pointer_pointees.size()) - 1};
     }
 
+    auto intern_function_type(Program &program, FunctionTypeInfo sig) -> ResolvedType {
+        for (size_t i = 0; i < program.fn_signatures.size(); ++i) {
+            const auto &s = program.fn_signatures[i];
+            if (s.is_variadic == sig.is_variadic &&
+                s.param_types == sig.param_types &&
+                s.return_types == sig.return_types) {
+                return ResolvedType{.kind = TypeKind::Function, .fn_index = static_cast<int>(i)};
+            }
+        }
+        program.fn_signatures.push_back(std::move(sig));
+        return ResolvedType{.kind = TypeKind::Function, .fn_index = static_cast<int>(program.fn_signatures.size()) - 1};
+    }
+
     auto intern_slice(ProgramModule &module, const ResolvedType &element) -> ResolvedType {
         for (size_t i = 0; i < module.slices.size(); ++i) {
             if (module.slices[i].element_type == element) {
@@ -59,6 +72,7 @@ namespace sema {
             case TypeKind::Error:
             case TypeKind::Pointer:
             case TypeKind::Anyptr:
+            case TypeKind::Function: // code pointer, 8 bytes
                 return 8;
 
             case TypeKind::Slice:
@@ -712,6 +726,16 @@ namespace sema {
                             program.unions.push_back(UnionInfo{.module_path = module_path});
                             layout_union(module_path, slot, v);
                             return ResolvedType{.kind = TypeKind::Union, .union_index = slot};
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::FunctionType>>) {
+                            FunctionTypeInfo sig;
+                            sig.is_variadic = v->is_variadic;
+                            for (const auto &pt : v->param_types) {
+                                sig.param_types.push_back(resolve_type_impl(pt, module_path));
+                            }
+                            for (const auto &rt : v->return_types) {
+                                sig.return_types.push_back(resolve_type_impl(rt, module_path));
+                            }
+                            return intern_function_type(program, std::move(sig));
                         } else {
                             return ResolvedType{.kind = TypeKind::Invalid};
                         }
@@ -748,6 +772,9 @@ namespace sema {
         if (from == to) return true;
         if (from.kind == TypeKind::Anyptr && to.kind == TypeKind::Pointer) return true;
         if (from.kind == TypeKind::Pointer && to.kind == TypeKind::Anyptr) return true;
+        // nil (Anyptr) is assignable to/from function pointer types
+        if (from.kind == TypeKind::Anyptr && to.kind == TypeKind::Function) return true;
+        if (from.kind == TypeKind::Function && to.kind == TypeKind::Anyptr) return true;
         if (from.kind == TypeKind::Array && to.kind == TypeKind::Slice) return true;
         return false;
     }
