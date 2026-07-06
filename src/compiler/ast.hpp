@@ -474,8 +474,9 @@ namespace ast {
     };
 
     struct ForInStmt {
-        std::string index_name;
+        std::string index_name;       // "_" if omitted
         std::string element_name;
+        bool element_by_ref = false;  // true for &val syntax
         Expr iterable;
         Stmt body;
         SourceLocation location;

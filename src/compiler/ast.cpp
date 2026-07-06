@@ -1252,13 +1252,30 @@ namespace ast {
 
             parser.expect(TokenKind::KwFor, "'for'");
 
-            auto &idx_tok = parser.expect(TokenKind::Identifier, "index variable name");
-            std::string index_name{idx_tok.lexeme};
+            std::string index_name = "_";
+            std::string element_name;
+            bool element_by_ref = false;
 
-            parser.expect(TokenKind::Comma, "','");
-
-            auto &elem_tok = parser.expect(TokenKind::Identifier, "element variable name");
-            std::string element_name{elem_tok.lexeme};
+            if (parser.check(TokenKind::Ampersand)) {
+                // for &val in ...
+                parser.advance();
+                element_by_ref = true;
+                element_name = std::string{parser.expect(TokenKind::Identifier, "element variable name").lexeme};
+            } else {
+                std::string first{parser.expect(TokenKind::Identifier, "variable name").lexeme};
+                if (parser.match(TokenKind::Comma)) {
+                    // for idx, [&]val in ...
+                    index_name = std::move(first);
+                    if (parser.check(TokenKind::Ampersand)) {
+                        parser.advance();
+                        element_by_ref = true;
+                    }
+                    element_name = std::string{parser.expect(TokenKind::Identifier, "element variable name").lexeme};
+                } else {
+                    // for val in ...
+                    element_name = std::move(first);
+                }
+            }
 
             parser.expect(TokenKind::KwIn, "'in'");
 
@@ -1268,6 +1285,7 @@ namespace ast {
             return std::make_unique<ForInStmt>(ForInStmt{
                 .index_name = std::move(index_name),
                 .element_name = std::move(element_name),
+                .element_by_ref = element_by_ref,
                 .iterable = std::move(iterable),
                 .body = std::move(body),
                 .location = location,

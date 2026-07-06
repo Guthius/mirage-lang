@@ -1,3 +1,4 @@
+// Declare all the external libc functions needed
 ext fn malloc(size: usize) -> anyptr
 ext fn realloc(ptr: anyptr, size: usize) -> anyptr
 ext fn free(ptr: anyptr)
@@ -21,7 +22,7 @@ pub type Dictionary = struct {
 fn compute_hash(str: []u8) -> usize {
     mut hash: usize = 5831
     for ch in str {
-        hash = ((hash << 5) + hash) + ch
+        hash = ((hash << 5) + hash) + cast(ch, usize)
     }
     return hash % TABLE_SIZE
 }
@@ -44,9 +45,9 @@ impl Dictionary {
         const idx := compute_hash(key)
         const key_len := len(key)
 
-        mut cur := self.buckeys[idx]
+        mut cur := self.buckets[idx]
         while cur != nil {
-            if cur.key_len == key_len && memcmp(cur.key, key, key_len) {
+            if cur.key_len == key_len && memcmp(cur.key, key, key_len) == 0 {
                 return cur.value
             }
             cur = cur.next
@@ -85,7 +86,7 @@ impl Dictionary {
         entry.key_len = len(key)
         entry.key = duplicate(key, entry.key_len)
         if entry.key == nil {
-            mem.free(entry)
+            free(entry)
             return false
         }
 

@@ -1495,7 +1495,12 @@ namespace sema {
                         inner[v->index_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::USize}, .is_mut = false};
                     }
                     if (v->element_name != "_") {
-                        inner[v->element_name] = LocalBinding{.type = elem_type, .is_mut = false};
+                        if (v->element_by_ref) {
+                            auto ptr_type = intern_pointer(program.modules.at(module_path), elem_type);
+                            inner[v->element_name] = LocalBinding{.type = ptr_type, .is_mut = false};
+                        } else {
+                            inner[v->element_name] = LocalBinding{.type = elem_type, .is_mut = false};
+                        }
                     }
                     check_stmt(v->body, inner, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
 

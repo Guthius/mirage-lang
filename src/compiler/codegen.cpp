@@ -2687,9 +2687,21 @@ namespace codegen {
 
                 llvm::AllocaInst *elem_slot = nullptr;
                 if (stmt.element_name != "_") {
-                    auto *elem_ll_ty = llvm_type_for(elem_type, type_module);
-                    elem_slot = create_entry_alloca(current_function_, elem_ll_ty, stmt.element_name);
-                    locals_[stmt.element_name] = LocalValue{.alloca = elem_slot, .type = elem_type, .type_module = type_module};
+                    if (stmt.element_by_ref) {
+                        auto *ptr_ll_ty = llvm::PointerType::getUnqual(*context_);
+                        elem_slot = create_entry_alloca(current_function_, ptr_ll_ty, stmt.element_name);
+                        const auto &pointees = module_for(type_module).pointer_pointees;
+                        int ptr_idx = 0;
+                        for (int i = 0; i < (int)pointees.size(); i++) {
+                            if (pointees[i] == elem_type) { ptr_idx = i; break; }
+                        }
+                        auto ptr_type = sema::ResolvedType{.kind = sema::TypeKind::Pointer, .pointee_index = ptr_idx};
+                        locals_[stmt.element_name] = LocalValue{.alloca = elem_slot, .type = ptr_type, .type_module = type_module};
+                    } else {
+                        auto *elem_ll_ty = llvm_type_for(elem_type, type_module);
+                        elem_slot = create_entry_alloca(current_function_, elem_ll_ty, stmt.element_name);
+                        locals_[stmt.element_name] = LocalValue{.alloca = elem_slot, .type = elem_type, .type_module = type_module};
+                    }
                 }
 
                 auto *cond_bb = llvm::BasicBlock::Create(*context_, "for.cond", fn);
@@ -2707,7 +2719,13 @@ namespace codegen {
                 auto *base = builder_.CreateExtractValue(slice_val, {0}, "for.base");
                 auto *elem_ll_ty = llvm_type_for(elem_type, type_module);
                 auto *elem_ptr = builder_.CreateInBoundsGEP(elem_ll_ty, base, idx, "for.elem.ptr");
-                if (elem_slot) builder_.CreateStore(builder_.CreateLoad(elem_ll_ty, elem_ptr), elem_slot);
+                if (elem_slot) {
+                    if (stmt.element_by_ref) {
+                        builder_.CreateStore(elem_ptr, elem_slot);
+                    } else {
+                        builder_.CreateStore(builder_.CreateLoad(elem_ll_ty, elem_ptr), elem_slot);
+                    }
+                }
 
                 continue_targets_.push_back(step_bb);
                 break_targets_.push_back(end_bb);
