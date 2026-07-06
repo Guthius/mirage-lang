@@ -230,6 +230,7 @@ namespace ast {
             case TokenKind::KwTry:
             case TokenKind::KwIota:
             case TokenKind::Dot:
+            case TokenKind::LBrace:
                 return true;
             default:
                 return false;
@@ -368,9 +369,10 @@ namespace ast {
                 });
             }
 
-            if (parser.check(TokenKind::Identifier) && parser.check_next(TokenKind::Equal)) {
+            if (parser.check(TokenKind::Dot) && parser.peek().kind == TokenKind::Identifier) {
                 std::vector<StructExpr::Field> fields;
                 while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                    parser.expect(TokenKind::Dot, "'.'");
                     const auto value_name = parser.expect_identifier();
 
                     parser.expect(TokenKind::Equal, "'='");

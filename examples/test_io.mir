@@ -1,0 +1,16 @@
+const io := import("io")
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub fn main() -> error {
+    const f := try io.open("Justfile", "r")
+    defer f.close()
+
+    mut buf: [256]u8
+    const bytes_read := f.read(buf, 256)
+
+    printf("Read %u bytes from Justfile\n", bytes_read)
+    printf("%.*s\n", bytes_read, cast(buf, *u8))
+
+    return 0
+}

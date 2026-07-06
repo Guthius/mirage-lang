@@ -317,19 +317,21 @@ LETTER        ::= 'a' .. 'z' | 'A' .. 'Z' | '_'</code></pre>
         <tr><td>Struct fields in type definition</td><td>Newline (no commas)</td></tr>
         <tr><td>Enum fields in type definition</td><td>Newline (no commas)</td></tr>
         <tr><td>Tagged union variants in type definition</td><td>Newline (no commas)</td></tr>
-        <tr><td>Struct braced initializer <code>{x = 1, y = 2}</code></td><td>Comma</td></tr>
+        <tr><td>Struct braced initializer <code>{.x = 1, .y = 2}</code></td><td>Comma</td></tr>
         <tr><td>Array braced initializer <code>{1, 2, 3}</code></td><td>Comma</td></tr>
         <tr><td>Match / switch arms</td><td>Comma (trailing comma optional)</td></tr>
         <tr><td>Function parameters</td><td>Comma</td></tr>
         <tr><td>Multiple return values in <code>return</code></td><td>Comma</td></tr>
       </table>
 
-      <h3>Tagged Variant Disambiguation</h3>
+      <h3>Braced Initializer Disambiguation</h3>
       <p>
-        The sequence <code>{.</code> (left-brace immediately followed by dot) signals a tagged union
-        payload constructor. Any other content after <code>{</code> is a braced initializer or block.
-        This disambiguation applies both in postfix position (<code>Type.variant{.</code>) and in
-        primary position (<code>.variant{.</code>).
+        The sequence <code>{.</code> (left-brace immediately followed by dot) signals a struct or
+        tagged union field initializer: <code>{.field = val}</code>. Any other content after
+        <code>{</code> is an array initializer, empty initializer <code>{}</code>, or a block
+        statement. This disambiguation applies to struct inits, tagged union payload constructors
+        (postfix <code>Type.variant{.</code> and primary <code>.variant{.</code>), and inline
+        struct returns.
       </p>
 
       <h3>Multi-Return Syntax</h3>

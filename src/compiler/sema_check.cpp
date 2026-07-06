@@ -97,6 +97,7 @@ namespace sema {
 
         auto is_cast_legal(const ResolvedType &from, const ResolvedType &to) -> bool {
             if (to.kind == TypeKind::Slice) return from.kind == TypeKind::Pointer || from.kind == TypeKind::Anyptr || from.kind == TypeKind::Array || from.kind == TypeKind::Slice;
+            if (from.kind == TypeKind::Array && (to.kind == TypeKind::Pointer || to.kind == TypeKind::Anyptr)) return true;
             // Function pointers can be cast to/from anyptr (C callback interop)
             if (from.kind == TypeKind::Function && to.kind == TypeKind::Anyptr) return true;
             if (from.kind == TypeKind::Anyptr && to.kind == TypeKind::Function) return true;
@@ -119,6 +120,9 @@ namespace sema {
         auto assignable_in_module(const ResolvedType &from, const ResolvedType &to, const std::string &module_path, Program &program) -> bool {
             if (from.kind == TypeKind::Array && to.kind == TypeKind::Slice) {
                 return array_element_type(from, module_path, program) == slice_element_type(to, module_path, program);
+            }
+            if (from.kind == TypeKind::Array && to.kind == TypeKind::Pointer) {
+                return array_element_type(from, module_path, program) == program.modules.at(module_path).pointer_pointees.at(to.pointee_index);
             }
             return is_assignable(from, to);
         }

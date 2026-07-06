@@ -302,7 +302,7 @@ LETTER        ::= 'a'..'z' | 'A'..'Z' | '_'
 
 ## Notes on Syntax Conventions
 
-1. **Struct field separators**: Struct fields in type definitions and in `StructExpr` braced initializers use newlines as separators (not commas). In `StructExpr` (braced init), fields use commas: `{x = 1, y = 2}`.
+1. **Struct field separators**: Struct fields in type definitions use newlines as separators (not commas). In `StructExpr` (braced init), fields use `.name = val` syntax with commas: `{.x = 1, .y = 2}`.
 
 2. **Match/switch arm separator**: Arms are comma-separated; a trailing comma before `}` is optional.
 
@@ -310,7 +310,7 @@ LETTER        ::= 'a'..'z' | 'A'..'Z' | '_'
 
 4. **`try` precedence**: `try` binds tighter than binary operators: `try f(x) + g()` parses as `(try f(x)) + g()`. To chain member access after try, use parentheses: `(try f(x)).field`.
 
-5. **Tagged variant constructor disambiguation**: `{.` (left-brace immediately followed by dot) signals a tagged union payload constructor. Any other content after `{` is a braced initializer or block.
+5. **Braced initializer disambiguation**: A `{` followed by `.identifier` signals a struct or tagged union field initializer. `{` followed by anything else is an array initializer, empty initializer `{}`, or a block statement.
 
 6. **`ext` keyword**: `ext` is scanned as an `IDENT` with the lexeme `"ext"`, not as a keyword token. It is valid only at the start of a declaration in `ext fn name(...)` form.
 

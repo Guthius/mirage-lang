@@ -123,7 +123,7 @@ Untagged unions store all members at offset 0. The size equals the largest membe
 
 Initialization requires exactly one named member:
 ```mirage
-mut u: NumUnion = {as_i64 = 42}
+mut u: NumUnion = {.as_i64 = 42}
 ```
 
 `undefined` is a valid initializer. `default` and `{}` are not valid.
@@ -481,7 +481,7 @@ Calls a fallible function (one whose last return type is `error`). If the error 
 ### Braced Initializers
 
 ```mirage
-{field = val, field2 = val2}   // struct initializer
+{.field = val, .field2 = val2} // struct initializer
 {val1, val2, val3}             // array initializer
 {}                             // empty (full default initialization)
 ```

@@ -1171,6 +1171,14 @@ namespace codegen {
                 if (from.kind == sema::TypeKind::Array && target.kind == sema::TypeKind::Slice) {
                     return emit_array_to_slice(expr, from, target, expr_type_module_hint(expr));
                 }
+                if (from.kind == sema::TypeKind::Array && target.kind == sema::TypeKind::Pointer) {
+                    auto lv = emit_lvalue(expr);
+                    const auto array_module = expr_type_module_hint(expr);
+                    return builder_.CreateInBoundsGEP(
+                        llvm_type(array_module, from),
+                        lv.ptr,
+                        {builder_.getInt32(0), builder_.getInt64(0)});
+                }
                 return emit_expr(expr);
             }
 
@@ -1743,6 +1751,13 @@ namespace codegen {
                             const auto from = current_module_->expr_types.at(sema::get_expr_key(v->value));
                             if (ty.kind == sema::TypeKind::Slice) {
                                 return emit_slice_cast(*v, from, ty);
+                            }
+                            if (from.kind == sema::TypeKind::Array && is_pointer_like(ty)) {
+                                auto lv = emit_lvalue(v->value);
+                                return builder_.CreateInBoundsGEP(
+                                    llvm_type(*current_module_path_, from),
+                                    lv.ptr,
+                                    {builder_.getInt32(0), builder_.getInt64(0)});
                             }
                             return emit_cast(emit_expr(v->value), from, ty);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {

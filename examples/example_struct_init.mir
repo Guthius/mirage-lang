@@ -18,7 +18,7 @@ pub fn main() -> i32 {
 
     // Partial StructExpr: x is overridden; y falls back to its field default.
     // b.x == 5, b.y == 20
-    mut b: Vec2 = {x = 5}
+    mut b: Vec2 = {.x = 5}
 
     // Empty braces: equivalent to no init expr — full default initialization.
     // c.x == 10, c.y == 20

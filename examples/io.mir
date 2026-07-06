@@ -1,0 +1,30 @@
+ext fn fopen(path: *u8, mode: *u8) -> anyptr
+ext fn fclose(fd: anyptr) -> i32
+ext fn fread(buf: *u8, size: usize, count: usize, fd: anyptr) -> usize
+
+pub type file = struct {
+    fd: anyptr
+}
+
+pub fn open(path: *u8, mode: *u8) -> (file, error) {
+    const fd := fopen(path, mode)
+    if fd == nil {
+        return default, 1
+    }
+    return {.fd = fd}, 0
+}
+
+impl file {
+    pub fn close(mut self) {
+        if self.fd == nil {
+            return
+        }
+        if fclose(self.fd) == 0 {
+            self.fd = nil
+        }
+    }
+
+    pub fn read(self, buf: *u8, size: usize) -> usize {
+        return fread(buf, 1, size, self.fd)
+    }
+}

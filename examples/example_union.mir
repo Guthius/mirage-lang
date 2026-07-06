@@ -8,7 +8,7 @@ type NumUnion = union {
 
 pub fn main() -> i32 {
     // Initialize via single-member braced literal (type inferred from annotation)
-    mut u: NumUnion = {as_i64 = 42}
+    mut u: NumUnion = {.as_i64 = 42}
 
     // Read back the same member
     const iv: i64 = u.as_i64
