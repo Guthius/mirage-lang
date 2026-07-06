@@ -54,13 +54,26 @@ namespace sema {
         ResolvedType type;
     };
 
+    // One variant in a tagged union (union(enum))
+    struct TaggedUnionVariant {
+        std::string name;
+        int32_t tag_value = 0;             // 0..N-1 in declaration order
+        int32_t payload_struct_index = -1; // global struct index; -1 if payload-free
+    };
+
     struct UnionInfo {
         std::string module_path; // module where this union is declared
-        std::vector<UnionMember> members;
+        std::vector<UnionMember> members;       // for untagged unions
+        bool is_tagged = false;
+        std::vector<TaggedUnionVariant> variants; // for tagged unions
+        uint32_t payload_offset = 0;            // byte offset of payload after tag
         uint32_t size = 0;
         uint32_t align = 1;
         bool layout_done = false;
     };
+
+    // The tag field of a tagged union is always u32.
+    inline const ResolvedType TAG_TYPE{.kind = TypeKind::U32};
 
     struct MethodInfo {
         const ast::ImplDecl::Function *decl = nullptr;

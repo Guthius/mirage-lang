@@ -136,6 +136,8 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct TaggedVariantExpr;
+
     struct DefaultExpr {
         SourceLocation location;
     };
@@ -170,6 +172,7 @@ namespace ast {
         DotIdentExpr,
         std::unique_ptr<MatchExpr>,
         std::unique_ptr<BracedInitializerExpr>,
+        std::unique_ptr<TaggedVariantExpr>,
         DefaultExpr,
         UndefinedExpr>;
 
@@ -195,10 +198,11 @@ namespace ast {
     struct UnionType {
         struct Member {
             std::string name;
-            Type type;
+            Type type; // std::monostate for payload-free tagged variants
             SourceLocation location;
         };
 
+        bool is_tagged = false;
         std::vector<Member> members;
         SourceLocation location;
     };
@@ -336,6 +340,8 @@ namespace ast {
     struct MatchExpr {
         struct Arm {
             std::string field;
+            std::optional<std::string> capture_name; // nullopt if no capture
+            bool capture_by_ref = false;             // true for (&v) capture
             Expr value;
             SourceLocation location;
         };
@@ -358,6 +364,15 @@ namespace ast {
 
     struct ArrayExpr {
         std::vector<Expr> values;
+        SourceLocation location;
+    };
+
+    // Tagged union variant construction: `TypeName.variant{field = val}` (qualified)
+    // or `.variant{field = val}` (contextual). Payload-free variants use DotIdentExpr.
+    struct TaggedVariantExpr {
+        std::string type_name;               // empty for contextual form
+        std::string variant_name;
+        std::optional<StructExpr> payload;   // nullopt only for qualified payload-free
         SourceLocation location;
     };
 

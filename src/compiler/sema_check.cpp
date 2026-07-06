@@ -405,9 +405,16 @@ namespace sema {
             }
 
             // TypeKind::Union
-            for (const auto &info = program.unions[effective_type.union_index]; auto &member : info.members) {
-                if (member.name == m.member) {
-                    return {member.type, writable};
+            {
+                const auto &info = program.unions[effective_type.union_index];
+                if (info.is_tagged) {
+                    error(diag, m.location, "cannot access tagged union variants directly; use 'match' to destructure");
+                    return {ResolvedType{.kind = TypeKind::Invalid}, false};
+                }
+                for (auto &member : info.members) {
+                    if (member.name == m.member) {
+                        return {member.type, writable};
+                    }
                 }
             }
 
@@ -829,22 +836,111 @@ namespace sema {
 
                 } else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
                     // Dot-prefixed enum field literal: .field_name
-                    // Requires an expected enum type to resolve which enum this belongs to
-                    if (!expected || expected->kind != TypeKind::Enum) {
-                        return error(diag, v.location, std::format("cannot resolve enum field '.{}' without an expected enum type", v.name));
+                    // Requires an expected enum or tagged union type
+                    if (expected && expected->kind == TypeKind::Enum) {
+                        const auto &enum_info = program.enums[expected->enum_index];
+                        for (const auto &field : enum_info.fields) {
+                            if (field.name == v.name) {
+                                return *expected;
+                            }
+                        }
+                        return error(diag, v.location, std::format("no enum field named '{}'", v.name));
                     }
-                    const auto &enum_info = program.enums[expected->enum_index];
-                    for (const auto &field : enum_info.fields) {
-                        if (field.name == v.name) {
+                    if (expected && expected->kind == TypeKind::Union) {
+                        const auto &union_info = program.unions.at(expected->union_index);
+                        if (union_info.is_tagged) {
+                            const auto it = std::ranges::find(union_info.variants, v.name, &TaggedUnionVariant::name);
+                            if (it == union_info.variants.end()) {
+                                return error(diag, v.location, std::format("no variant '{}' on tagged union", v.name));
+                            }
+                            if (it->payload_struct_index >= 0) {
+                                return error(diag, v.location, std::format("variant '{}' has a payload; use '.{}{{...}}' syntax", v.name, v.name));
+                            }
                             return *expected;
                         }
                     }
-                    return error(diag, v.location, std::format("no enum field named '{}'", v.name));
+                    return error(diag, v.location, std::format("cannot resolve '.{}' without an expected enum or tagged union type", v.name));
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) {
                     const auto operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth);
+
+                    if (operand_type.kind == TypeKind::Union) {
+                        const auto &union_info = program.unions[operand_type.union_index];
+                        if (!union_info.is_tagged) {
+                            return error(diag, v->location, "match operand must be an enum or tagged union type");
+                        }
+
+                        // Check if any arm uses by-ref capture; operand must be an lvalue in that case
+                        const bool any_ref_capture = std::ranges::any_of(v->arms, [](const auto &a) { return a.capture_by_ref; });
+                        if (any_ref_capture) {
+                            const auto lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth);
+                            if (lv.type.kind == TypeKind::Invalid) {
+                                error(diag, v->location, "by-ref capture requires an lvalue match operand");
+                            }
+                        }
+
+                        ResolvedType arm_type{.kind = TypeKind::Invalid};
+                        bool first_arm = true;
+                        std::vector<bool> covered(union_info.variants.size(), false);
+
+                        for (const auto &arm : v->arms) {
+                            bool found = false;
+                            for (size_t i = 0; i < union_info.variants.size(); ++i) {
+                                if (union_info.variants[i].name == arm.field) {
+                                    if (covered[i]) {
+                                        error(diag, arm.location, std::format("duplicate match arm for variant '{}'", arm.field));
+                                    }
+                                    covered[i] = true;
+                                    found = true;
+
+                                    const auto &variant = union_info.variants[i];
+                                    auto arm_locals = locals;
+
+                                    if (arm.capture_name) {
+                                        if (variant.payload_struct_index < 0) {
+                                            error(diag, arm.location, std::format("variant '{}' has no payload; cannot capture", arm.field));
+                                        } else {
+                                            const ResolvedType payload_ty{.kind = TypeKind::Struct, .struct_index = variant.payload_struct_index};
+                                            if (arm.capture_by_ref) {
+                                                arm_locals[*arm.capture_name] = LocalBinding{
+                                                    .type = intern_pointer(program.modules.at(module_path), payload_ty),
+                                                    .is_mut = false,
+                                                };
+                                            } else {
+                                                arm_locals[*arm.capture_name] = LocalBinding{.type = payload_ty, .is_mut = false};
+                                            }
+                                        }
+                                    }
+
+                                    const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
+                                                                     first_arm ? std::nullopt : std::optional<ResolvedType>{arm_type}, loop_depth);
+                                    if (first_arm) {
+                                        arm_type = val_type;
+                                        first_arm = false;
+                                    } else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
+                                        error(diag, arm.location, "all match arms must have the same type");
+                                    }
+                                    break;
+                                }
+                            }
+                            if (!found) {
+                                error(diag, arm.location, std::format("no variant '{}' on tagged union", arm.field));
+                                const auto val_type = check_expr(arm.value, locals, module_path, program, diag, std::nullopt, loop_depth);
+                                if (first_arm) { arm_type = val_type; first_arm = false; }
+                            }
+                        }
+
+                        for (size_t i = 0; i < union_info.variants.size(); ++i) {
+                            if (!covered[i]) {
+                                error(diag, v->location, std::format("match is not exhaustive: missing arm for '{}'", union_info.variants[i].name));
+                            }
+                        }
+
+                        return arm_type.kind == TypeKind::Invalid ? ResolvedType{.kind = TypeKind::Void} : arm_type;
+                    }
+
                     if (operand_type.kind != TypeKind::Enum) {
-                        return error(diag, v->location, "match operand must be an enum type");
+                        return error(diag, v->location, "match operand must be an enum or tagged union type");
                     }
 
                     const auto &enum_info = program.enums[operand_type.enum_index];
@@ -855,6 +951,9 @@ namespace sema {
                     std::vector<bool> covered(enum_info.fields.size(), false);
 
                     for (const auto &arm : v->arms) {
+                        if (arm.capture_name) {
+                            error(diag, arm.location, "payload capture is only valid for tagged union match arms");
+                        }
                         // Find field in enum
                         bool found = false;
                         for (size_t i = 0; i < enum_info.fields.size(); ++i) {
@@ -901,7 +1000,64 @@ namespace sema {
                     if (!expected) {
                         return error(diag, v.location, "'undefined' requires a known target type");
                     }
+                    if (expected->kind == TypeKind::Union && program.unions.at(expected->union_index).is_tagged) {
+                        return error(diag, v.location, "tagged unions have no 'undefined' form; use an explicit variant initializer");
+                    }
                     return *expected;
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TaggedVariantExpr>>) {
+                    // Resolve the tagged union type
+                    ResolvedType union_ty;
+                    if (!v->type_name.empty()) {
+                        union_ty = resolve_type_symbol(module_path, v->type_name, program, diag, v->location);
+                    } else if (expected && expected->kind == TypeKind::Union) {
+                        union_ty = *expected;
+                    } else {
+                        return error(diag, v->location, "cannot infer tagged union type; provide an explicit type name (e.g. 'TypeName.variant{...}')");
+                    }
+                    if (union_ty.kind != TypeKind::Union) {
+                        return error(diag, v->location, std::format("'{}' is not a union type", v->type_name));
+                    }
+                    const auto &union_info = program.unions.at(union_ty.union_index);
+                    if (!union_info.is_tagged) {
+                        return error(diag, v->location, "use '{member = val}' syntax for untagged unions");
+                    }
+                    const auto variant_it = std::ranges::find(union_info.variants, v->variant_name, &TaggedUnionVariant::name);
+                    if (variant_it == union_info.variants.end()) {
+                        return error(diag, v->location, std::format("no variant '{}' on tagged union", v->variant_name));
+                    }
+                    const bool has_payload = variant_it->payload_struct_index >= 0;
+                    if (!has_payload && v->payload.has_value()) {
+                        return error(diag, v->location, std::format("variant '{}' has no payload; use '.{}' without braces", v->variant_name, v->variant_name));
+                    }
+                    if (has_payload) {
+                        if (!v->payload.has_value()) {
+                            return error(diag, v->location, std::format("variant '{}' requires a payload initializer; use '.{}{{field = val}}'", v->variant_name, v->variant_name));
+                        }
+                        const auto &bv = *v->payload;
+                        const auto &struct_info = program.structs.at(variant_it->payload_struct_index);
+                        std::unordered_set<std::string> seen;
+                        for (const auto &sf : bv.fields) {
+                            if (!seen.insert(sf.name).second) {
+                                error(diag, sf.location, std::format("duplicate field '{}' in variant initializer", sf.name));
+                            }
+                            const auto it = std::ranges::find(struct_info.fields, sf.name, &StructField::name);
+                            if (it == struct_info.fields.end()) {
+                                error(diag, sf.location, std::format("no field '{}' in variant '{}'", sf.name, v->variant_name));
+                                continue;
+                            }
+                            const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth);
+                            if (!assignable_in_module(val_ty, it->type, module_path, program)) {
+                                error(diag, sf.location, std::format("type mismatch for field '{}'", sf.name));
+                            }
+                        }
+                        for (const auto &f : struct_info.fields) {
+                            if (f.init_expr != nullptr) continue;
+                            if (!std::ranges::any_of(bv.fields, [&](const auto &sf) { return sf.name == f.name; })) {
+                                error(diag, v->location, std::format("missing field '{}' in variant '{}'", f.name, v->variant_name));
+                            }
+                        }
+                    }
+                    return union_ty;
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
                     return std::visit(
                         [&]<typename BV>(const BV &bv) -> ResolvedType {

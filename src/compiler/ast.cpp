@@ -115,15 +115,12 @@ namespace ast {
 
             parser.expect(TokenKind::KwUnion, "'union'");
 
-            // Reserve room for future `union(enum)` attribute syntax: if we see `(`,
-            // consume and report an error rather than silently misparse.
+            bool is_tagged = false;
             if (parser.match(TokenKind::LParen)) {
-                parser.report_error(location, "tagged union syntax ('union(enum)') is not yet implemented");
-                // Skip until closing paren to recover
-                while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
-                    parser.advance();
-                }
+                // tagged union: union(enum) { ... }
+                parser.expect(TokenKind::KwEnum, "'enum'");
                 parser.expect(TokenKind::RParen, "')'");
+                is_tagged = true;
             }
 
             parser.expect(TokenKind::LBrace, "'{'");
@@ -133,25 +130,45 @@ namespace ast {
                 const auto member_location = parser.current_location();
                 const auto member_name = parser.expect_identifier();
 
-                parser.expect(TokenKind::Colon, "':'");
+                if (is_tagged) {
+                    // Tagged variant: optional `: type` payload; no default initializers
+                    if (parser.match(TokenKind::Colon)) {
+                        auto member_type = parse_type(parser);
+                        members.push_back({
+                            .name = member_name,
+                            .type = std::move(member_type),
+                            .location = member_location,
+                        });
+                    } else {
+                        // Payload-free variant (monostate type)
+                        members.push_back({
+                            .name = member_name,
+                            .type = std::monostate{},
+                            .location = member_location,
+                        });
+                    }
+                } else {
+                    parser.expect(TokenKind::Colon, "':'");
 
-                auto member_type = parse_type(parser);
+                    auto member_type = parse_type(parser);
 
-                if (parser.match(TokenKind::Equal)) {
-                    parser.report_error(member_location, "union member default initializers are not allowed");
-                    parse_expr(parser); // consume and discard
+                    if (parser.match(TokenKind::Equal)) {
+                        parser.report_error(member_location, "union member default initializers are not allowed");
+                        parse_expr(parser); // consume and discard
+                    }
+
+                    members.push_back({
+                        .name = member_name,
+                        .type = std::move(member_type),
+                        .location = member_location,
+                    });
                 }
-
-                members.push_back({
-                    .name = member_name,
-                    .type = std::move(member_type),
-                    .location = member_location,
-                });
             }
 
             parser.expect(TokenKind::RBrace, "'}'");
 
             return std::make_unique<UnionType>(UnionType{
+                .is_tagged = is_tagged,
                 .members = std::move(members),
                 .location = location,
             });
@@ -507,6 +524,32 @@ namespace ast {
                 parser.advance();
                 const auto name = parser.expect_identifier();
 
+                // If followed by '{', this is a contextual tagged variant: .variant{...}
+                if (parser.check(TokenKind::LBrace)) {
+                    const auto brace_loc = parser.current_location();
+                    parser.advance(); // consume '{'
+                    std::vector<StructExpr::Field> fields;
+                    while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                        const auto field_name = parser.expect_identifier();
+                        parser.expect(TokenKind::Equal, "'='");
+                        const auto field_loc = parser.current_location();
+                        fields.push_back(StructExpr::Field{
+                            .name = field_name,
+                            .expr = parse_expr(parser),
+                            .location = field_loc,
+                        });
+                        if (parser.check(TokenKind::RBrace)) break;
+                        parser.expect(TokenKind::Comma, "','");
+                    }
+                    parser.expect(TokenKind::RBrace, "'}'");
+                    return std::make_unique<TaggedVariantExpr>(TaggedVariantExpr{
+                        .type_name = "",
+                        .variant_name = name,
+                        .payload = StructExpr{.fields = std::move(fields), .location = brace_loc},
+                        .location = location,
+                    });
+                }
+
                 return DotIdentExpr{
                     .name = name,
                     .location = location,
@@ -524,11 +567,25 @@ namespace ast {
                     const auto arm_location = parser.current_location();
                     parser.expect(TokenKind::Dot, "'.'");
                     auto field = parser.expect_identifier();
+
+                    // Optional capture: (name) or (&name)
+                    std::optional<std::string> capture_name;
+                    bool capture_by_ref = false;
+                    if (parser.match(TokenKind::LParen)) {
+                        if (parser.match(TokenKind::Ampersand)) {
+                            capture_by_ref = true;
+                        }
+                        capture_name = parser.expect_identifier();
+                        parser.expect(TokenKind::RParen, "')'");
+                    }
+
                     parser.expect(TokenKind::Colon, "':'");
                     auto arm_value = parse_expr(parser);
 
                     arms.push_back(MatchExpr::Arm{
                         .field = std::move(field),
+                        .capture_name = std::move(capture_name),
+                        .capture_by_ref = capture_by_ref,
                         .value = std::move(arm_value),
                         .location = arm_location,
                     });
@@ -610,10 +667,40 @@ namespace ast {
 
                 } else if (parser.check(TokenKind::Dot)) {
                     parser.advance();
+                    const auto member_name = parser.expect_identifier();
+
+                    // If followed by '{' and base is an IdentExpr, parse as qualified tagged variant
+                    if (parser.check(TokenKind::LBrace)) {
+                        if (const auto *base_ident = std::get_if<IdentExpr>(&expr)) {
+                            const auto brace_loc = parser.current_location();
+                            parser.advance(); // consume '{'
+                            std::vector<StructExpr::Field> fields;
+                            while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                                const auto field_name = parser.expect_identifier();
+                                parser.expect(TokenKind::Equal, "'='");
+                                const auto field_loc = parser.current_location();
+                                fields.push_back(StructExpr::Field{
+                                    .name = field_name,
+                                    .expr = parse_expr(parser),
+                                    .location = field_loc,
+                                });
+                                if (parser.check(TokenKind::RBrace)) break;
+                                parser.expect(TokenKind::Comma, "','");
+                            }
+                            parser.expect(TokenKind::RBrace, "'}'");
+                            expr = std::make_unique<TaggedVariantExpr>(TaggedVariantExpr{
+                                .type_name = base_ident->name,
+                                .variant_name = member_name,
+                                .payload = StructExpr{.fields = std::move(fields), .location = brace_loc},
+                                .location = location,
+                            });
+                            continue;
+                        }
+                    }
 
                     expr = make_expr(MemberExpr{
                         .object = std::move(expr),
-                        .member = parser.expect_identifier(),
+                        .member = member_name,
                         .location = location,
                     });
 

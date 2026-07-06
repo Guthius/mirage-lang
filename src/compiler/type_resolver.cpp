@@ -566,28 +566,96 @@ namespace sema {
             void layout_union(const std::string &module_path, const int slot, const std::unique_ptr<ast::UnionType> &decl) {
                 UnionInfo info;
                 info.module_path = module_path;
+                info.is_tagged = decl->is_tagged;
 
-                uint32_t max_size = 0;
-                uint32_t max_align = 1;
+                if (decl->is_tagged) {
+                    // Tagged union: tag (u32) + optional payload
+                    // Layout: [u32 tag | padding | max_payload bytes]
+                    static constexpr uint32_t TAG_SIZE = 4;
+                    static constexpr uint32_t TAG_ALIGN = 4;
 
-                for (const auto &member : decl->members) {
-                    auto member_type = resolve_field_type(module_path, member.type, member.location);
-                    const uint32_t m_size = size_of(module_path, member_type);
-                    const uint32_t m_align = align_of(module_path, member_type);
+                    uint32_t max_payload_size = 0;
+                    uint32_t max_payload_align = 1;
 
-                    info.members.push_back(UnionMember{
-                        .name = member.name,
-                        .type = member_type,
-                    });
-                    max_size = std::max(max_size, m_size);
-                    max_align = std::max(max_align, m_align);
+                    for (int32_t i = 0; i < static_cast<int32_t>(decl->members.size()); ++i) {
+                        const auto &member = decl->members[i];
+                        TaggedUnionVariant variant;
+                        variant.name = member.name;
+                        variant.tag_value = i;
+                        variant.payload_struct_index = -1;
+
+                        if (!std::holds_alternative<std::monostate>(member.type)) {
+                            // Variant has a payload type — allocate an anonymous struct slot
+                            const int struct_slot = static_cast<int>(program.structs.size());
+                            program.structs.push_back(StructInfo{.module_path = module_path});
+
+                            // Build a fake ast::StructType with a single field named "v"
+                            // if the payload is not already a struct type, or use its fields directly.
+                            // We support any payload type by wrapping in a one-field struct.
+                            // For struct payload types, we inline the fields for ergonomics.
+                            if (const auto *st = std::get_if<std::unique_ptr<ast::StructType>>(&member.type)) {
+                                layout_struct(module_path, struct_slot, *st);
+                            } else {
+                                // Non-struct payload: create a one-field anonymous struct
+                                auto payload_type = resolve_field_type(module_path, member.type, member.location);
+                                StructInfo payload_info;
+                                payload_info.module_path = module_path;
+                                const uint32_t p_size = size_of(module_path, payload_type);
+                                const uint32_t p_align = align_of(module_path, payload_type);
+                                payload_info.fields.push_back(StructField{
+                                    .name = "v",
+                                    .type = payload_type,
+                                    .offset = 0,
+                                    .init_expr = nullptr,
+                                });
+                                payload_info.size = p_size;
+                                payload_info.align = p_align;
+                                payload_info.layout_done = true;
+                                program.structs[struct_slot] = std::move(payload_info);
+                            }
+
+                            variant.payload_struct_index = struct_slot;
+                            const auto &payload_struct = program.structs[struct_slot];
+                            max_payload_size = std::max(max_payload_size, payload_struct.size);
+                            max_payload_align = std::max(max_payload_align, payload_struct.align);
+                        }
+
+                        info.variants.push_back(std::move(variant));
+                    }
+
+                    // payload_offset = align_up(TAG_SIZE, max_payload_align)
+                    const uint32_t effective_payload_align = std::max(max_payload_align, 1u);
+                    info.payload_offset = (TAG_SIZE + effective_payload_align - 1) / effective_payload_align * effective_payload_align;
+
+                    // Total align = max(tag_align, payload_align)
+                    info.align = std::max(TAG_ALIGN, max_payload_align);
+                    // Total size = align_up(payload_offset + max_payload_size, align)
+                    const uint32_t raw_size = info.payload_offset + max_payload_size;
+                    info.size = (raw_size + info.align - 1) / info.align * info.align;
+                    if (info.size == 0) info.size = TAG_ALIGN; // minimum size for tag-only unions
+                } else {
+                    uint32_t max_size = 0;
+                    uint32_t max_align = 1;
+
+                    for (const auto &member : decl->members) {
+                        auto member_type = resolve_field_type(module_path, member.type, member.location);
+                        const uint32_t m_size = size_of(module_path, member_type);
+                        const uint32_t m_align = align_of(module_path, member_type);
+
+                        info.members.push_back(UnionMember{
+                            .name = member.name,
+                            .type = member_type,
+                        });
+                        max_size = std::max(max_size, m_size);
+                        max_align = std::max(max_align, m_align);
+                    }
+
+                    // Union size = largest member size, rounded up to alignment
+                    info.size = (max_size + max_align - 1) / max_align * max_align;
+                    info.align = max_align;
                 }
 
-                // Union size = largest member size, rounded up to alignment
-                info.size = (max_size + max_align - 1) / max_align * max_align;
-                info.align = max_align;
                 info.layout_done = true;
-
                 program.unions[slot] = std::move(info);
             }
 

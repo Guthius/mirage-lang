@@ -562,6 +562,53 @@ namespace codegen {
                 return builder_.CreateLoad(ll_ty, slot);
             }
 
+            // Emit a tagged union value for a TaggedVariantExpr.
+            // Layout: [tag:u32 | padding | payload_bytes]
+            auto emit_tagged_variant_expr(const ast::TaggedVariantExpr &expr, const sema::ResolvedType &ty) -> llvm::Value * {
+                const auto &union_info = sema_program_.unions.at(ty.union_index);
+                auto *ll_ty = unions_.at(ty.union_index); // [total_size x i8]
+                auto *slot = builder_.CreateAlloca(ll_ty);
+
+                // Find the variant
+                const auto variant_it = std::ranges::find(union_info.variants, expr.variant_name, &sema::TaggedUnionVariant::name);
+                if (variant_it == union_info.variants.end()) {
+                    report_codegen_error(diag_, {}, std::format("internal error: unknown variant '{}'", expr.variant_name));
+                    return llvm::UndefValue::get(ll_ty);
+                }
+
+                // Store tag (u32) at byte 0
+                auto *tag_val = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), static_cast<uint64_t>(variant_it->tag_value), false);
+                builder_.CreateStore(tag_val, slot);
+
+                // Store payload at payload_offset if present
+                if (variant_it->payload_struct_index >= 0 && expr.payload.has_value()) {
+                    const sema::ResolvedType payload_ty{.kind = sema::TypeKind::Struct, .struct_index = variant_it->payload_struct_index};
+                    const auto &payload_struct = sema_program_.structs.at(variant_it->payload_struct_index);
+                    const auto &struct_module = payload_struct.module_path;
+
+                    auto *struct_val = emit_struct_expr_value(*expr.payload, payload_ty);
+
+                    // GEP to payload_offset
+                    auto *payload_ptr = builder_.CreateConstInBoundsGEP1_64(
+                        llvm::Type::getInt8Ty(*context_), slot, union_info.payload_offset);
+
+                    // Temporarily switch module context for the store
+                    const auto *saved_path = current_module_path_;
+                    const auto *saved_module = current_module_;
+                    current_module_path_ = &struct_module;
+                    current_module_ = &module_for(struct_module);
+
+                    auto *struct_ll_ty = llvm_type(struct_module, payload_ty);
+                    builder_.CreateStore(struct_val, payload_ptr);
+
+                    current_module_path_ = saved_path;
+                    current_module_ = saved_module;
+                    (void)struct_ll_ty;
+                }
+
+                return builder_.CreateLoad(ll_ty, slot);
+            }
+
             auto validate_hosted_main() const -> const sema::FunctionSymbol * {
                 const auto root_it = sema_program_.modules.find(ast_program_.root_module_path);
                 if (root_it == sema_program_.modules.end()) {
@@ -1513,6 +1560,22 @@ namespace codegen {
                             const auto lv = emit_lvalue(expr);
                             return builder_.CreateLoad(lv.storage_type, lv.ptr);
                         } else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
+                            if (ty.kind == sema::TypeKind::Union) {
+                                // Payload-free tagged union variant: .variant_name
+                                const auto &union_info = sema_program_.unions.at(ty.union_index);
+                                const auto variant_it = std::ranges::find(union_info.variants, v.name, &sema::TaggedUnionVariant::name);
+                                if (variant_it == union_info.variants.end()) {
+                                    report_codegen_error(diag_, v.location, std::format("unknown variant '{}'", v.name));
+                                    return llvm::UndefValue::get(unions_.at(ty.union_index));
+                                }
+                                // Emit as a tagged variant with no payload
+                                auto *ll_ty = unions_.at(ty.union_index);
+                                auto *slot = builder_.CreateAlloca(ll_ty);
+                                auto *tag_val = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_),
+                                                                        static_cast<uint64_t>(variant_it->tag_value), false);
+                                builder_.CreateStore(tag_val, slot);
+                                return builder_.CreateLoad(ll_ty, slot);
+                            }
                             // Enum field literal: .field_name
                             // ty is the enum type; look up the field value
                             const auto &enum_info = sema_program_.enums.at(ty.enum_index);
@@ -1538,6 +1601,8 @@ namespace codegen {
                             return emit_default_value(tm, ty);
                         } else if constexpr (std::is_same_v<V, ast::UndefinedExpr>) {
                             return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TaggedVariantExpr>>) {
+                            return emit_tagged_variant_expr(*v, ty);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
                             return std::visit(
                                 [&]<typename BV>(const BV &bv) -> llvm::Value * {
@@ -1634,9 +1699,92 @@ namespace codegen {
                 auto *merge_bb = llvm::BasicBlock::Create(*context_, "match.end", fn);
 
                 const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(expr.operand));
-                auto *operand = emit_expr(expr.operand);
 
-                // Underlying integer type for the enum
+                // Tagged union match
+                if (operand_type.kind == sema::TypeKind::Union) {
+                    const auto &union_info = sema_program_.unions.at(operand_type.union_index);
+                    auto *union_ll_ty = unions_.at(operand_type.union_index);
+
+                    // Always alloca the operand so we can GEP into it for captures
+                    auto *union_slot = builder_.CreateAlloca(union_ll_ty, nullptr, "match.union");
+                    auto *operand_val = emit_expr(expr.operand);
+                    builder_.CreateStore(operand_val, union_slot);
+
+                    // Load tag (u32) from byte 0
+                    auto *tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), union_slot, "match.tag");
+                    auto *sw = builder_.CreateSwitch(tag, unreachable_bb, static_cast<unsigned>(expr.arms.size()));
+
+                    std::vector<std::pair<llvm::BasicBlock *, llvm::Value *>> arm_results;
+                    const auto saved_locals = locals_;
+
+                    for (const auto &arm : expr.arms) {
+                        // Find variant tag value
+                        int32_t tag_val = 0;
+                        int32_t payload_idx = -1;
+                        for (const auto &variant : union_info.variants) {
+                            if (variant.name == arm.field) {
+                                tag_val = variant.tag_value;
+                                payload_idx = variant.payload_struct_index;
+                                break;
+                            }
+                        }
+
+                        auto *arm_bb = llvm::BasicBlock::Create(*context_, std::format("match.arm.{}", arm.field), fn);
+                        sw->addCase(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), static_cast<uint64_t>(tag_val), false), arm_bb);
+
+                        builder_.SetInsertPoint(arm_bb);
+
+                        // Bind capture if present
+                        if (arm.capture_name && payload_idx >= 0) {
+                            const sema::ResolvedType payload_ty{.kind = sema::TypeKind::Struct, .struct_index = payload_idx};
+                            const auto &payload_struct = sema_program_.structs.at(payload_idx);
+                            const auto &struct_module = payload_struct.module_path;
+                            auto *payload_ll_ty = llvm_type(struct_module, payload_ty);
+
+                            // GEP to payload_offset
+                            auto *payload_ptr = builder_.CreateConstInBoundsGEP1_64(
+                                llvm::Type::getInt8Ty(*context_), union_slot, union_info.payload_offset, "match.payload");
+
+                            if (arm.capture_by_ref) {
+                                // Bind as pointer-to-payload
+                                auto *ref_slot = create_entry_alloca(fn, llvm::PointerType::getUnqual(*context_), *arm.capture_name);
+                                builder_.CreateStore(payload_ptr, ref_slot);
+                                const auto ptr_ty = find_self_ptr_type(payload_ty);
+                                locals_[*arm.capture_name] = LocalValue{.alloca = ref_slot, .type = ptr_ty, .type_module = *current_module_path_};
+                            } else {
+                                // Bind as value: load the struct
+                                auto *val_slot = create_entry_alloca(fn, payload_ll_ty, *arm.capture_name);
+                                auto *loaded = builder_.CreateLoad(payload_ll_ty, payload_ptr);
+                                builder_.CreateStore(loaded, val_slot);
+                                locals_[*arm.capture_name] = LocalValue{.alloca = val_slot, .type = payload_ty, .type_module = struct_module};
+                            }
+                        }
+
+                        auto *arm_val = emit_expr(arm.value);
+                        auto *arm_done = builder_.GetInsertBlock();
+                        builder_.CreateBr(merge_bb);
+                        arm_results.emplace_back(arm_done, arm_val);
+
+                        // Restore locals after arm (captures are arm-scoped)
+                        locals_ = saved_locals;
+                    }
+
+                    builder_.SetInsertPoint(unreachable_bb);
+                    builder_.CreateUnreachable();
+
+                    builder_.SetInsertPoint(merge_bb);
+                    if (result_type.kind == sema::TypeKind::Void || arm_results.empty()) {
+                        return llvm::UndefValue::get(llvm::Type::getInt32Ty(*context_));
+                    }
+                    auto *phi = builder_.CreatePHI(llvm_type(*current_module_path_, result_type), static_cast<unsigned>(arm_results.size()));
+                    for (auto &[bb, val] : arm_results) {
+                        phi->addIncoming(val, bb);
+                    }
+                    return phi;
+                }
+
+                // Enum match
+                auto *operand = emit_expr(expr.operand);
                 const auto &enum_info = sema_program_.enums.at(operand_type.enum_index);
                 auto *underlying_llvm_ty = llvm_type(*current_module_path_, enum_info.underlying_type);
 

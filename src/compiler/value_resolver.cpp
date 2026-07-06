@@ -52,6 +52,10 @@ namespace sema {
                         return true;
                     }
 
+                    if constexpr (std::is_same_v<V, std::unique_ptr<ast::TaggedVariantExpr>>) {
+                        return false; // has runtime stores
+                    }
+
                     if constexpr (std::is_same_v<V, ast::DefaultExpr>) {
                         return true;
                     }

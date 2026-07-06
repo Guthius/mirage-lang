@@ -59,7 +59,8 @@ namespace sema {
                 sema_program.enums.push_back(EnumInfo{});
             }
             if (union_slot >= 0) {
-                sema_program.unions.push_back(UnionInfo{.module_path = module_path});
+                const auto &union_decl = std::get<std::unique_ptr<ast::UnionType>>(decl.type);
+                sema_program.unions.push_back(UnionInfo{.module_path = module_path, .is_tagged = union_decl->is_tagged});
             }
         }
 
