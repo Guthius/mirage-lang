@@ -282,6 +282,47 @@ namespace sema {
             return std::nullopt;
         }
 
+        // Resolves an expression as a type reference (not a value).
+        // Returns the ResolvedType if expr names a type (locally or via module chain), nullopt otherwise.
+        auto try_resolve_type_chain(const ast::Expr &expr, const std::string &module_path, LocalScope &locals, Program &program) -> std::optional<ResolvedType> {
+            if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
+                if (locals.contains(ident->name)) {
+                    return std::nullopt;
+                }
+                const auto mod_it = program.modules.find(module_path);
+                if (mod_it == program.modules.end()) {
+                    return std::nullopt;
+                }
+                const auto sym_it = mod_it->second.symbols.find(ident->name);
+                if (sym_it == mod_it->second.symbols.end()) {
+                    return std::nullopt;
+                }
+                if (const auto *ts = std::get_if<TypeSymbol>(&sym_it->second)) {
+                    return ts->resolved;
+                }
+                return std::nullopt;
+            }
+            if (const auto *mem = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr)) {
+                const auto inner_module = try_resolve_namespace_chain((*mem)->object, module_path, locals, program);
+                if (!inner_module) {
+                    return std::nullopt;
+                }
+                const auto mod_it = program.modules.find(*inner_module);
+                if (mod_it == program.modules.end()) {
+                    return std::nullopt;
+                }
+                const auto sym_it = mod_it->second.symbols.find((*mem)->member);
+                if (sym_it == mod_it->second.symbols.end()) {
+                    return std::nullopt;
+                }
+                if (const auto *ts = std::get_if<TypeSymbol>(&sym_it->second)) {
+                    return ts->resolved;
+                }
+                return std::nullopt;
+            }
+            return std::nullopt;
+        }
+
         auto check_member_cross_module(const ast::MemberExpr &m, const std::string &target_module_path, Program &program, DiagnosticEngine &diag) -> LvalueInfo {
             const auto mod_it = program.modules.find(target_module_path);
             if (mod_it == program.modules.end()) {
@@ -317,6 +358,20 @@ namespace sema {
         auto resolve_member(const ast::MemberExpr &m, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth) -> LvalueInfo {
             if (const auto target_module = try_resolve_namespace_chain(m.object, module_path, locals, program)) {
                 return check_member_cross_module(m, *target_module, program, diag);
+            }
+
+            // Handle fully-qualified enum field: e.g. EnumType.field or module.EnumType.field
+            if (const auto type_ref = try_resolve_type_chain(m.object, module_path, locals, program)) {
+                if (type_ref->kind == TypeKind::Enum) {
+                    const auto &enum_info = program.enums[type_ref->enum_index];
+                    for (const auto &field : enum_info.fields) {
+                        if (field.name == m.member) {
+                            return {*type_ref, false};
+                        }
+                    }
+                    error(diag, m.location, std::format("no enum field named '{}'", m.member));
+                    return {ResolvedType{.kind = TypeKind::Invalid}, false};
+                }
             }
 
             const auto object_type = check_expr(m.object, locals, module_path, program, diag, std::nullopt, loop_depth);

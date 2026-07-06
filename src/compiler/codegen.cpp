@@ -1216,6 +1216,40 @@ namespace codegen {
                 return std::nullopt;
             }
 
+            // Resolves an expression as a type reference. Returns the ResolvedType if expr names a
+            // type (locally or via module chain), nullopt otherwise.
+            auto try_type_chain(const ast::Expr &expr) const -> std::optional<sema::ResolvedType> {
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
+                    if (locals_.contains(ident->name) || macro_args_.contains(ident->name)) {
+                        return std::nullopt;
+                    }
+                    const auto it = current_module_->symbols.find(ident->name);
+                    if (it == current_module_->symbols.end()) {
+                        return std::nullopt;
+                    }
+                    if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second)) {
+                        return ts->resolved;
+                    }
+                    return std::nullopt;
+                }
+                if (const auto *mem = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr)) {
+                    const auto inner_module = try_namespace_chain((*mem)->object);
+                    if (!inner_module) {
+                        return std::nullopt;
+                    }
+                    const auto &mod = module_for(*inner_module);
+                    const auto it = mod.symbols.find((*mem)->member);
+                    if (it == mod.symbols.end()) {
+                        return std::nullopt;
+                    }
+                    if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second)) {
+                        return ts->resolved;
+                    }
+                    return std::nullopt;
+                }
+                return std::nullopt;
+            }
+
             auto emit_call(const ast::CallExpr &call) -> llvm::Value * {
                 std::string target_module = *current_module_path_;
                 std::string name;
@@ -1413,6 +1447,19 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
                             return emit_slice_expr(*v, ty);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                            // Handle fully-qualified enum field: e.g. EnumType.field or module.EnumType.field
+                            if (ty.kind == sema::TypeKind::Enum && try_type_chain(v->object)) {
+                                const auto &enum_info = sema_program_.enums.at(ty.enum_index);
+                                for (const auto &field : enum_info.fields) {
+                                    if (field.name == v->member) {
+                                        return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty),
+                                                                      static_cast<uint64_t>(field.value),
+                                                                      enum_info.underlying_type.is_signed());
+                                    }
+                                }
+                                report_codegen_error(diag_, v->location, std::format("unknown enum field '{}'", v->member));
+                                return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
+                            }
                             const auto lv = emit_lvalue(expr);
                             return builder_.CreateLoad(lv.storage_type, lv.ptr);
                         } else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
