@@ -10,6 +10,7 @@ enum class TokenKind : uint8_t {
     IntLiteral,
     FloatLiteral,
     StringLiteral,
+    CharLiteral,
     Identifier,
 
     // Keywords

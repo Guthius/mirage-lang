@@ -217,6 +217,10 @@ namespace lexer {
                     return lex_string(start);
                 }
 
+                if (ch == '\'') {
+                    return lex_char(start);
+                }
+
                 return lex_symbol(start, ch);
             }
 
@@ -314,6 +318,26 @@ namespace lexer {
                 advance();
 
                 return make_token(TokenKind::StringLiteral, start);
+            }
+
+            auto lex_char(const size_t start) -> Token {
+                if (at_end() || peek() == '\'') {
+                    diagnostics_.report_error(DiagnosticStage::Lexer, make_location(), "empty character literal");
+                    if (!at_end()) advance();
+                    return make_token(TokenKind::CharLiteral, start);
+                }
+                if (peek() == '\\') {
+                    advance();
+                    if (!at_end()) advance();
+                } else {
+                    advance();
+                }
+                if (at_end() || peek() != '\'') {
+                    diagnostics_.report_error(DiagnosticStage::Lexer, make_location(), "unterminated character literal");
+                    return make_token(TokenKind::CharLiteral, start);
+                }
+                advance();
+                return make_token(TokenKind::CharLiteral, start);
             }
 
             auto lex_symbol(const size_t start, const char ch) -> Token {

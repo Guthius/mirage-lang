@@ -359,6 +359,38 @@ namespace ast {
             };
         }
 
+        auto parse_char_literal(Parser &parser) -> LiteralCharExpr {
+            const auto location = parser.current_location();
+            auto &token = parser.expect(TokenKind::CharLiteral, "character literal");
+
+            std::string_view str = token.lexeme;
+            if (str.size() < 3) {
+                parser.report_error(location, "malformed character literal");
+                return LiteralCharExpr{.value = 0, .location = location};
+            }
+            str.remove_prefix(1);
+            str.remove_suffix(1);
+
+            uint8_t val = 0;
+            if (str[0] == '\\' && str.size() > 1) {
+                switch (str[1]) {
+                case '\\': val = '\\'; break;
+                case '\'': val = '\''; break;
+                case 'n':  val = '\n'; break;
+                case 't':  val = '\t'; break;
+                case 'r':  val = '\r'; break;
+                case '0':  val = '\0'; break;
+                default:
+                    parser.report_error(location, std::format("unknown escape sequence '\\{}' in character literal", str[1]));
+                    break;
+                }
+            } else if (!str.empty()) {
+                val = static_cast<uint8_t>(str[0]);
+            }
+
+            return LiteralCharExpr{.value = val, .location = location};
+        }
+
         auto parse_braced_initializer(Parser &parser) -> std::unique_ptr<BracedInitializerExpr> {
             const auto location = parser.current_location();
 
@@ -434,6 +466,10 @@ namespace ast {
 
             if (parser.check(TokenKind::StringLiteral)) {
                 return parse_string_literal(parser);
+            }
+
+            if (parser.check(TokenKind::CharLiteral)) {
+                return parse_char_literal(parser);
             }
 
             if (parser.check(TokenKind::KwTrue)) {
@@ -1211,6 +1247,33 @@ namespace ast {
             });
         }
 
+        auto parse_for_in_stmt(Parser &parser) -> std::unique_ptr<ForInStmt> {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwFor, "'for'");
+
+            auto &idx_tok = parser.expect(TokenKind::Identifier, "index variable name");
+            std::string index_name{idx_tok.lexeme};
+
+            parser.expect(TokenKind::Comma, "','");
+
+            auto &elem_tok = parser.expect(TokenKind::Identifier, "element variable name");
+            std::string element_name{elem_tok.lexeme};
+
+            parser.expect(TokenKind::KwIn, "'in'");
+
+            auto iterable = parse_expr(parser);
+            auto body = parse_block_stmt(parser);
+
+            return std::make_unique<ForInStmt>(ForInStmt{
+                .index_name = std::move(index_name),
+                .element_name = std::move(element_name),
+                .iterable = std::move(iterable),
+                .body = std::move(body),
+                .location = location,
+            });
+        }
+
         auto parse_continue_stmt(Parser &parser) -> ContinueStmt {
             const auto location = parser.current_location();
 
@@ -1707,6 +1770,10 @@ namespace ast {
 
         if (parser.check(TokenKind::KwWhile)) {
             return parse_while_stmt(parser);
+        }
+
+        if (parser.check(TokenKind::KwFor)) {
+            return parse_for_in_stmt(parser);
         }
 
         if (parser.check(TokenKind::KwSwitch)) {

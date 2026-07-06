@@ -1179,6 +1179,9 @@ namespace codegen {
                         lv.ptr,
                         {builder_.getInt32(0), builder_.getInt64(0)});
                 }
+                if (from.kind == sema::TypeKind::Slice && target.kind == sema::TypeKind::Pointer) {
+                    return builder_.CreateExtractValue(emit_expr(expr), {0});
+                }
                 return emit_expr(expr);
             }
 
@@ -1690,9 +1693,13 @@ namespace codegen {
                             return llvm::ConstantFP::get(llvm_type(*current_module_path_, ty), v.value);
                         } else if constexpr (std::is_same_v<V, ast::LiteralStringExpr>) {
                             return emit_string_literal(v.value);
+                        } else if constexpr (std::is_same_v<V, ast::LiteralCharExpr>) {
+                            return builder_.getInt8(v.value);
                         } else if constexpr (std::is_same_v<V, ast::LiteralBoolExpr>) {
                             return builder_.getInt1(v.value);
                         } else if constexpr (std::is_same_v<V, ast::LiteralNilExpr>) {
+                            if (ty.kind == sema::TypeKind::Slice)
+                                return llvm::ConstantAggregateZero::get(llvm_type(*current_module_path_, ty));
                             return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
                         } else if constexpr (std::is_same_v<V, ast::IdentExpr>) {
                             if (const auto macro = macro_args_.find(v.name); macro != macro_args_.end()) {
@@ -1883,8 +1890,12 @@ namespace codegen {
                     *module_, array_ty, true, llvm::GlobalValue::PrivateLinkage, init,
                     std::format(".str.{}", string_counter_++));
                 llvm::Constant *indices[] = {builder_.getInt32(0), builder_.getInt32(0)};
-                return llvm::ConstantExpr::getInBoundsGetElementPtr(
+                auto *ptr = llvm::ConstantExpr::getInBoundsGetElementPtr(
                     array_ty, global, llvm::ArrayRef(indices));
+                auto *len = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), value.size());
+                auto *slice_ty = llvm::StructType::get(*context_,
+                    {llvm::PointerType::getUnqual(*context_), llvm::Type::getInt64Ty(*context_)});
+                return llvm::ConstantStruct::get(slice_ty, {ptr, len});
             }
 
             auto build_slice_value(llvm::Value *ptr, llvm::Value *count, const sema::ResolvedType &slice_type, const std::string &type_module) -> llvm::Value * {
@@ -2361,9 +2372,13 @@ namespace codegen {
                             return llvm::ConstantFP::get(llvm_type(*current_module_path_, ty), v.value);
                         } else if constexpr (std::is_same_v<V, ast::LiteralStringExpr>) {
                             return emit_string_literal(v.value);
+                        } else if constexpr (std::is_same_v<V, ast::LiteralCharExpr>) {
+                            return builder_.getInt8(v.value);
                         } else if constexpr (std::is_same_v<V, ast::LiteralBoolExpr>) {
                             return builder_.getInt1(v.value);
                         } else if constexpr (std::is_same_v<V, ast::LiteralNilExpr>) {
+                            if (ty.kind == sema::TypeKind::Slice)
+                                return llvm::ConstantAggregateZero::get(llvm_type(*current_module_path_, ty));
                             return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
                         } else if constexpr (std::is_same_v<V, ast::IdentExpr>) {
                             if (const auto macro = macro_args_.find(v.name); macro != macro_args_.end()) {
@@ -2536,6 +2551,8 @@ namespace codegen {
                             emit_if(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhileStmt>>) {
                             emit_while(*v);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ForInStmt>>) {
+                            emit_for_in(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SwitchStmt>>) {
                             emit_switch_stmt(*v);
                         } else if constexpr (std::is_same_v<V, ast::ExprStmt>) {
@@ -2651,6 +2668,62 @@ namespace codegen {
                 if (!builder_.GetInsertBlock()->getTerminator()) builder_.CreateBr(cond_bb);
 
                 builder_.SetInsertPoint(end_bb);
+            }
+
+            void emit_for_in(const ast::ForInStmt &stmt) {
+                auto *fn = builder_.GetInsertBlock()->getParent();
+                const auto saved_locals = locals_;
+
+                auto *slice_val = emit_expr(stmt.iterable);
+                const auto slice_type = current_module_->expr_types.at(sema::get_expr_key(stmt.iterable));
+                const auto type_module = expr_type_module_hint(stmt.iterable);
+                const auto elem_type = module_for(type_module).slices.at(slice_type.slice_index).element_type;
+
+                auto *idx_slot = create_entry_alloca(current_function_, llvm::Type::getInt64Ty(*context_), "for.idx");
+                builder_.CreateStore(builder_.getInt64(0), idx_slot);
+                if (stmt.index_name != "_") {
+                    locals_[stmt.index_name] = LocalValue{.alloca = idx_slot, .type = sema::ResolvedType{.kind = sema::TypeKind::USize}, .type_module = *current_module_path_};
+                }
+
+                llvm::AllocaInst *elem_slot = nullptr;
+                if (stmt.element_name != "_") {
+                    auto *elem_ll_ty = llvm_type_for(elem_type, type_module);
+                    elem_slot = create_entry_alloca(current_function_, elem_ll_ty, stmt.element_name);
+                    locals_[stmt.element_name] = LocalValue{.alloca = elem_slot, .type = elem_type, .type_module = type_module};
+                }
+
+                auto *cond_bb = llvm::BasicBlock::Create(*context_, "for.cond", fn);
+                auto *body_bb = llvm::BasicBlock::Create(*context_, "for.body", fn);
+                auto *step_bb = llvm::BasicBlock::Create(*context_, "for.step", fn);
+                auto *end_bb = llvm::BasicBlock::Create(*context_, "for.end", fn);
+                builder_.CreateBr(cond_bb);
+
+                builder_.SetInsertPoint(cond_bb);
+                auto *idx = builder_.CreateLoad(llvm::Type::getInt64Ty(*context_), idx_slot, "for.idx");
+                auto *len = builder_.CreateExtractValue(slice_val, {1}, "for.len");
+                builder_.CreateCondBr(builder_.CreateICmpULT(idx, len, "for.cond"), body_bb, end_bb);
+
+                builder_.SetInsertPoint(body_bb);
+                auto *base = builder_.CreateExtractValue(slice_val, {0}, "for.base");
+                auto *elem_ll_ty = llvm_type_for(elem_type, type_module);
+                auto *elem_ptr = builder_.CreateInBoundsGEP(elem_ll_ty, base, idx, "for.elem.ptr");
+                if (elem_slot) builder_.CreateStore(builder_.CreateLoad(elem_ll_ty, elem_ptr), elem_slot);
+
+                continue_targets_.push_back(step_bb);
+                break_targets_.push_back(end_bb);
+                next_block_is_loop_body_ = true;
+                emit_stmt(stmt.body);
+                break_targets_.pop_back();
+                continue_targets_.pop_back();
+                if (!builder_.GetInsertBlock()->getTerminator()) builder_.CreateBr(step_bb);
+
+                builder_.SetInsertPoint(step_bb);
+                auto *idx2 = builder_.CreateLoad(llvm::Type::getInt64Ty(*context_), idx_slot);
+                builder_.CreateStore(builder_.CreateAdd(idx2, builder_.getInt64(1)), idx_slot);
+                builder_.CreateBr(cond_bb);
+
+                builder_.SetInsertPoint(end_bb);
+                locals_ = saved_locals;
             }
 
             void emit_return(const ast::ReturnStmt &stmt) {

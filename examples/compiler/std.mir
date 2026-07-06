@@ -66,3 +66,9 @@ impl Vector {
         return self.data + idx * self.element_size
     }
 }
+
+
+
+pub type Dictionary = struct {
+    
+}

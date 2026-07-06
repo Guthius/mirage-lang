@@ -5,6 +5,7 @@ auto token_kind_name(const TokenKind kind) -> const char * {
     case TokenKind::IntLiteral:      return "INT";
     case TokenKind::FloatLiteral:    return "FLOAT";
     case TokenKind::StringLiteral:   return "STRING";
+    case TokenKind::CharLiteral:     return "CHAR";
     case TokenKind::Identifier:      return "IDENT";
     case TokenKind::KwConst:         return "KW_CONST";
     case TokenKind::KwMut:           return "KW_MUT";
@@ -42,6 +43,7 @@ auto token_kind_name(const TokenKind kind) -> const char * {
     case TokenKind::KwMatch:         return "KW_MATCH";
     case TokenKind::KwUnion:         return "KW_UNION";
     case TokenKind::KwSwitch:        return "KW_SWITCH";
+    case TokenKind::KwDefer:         return "KW_DEFER";
     case TokenKind::KwU8:            return "KW_U8";
     case TokenKind::KwU16:           return "KW_U16";
     case TokenKind::KwU32:           return "KW_U32";

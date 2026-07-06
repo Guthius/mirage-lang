@@ -1,0 +1,7 @@
+const d := import("dictionary")
+
+pub fn main() {
+    mut hash_map: d.Dictionary
+
+    
+}

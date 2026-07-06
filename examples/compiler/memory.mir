@@ -1,3 +1,4 @@
 pub ext fn malloc(size: usize) -> anyptr
 pub ext fn realloc(ptr: anyptr, size: usize) -> anyptr
 pub ext fn free(ptr: anyptr)
+pub ext fn memcpy(dest: anyptr, src: anyptr, n: usize) -> anyptr

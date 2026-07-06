@@ -1,0 +1,151 @@
+ext fn malloc(size: usize) -> anyptr
+ext fn realloc(ptr: anyptr, size: usize) -> anyptr
+ext fn free(ptr: anyptr)
+ext fn memcpy(dest: anyptr, src: anyptr, n: usize) -> anyptr
+ext fn memcmp(s1: *u8, s2: *u8, n: usize) -> i32
+
+const TABLE_SIZE: usize = 101
+
+pub type Node = struct {
+    key: *u8
+    key_len: usize
+    value: anyptr
+    next: *Node = nil
+}
+
+pub type Dictionary = struct {
+    buckets: [TABLE_SIZE]*Node
+    value_size: usize
+}
+
+fn compute_hash(str: []u8) -> usize {
+    mut hash: usize = 5831
+    for ch in str {
+        hash = ((hash << 5) + hash) + ch
+    }
+    return hash % TABLE_SIZE
+}
+
+fn duplicate(key: *u8, key_len: usize) -> *u8 {
+    const data: *u8 = malloc(key_len)
+    if data == nil {
+        return nil
+    }
+    return memcpy(data, key, key_len)
+}
+
+impl Dictionary {
+    pub fn init(mut self, value_size: usize) {
+        self.clear()
+        self.value_size = value_size
+    }
+
+    pub fn get_ptr(self, key: []u8) -> anyptr {
+        const idx := compute_hash(key)
+        const key_len := len(key)
+
+        mut cur := self.buckeys[idx]
+        while cur != nil {
+            if cur.key_len == key_len && memcmp(cur.key, key, key_len) {
+                return cur.value
+            }
+            cur = cur.next
+        }
+
+        return nil
+    }
+
+    pub fn get(self, key: []u8, out: anyptr) -> bool {
+        const ptr := self.get_ptr(key)
+        if ptr == nil {
+            return false
+        }
+        memcpy(out, ptr, self.value_size)
+        return true
+    }
+
+    pub fn contains(self, key: []u8) -> bool {
+        return self.get_ptr(key) != nil
+    }
+
+    pub fn put(mut self, key: []u8, value: anyptr) -> bool {
+        const idx := compute_hash(key)
+
+        const value_ptr := self.get_ptr(key)
+        if value_ptr != nil {
+            memcpy(value_ptr, value, self.value_size)
+            return true
+        }
+
+        mut entry: *Node = malloc(sizeof(Node))
+        if entry == nil {
+            return false
+        }
+
+        entry.key_len = len(key)
+        entry.key = duplicate(key, entry.key_len)
+        if entry.key == nil {
+            mem.free(entry)
+            return false
+        }
+
+        entry.value = malloc(self.value_size)
+        if entry.value == nil {
+            free(entry.key)
+            free(entry)
+            return false
+        }
+
+        memcpy(entry.value, value, self.value_size)
+
+        entry.next = self.buckets[idx]
+        self.buckets[idx] = entry
+
+        return true
+    }
+
+    pub fn remove(mut self, key: []u8) -> bool {
+        const idx := compute_hash(key)
+        const key_len := len(key)
+
+        mut cur := self.buckets[idx]
+        mut prev: *Node = nil
+
+        while cur != nil {
+            if cur.key_len == key_len && memcmp(cur.key, key, key_len) == 0 {
+                if prev != nil {
+                    prev.next = cur.next
+                } else {
+                    self.buckets[idx] = cur.next
+                }
+
+                free(cur.key)
+                free(cur.value)
+                free(cur)
+                
+                return true
+            }
+
+            prev = cur
+            cur = cur.next
+        }
+
+        return false
+    }
+    
+    pub fn clear(mut self) {
+        for &bucket in self.buckets {
+            mut cur := *bucket
+            while cur != nil {
+                const next := cur.next
+
+                free(cur.key)
+                free(cur.value)
+                free(cur)
+
+                cur = next
+            }
+            bucket = nil
+        }
+    }
+}

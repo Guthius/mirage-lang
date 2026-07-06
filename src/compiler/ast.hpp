@@ -100,6 +100,11 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct LiteralCharExpr {
+        uint8_t value;
+        SourceLocation location;
+    };
+
     struct LiteralBoolExpr {
         bool value;
         SourceLocation location;
@@ -166,6 +171,7 @@ namespace ast {
         LiteralIntegerExpr,
         LiteralFloatExpr,
         LiteralStringExpr,
+        LiteralCharExpr,
         LiteralBoolExpr,
         LiteralNilExpr,
         IdentExpr,
@@ -446,11 +452,13 @@ namespace ast {
     };
 
     struct DeferStmt;
+    struct ForInStmt;
 
     using Stmt = std::variant<
         std::unique_ptr<BlockStmt>,
         std::unique_ptr<IfStmt>,
         std::unique_ptr<WhileStmt>,
+        std::unique_ptr<ForInStmt>,
         std::unique_ptr<SwitchStmt>,
         ExprStmt,
         VarDeclStmt,
@@ -461,6 +469,14 @@ namespace ast {
         std::unique_ptr<DeferStmt>>;
 
     struct DeferStmt {
+        Stmt body;
+        SourceLocation location;
+    };
+
+    struct ForInStmt {
+        std::string index_name;
+        std::string element_name;
+        Expr iterable;
         Stmt body;
         SourceLocation location;
     };

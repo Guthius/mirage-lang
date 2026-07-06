@@ -545,12 +545,16 @@ namespace sema {
                     return ResolvedType{.kind = TypeKind::F64};
 
                 } else if constexpr (std::is_same_v<V, ast::LiteralStringExpr>) {
-                    return intern_pointer(program.modules.at(module_path), ResolvedType{.kind = TypeKind::U8});
+                    return intern_slice(program.modules.at(module_path), ResolvedType{.kind = TypeKind::U8});
+
+                } else if constexpr (std::is_same_v<V, ast::LiteralCharExpr>) {
+                    return ResolvedType{.kind = TypeKind::U8};
 
                 } else if constexpr (std::is_same_v<V, ast::LiteralBoolExpr>) {
                     return ResolvedType{.kind = TypeKind::Bool};
 
                 } else if constexpr (std::is_same_v<V, ast::LiteralNilExpr>) {
+                    if (expected && expected->kind == TypeKind::Slice) return *expected;
                     return ResolvedType{.kind = TypeKind::Anyptr};
 
                 } else if constexpr (std::is_same_v<V, ast::IdentExpr>) {
@@ -1478,6 +1482,22 @@ namespace sema {
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhileStmt>>) {
                     check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base);
                     check_stmt(v->body, locals, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
+
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ForInStmt>>) {
+                    const auto iterable_type = check_expr(v->iterable, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
+                    if (iterable_type.kind != TypeKind::Slice) {
+                        diag.report_error(DiagnosticStage::Sema, v->location, "'for-in' requires a slice operand");
+                        return;
+                    }
+                    const auto elem_type = slice_element_type(iterable_type, module_path, program);
+                    auto inner = locals;
+                    if (v->index_name != "_") {
+                        inner[v->index_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::USize}, .is_mut = false};
+                    }
+                    if (v->element_name != "_") {
+                        inner[v->element_name] = LocalBinding{.type = elem_type, .is_mut = false};
+                    }
+                    check_stmt(v->body, inner, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
 
                 } else if constexpr (std::is_same_v<V, ast::ExprStmt>) {
                     const auto expr_ty = check_expr(v.expr, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
