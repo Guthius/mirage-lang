@@ -49,6 +49,19 @@ namespace sema {
         bool layout_done = false;
     };
 
+    struct UnionMember {
+        std::string name;
+        ResolvedType type;
+    };
+
+    struct UnionInfo {
+        std::string module_path; // module where this union is declared
+        std::vector<UnionMember> members;
+        uint32_t size = 0;
+        uint32_t align = 1;
+        bool layout_done = false;
+    };
+
     struct MethodInfo {
         const ast::ImplDecl::Function *decl = nullptr;
         std::string impl_module;               // module where this impl is defined
@@ -75,6 +88,7 @@ namespace sema {
     struct ResolveState {
         std::set<std::pair<std::string, std::string>> alias_resolving;
         std::set<std::pair<std::string, std::string>> struct_resolving;
+        std::set<std::pair<std::string, std::string>> union_resolving;
         std::set<std::pair<std::string, std::string>> value_resolving;
     };
 
@@ -82,6 +96,7 @@ namespace sema {
         std::unordered_map<std::string, ProgramModule> modules;
         std::vector<StructInfo> structs; // global; struct_index is unique across all modules
         std::vector<EnumInfo> enums;
+        std::vector<UnionInfo> unions;   // global; union_index is unique across all modules
         ResolveState resolve_state;
         bool ok = false;
     };

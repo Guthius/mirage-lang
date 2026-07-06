@@ -49,6 +49,7 @@ namespace ast {
     struct ArrayType;
     struct SliceType;
     struct EnumType;
+    struct UnionType;
 
     using Type = std::variant<
         std::monostate,
@@ -58,7 +59,8 @@ namespace ast {
         std::unique_ptr<StructType>,
         std::unique_ptr<ArrayType>,
         std::unique_ptr<SliceType>,
-        std::unique_ptr<EnumType>>;
+        std::unique_ptr<EnumType>,
+        std::unique_ptr<UnionType>>;
 
     struct PointerType {
         Type pointee;
@@ -187,6 +189,17 @@ namespace ast {
     struct ArrayType {
         Type base_type;
         Expr size;
+        SourceLocation location;
+    };
+
+    struct UnionType {
+        struct Member {
+            std::string name;
+            Type type;
+            SourceLocation location;
+        };
+
+        std::vector<Member> members;
         SourceLocation location;
     };
 

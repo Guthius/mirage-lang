@@ -26,6 +26,7 @@ namespace sema {
         Slice,
         Namespace,
         Enum,
+        Union,
     };
 
     struct ResolvedType {
@@ -35,6 +36,7 @@ namespace sema {
         int array_index = -1;
         int slice_index = -1;
         int enum_index = -1;
+        int union_index = -1;   // global index into Program::unions
 
         auto is_integer() const -> bool {
             switch (kind) {
@@ -85,7 +87,8 @@ namespace sema {
                    other.struct_index == struct_index &&
                    other.array_index == array_index &&
                    other.slice_index == slice_index &&
-                   other.enum_index == enum_index;
+                   other.enum_index == enum_index &&
+                   other.union_index == union_index;
         }
 
         auto operator!=(const ResolvedType &other) const -> bool {

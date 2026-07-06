@@ -230,6 +230,23 @@ namespace sema {
                     return *ts->resolved;
                 }
 
+                if (ts->resolved && ts->resolved->kind == TypeKind::Union) {
+                    const int slot = ts->resolved->union_index;
+                    if (program.unions[slot].layout_done) return *ts->resolved;
+
+                    const auto key = std::make_pair(module_path, name);
+                    if (program.resolve_state.union_resolving.contains(key)) {
+                        return error(diag, loc, std::format("by-value union cycle detected at '{}'", name));
+                    }
+
+                    program.resolve_state.union_resolving.insert(key);
+                    Resolver inner{program, diag};
+                    inner.layout_union(module_path, slot, std::get<std::unique_ptr<ast::UnionType>>(ts->decl->type));
+                    program.resolve_state.union_resolving.erase(key);
+
+                    return *ts->resolved;
+                }
+
                 return resolve_final_shallow(module_path, name, check_pub, loc);
             }
 
@@ -283,6 +300,7 @@ namespace sema {
                 if (t.kind == TypeKind::Array) return program.modules.at(module_path).arrays[t.array_index].size;
                 if (t.kind == TypeKind::Slice) return 16;
                 if (t.kind == TypeKind::Enum) return primitive_size(program.enums[t.enum_index].underlying_type.kind);
+                if (t.kind == TypeKind::Union) return program.unions[t.union_index].size;
                 return primitive_size(t.kind);
             }
 
@@ -291,6 +309,7 @@ namespace sema {
                 if (t.kind == TypeKind::Array) return program.modules.at(module_path).arrays[t.array_index].align;
                 if (t.kind == TypeKind::Slice) return 8;
                 if (t.kind == TypeKind::Enum) return primitive_align(program.enums[t.enum_index].underlying_type.kind);
+                if (t.kind == TypeKind::Union) return program.unions[t.union_index].align;
                 return primitive_align(t.kind);
             }
 
@@ -544,6 +563,34 @@ namespace sema {
                 program.enums[slot] = std::move(info);
             }
 
+            void layout_union(const std::string &module_path, const int slot, const std::unique_ptr<ast::UnionType> &decl) {
+                UnionInfo info;
+                info.module_path = module_path;
+
+                uint32_t max_size = 0;
+                uint32_t max_align = 1;
+
+                for (const auto &member : decl->members) {
+                    auto member_type = resolve_field_type(module_path, member.type, member.location);
+                    const uint32_t m_size = size_of(module_path, member_type);
+                    const uint32_t m_align = align_of(module_path, member_type);
+
+                    info.members.push_back(UnionMember{
+                        .name = member.name,
+                        .type = member_type,
+                    });
+                    max_size = std::max(max_size, m_size);
+                    max_align = std::max(max_align, m_align);
+                }
+
+                // Union size = largest member size, rounded up to alignment
+                info.size = (max_size + max_align - 1) / max_align * max_align;
+                info.align = max_align;
+                info.layout_done = true;
+
+                program.unions[slot] = std::move(info);
+            }
+
             auto resolve_type_impl(const ast::Type &type, const std::string &module_path) -> ResolvedType {
                 return std::visit(
                     [&]<typename T>(const T &v) -> ResolvedType {
@@ -592,6 +639,11 @@ namespace sema {
                             program.enums.push_back(EnumInfo{});
                             layout_enum(module_path, slot, v);
                             return ResolvedType{.kind = TypeKind::Enum, .enum_index = slot};
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnionType>>) {
+                            const int slot = static_cast<int>(program.unions.size());
+                            program.unions.push_back(UnionInfo{.module_path = module_path});
+                            layout_union(module_path, slot, v);
+                            return ResolvedType{.kind = TypeKind::Union, .union_index = slot};
                         } else {
                             return ResolvedType{.kind = TypeKind::Invalid};
                         }

@@ -383,24 +383,35 @@ namespace sema {
                 const auto &mod = program.modules.at(module_path);
                 effective_type = mod.pointer_pointees[object_type.pointee_index];
                 writable = true;
-            } else if (object_type.kind == TypeKind::Struct) {
+            } else if (object_type.kind == TypeKind::Struct || object_type.kind == TypeKind::Union) {
                 effective_type = object_type;
                 const auto object_lvalue = resolve_lvalue(m.object, locals, module_path, program, diag, loop_depth);
                 writable = object_lvalue.type == object_type && object_lvalue.writable;
             } else if (object_type.kind == TypeKind::Invalid) {
                 return {ResolvedType{.kind = TypeKind::Invalid}, false};
             } else {
-                error(diag, m.location, "'.' requires a struct or pointer-to-struct value");
+                error(diag, m.location, "'.' requires a struct, union, or pointer-to-struct/union value");
                 return {ResolvedType{.kind = TypeKind::Invalid}, false};
             }
 
-            for (const auto &info = program.structs[effective_type.struct_index]; auto &field : info.fields) {
-                if (field.name == m.member) {
-                    return {field.type, writable};
+            if (effective_type.kind == TypeKind::Struct) {
+                for (const auto &info = program.structs[effective_type.struct_index]; auto &field : info.fields) {
+                    if (field.name == m.member) {
+                        return {field.type, writable};
+                    }
+                }
+                error(diag, m.location, std::format("no field named '{}'", m.member));
+                return {ResolvedType{.kind = TypeKind::Invalid}, false};
+            }
+
+            // TypeKind::Union
+            for (const auto &info = program.unions[effective_type.union_index]; auto &member : info.members) {
+                if (member.name == m.member) {
+                    return {member.type, writable};
                 }
             }
 
-            error(diag, m.location, std::format("no field named '{}'", m.member));
+            error(diag, m.location, std::format("no member named '{}'", m.member));
             return {ResolvedType{.kind = TypeKind::Invalid}, false};
         }
 
@@ -882,6 +893,9 @@ namespace sema {
                     if (!expected) {
                         return error(diag, v.location, "'default' requires a known target type");
                     }
+                    if (expected->kind == TypeKind::Union) {
+                        return error(diag, v.location, "unions have no default value; use an explicit single-member initializer or 'undefined'");
+                    }
                     return *expected;
                 } else if constexpr (std::is_same_v<V, ast::UndefinedExpr>) {
                     if (!expected) {
@@ -895,6 +909,9 @@ namespace sema {
 
                             if constexpr (std::is_same_v<BVT, ast::EmptyExpr>) {
                                 if (!expected || (expected->kind != TypeKind::Struct && expected->kind != TypeKind::Array)) {
+                                    if (expected && expected->kind == TypeKind::Union) {
+                                        return error(diag, bv.location, "a union initializer must set exactly one member");
+                                    }
                                     return error(diag, bv.location, "braced initializer '{}' requires a struct or array type");
                                 }
                                 return *expected;
@@ -905,6 +922,23 @@ namespace sema {
                                 }
                                 if (expected->kind == TypeKind::Array) {
                                     return error(diag, bv.location, "struct initializer used where array type is expected");
+                                }
+                                if (expected->kind == TypeKind::Union) {
+                                    const auto &union_info = program.unions.at(expected->union_index);
+                                    if (bv.fields.size() != 1) {
+                                        return error(diag, bv.location, std::format("a union initializer must set exactly one member, got {}", bv.fields.size()));
+                                    }
+                                    const auto &sf = bv.fields[0];
+                                    const auto it = std::ranges::find(union_info.members, sf.name, &sema::UnionMember::name);
+                                    if (it == union_info.members.end()) {
+                                        error(diag, sf.location, std::format("no member '{}' on union", sf.name));
+                                        return *expected;
+                                    }
+                                    const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth);
+                                    if (!assignable_in_module(val_ty, it->type, module_path, program)) {
+                                        error(diag, sf.location, std::format("type mismatch for union member '{}'", sf.name));
+                                    }
+                                    return *expected;
                                 }
                                 if (expected->kind != TypeKind::Struct) {
                                     return error(diag, bv.location, "struct initializer requires a struct type");

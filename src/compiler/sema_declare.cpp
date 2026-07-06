@@ -27,6 +27,7 @@ namespace sema {
 
             int struct_slot = -1;
             int enum_slot = -1;
+            int union_slot = -1;
             if (std::holds_alternative<std::unique_ptr<ast::StructType>>(decl.type)) {
                 struct_slot = static_cast<int>(sema_program.structs.size());
                 resolved = ResolvedType{
@@ -39,6 +40,12 @@ namespace sema {
                     .kind = TypeKind::Enum,
                     .enum_index = enum_slot,
                 };
+            } else if (std::holds_alternative<std::unique_ptr<ast::UnionType>>(decl.type)) {
+                union_slot = static_cast<int>(sema_program.unions.size());
+                resolved = ResolvedType{
+                    .kind = TypeKind::Union,
+                    .union_index = union_slot,
+                };
             }
 
             if (!declare_symbol(module.symbols, decl.name, TypeSymbol{.decl = &decl, .resolved = resolved, .is_pub = decl.is_pub, .location = decl.location}, decl.location, diag)) {
@@ -50,6 +57,9 @@ namespace sema {
             }
             if (enum_slot >= 0) {
                 sema_program.enums.push_back(EnumInfo{});
+            }
+            if (union_slot >= 0) {
+                sema_program.unions.push_back(UnionInfo{.module_path = module_path});
             }
         }
 

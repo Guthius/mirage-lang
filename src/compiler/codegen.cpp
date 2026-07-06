@@ -153,6 +153,7 @@ namespace codegen {
 
             auto run() -> std::unique_ptr<llvm::Module> {
                 declare_structs();
+                declare_unions();
                 declare_globals_and_functions();
                 declare_methods();
                 const sema::FunctionSymbol *entry_main = nullptr;
@@ -202,6 +203,7 @@ namespace codegen {
             std::unordered_map<FunctionKey, llvm::Function *, FunctionKeyHash> functions_;
             std::unordered_map<std::string, llvm::Function *> ext_functions_;
             std::unordered_map<int, StructLowering> structs_;
+            std::unordered_map<int, llvm::Type *> unions_; // union_index -> [N x i8] ArrayType
             size_t string_counter_ = 0;
 
             auto module_for(const std::string &path) const -> const sema::ProgramModule & {
@@ -233,7 +235,8 @@ namespace codegen {
 
             auto type_module_for_ast_type(const ast::Type &type, const std::string &context_module, const sema::ResolvedType &resolved) const -> std::string {
                 if (resolved.kind != sema::TypeKind::Struct && resolved.kind != sema::TypeKind::Pointer &&
-                    resolved.kind != sema::TypeKind::Array && resolved.kind != sema::TypeKind::Slice) {
+                    resolved.kind != sema::TypeKind::Array && resolved.kind != sema::TypeKind::Slice &&
+                    resolved.kind != sema::TypeKind::Union) {
                     return context_module;
                 }
 
@@ -255,7 +258,8 @@ namespace codegen {
             auto llvm_type_for(const sema::ResolvedType &type, const std::string &type_module) -> llvm::Type * {
                 return llvm_type(
                     type.kind == sema::TypeKind::Struct || type.kind == sema::TypeKind::Array ||
-                            type.kind == sema::TypeKind::Slice || type.kind == sema::TypeKind::Enum
+                            type.kind == sema::TypeKind::Slice || type.kind == sema::TypeKind::Enum ||
+                            type.kind == sema::TypeKind::Union
                         ? type_module
                         : *current_module_path_,
                     type);
@@ -281,6 +285,9 @@ namespace codegen {
                 }
                 if (type.kind == sema::TypeKind::Enum) {
                     return primitive_size(sema_program_.enums.at(type.enum_index).underlying_type.kind);
+                }
+                if (type.kind == sema::TypeKind::Union) {
+                    return sema_program_.unions.at(type.union_index).size;
                 }
                 return primitive_size(type.kind);
             }
@@ -316,6 +323,8 @@ namespace codegen {
                         const auto &enum_info = sema_program_.enums.at(type.enum_index);
                         return llvm_type(module_path, enum_info.underlying_type);
                     }
+                case sema::TypeKind::Union:
+                    return unions_.at(type.union_index);
                 default: return llvm::Type::getVoidTy(*context_);
                 }
             }
@@ -367,6 +376,13 @@ namespace codegen {
                     }
 
                     lowering.type->setBody(elements, true);
+                }
+            }
+
+            void declare_unions() {
+                for (size_t i = 0; i < sema_program_.unions.size(); ++i) {
+                    const auto &info = sema_program_.unions[i];
+                    unions_[static_cast<int>(i)] = llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), info.size);
                 }
             }
 
@@ -458,6 +474,9 @@ namespace codegen {
                     }
                     return agg;
                 }
+                if (type.kind == sema::TypeKind::Union) {
+                    return llvm::Constant::getNullValue(unions_.at(type.union_index));
+                }
                 return zero_value(type_module, type);
             }
 
@@ -521,6 +540,26 @@ namespace codegen {
                     agg = builder_.CreateInsertValue(agg, elem, {static_cast<unsigned>(i)});
                 }
                 return agg;
+            }
+
+            // Emit a union value from a single-member StructExpr initializer.
+            // Strategy: alloca the union storage, store the member value at offset 0, then load.
+            auto emit_union_expr_value(const ast::StructExpr &se, const sema::ResolvedType &ty) -> llvm::Value * {
+                const auto &union_info = sema_program_.unions.at(ty.union_index);
+                auto *ll_ty = unions_.at(ty.union_index);
+                auto *slot = builder_.CreateAlloca(ll_ty);
+                // se has exactly one field (enforced by sema)
+                if (!se.fields.empty()) {
+                    const auto &sf = se.fields[0];
+                    const auto it = std::ranges::find(union_info.members, sf.name, &sema::UnionMember::name);
+                    if (it != union_info.members.end()) {
+                        // Opaque pointers: store the member value directly into the union alloca.
+                        // The store uses the value's type; the union's [N x i8] storage holds it.
+                        auto *member_val = emit_value_as(sf.expr, it->type);
+                        builder_.CreateStore(member_val, slot);
+                    }
+                }
+                return builder_.CreateLoad(ll_ty, slot);
             }
 
             auto validate_hosted_main() const -> const sema::FunctionSymbol * {
@@ -1142,6 +1181,17 @@ namespace codegen {
                     base = lv.ptr;
                 }
 
+                if (struct_type.kind == sema::TypeKind::Union) {
+                    const auto &union_info = sema_program_.unions.at(struct_type.union_index);
+                    const auto member_it = std::ranges::find(union_info.members, member.member, &sema::UnionMember::name);
+                    if (member_it == union_info.members.end()) {
+                        report_codegen_error(diag_, member.location, std::format("unknown union member '{}'", member.member));
+                        return {};
+                    }
+                    // All union members reside at offset 0; return a pointer to the union storage.
+                    return LValue{.ptr = base, .type = member_it->type, .type_module = struct_module, .storage_type = llvm_type_for(member_it->type, struct_module)};
+                }
+
                 const auto &info = sema_program_.structs.at(struct_type.struct_index);
                 const auto field_it = std::ranges::find(info.fields, member.member, &sema::StructField::name);
                 if (field_it == info.fields.end()) {
@@ -1481,8 +1531,9 @@ namespace codegen {
                             report_codegen_error(diag_, v.location, "iota is not valid in this context");
                             return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
                         } else if constexpr (std::is_same_v<V, ast::DefaultExpr>) {
-                            const auto tm = ty.kind == sema::TypeKind::Struct
-                                ? sema_program_.structs.at(ty.struct_index).module_path
+                            const std::string tm =
+                                ty.kind == sema::TypeKind::Struct ? sema_program_.structs.at(ty.struct_index).module_path
+                                : ty.kind == sema::TypeKind::Union ? sema_program_.unions.at(ty.union_index).module_path
                                 : *current_module_path_;
                             return emit_default_value(tm, ty);
                         } else if constexpr (std::is_same_v<V, ast::UndefinedExpr>) {
@@ -1492,11 +1543,15 @@ namespace codegen {
                                 [&]<typename BV>(const BV &bv) -> llvm::Value * {
                                     using BVT = std::decay_t<BV>;
                                     if constexpr (std::is_same_v<BVT, ast::EmptyExpr>) {
-                                        const auto tm = ty.kind == sema::TypeKind::Struct
-                                            ? sema_program_.structs.at(ty.struct_index).module_path
+                                        const std::string tm =
+                                            ty.kind == sema::TypeKind::Struct ? sema_program_.structs.at(ty.struct_index).module_path
+                                            : ty.kind == sema::TypeKind::Union ? sema_program_.unions.at(ty.union_index).module_path
                                             : *current_module_path_;
                                         return emit_default_value(tm, ty);
                                     } else if constexpr (std::is_same_v<BVT, ast::StructExpr>) {
+                                        if (ty.kind == sema::TypeKind::Union) {
+                                            return emit_union_expr_value(bv, ty);
+                                        }
                                         return emit_struct_expr_value(bv, ty);
                                     } else {  // ast::ArrayExpr
                                         return emit_array_expr_value(bv, ty);

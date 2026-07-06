@@ -1,0 +1,42 @@
+// example_union.mir — demonstrates untagged union types
+
+type NumUnion = union {
+    as_i64: i64
+    as_f64: f64
+    as_u8:  u8
+}
+
+pub fn main() -> i32 {
+    // Initialize via single-member braced literal (type inferred from annotation)
+    mut u: NumUnion = {as_i64 = 42}
+
+    // Read back the same member
+    const iv: i64 = u.as_i64
+    if iv != 42 {
+        return 1
+    }
+
+    // Write a float member
+    u.as_f64 = 1.0
+
+    // Read the float member back
+    const fv: f64 = u.as_f64
+    if fv != 1.0 {
+        return 2
+    }
+
+    // undefined init is legal for unions
+    mut v: NumUnion = undefined
+    v.as_i64 = 100
+    if v.as_i64 != 100 {
+        return 3
+    }
+
+    // sizeof reflects the largest member (f64 = 8 bytes)
+    const sz: usize = sizeof(NumUnion)
+    if sz != 8 {
+        return 4
+    }
+
+    return 0
+}

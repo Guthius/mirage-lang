@@ -25,11 +25,19 @@ namespace sema {
                     }
                 } else if (auto *ef = std::get_if<ExtFunctionSymbol>(&sym)) {
                     for (auto &p : ef->decl->params) {
-                        ef->params.push_back(resolve_type(p.type, module_path, program, diag));
+                        const auto pt = resolve_type(p.type, module_path, program, diag);
+                        if (pt.kind == TypeKind::Union) {
+                            diag.report_error(DiagnosticStage::Sema, p.location, "union types are not yet supported in extern function signatures");
+                        }
+                        ef->params.push_back(pt);
                     }
 
                     if (ef->decl->return_type) {
-                        ef->return_type = resolve_type(*ef->decl->return_type, module_path, program, diag);
+                        const auto rt = resolve_type(*ef->decl->return_type, module_path, program, diag);
+                        if (rt.kind == TypeKind::Union) {
+                            diag.report_error(DiagnosticStage::Sema, ef->decl->location, "union types are not yet supported in extern function signatures");
+                        }
+                        ef->return_type = rt;
                     }
 
                     ef->is_variadic = ef->decl->is_variadic;

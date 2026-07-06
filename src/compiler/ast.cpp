@@ -110,6 +110,53 @@ namespace ast {
             };
         }
 
+        auto parse_union_type(Parser &parser) -> Type {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwUnion, "'union'");
+
+            // Reserve room for future `union(enum)` attribute syntax: if we see `(`,
+            // consume and report an error rather than silently misparse.
+            if (parser.match(TokenKind::LParen)) {
+                parser.report_error(location, "tagged union syntax ('union(enum)') is not yet implemented");
+                // Skip until closing paren to recover
+                while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                    parser.advance();
+                }
+                parser.expect(TokenKind::RParen, "')'");
+            }
+
+            parser.expect(TokenKind::LBrace, "'{'");
+
+            std::vector<UnionType::Member> members;
+            while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                const auto member_location = parser.current_location();
+                const auto member_name = parser.expect_identifier();
+
+                parser.expect(TokenKind::Colon, "':'");
+
+                auto member_type = parse_type(parser);
+
+                if (parser.match(TokenKind::Equal)) {
+                    parser.report_error(member_location, "union member default initializers are not allowed");
+                    parse_expr(parser); // consume and discard
+                }
+
+                members.push_back({
+                    .name = member_name,
+                    .type = std::move(member_type),
+                    .location = member_location,
+                });
+            }
+
+            parser.expect(TokenKind::RBrace, "'}'");
+
+            return std::make_unique<UnionType>(UnionType{
+                .members = std::move(members),
+                .location = location,
+            });
+        }
+
         auto parse_enum_type(Parser &parser) -> Type {
             const auto location = parser.current_location();
 
@@ -1367,6 +1414,10 @@ namespace ast {
 
         if (parser.check(TokenKind::KwEnum)) {
             return parse_enum_type(parser);
+        }
+
+        if (parser.check(TokenKind::KwUnion)) {
+            return parse_union_type(parser);
         }
 
         if (parser.check(TokenKind::Identifier)) {
