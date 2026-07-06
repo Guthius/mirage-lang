@@ -524,12 +524,14 @@ namespace ast {
                 parser.advance();
                 const auto name = parser.expect_identifier();
 
-                // If followed by '{', this is a contextual tagged variant: .variant{...}
-                if (parser.check(TokenKind::LBrace)) {
+                // If followed by '{.' this is a contextual tagged variant: .variant{.field = val}
+                // The leading '.' inside the braces disambiguates payload from block statements.
+                if (parser.check(TokenKind::LBrace) && parser.peek().kind == TokenKind::Dot) {
                     const auto brace_loc = parser.current_location();
                     parser.advance(); // consume '{'
                     std::vector<StructExpr::Field> fields;
                     while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                        parser.expect(TokenKind::Dot, "'.'");
                         const auto field_name = parser.expect_identifier();
                         parser.expect(TokenKind::Equal, "'='");
                         const auto field_loc = parser.current_location();
@@ -669,13 +671,15 @@ namespace ast {
                     parser.advance();
                     const auto member_name = parser.expect_identifier();
 
-                    // If followed by '{' and base is an IdentExpr, parse as qualified tagged variant
-                    if (parser.check(TokenKind::LBrace)) {
+                    // If followed by '{.' and base is an IdentExpr, parse as qualified tagged variant.
+                    // The leading '.' inside braces disambiguates payload from block statements.
+                    if (parser.check(TokenKind::LBrace) && parser.peek().kind == TokenKind::Dot) {
                         if (const auto *base_ident = std::get_if<IdentExpr>(&expr)) {
                             const auto brace_loc = parser.current_location();
                             parser.advance(); // consume '{'
                             std::vector<StructExpr::Field> fields;
                             while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                                parser.expect(TokenKind::Dot, "'.'");
                                 const auto field_name = parser.expect_identifier();
                                 parser.expect(TokenKind::Equal, "'='");
                                 const auto field_loc = parser.current_location();

@@ -40,6 +40,13 @@ namespace ast {
                 return tokens_.back();
             }
 
+            [[nodiscard]] auto peek_next() const -> const Token & override {
+                if (pos_ + 2 < tokens_.size()) {
+                    return tokens_[pos_ + 2];
+                }
+                return tokens_.back();
+            }
+
             auto advance() -> const Token & override {
                 auto &tok = tokens_[pos_];
                 if (!at_end()) {

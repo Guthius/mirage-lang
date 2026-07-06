@@ -10,8 +10,8 @@ type Shape = union(enum) {
 }
 
 pub fn main() -> i32 {
-    // Construct via qualified form: TypeName.variant{field = val}
-    const c: Shape = Shape.circle{radius = 3.0}
+    // Construct via qualified form: TypeName.variant{.field = val}
+    const c: Shape = Shape.circle{.radius = 3.0}
 
     // Match on a tagged union — exhaustive check required
     const area_c: f64 = match c {
@@ -23,8 +23,8 @@ pub fn main() -> i32 {
         return 1
     }
 
-    // Construct via contextual form: .variant{field = val}
-    mut r: Shape = .rect{w = 4.0, h = 5.0}
+    // Construct via contextual form: .variant{.field = val}
+    mut r: Shape = .rect{.w = 4.0, .h = 5.0}
 
     const area_r: f64 = match r {
         .circle(s): s.radius * s.radius * 3.14159,

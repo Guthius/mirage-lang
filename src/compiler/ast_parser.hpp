@@ -12,6 +12,7 @@ namespace ast {
         virtual auto current_location() const -> SourceLocation = 0;
         virtual auto at_end() const -> bool = 0;
         virtual auto peek() const -> const Token & = 0;
+        virtual auto peek_next() const -> const Token & = 0;
         virtual auto advance() -> const Token & = 0;
         virtual auto check(TokenKind kind) const -> bool = 0;
         virtual auto check_next(TokenKind kind) const -> bool = 0;
