@@ -13,6 +13,7 @@ namespace sema {
                     if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr> ||
                                   std::is_same_v<V, ast::LiteralFloatExpr> ||
                                   std::is_same_v<V, ast::LiteralStringExpr> ||
+                                  std::is_same_v<V, ast::LiteralCharExpr> ||
                                   std::is_same_v<V, ast::LiteralBoolExpr> ||
                                   std::is_same_v<V, ast::LiteralNilExpr>) {
                         return true;
@@ -262,6 +263,10 @@ namespace sema {
 
                 if constexpr (std::is_same_v<V, ast::LiteralBoolExpr>) {
                     return v.value ? int64_t{1} : int64_t{0};
+                }
+
+                if constexpr (std::is_same_v<V, ast::LiteralCharExpr>) {
+                    return static_cast<int64_t>(v.value);
                 }
 
                 if constexpr (std::is_same_v<V, ast::IdentExpr>) {
