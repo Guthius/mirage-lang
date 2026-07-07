@@ -28,9 +28,9 @@ namespace ast {
 
             Module combined;
             for (const auto &file : files) {
-                const auto source = source_manager.load(file.string(), diagnostics);
-                if (source.empty()) continue;
-                auto tokens = lexer::tokenize(source, file.string(), diagnostics);
+                const auto source_file = source_manager.load(file.string(), diagnostics);
+                if (source_file.text.empty()) continue;
+                auto tokens = lexer::tokenize(source_file.text, source_file.filename, diagnostics);
                 if (diagnostics.has_errors()) return {};
                 auto decls = parse(tokens, diagnostics);
                 combined.insert(combined.end(), std::make_move_iterator(decls.begin()), std::make_move_iterator(decls.end()));

@@ -5,9 +5,14 @@
 
 class DiagnosticEngine;
 
+struct SourceFile {
+    std::string_view filename;
+    std::string_view text;
+};
+
 class SourceManager {
   public:
-    auto load(const std::string &canonical_path, DiagnosticEngine &diagnostics) -> std::string_view;
+    auto load(const std::string &canonical_path, DiagnosticEngine &diagnostics) -> SourceFile;
     auto get_source_line(std::string_view filename, size_t line) -> std::string_view;
 
   private:

@@ -5,9 +5,9 @@
 #include <fstream>
 #include <sstream>
 
-auto SourceManager::load(const std::string &canonical_path, DiagnosticEngine &diagnostics) -> std::string_view {
+auto SourceManager::load(const std::string &canonical_path, DiagnosticEngine &diagnostics) -> SourceFile {
     if (const auto it = sources_.find(canonical_path); it != sources_.end()) {
-        return it->second;
+        return {it->first, it->second};
     }
 
     std::ifstream file(canonical_path);
@@ -24,7 +24,7 @@ auto SourceManager::load(const std::string &canonical_path, DiagnosticEngine &di
 
     auto [it, inserted] = sources_.emplace(canonical_path, buf.str());
 
-    return it->second;
+    return {it->first, it->second};
 }
 
 auto SourceManager::get_source_line(std::string_view filename, size_t line) -> std::string_view {
