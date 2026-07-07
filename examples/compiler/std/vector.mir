@@ -1,7 +1,3 @@
-const mem := import("../memory")
-
-ext fn memcpy(s1: anyptr, s2: anyptr, n: usize) -> anyptr
-
 pub type Vector = struct {
     data: anyptr
     length: usize
@@ -19,7 +15,7 @@ pub fn init(v: *Vector, element_size: usize) -> bool {
 
 pub fn destroy(v: *Vector) {
     if v.data != nil {
-        mem.free(v.data)
+        free(v.data)
     }
     v.data = nil
     v.length = v.capacity = 0
@@ -29,7 +25,7 @@ fn reserve(v: *Vector, new_capacity: usize) -> bool {
     if new_capacity <= v.capacity {
         return true
     }
-    mut new_data := mem.realloc(v.data, new_capacity * v.element_size)
+    mut new_data := realloc(v.data, new_capacity * v.element_size)
     if new_data == nil {
         return false
     }
@@ -65,10 +61,4 @@ impl Vector {
         }
         return self.data + idx * self.element_size
     }
-}
-
-
-
-pub type Dictionary = struct {
-    
 }

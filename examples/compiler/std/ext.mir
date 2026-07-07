@@ -1,0 +1,5 @@
+ext fn malloc(size: usize) -> anyptr
+ext fn realloc(ptr: anyptr, size: usize) -> anyptr
+ext fn free(ptr: anyptr)
+ext fn memcpy(dest: anyptr, src: anyptr, n: usize) -> anyptr
+ext fn memcmp(s1: *u8, s2: *u8, n: usize) -> i32

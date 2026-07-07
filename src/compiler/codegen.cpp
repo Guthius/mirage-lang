@@ -449,10 +449,18 @@ namespace codegen {
                             if (ef->return_type) {
                                 returns.push_back(*ef->return_type);
                             }
-                            ext_functions_[path + "\n" + name] = llvm::Function::Create(
-                                function_type(path, ef->params, returns, ef->is_variadic),
-                                llvm::GlobalValue::ExternalLinkage,
-                                name, *module_);
+                            // External C symbols are process-global, not module-scoped: if another
+                            // module already declared the same name, reuse that declaration instead
+                            // of creating a second one (LLVM would otherwise rename it to `name.N`,
+                            // leaving the real symbol unresolved at link time).
+                            auto *llvm_fn = module_->getFunction(name);
+                            if (!llvm_fn) {
+                                llvm_fn = llvm::Function::Create(
+                                    function_type(path, ef->params, returns, ef->is_variadic),
+                                    llvm::GlobalValue::ExternalLinkage,
+                                    name, *module_);
+                            }
+                            ext_functions_[path + "\n" + name] = llvm_fn;
                         }
                     }
                 }

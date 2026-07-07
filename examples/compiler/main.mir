@@ -1,11 +1,20 @@
 const std := import("std")
 const io := import("io")
-const mem := import("memory")
+
+ext fn free(ptr: anyptr)
 
 pub fn main() -> error {
     const f_len, f_bytes := try io.load_file("Justfile")
-    defer mem.free(f_bytes)
+    defer free(f_bytes)
 
     io.printf("%.*s\n", f_len, f_bytes)
+
+    mut hash_map: std.Dictionary
+
+    const x: u32 = 5
+
+    hash_map.init(sizeof(x))
+    hash_map.put("key_a", &x)
+
     return 0
 }
