@@ -1,0 +1,41 @@
+// range_test.mir — tests RangeExpr in for-in
+
+pub fn main() -> i32 {
+    // basic range 0..10: sum = 0+1+...+9 = 45
+    mut sum: i32 = 0
+    for x in 0..10 {
+        sum = sum + x
+    }
+    if sum != 45 {
+        return 1
+    }
+
+    // lower-less range ..5: sum2 = 0+1+2+3+4 = 10
+    mut sum2: i32 = 0
+    for x in ..5 {
+        sum2 = sum2 + x
+    }
+    if sum2 != 10 {
+        return 2
+    }
+
+    // non-zero lower 3..7: sum3 = 3+4+5+6 = 18
+    mut sum3: i32 = 0
+    for x in 3..7 {
+        sum3 = sum3 + x
+    }
+    if sum3 != 18 {
+        return 3
+    }
+
+    // with explicit index variable
+    mut idx_check: i32 = 0
+    for i, x in 0..4 {
+        idx_check = idx_check + x
+    }
+    if idx_check != 6 {
+        return 4
+    }
+
+    return 0
+}

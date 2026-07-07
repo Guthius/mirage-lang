@@ -2674,6 +2674,62 @@ namespace codegen {
                 auto *fn = builder_.GetInsertBlock()->getParent();
                 const auto saved_locals = locals_;
 
+                if (const auto *rp = std::get_if<std::unique_ptr<ast::RangeExpr>>(&stmt.iterable)) {
+                    const auto &range = **rp;
+                    const auto upper_sema_type = current_module_->expr_types.at(sema::get_expr_key(range.upper));
+                    auto *int_ty = llvm_type_for(upper_sema_type, *current_module_path_);
+
+                    auto *idx_slot = create_entry_alloca(current_function_, int_ty, "for.idx");
+                    llvm::Value *lower_val = range.lower
+                        ? emit_expr(*range.lower)
+                        : llvm::ConstantInt::get(int_ty, 0);
+                    builder_.CreateStore(lower_val, idx_slot);
+                    llvm::Value *upper_val = emit_expr(range.upper);
+
+                    if (stmt.index_name != "_") {
+                        locals_[stmt.index_name] = LocalValue{.alloca = idx_slot, .type = sema::ResolvedType{.kind = sema::TypeKind::USize}, .type_module = *current_module_path_};
+                    }
+                    llvm::AllocaInst *elem_slot = nullptr;
+                    if (stmt.element_name != "_") {
+                        elem_slot = create_entry_alloca(current_function_, int_ty, stmt.element_name);
+                        locals_[stmt.element_name] = LocalValue{.alloca = elem_slot, .type = upper_sema_type, .type_module = *current_module_path_};
+                    }
+
+                    auto *cond_bb = llvm::BasicBlock::Create(*context_, "for.cond", fn);
+                    auto *body_bb = llvm::BasicBlock::Create(*context_, "for.body", fn);
+                    auto *step_bb = llvm::BasicBlock::Create(*context_, "for.step", fn);
+                    auto *end_bb  = llvm::BasicBlock::Create(*context_, "for.end",  fn);
+                    builder_.CreateBr(cond_bb);
+
+                    builder_.SetInsertPoint(cond_bb);
+                    auto *idx = builder_.CreateLoad(int_ty, idx_slot, "for.idx");
+                    auto *cmp = upper_sema_type.is_signed()
+                        ? builder_.CreateICmpSLT(idx, upper_val, "for.cond")
+                        : builder_.CreateICmpULT(idx, upper_val, "for.cond");
+                    builder_.CreateCondBr(cmp, body_bb, end_bb);
+
+                    builder_.SetInsertPoint(body_bb);
+                    if (elem_slot) {
+                        builder_.CreateStore(builder_.CreateLoad(int_ty, idx_slot), elem_slot);
+                    }
+                    continue_targets_.push_back(step_bb);
+                    break_targets_.push_back(end_bb);
+                    next_block_is_loop_body_ = true;
+                    emit_stmt(stmt.body);
+                    break_targets_.pop_back();
+                    continue_targets_.pop_back();
+                    if (!builder_.GetInsertBlock()->getTerminator()) builder_.CreateBr(step_bb);
+
+                    builder_.SetInsertPoint(step_bb);
+                    auto *idx2 = builder_.CreateLoad(int_ty, idx_slot);
+                    builder_.CreateStore(builder_.CreateAdd(idx2, llvm::ConstantInt::get(int_ty, 1)), idx_slot);
+                    builder_.CreateBr(cond_bb);
+
+                    builder_.SetInsertPoint(end_bb);
+                    locals_ = saved_locals;
+                    return;
+                }
+
                 const auto iterable_type = current_module_->expr_types.at(sema::get_expr_key(stmt.iterable));
                 const auto type_module = expr_type_module_hint(stmt.iterable);
                 const bool is_array = (iterable_type.kind == sema::TypeKind::Array);

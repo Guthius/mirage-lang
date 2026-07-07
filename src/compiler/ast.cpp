@@ -1279,7 +1279,19 @@ namespace ast {
 
             parser.expect(TokenKind::KwIn, "'in'");
 
-            auto iterable = parse_expr(parser);
+            auto iterable = [&]() -> ast::Expr {
+                const auto loc = parser.current_location();
+                if (parser.match(TokenKind::DotDot)) {
+                    auto upper = parse_expr(parser);
+                    return make_expr(ast::RangeExpr{.lower = std::nullopt, .upper = std::move(upper), .location = loc});
+                }
+                auto expr = parse_expr(parser);
+                if (parser.match(TokenKind::DotDot)) {
+                    auto upper = parse_expr(parser);
+                    return make_expr(ast::RangeExpr{.lower = std::move(expr), .upper = std::move(upper), .location = loc});
+                }
+                return expr;
+            }();
             auto body = parse_block_stmt(parser);
 
             return std::make_unique<ForInStmt>(ForInStmt{

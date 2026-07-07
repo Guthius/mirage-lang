@@ -156,6 +156,7 @@ namespace ast {
 
     struct TaggedVariantExpr;
     struct TryExpr;
+    struct RangeExpr;
 
     struct DefaultExpr {
         SourceLocation location;
@@ -195,7 +196,8 @@ namespace ast {
         std::unique_ptr<TaggedVariantExpr>,
         DefaultExpr,
         UndefinedExpr,
-        std::unique_ptr<TryExpr>>;
+        std::unique_ptr<TryExpr>,
+        std::unique_ptr<RangeExpr>>;
 
     struct StructType {
         struct Field {
@@ -410,6 +412,12 @@ namespace ast {
 
     struct TryExpr {
         Expr call; // must resolve to a CallExpr (validated in sema)
+        SourceLocation location;
+    };
+
+    struct RangeExpr {
+        std::optional<Expr> lower; // nullopt means implicit 0
+        Expr upper;                // exclusive upper bound
         SourceLocation location;
     };
 

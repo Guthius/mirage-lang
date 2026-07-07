@@ -1456,6 +1456,14 @@ namespace sema {
                             }
                         },
                         *v);
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::RangeExpr>>) {
+                    // Range expressions are only valid as for-in operands; type-check bounds
+                    // so expr_types is populated for codegen, then report the contextual error.
+                    const auto upper_type = check_expr(v->upper, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
+                    if (v->lower) {
+                        check_expr(*v->lower, locals, module_path, program, diag, upper_type, loop_depth, defer_loop_base);
+                    }
+                    return error(diag, v->location, "range expression is only valid as a 'for-in' operand");
                 }
             },
             expr);
@@ -1484,6 +1492,34 @@ namespace sema {
                     check_stmt(v->body, locals, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ForInStmt>>) {
+                    if (const auto *rp = std::get_if<std::unique_ptr<ast::RangeExpr>>(&v->iterable)) {
+                        const auto &range = **rp;
+                        if (v->element_by_ref) {
+                            diag.report_error(DiagnosticStage::Sema, v->location, "range 'for-in' does not support '&' element binding");
+                            return;
+                        }
+                        const auto upper_type = check_expr(range.upper, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
+                        if (!upper_type.is_integer()) {
+                            diag.report_error(DiagnosticStage::Sema, v->location, "range upper bound must be an integer type");
+                            return;
+                        }
+                        if (range.lower) {
+                            const auto lower_type = check_expr(*range.lower, locals, module_path, program, diag, upper_type, loop_depth, defer_loop_base);
+                            if (lower_type != upper_type) {
+                                diag.report_error(DiagnosticStage::Sema, v->location, "range lower and upper bounds must have the same type");
+                                return;
+                            }
+                        }
+                        auto inner = locals;
+                        if (v->index_name != "_") {
+                            inner[v->index_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::USize}, .is_mut = false};
+                        }
+                        if (v->element_name != "_") {
+                            inner[v->element_name] = LocalBinding{.type = upper_type, .is_mut = false};
+                        }
+                        check_stmt(v->body, inner, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
+                        return;
+                    }
                     const auto iterable_type = check_expr(v->iterable, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
                     if (iterable_type.kind != TypeKind::Slice && iterable_type.kind != TypeKind::Array) {
                         diag.report_error(DiagnosticStage::Sema, v->location, "'for-in' requires a slice or array operand");
