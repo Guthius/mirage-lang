@@ -32,6 +32,7 @@ namespace {
         bool freestanding = false;
         std::string module_path;
         std::string output = "a.out";
+        std::vector<std::string> libs;
     };
 
     auto print_usage(const char *argv0) -> void {
@@ -43,6 +44,7 @@ namespace {
                      << "\n"
                      << "Options:\n"
                      << "  -o, --output <file>  Output file name (default: a.out)\n"
+                     << "  -l <lib>             Link with additional library (may be repeated)\n"
                      << "  --emit-ir            Print LLVM IR to stdout instead of compiling\n"
                      << "  --freestanding       Compile without standard library\n"
                      << "  --help               Show this help message\n";
@@ -65,6 +67,13 @@ namespace {
                     return options;
                 }
                 options.output = argv[++i];
+            } else if (arg == "-l") {
+                if (i + 1 >= argc) {
+                    return options;
+                }
+                options.libs.push_back(argv[++i]);
+            } else if (arg.starts_with("-l") && arg.size() > 2) {
+                options.libs.push_back(arg.substr(2));
             } else if (options.action == Action::None) {
                 if (arg == "build") {
                     options.action = Action::Build;
@@ -151,6 +160,9 @@ namespace {
         args.emplace_back("-no-pie");
 
         args.push_back(object_path.string());
+        for (const auto &lib : options.libs) {
+            args.push_back("-l" + lib);
+        }
         args.emplace_back("-o");
         args.push_back(options.output);
 
