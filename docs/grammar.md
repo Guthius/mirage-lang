@@ -270,7 +270,7 @@ field_init    ::= '.' IDENT '=' expr
 
 braced_initializer ::= '{' '}'                                    (* empty *)
                | '{' IDENT '=' expr { ',' IDENT '=' expr } '}'   (* struct fields *)
-               | '{' expr { ',' expr } '}'                        (* array values *)
+               | '{' expr { ',' expr } [ '...' ] '}'              (* array values, optional trailing fill *)
 ```
 
 ---
@@ -319,3 +319,5 @@ LETTER        ::= 'a'..'z' | 'A'..'Z' | '_'
 8. **Variadic `...` in `fn` type**: Inside a function-pointer type expression, `...` marks the function as variadic and must be the last parameter.
 
 9. **`for` keyword**: Reserved but not yet implemented as a statement form.
+
+10. **Array fill `...` in array initializer**: In an array initializer `{ expr, ... }`, a trailing `...` immediately after the last value repeats that value (evaluated once) to fill all remaining elements of the array. It must be the last token before `}`.

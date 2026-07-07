@@ -486,6 +486,13 @@ Calls a fallible function (one whose last return type is `error`). If the error 
 {}                             // empty (full default initialization)
 ```
 
+An array initializer's last value may end with `...` to fill all remaining elements with that same value (evaluated once):
+
+```mirage
+mut npc_ids: [10]i32 = { -1... }              // all 10 elements set to -1
+const levels: [10]i32 = { 0, 1, 2, 3, 4, 5... } // 0, 1, 2, 3, 4, then five more 5s
+```
+
 ### Import Expression
 
 ```mirage

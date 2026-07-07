@@ -566,18 +566,24 @@ namespace codegen {
             }
 
             // Emit an array value from an explicit ArrayExpr; trailing elements are
-            // default-initialized (per rule 1) if not all provided.
+            // default-initialized (per rule 1) if not all provided, unless the last
+            // provided value ends with '...' (has_fill), in which case it is repeated
+            // (evaluated once) to fill the remaining elements instead.
             auto emit_array_expr_value(const ast::ArrayExpr &ae, const sema::ResolvedType &ty) -> llvm::Value * {
                 const auto &array_info = module_for(*current_module_path_).arrays.at(ty.array_index);
                 auto *ll_ty = llvm_type(*current_module_path_, ty);
                 llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
+                llvm::Value *fill_elem = nullptr;
                 for (size_t i = 0; i < ae.values.size(); ++i) {
                     if (std::holds_alternative<ast::UndefinedExpr>(ae.values[i])) continue;
                     auto *elem = emit_value_as(ae.values[i], array_info.element_type);
                     agg = builder_.CreateInsertValue(agg, elem, {static_cast<unsigned>(i)});
+                    if (ae.has_fill && i == ae.values.size() - 1) {
+                        fill_elem = elem;
+                    }
                 }
                 for (uint64_t i = ae.values.size(); i < array_info.count; ++i) {
-                    auto *elem = emit_default_value(*current_module_path_, array_info.element_type);
+                    auto *elem = fill_elem != nullptr ? fill_elem : emit_default_value(*current_module_path_, array_info.element_type);
                     agg = builder_.CreateInsertValue(agg, elem, {static_cast<unsigned>(i)});
                 }
                 return agg;

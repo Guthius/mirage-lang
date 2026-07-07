@@ -398,6 +398,7 @@ namespace ast {
 
     struct ArrayExpr {
         std::vector<Expr> values;
+        bool has_fill = false; // true if the last value ends with '...' to fill remaining elements
         SourceLocation location;
     };
 

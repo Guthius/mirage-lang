@@ -433,8 +433,13 @@ namespace ast {
             }
 
             std::vector<Expr> values;
+            bool has_fill = false;
             while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
                 values.push_back(parse_expr(parser));
+                if (parser.match(TokenKind::DotDotDot)) {
+                    has_fill = true;
+                    break;
+                }
                 if (!parser.match(TokenKind::Comma)) {
                     break;
                 }
@@ -444,6 +449,7 @@ namespace ast {
 
             return std::make_unique<BracedInitializerExpr>(ArrayExpr{
                 .values = std::move(values),
+                .has_fill = has_fill,
                 .location = location,
             });
         }
