@@ -1,5 +1,5 @@
-const mem := import("mem")
-const vec := import("vector")
+const mem := import("../mem")
+const vec := import("../vector")
 
 pub fn main() -> i32 {
     const x: i32 = 42

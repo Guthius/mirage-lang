@@ -1,5 +1,5 @@
-const std := import("std")
-const source := import("source")
+const std := import("../std")
+const source := import("../source")
 
 const MAX_ERRORS: usize = 20
 

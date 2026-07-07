@@ -7,7 +7,7 @@ ext fn fseek(stream: anyptr, offset: i64, whence: i32) -> i32
 ext fn ftell(stream: anyptr) -> i64
 ext fn rewind(stream: anyptr)
 
-const mem := import("memory")
+const mem := import("../memory")
 
 const SEEK_SET: i32 = 0
 const SEEK_CUR: i32 = 1

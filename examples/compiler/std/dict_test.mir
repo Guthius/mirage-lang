@@ -1,7 +1,3 @@
-const dictionary := import("dictionary")
-
-type Dictionary = dictionary.Dictionary
-
 pub fn main() {
     mut hash_map: Dictionary
 

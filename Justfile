@@ -26,7 +26,7 @@ build target="all": configure
 
 # Run the compiler
 run: build
-    ./{{ build_dir }}/mirage examples/start.mir
+    ./{{ build_dir }}/mirage run examples/start
 
 # Install the compiler to the system
 install prefix="/usr/local": build

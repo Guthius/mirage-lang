@@ -1,6 +1,6 @@
 // NOTE: Draft Design for Generics - Not Implemented Yet!!
 
-const mem := import("mem")
+const mem := import("../mem")
 
 const table_size: usize = 101
 

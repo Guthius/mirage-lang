@@ -1,4 +1,4 @@
-const io := import("io")
+const io := import("../io")
 
 ext fn printf(fmt: *u8, ...) -> i32
 
@@ -32,7 +32,6 @@ pub fn main() -> error {
 
     printf("Read %u bytes from Justfile\n", file_len)
     printf("%.*s\n", file_len, cast(file_data, *u8))
-    //printf("%s\n", token_kind_name(.LitInteger))
 
     return 0
 }

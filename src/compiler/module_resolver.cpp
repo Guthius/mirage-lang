@@ -3,23 +3,39 @@
 #include "lexer.hpp"
 #include "source_manager.hpp"
 
+#include <algorithm>
 #include <filesystem>
-#include <fstream>
 
 namespace ast {
     namespace {
         auto load_and_parse(const std::string &canonical_path, SourceManager &source_manager, DiagnosticEngine &diagnostics) -> Module {
-            const auto source = source_manager.load(canonical_path, diagnostics);
-            if (source.empty()) {
+            std::error_code ec;
+            std::filesystem::directory_iterator dir(canonical_path, ec);
+            if (ec) {
+                diagnostics.report_error(
+                    DiagnosticStage::Parser, {},
+                    std::format("cannot read module directory '{}'", canonical_path));
                 return {};
             }
 
-            auto tokens = lexer::tokenize(source, canonical_path, diagnostics);
-            if (diagnostics.has_errors()) {
-                return {};
+            std::vector<std::filesystem::path> files;
+            for (const auto &entry : dir) {
+                if (entry.is_regular_file() && entry.path().extension() == ".mir") {
+                    files.push_back(entry.path());
+                }
             }
+            std::sort(files.begin(), files.end());
 
-            return parse(tokens, diagnostics);
+            Module combined;
+            for (const auto &file : files) {
+                const auto source = source_manager.load(file.string(), diagnostics);
+                if (source.empty()) continue;
+                auto tokens = lexer::tokenize(source, file.string(), diagnostics);
+                if (diagnostics.has_errors()) return {};
+                auto decls = parse(tokens, diagnostics);
+                combined.insert(combined.end(), std::make_move_iterator(decls.begin()), std::make_move_iterator(decls.end()));
+            }
+            return combined;
         }
 
         auto find_import_strings(const Module &module) -> std::vector<std::string> {
@@ -37,16 +53,11 @@ namespace ast {
         }
 
         auto resolve_import_path(const std::string &importer_path, const std::string &import_path) -> std::string {
-            auto parent_path = std::filesystem::path(importer_path).parent_path();
-            auto candidate_path = parent_path / import_path;
-            auto candidate_path_with_ext = candidate_path;
-
-            candidate_path_with_ext += ".mir";
-            if (std::filesystem::exists(candidate_path_with_ext)) {
-                return canonicalize(candidate_path_with_ext);
+            auto candidate = std::filesystem::path(importer_path) / import_path;
+            if (!std::filesystem::is_directory(candidate)) {
+                return {};
             }
-
-            return {};
+            return canonicalize(candidate.string());
         }
 
         void visit(const std::string &path, Program &program, SourceManager &source_manager, DiagnosticEngine &diagnostics) {
@@ -93,10 +104,10 @@ namespace ast {
         Program program;
 
         const auto canonical = canonicalize(root_module_path);
-        if (canonical.empty()) {
+        if (canonical.empty() || !std::filesystem::is_directory(canonical)) {
             diagnostics.report_error(
                 DiagnosticStage::Parser, {},
-                std::format("cannot resolve root module path '{}'", root_module_path));
+                std::format("'{}' is not a valid module directory", root_module_path));
 
             return program;
         }

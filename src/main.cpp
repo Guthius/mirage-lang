@@ -20,18 +20,26 @@
 #include <filesystem>
 #include <format>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
+    enum class Action { None, Build, Run };
+
     struct Options {
-        bool emit_ir;
-        bool freestanding;
-        std::string filename;
+        Action action = Action::None;
+        bool emit_ir = false;
+        bool freestanding = false;
+        std::string module_path;
         std::string output = "a.out";
     };
 
     auto print_usage(const char *argv0) -> void {
-        llvm::errs() << "Usage: " << argv0 << " [options] <file>\n"
+        llvm::errs() << "Usage: " << argv0 << " <action> <module> [options]\n"
+                     << "\n"
+                     << "Actions:\n"
+                     << "  build   Compile a module to an executable\n"
+                     << "  run     Compile and run a module\n"
                      << "\n"
                      << "Options:\n"
                      << "  -o, --output <file>  Output file name (default: a.out)\n"
@@ -44,7 +52,8 @@ namespace {
         Options options{};
 
         for (int i = 1; i < argc; ++i) {
-            if (const auto arg = std::string(argv[i]); arg == "--help" || arg == "-h") {
+            const auto arg = std::string(argv[i]);
+            if (arg == "--help" || arg == "-h") {
                 print_usage(argv[0]);
                 std::exit(0);
             } else if (arg == "--emit-ir") {
@@ -53,12 +62,20 @@ namespace {
                 options.freestanding = true;
             } else if (arg == "-o" || arg == "--output") {
                 if (i + 1 >= argc) {
-                    options.filename.clear();
                     return options;
                 }
                 options.output = argv[++i];
-            } else if (options.filename.empty()) {
-                options.filename = arg;
+            } else if (options.action == Action::None) {
+                if (arg == "build") {
+                    options.action = Action::Build;
+                } else if (arg == "run") {
+                    options.action = Action::Run;
+                } else {
+                    llvm::errs() << "mirage: unknown action '" << arg << "'; expected 'build' or 'run'\n";
+                    return options;
+                }
+            } else if (options.module_path.empty()) {
+                options.module_path = arg;
             } else {
                 break;
             }
@@ -150,13 +167,13 @@ namespace {
 }
 
 auto main(const int argc, char *argv[]) -> int {
-    if (argc < 2) {
+    if (argc < 3) {
         print_usage(argv[0]);
         return 1;
     }
 
     const auto options = parse_options(argc, argv);
-    if (options.filename.empty()) {
+    if (options.action == Action::None || options.module_path.empty()) {
         print_usage(argv[0]);
         return 1;
     }
@@ -166,7 +183,7 @@ auto main(const int argc, char *argv[]) -> int {
     SourceManager source_manager;
     DiagnosticEngine diag(source_manager);
 
-    const auto ast = ast::resolve(options.filename, source_manager, diag);
+    const auto ast = ast::resolve(options.module_path, source_manager, diag);
     if (!ast.ok) {
         return 1;
     }
@@ -203,7 +220,15 @@ auto main(const int argc, char *argv[]) -> int {
 
     const auto elapsed = std::chrono::steady_clock::now() - start_time;
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-    llvm::outs() << std::format("Compiled '{}' -> '{}' in {}ms\n", options.filename, options.output, ms);
+    llvm::outs() << std::format("Compiled '{}' -> '{}' in {}ms\n", options.module_path, options.output, ms);
+    llvm::outs().flush();
+
+    if (options.action == Action::Run) {
+        const char *args[] = {options.output.c_str(), nullptr};
+        execv(options.output.c_str(), const_cast<char *const *>(args));
+        llvm::errs() << "mirage: failed to execute '" << options.output << "'\n";
+        return 1;
+    }
 
     return 0;
 }
