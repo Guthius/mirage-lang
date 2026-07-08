@@ -20,5 +20,5 @@ pub fn main() -> i32 {
 
     const v_ptr := &v
 
-    return v.member_func_a() + v_ptr.member_func_b(10) // 20
+    return v.member_func_a() + v_ptr.member_func_b(10) # 20
 }

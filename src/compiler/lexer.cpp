@@ -179,7 +179,7 @@ namespace lexer {
                     const char ch = peek();
                     if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
                         advance();
-                    } else if (ch == '/' && peek_next() == '/') {
+                    } else if (ch == '#') {
                         while (!at_end() && peek() != '\n') {
                             advance();
                         }

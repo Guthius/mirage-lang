@@ -57,17 +57,17 @@
         return both a result value and an error code simultaneously.
       </p>
 
-      <pre><code><span class="cmt">// Returns (quotient, error): 0 = success, 1 = division by zero</span>
+      <pre><code><span class="cmt"># Returns (quotient, error): 0 = success, 1 = division by zero</span>
 <span class="kw">fn</span> <span class="fn">divide</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>) {
     <span class="kw">if</span> <span class="var">b</span> == <span class="num">0</span> {
-        <span class="kw">return</span> <span class="num">0</span>, <span class="num">1</span>   <span class="cmt">// error code 1</span>
+        <span class="kw">return</span> <span class="num">0</span>, <span class="num">1</span>   <span class="cmt"># error code 1</span>
     }
     <span class="kw">return</span> <span class="var">a</span> / <span class="var">b</span>, <span class="num">0</span>
 }
 
-<span class="cmt">// Void-return fallible</span>
+<span class="cmt"># Void-return fallible</span>
 <span class="kw">fn</span> <span class="fn">open_file</span>(<span class="var">path</span>: *<span class="ty">u8</span>) -&gt; <span class="ty">error</span> {
-    <span class="cmt">// ... attempt to open ...</span>
+    <span class="cmt"># ... attempt to open ...</span>
     <span class="kw">return</span> <span class="num">0</span>
 }</code></pre>
 
@@ -76,7 +76,7 @@
         Ignoring the return value of a fallible function is a compile-time error. You must either
         capture the error or use <code>try</code>.
       </p>
-      <pre><code><span class="cmt">// Correct: capture all return values</span>
+      <pre><code><span class="cmt"># Correct: capture all return values</span>
 <span class="kw">mut</span> <span class="var">result</span>, <span class="var">err</span> := <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">2</span>)
 <span class="kw">if</span> <span class="var">err</span> != <span class="num">0</span> {
     <span class="fn">printf</span>(<span class="str">"error: %llu\n"</span>, <span class="var">err</span>)
@@ -95,10 +95,10 @@
       </p>
 
       <pre><code><span class="kw">fn</span> <span class="fn">process</span>() -&gt; <span class="ty">error</span> {
-    <span class="cmt">// If divide fails, propagate the error up immediately</span>
-    <span class="kw">mut</span> <span class="var">q</span>: <span class="ty">i32</span> = <span class="kw">try</span> <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">2</span>)   <span class="cmt">// q = 5</span>
+    <span class="cmt"># If divide fails, propagate the error up immediately</span>
+    <span class="kw">mut</span> <span class="var">q</span>: <span class="ty">i32</span> = <span class="kw">try</span> <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">2</span>)   <span class="cmt"># q = 5</span>
 
-    <span class="cmt">// Chained: try in a group decl</span>
+    <span class="cmt"># Chained: try in a group decl</span>
     <span class="kw">mut</span> <span class="var">q2</span>, <span class="var">e2</span> := <span class="fn">divide</span>(<span class="num">20</span>, <span class="num">4</span>)
     <span class="kw">if</span> <span class="var">e2</span> != <span class="num">0</span> { <span class="kw">return</span> <span class="var">e2</span> }
 
@@ -107,7 +107,7 @@
 }
 
 <span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span> {
-    <span class="cmt">// Propagate any error from process() up to OS</span>
+    <span class="cmt"># Propagate any error from process() up to OS</span>
     <span class="kw">try</span> <span class="fn">process</span>()
     <span class="kw">return</span> <span class="num">0</span>
 }</code></pre>
@@ -116,10 +116,10 @@
       <p>
         <code>try</code> binds tighter than binary operators:
       </p>
-      <pre><code><span class="cmt">// try applies only to f(x), not to the entire expression</span>
-<span class="kw">try</span> <span class="fn">f</span>(<span class="var">x</span>) + <span class="fn">g</span>()    <span class="cmt">// same as: (try f(x)) + g()</span>
+      <pre><code><span class="cmt"># try applies only to f(x), not to the entire expression</span>
+<span class="kw">try</span> <span class="fn">f</span>(<span class="var">x</span>) + <span class="fn">g</span>()    <span class="cmt"># same as: (try f(x)) + g()</span>
 
-<span class="cmt">// Parentheses to chain member access after try:</span>
+<span class="cmt"># Parentheses to chain member access after try:</span>
 <span class="kw">const</span> <span class="var">s</span> := (<span class="kw">try</span> <span class="fn">lookup</span>(<span class="var">key</span>)).<span class="var">size</span></code></pre>
 
       <hr>
@@ -132,9 +132,9 @@
 
       <pre><code><span class="kw">fn</span> <span class="fn">with_resource</span>() -&gt; <span class="ty">error</span> {
     <span class="kw">const</span> <span class="var">handle</span> := <span class="fn">open</span>(<span class="str">"file.txt"</span>)
-    <span class="kw">defer</span> <span class="fn">close</span>(<span class="var">handle</span>)   <span class="cmt">// always runs on exit</span>
+    <span class="kw">defer</span> <span class="fn">close</span>(<span class="var">handle</span>)   <span class="cmt"># always runs on exit</span>
 
-    <span class="kw">try</span> <span class="fn">read</span>(<span class="var">handle</span>)      <span class="cmt">// defer still runs if this propagates</span>
+    <span class="kw">try</span> <span class="fn">read</span>(<span class="var">handle</span>)      <span class="cmt"># defer still runs if this propagates</span>
     <span class="kw">return</span> <span class="num">0</span>
 }</code></pre>
 
@@ -145,38 +145,38 @@
     <span class="kw">defer</span> <span class="fn">printf</span>(<span class="str">"second registered\n"</span>)
     <span class="kw">defer</span> <span class="fn">printf</span>(<span class="str">"third registered\n"</span>)
 }
-<span class="cmt">// Output:
-// third registered
-// second registered
-// first registered</span></code></pre>
+<span class="cmt"># Output:
+# third registered
+# second registered
+# first registered</span></code></pre>
 
       <h3>Defer in Nested Blocks</h3>
       <p>Each block has its own defer scope. Inner-block defers fire when that block exits:</p>
       <pre><code><span class="kw">fn</span> <span class="fn">block_defer</span>() {
     {
-        <span class="kw">defer</span> <span class="fn">printf</span>(<span class="str">"inner\n"</span>)    <span class="cmt">// fires when inner block exits</span>
+        <span class="kw">defer</span> <span class="fn">printf</span>(<span class="str">"inner\n"</span>)    <span class="cmt"># fires when inner block exits</span>
     }
-    <span class="fn">printf</span>(<span class="str">"outer\n"</span>)              <span class="cmt">// runs after inner defer</span>
+    <span class="fn">printf</span>(<span class="str">"outer\n"</span>)              <span class="cmt"># runs after inner defer</span>
 }
-<span class="cmt">// Output:
-// inner
-// outer</span></code></pre>
+<span class="cmt"># Output:
+# inner
+# outer</span></code></pre>
 
       <h3>Defer in Loops</h3>
       <p>A <code>defer</code> inside a loop body fires on every iteration, including on <code>break</code>:</p>
       <pre><code><span class="kw">mut</span> <span class="var">i</span>: <span class="ty">i32</span> = <span class="num">0</span>
 <span class="kw">while</span> <span class="var">i</span> &lt; <span class="num">3</span> {
-    <span class="kw">defer</span> <span class="fn">printf</span>(<span class="str">"tick\n"</span>)   <span class="cmt">// prints "tick" once per iteration</span>
+    <span class="kw">defer</span> <span class="fn">printf</span>(<span class="str">"tick\n"</span>)   <span class="cmt"># prints "tick" once per iteration</span>
     <span class="var">i</span>++
 }
-<span class="cmt">// Output: tick tick tick</span></code></pre>
+<span class="cmt"># Output: tick tick tick</span></code></pre>
 
       <h3>Defer and Early Return</h3>
       <p>Defers run even on early <code>return</code>. Return values are captured <em>before</em> defers execute:</p>
       <pre><code><span class="kw">fn</span> <span class="fn">example</span>() -&gt; <span class="ty">i32</span> {
     <span class="kw">defer</span> <span class="fn">printf</span>(<span class="str">"cleanup\n"</span>)
     <span class="kw">if</span> <span class="var">some_condition</span> {
-        <span class="kw">return</span> <span class="num">1</span>   <span class="cmt">// defer fires before the ret instruction</span>
+        <span class="kw">return</span> <span class="num">1</span>   <span class="cmt"># defer fires before the ret instruction</span>
     }
     <span class="kw">return</span> <span class="num">0</span>
 }</code></pre>
@@ -203,7 +203,7 @@
     <span class="kw">const</span> <span class="var">b</span> := <span class="kw">try</span> <span class="fn">acquire_resource_b</span>()
     <span class="kw">defer</span> <span class="fn">release_resource_b</span>(<span class="var">b</span>)
 
-    <span class="cmt">// If this fails, both release_b and release_a will run (LIFO)</span>
+    <span class="cmt"># If this fails, both release_b and release_a will run (LIFO)</span>
     <span class="kw">try</span> <span class="fn">do_work</span>(<span class="var">a</span>, <span class="var">b</span>)
 
     <span class="kw">return</span> <span class="num">0</span>
@@ -236,13 +236,13 @@
     <span class="kw">defer</span> {
         <span class="fn">printf</span>(<span class="str">"cleanup ran\n"</span>)
     }
-    <span class="kw">try</span> <span class="fn">maybe_fail</span>(<span class="lit">true</span>)    <span class="cmt">// propagates 42; defer runs first</span>
+    <span class="kw">try</span> <span class="fn">maybe_fail</span>(<span class="lit">true</span>)    <span class="cmt"># propagates 42; defer runs first</span>
     <span class="kw">return</span> <span class="num">0</span>
 }
 
 <span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">i32</span> {
     <span class="kw">const</span> <span class="var">e</span>: <span class="ty">error</span> = <span class="fn">test_defer_before_try</span>()
-    <span class="fn">printf</span>(<span class="str">"error code: %llu\n"</span>, <span class="var">e</span>)   <span class="cmt">// 42</span>
+    <span class="fn">printf</span>(<span class="str">"error code: %llu\n"</span>, <span class="var">e</span>)   <span class="cmt"># 42</span>
 
     <span class="kw">mut</span> <span class="var">q</span>, <span class="var">err</span> := <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">0</span>)
     <span class="kw">if</span> <span class="var">err</span> != <span class="num">0</span> {

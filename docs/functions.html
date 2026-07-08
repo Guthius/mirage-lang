@@ -45,7 +45,7 @@
     <span class="kw">return</span> <span class="var">a</span> + <span class="var">b</span>
 }
 
-<span class="cmt">// No return value (void)</span>
+<span class="cmt"># No return value (void)</span>
 <span class="kw">fn</span> <span class="fn">greet</span>(<span class="var">name</span>: *<span class="ty">u8</span>) {
     <span class="fn">printf</span>(<span class="str">"Hello, %s!\n"</span>, <span class="var">name</span>)
 }</code></pre>
@@ -74,11 +74,11 @@
     <span class="kw">return</span> <span class="var">a</span> / <span class="var">b</span>, <span class="var">a</span> % <span class="var">b</span>
 }
 
-<span class="kw">mut</span> <span class="var">q</span>, <span class="var">r</span> := <span class="fn">divmod</span>(<span class="num">17</span>, <span class="num">5</span>)   <span class="cmt">// q=3, r=2</span></code></pre>
+<span class="kw">mut</span> <span class="var">q</span>, <span class="var">r</span> := <span class="fn">divmod</span>(<span class="num">17</span>, <span class="num">5</span>)   <span class="cmt"># q=3, r=2</span></code></pre>
 
       <h3>Discarding Return Values</h3>
       <p>Use <code>_</code> to discard one or more return values:</p>
-      <pre><code><span class="kw">mut</span> <span class="var">q</span>, <span class="var">_</span> := <span class="fn">divmod</span>(<span class="num">17</span>, <span class="num">5</span>)   <span class="cmt">// only keep quotient</span></code></pre>
+      <pre><code><span class="kw">mut</span> <span class="var">q</span>, <span class="var">_</span> := <span class="fn">divmod</span>(<span class="num">17</span>, <span class="num">5</span>)   <span class="cmt"># only keep quotient</span></code></pre>
 
       <h2>Fallible Functions (Error Return)</h2>
       <p>
@@ -91,11 +91,11 @@
     <span class="kw">return</span> <span class="var">a</span> / <span class="var">b</span>, <span class="num">0</span>
 }
 
-<span class="cmt">// Must capture error</span>
+<span class="cmt"># Must capture error</span>
 <span class="kw">mut</span> <span class="var">result</span>, <span class="var">err</span> := <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">2</span>)
 <span class="kw">if</span> <span class="var">err</span> != <span class="num">0</span> { <span class="cmt">/* handle */</span> }
 
-<span class="cmt">// Or propagate with try (enclosing fn must return error)</span>
+<span class="cmt"># Or propagate with try (enclosing fn must return error)</span>
 <span class="kw">mut</span> <span class="var">val</span>: <span class="ty">i32</span> = <span class="kw">try</span> <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">2</span>)</code></pre>
 
       <p>See <a href="error-handling.html">Error Handling</a> for full details.</p>
@@ -109,7 +109,7 @@
     <span class="kw">return</span> <span class="var">x</span> * <span class="num">2</span>
 }
 
-<span class="cmt">// Private — only callable within this module</span>
+<span class="cmt"># Private — only callable within this module</span>
 <span class="kw">fn</span> <span class="fn">helper</span>(<span class="var">x</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
     <span class="kw">return</span> <span class="var">x</span> + <span class="num">1</span>
 }</code></pre>
@@ -120,7 +120,7 @@
         type signature; the linker resolves the actual symbol.
       </p>
 
-      <pre><code><span class="cmt">// C standard library declarations</span>
+      <pre><code><span class="cmt"># C standard library declarations</span>
 <span class="kw">ext fn</span> <span class="fn">puts</span>(<span class="var">s</span>: *<span class="ty">u8</span>) -&gt; <span class="ty">i32</span>
 <span class="kw">ext fn</span> <span class="fn">malloc</span>(<span class="var">size</span>: <span class="ty">usize</span>) -&gt; <span class="ty">anyptr</span>
 <span class="kw">ext fn</span> <span class="fn">free</span>(<span class="var">ptr</span>: <span class="ty">anyptr</span>)
@@ -146,9 +146,9 @@
 
       <h2>Entry Points</h2>
       <p>The root module must define exactly one of:</p>
-      <pre><code><span class="kw">pub fn</span> <span class="fn">main</span>() { <span class="cmt">/* ... */</span> }                    <span class="cmt">// exits with code 0</span>
-<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">i32</span> { <span class="kw">return</span> <span class="num">0</span> }                <span class="cmt">// returns exit code</span>
-<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span> { <span class="kw">return</span> <span class="num">0</span> }              <span class="cmt">// error truncated to i32</span></code></pre>
+      <pre><code><span class="kw">pub fn</span> <span class="fn">main</span>() { <span class="cmt">/* ... */</span> }                    <span class="cmt"># exits with code 0</span>
+<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">i32</span> { <span class="kw">return</span> <span class="num">0</span> }                <span class="cmt"># returns exit code</span>
+<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span> { <span class="kw">return</span> <span class="num">0</span> }              <span class="cmt"># error truncated to i32</span></code></pre>
 
       <p>
         For freestanding builds (<code>--freestanding</code>), define <code>fn _start()</code> instead.
@@ -162,14 +162,14 @@
       <pre><code><span class="kw">fn</span> <span class="fn">square</span>(<span class="var">x</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> { <span class="kw">return</span> <span class="var">x</span> * <span class="var">x</span> }
 
 <span class="kw">mut</span> <span class="var">fp</span>: <span class="ty">fn</span>(<span class="ty">i32</span>) -&gt; <span class="ty">i32</span> = <span class="var">square</span>
-<span class="kw">const</span> <span class="var">r</span>: <span class="ty">i32</span> = <span class="var">fp</span>(<span class="num">9</span>)   <span class="cmt">// 81</span></code></pre>
+<span class="kw">const</span> <span class="var">r</span>: <span class="ty">i32</span> = <span class="var">fp</span>(<span class="num">9</span>)   <span class="cmt"># 81</span></code></pre>
 
       <h3>Higher-Order Functions</h3>
       <pre><code><span class="kw">fn</span> <span class="fn">apply</span>(<span class="var">op</span>: <span class="ty">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; <span class="ty">i32</span>, <span class="var">x</span>: <span class="ty">i32</span>, <span class="var">y</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
     <span class="kw">return</span> <span class="var">op</span>(<span class="var">x</span>, <span class="var">y</span>)
 }
 
-<span class="kw">const</span> <span class="var">sum</span> := <span class="fn">apply</span>(<span class="var">add</span>, <span class="num">3</span>, <span class="num">4</span>)   <span class="cmt">// 7</span></code></pre>
+<span class="kw">const</span> <span class="var">sum</span> := <span class="fn">apply</span>(<span class="var">add</span>, <span class="num">3</span>, <span class="num">4</span>)   <span class="cmt"># 7</span></code></pre>
 
       <h3>Variadic Function Pointer</h3>
       <pre><code><span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
@@ -186,7 +186,7 @@
 <span class="kw">mut</span> <span class="var">fp</span>: <span class="ty">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>) = <span class="var">divide</span>
 <span class="kw">mut</span> <span class="var">val</span>, <span class="var">err</span> := <span class="var">fp</span>(<span class="num">10</span>, <span class="num">2</span>)
 
-<span class="cmt">// try also works through fn ptrs</span>
+<span class="cmt"># try also works through fn ptrs</span>
 <span class="kw">mut</span> <span class="var">v</span>: <span class="ty">i32</span> = <span class="kw">try</span> <span class="var">fp</span>(<span class="num">8</span>, <span class="num">2</span>)</code></pre>
 
       <h2>Macros</h2>
@@ -198,7 +198,7 @@
       <pre><code><span class="kw">macro</span> <span class="fn">max</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; <span class="var">a</span> &gt; <span class="var">b</span> ? <span class="var">a</span> : <span class="var">b</span>
 <span class="kw">macro</span> <span class="fn">align_up</span>(<span class="var">n</span>: <span class="ty">usize</span>) -&gt; (<span class="var">n</span> + (<span class="num">15</span>)) &amp; ~(<span class="ty">usize</span>)<span class="num">15</span>
 
-<span class="kw">const</span> <span class="var">m</span> := <span class="fn">max</span>(<span class="num">3</span>, <span class="num">7</span>)        <span class="cmt">// expands to: 3 > 7 ? 3 : 7 → 7</span>
+<span class="kw">const</span> <span class="var">m</span> := <span class="fn">max</span>(<span class="num">3</span>, <span class="num">7</span>)        <span class="cmt"># expands to: 3 > 7 ? 3 : 7 → 7</span>
 <span class="kw">const</span> <span class="var">aligned</span> := <span class="fn">align_up</span>(<span class="var">size</span>)</code></pre>
 
       <p>Macros can be exported with <code>pub</code>:</p>

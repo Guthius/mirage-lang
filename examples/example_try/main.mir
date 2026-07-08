@@ -1,39 +1,39 @@
-// example_try.mir — demonstrates try error propagation and interaction with defer
+# example_try.mir — demonstrates try error propagation and interaction with defer
 
 ext fn printf(fmt: *u8, ...) -> i32
 
 mut g_cleanup_ran: i32 = 0
 
-// A fallible function that returns error
+# A fallible function that returns error
 fn maybe_fail(should_fail: bool) -> error {
     if should_fail {
-        return 42  // non-zero error code
+        return 42  # non-zero error code
     }
     return 0
 }
 
-// A fallible function returning a value and error
+# A fallible function returning a value and error
 fn divide(a: i32, b: i32) -> (i32, error) {
     if b == 0 {
-        return 0, 1  // error: division by zero
+        return 0, 1  # error: division by zero
     }
     return a / b, 0
 }
 
-// Test 1: try propagates non-zero error
+# Test 1: try propagates non-zero error
 fn test_propagate() -> error {
     try maybe_fail(true)
-    // Should not reach here
+    # Should not reach here
     return 0
 }
 
-// Test 2: try does NOT propagate when error is 0
+# Test 2: try does NOT propagate when error is 0
 fn test_no_propagate() -> error {
     try maybe_fail(false)
     return 0
 }
 
-// Test 3: try with value capture
+# Test 3: try with value capture
 fn test_value_try() -> (i32, error) {
     mut result, err := divide(10, 2)
     if err != 0 {
@@ -42,17 +42,17 @@ fn test_value_try() -> (i32, error) {
     return result, 0
 }
 
-// Test 4: defers run before try propagation
+# Test 4: defers run before try propagation
 fn test_defer_before_try() -> error {
     defer {
         g_cleanup_ran = g_cleanup_ran + 1
     }
     try maybe_fail(true)
-    // Should not reach here; defer must have run before propagation
+    # Should not reach here; defer must have run before propagation
     return 0
 }
 
-// Test 5: try in a group declaration
+# Test 5: try in a group declaration
 fn test_group_try() -> error {
     mut q, e := divide(20, 4)
     if e != 0 {
@@ -65,19 +65,19 @@ fn test_group_try() -> error {
 }
 
 pub fn main() -> i32 {
-    // Test 1: propagation
+    # Test 1: propagation
     const e1: error = test_propagate()
     if e1 != 42 {
         return 1
     }
 
-    // Test 2: no propagation
+    # Test 2: no propagation
     const e2: error = test_no_propagate()
     if e2 != 0 {
         return 2
     }
 
-    // Test 3: value try
+    # Test 3: value try
     mut val: i32 = 0
     mut err: error = 0
     mut res, err2 := divide(10, 2)
@@ -88,7 +88,7 @@ pub fn main() -> i32 {
         return 4
     }
 
-    // Test 4: defer runs before try propagation
+    # Test 4: defer runs before try propagation
     g_cleanup_ran = 0
     const e4: error = test_defer_before_try()
     if e4 != 42 {
@@ -98,7 +98,7 @@ pub fn main() -> i32 {
         return 6
     }
 
-    // Test 5: group try
+    # Test 5: group try
     const e5: error = test_group_try()
     if e5 != 0 {
         return 7

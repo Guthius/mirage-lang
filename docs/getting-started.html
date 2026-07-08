@@ -73,7 +73,7 @@ just build</code></pre>
         that run in a hosted environment.
       </p>
 
-      <pre><code><span class="cmt">// hello.mir</span>
+      <pre><code><span class="cmt"># hello.mir</span>
 
 <span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
 
@@ -90,17 +90,17 @@ just build</code></pre>
         The root module must define a <code>pub fn main</code> in one of three signatures:
       </p>
 
-      <pre><code><span class="cmt">// No return value — exits with code 0</span>
+      <pre><code><span class="cmt"># No return value — exits with code 0</span>
 <span class="kw">pub fn</span> <span class="fn">main</span>() {
-    <span class="cmt">// ...</span>
+    <span class="cmt"># ...</span>
 }
 
-<span class="cmt">// Returns an explicit exit code</span>
+<span class="cmt"># Returns an explicit exit code</span>
 <span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">i32</span> {
     <span class="kw">return</span> <span class="num">0</span>
 }
 
-<span class="cmt">// Returns an error value (truncated to i32 for the exit code)</span>
+<span class="cmt"># Returns an error value (truncated to i32 for the exit code)</span>
 <span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span> {
     <span class="kw">return</span> <span class="num">0</span>
 }</code></pre>
@@ -143,19 +143,19 @@ just build</code></pre>
       </ul>
 
       <h2>Variables and Constants</h2>
-      <pre><code><span class="cmt">// Mutable variable — type inferred</span>
+      <pre><code><span class="cmt"># Mutable variable — type inferred</span>
 <span class="kw">mut</span> <span class="var">x</span> := <span class="num">42</span>
 
-<span class="cmt">// Mutable variable — explicit type</span>
+<span class="cmt"># Mutable variable — explicit type</span>
 <span class="kw">mut</span> <span class="var">y</span>: <span class="ty">f64</span> = <span class="num">3.14</span>
 
-<span class="cmt">// Immutable constant — cannot be reassigned</span>
+<span class="cmt"># Immutable constant — cannot be reassigned</span>
 <span class="kw">const</span> <span class="var">limit</span> := <span class="num">100</span>
 
-<span class="cmt">// Default initialization — struct/array fields zeroed</span>
+<span class="cmt"># Default initialization — struct/array fields zeroed</span>
 <span class="kw">mut</span> <span class="var">buf</span>: [<span class="num">256</span>]<span class="ty">u8</span>
 
-<span class="cmt">// Uninitialized — storage allocated, no write</span>
+<span class="cmt"># Uninitialized — storage allocated, no write</span>
 <span class="kw">mut</span> <span class="var">tmp</span>: <span class="ty">i32</span> = <span class="kw">undefined</span>
 <span class="var">tmp</span> = <span class="num">99</span></code></pre>
 
@@ -164,10 +164,10 @@ just build</code></pre>
         Mirage infers the type of a variable from its initializer when no annotation is given.
         The <code>:=</code> syntax means "infer the type":
       </p>
-      <pre><code><span class="kw">const</span> <span class="var">a</span> := <span class="num">10</span>         <span class="cmt">// a: i32</span>
-<span class="kw">mut</span>   <span class="var">b</span> := <span class="num">3.14</span>       <span class="cmt">// b: f64</span>
-<span class="kw">const</span> <span class="var">c</span> := <span class="lit">true</span>        <span class="cmt">// c: bool</span>
-<span class="kw">const</span> <span class="var">s</span> := <span class="str">"hello"</span>    <span class="cmt">// s: *u8</span></code></pre>
+      <pre><code><span class="kw">const</span> <span class="var">a</span> := <span class="num">10</span>         <span class="cmt"># a: i32</span>
+<span class="kw">mut</span>   <span class="var">b</span> := <span class="num">3.14</span>       <span class="cmt"># b: f64</span>
+<span class="kw">const</span> <span class="var">c</span> := <span class="lit">true</span>        <span class="cmt"># c: bool</span>
+<span class="kw">const</span> <span class="var">s</span> := <span class="str">"hello"</span>    <span class="cmt"># s: *u8</span></code></pre>
 
       <div class="callout">
         <div class="callout-title">Note</div>

@@ -9,5 +9,5 @@ fn get_value(e: my.enum_type) -> i32 {
 }
 
 pub fn main() -> i32 {
-    return get_value(.val_a) + get_value(my.enum_type.val_b) + get_value(.val_c) // should return 10
+    return get_value(.val_a) + get_value(my.enum_type.val_b) + get_value(.val_c) # should return 10
 }

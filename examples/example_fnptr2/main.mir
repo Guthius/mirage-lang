@@ -1,4 +1,4 @@
-// example_fnptr2.mir — advanced function pointer features
+# example_fnptr2.mir — advanced function pointer features
 
 ext fn printf(fmt: *u8, ...) -> i32
 
@@ -10,7 +10,7 @@ fn negate(x: i32) -> i32 {
     return 0 - x
 }
 
-// Struct with a function pointer field
+# Struct with a function pointer field
 type Transform = struct {
     f: fn(i32) -> i32
     label: *u8
@@ -20,45 +20,45 @@ fn apply_transform(t: Transform, x: i32) -> i32 {
     return t.f(x)
 }
 
-// Cast to/from anyptr
+# Cast to/from anyptr
 fn get_fn_ptr() -> anyptr {
     mut fp: fn(i32) -> i32 = square
     return cast(fp, anyptr)
 }
 
-// Multi-return function
+# Multi-return function
 fn divmod(a: i32, b: i32) -> (i32, i32) {
     return a / b, a % b
 }
 
-// Variadic function pointer
+# Variadic function pointer
 ext fn snprintf(buf: *u8, n: u64, fmt: *u8, ...) -> i32
 
 pub fn main() {
-    // Struct field function pointer
+    # Struct field function pointer
     mut t: Transform
     t.f = square
     t.label = "square"
     mut result: i32 = apply_transform(t, 5)
-    printf("%d\n", result)  // 25
+    printf("%d\n", result)  # 25
 
     t.f = negate
     result = t.f(7)
-    printf("%d\n", result)  // -7
+    printf("%d\n", result)  # -7
 
-    // Call struct field fn ptr directly
+    # Call struct field fn ptr directly
     result = t.f(10)
-    printf("%d\n", result)  // -10
+    printf("%d\n", result)  # -10
 
-    // Cast fn ptr to anyptr and back
+    # Cast fn ptr to anyptr and back
     mut raw: anyptr = get_fn_ptr()
     mut fp: fn(i32) -> i32 = cast(raw, fn(i32) -> i32)
     result = fp(6)
-    printf("%d\n", result)  // 36
+    printf("%d\n", result)  # 36
 
-    // Variadic function pointer (printf itself)
+    # Variadic function pointer (printf itself)
     mut vfp: fn(*u8, ...) -> i32 = printf
-    vfp("vfp: %d\n", 777)  // vfp: 777
+    vfp("vfp: %d\n", 777)  # vfp: 777
 
     printf("ok\n")
 }

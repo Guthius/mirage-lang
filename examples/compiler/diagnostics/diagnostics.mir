@@ -25,7 +25,7 @@ pub type Engine = struct {
 }
 
 fn print_diagnostic(diagnostic: *Diagnostic) {
-    // TODO: Implement me
+    # TODO: Implement me
 }
 
 impl Engine {
@@ -48,7 +48,7 @@ impl Engine {
         if level == .Error {
             self.errors++
             if self.errors == MAX_ERRORS {
-                // TODO:  std::cerr << "mirage: too many errors emitted, stopping.\n";
+                # TODO:  std::cerr << "mirage: too many errors emitted, stopping.\n";
                 return
             }
         }

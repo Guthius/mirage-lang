@@ -1,4 +1,4 @@
-// NOTE: Draft Design for Generics - Not Implemented Yet!!
+# NOTE: Draft Design for Generics - Not Implemented Yet!!
 
 const mem := import("../mem")
 

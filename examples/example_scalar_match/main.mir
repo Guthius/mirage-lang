@@ -1,4 +1,4 @@
-// Example: scalar match and switch statements
+# Example: scalar match and switch statements
 
 fn classify_i32(x: i32) -> i32 {
     return match x {
@@ -10,7 +10,7 @@ fn classify_i32(x: i32) -> i32 {
 }
 
 fn bool_name(b: bool) -> i32 {
-    // bool match: exhaustive via both literals, no _ needed
+    # bool match: exhaustive via both literals, no _ needed
     return match b {
         true: 1,
         false: 0
@@ -18,24 +18,24 @@ fn bool_name(b: bool) -> i32 {
 }
 
 pub fn main() -> i32 {
-    // Test scalar match
-    const a := classify_i32(0)   // -> 0
-    const b := classify_i32(1)   // -> 1
-    const c := classify_i32(-1)  // -> -1
-    const d := classify_i32(42)  // -> 99
+    # Test scalar match
+    const a := classify_i32(0)   # -> 0
+    const b := classify_i32(1)   # -> 1
+    const c := classify_i32(-1)  # -> -1
+    const d := classify_i32(42)  # -> 99
 
-    // Test bool match
-    const e := bool_name(true)   // -> 1
-    const f := bool_name(false)  // -> 0
+    # Test bool match
+    const e := bool_name(true)   # -> 1
+    const f := bool_name(false)  # -> 0
 
-    // Test switch statement
+    # Test switch statement
     mut result: i32 = 0
     switch a {
         0: result = 10,
         _: result = 99
     }
 
-    // Test switch with bool
+    # Test switch with bool
     mut flag: i32 = 0
     switch true {
         true: flag = 1,
@@ -43,5 +43,5 @@ pub fn main() -> i32 {
     }
 
     return a + b + c + d + e + f + result + flag
-    // 0 + 1 + (-1) + 99 + 1 + 0 + 10 + 1 = 111
+    # 0 + 1 + (-1) + 99 + 1 + 0 + 10 + 1 = 111
 }

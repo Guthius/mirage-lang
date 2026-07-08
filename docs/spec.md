@@ -145,13 +145,13 @@ Tagged unions combine a `u32` discriminant tag with a payload. Each variant may 
 
 **Construction:**
 ```mirage
-// Qualified form
+# Qualified form
 const c: Shape = Shape.circle{.radius = 3.0}
 
-// Contextual form (type inferred from annotation)
+# Contextual form (type inferred from annotation)
 mut r: Shape = .rect{.w = 4.0, .h = 5.0}
 
-// Payload-free
+# Payload-free
 const p: Shape = .point
 ```
 
@@ -165,7 +165,7 @@ Tagged union members cannot be accessed directly; use `match` to destructure.
 fn(ParamType1, ParamType2) -> ReturnType
 fn(ParamType) -> (RetType1, RetType2)
 fn(*u8, ...) -> i32
-fn() -> void   // written as: fn()
+fn() -> void   # written as: fn()
 ```
 
 Function pointer types represent callable values. They are opaque pointers internally (8 bytes). The `nil` literal is assignable to any function pointer type; `default` produces a null function pointer.
@@ -179,10 +179,10 @@ Multi-return function pointer types use `-> (T1, T2)` syntax.
 ### Integer Literals
 
 ```mirage
-42          // decimal
-0xFF        // hexadecimal
-0b1010      // binary
-1_000_000   // underscore separators allowed
+42          # decimal
+0xFF        # hexadecimal
+0b1010      # binary
+1_000_000   # underscore separators allowed
 ```
 
 ### Float Literals
@@ -234,8 +234,8 @@ An enum value written contextually (`.field_name`) is valid anywhere the expecte
 
 ```mirage
 mut name: Type = expr
-mut name := expr          // type inferred from initializer
-mut name: Type            // default-initialized (struct fields, arrays, etc.)
+mut name := expr          # type inferred from initializer
+mut name: Type            # default-initialized (struct fields, arrays, etc.)
 ```
 
 `mut` declares a mutable local variable or module-level global.
@@ -265,8 +265,8 @@ mut val, _ := fallible_fn()
 ### The `default` Initializer
 
 ```mirage
-mut x: i32 = default      // zero
-mut p: Point = default    // each field default-initialized
+mut x: i32 = default      # zero
+mut p: Point = default    # each field default-initialized
 ```
 
 `default` initializes a value to its type-appropriate zero. For structs, each field is recursively default-initialized (using field-level default expressions if present).
@@ -274,7 +274,7 @@ mut p: Point = default    // each field default-initialized
 ### The `undefined` Initializer
 
 ```mirage
-mut x: i32 = undefined    // storage allocated, no initialization
+mut x: i32 = undefined    # storage allocated, no initialization
 ```
 
 `undefined` allocates storage but emits no initializer. Valid anywhere except `const` declarations. Use for performance-critical paths where initialization is immediately followed by an assignment.
@@ -315,8 +315,8 @@ pub const max_size: usize = 4096
 ### Arithmetic
 
 ```mirage
-a + b    // add (also: anyptr + integer)
-a - b    // subtract (also: anyptr - integer)
+a + b    # add (also: anyptr + integer)
+a - b    # subtract (also: anyptr - integer)
 a * b
 a / b
 a % b
@@ -327,8 +327,8 @@ Both operands must have the same type (no implicit promotion). `anyptr` supports
 ### Comparison
 
 ```mirage
-a == b   // equal
-a != b   // not equal
+a == b   # equal
+a != b   # not equal
 a < b
 a > b
 a <= b
@@ -340,18 +340,18 @@ Result type is `bool`. Both operands must be of assignable types.
 ### Logical
 
 ```mirage
-a && b   // logical AND (bool operands only)
-a || b   // logical OR (bool operands only)
+a && b   # logical AND (bool operands only)
+a || b   # logical OR (bool operands only)
 ```
 
 ### Bitwise
 
 ```mirage
-a & b    // bitwise AND
-a | b    // bitwise OR
-a ^ b    // bitwise XOR
-a << b   // shift left
-a >> b   // shift right
+a & b    # bitwise AND
+a | b    # bitwise OR
+a ^ b    # bitwise XOR
+a << b   # shift left
+a >> b   # shift right
 ```
 
 Both operands must have the same type.
@@ -359,11 +359,11 @@ Both operands must have the same type.
 ### Unary
 
 ```mirage
--x       // numeric negation
-!x       // logical NOT (bool only)
-~x       // bitwise NOT
-&x       // address-of (produces *T)
-*x       // dereference pointer
+-x       # numeric negation
+!x       # logical NOT (bool only)
+~x       # bitwise NOT
+&x       # address-of (produces *T)
+*x       # dereference pointer
 ```
 
 ### Ternary
@@ -394,10 +394,10 @@ The target must be a mutable lvalue (a `mut` variable, a dereference, an array i
 ### Increment / Decrement
 
 ```mirage
-x++    // post-increment
-x--    // post-decrement
-++x    // pre-increment  (prefix form in unary)
---x    // pre-decrement  (prefix form in unary)
+x++    # post-increment
+x--    # post-decrement
+++x    # pre-increment  (prefix form in unary)
+--x    # pre-decrement  (prefix form in unary)
 ```
 
 Requires a mutable operand.
@@ -405,16 +405,16 @@ Requires a mutable operand.
 ### Member Access
 
 ```mirage
-value.field          // struct/union field
-pointer.field        // auto-deref through pointer
-module_name.symbol   // cross-module access
+value.field          # struct/union field
+pointer.field        # auto-deref through pointer
+module_name.symbol   # cross-module access
 ```
 
 ### Index and Slice
 
 ```mirage
-arr[i]            // array or slice index
-arr[start..end]   // slice expression (produces []T)
+arr[i]            # array or slice index
+arr[start..end]   # slice expression (produces []T)
 ```
 
 ### Function Call
@@ -422,15 +422,15 @@ arr[start..end]   // slice expression (produces []T)
 ```mirage
 fn_name(arg1, arg2)
 obj.method(arg1)
-fp(arg1)            // call through function pointer
-mod.fn_name(arg)    // cross-module call
+fp(arg1)            # call through function pointer
+mod.fn_name(arg)    # cross-module call
 ```
 
 ### `cast`
 
 ```mirage
 cast(expr, TargetType)
-cast(ptr, []T, length)   // create a slice from a pointer
+cast(ptr, []T, length)   # create a slice from a pointer
 ```
 
 Valid casts:
@@ -481,16 +481,16 @@ Calls a fallible function (one whose last return type is `error`). If the error 
 ### Braced Initializers
 
 ```mirage
-{.field = val, .field2 = val2} // struct initializer
-{val1, val2, val3}             // array initializer
-{}                             // empty (full default initialization)
+{.field = val, .field2 = val2} # struct initializer
+{val1, val2, val3}             # array initializer
+{}                             # empty (full default initialization)
 ```
 
 An array initializer's last value may end with `...` to fill all remaining elements with that same value (evaluated once):
 
 ```mirage
-mut npc_ids: [10]i32 = { -1... }              // all 10 elements set to -1
-const levels: [10]i32 = { 0, 1, 2, 3, 4, 5... } // 0, 1, 2, 3, 4, then five more 5s
+mut npc_ids: [10]i32 = { -1... }              # all 10 elements set to -1
+const levels: [10]i32 = { 0, 1, 2, 3, 4, 5... } # 0, 1, 2, 3, 4, then five more 5s
 ```
 
 ### Import Expression
@@ -520,11 +520,11 @@ Introduces a new scope. Variables declared inside are not visible outside.
 
 ```mirage
 if condition {
-    // then
+    # then
 } else if other_condition {
-    // else if
+    # else if
 } else {
-    // else
+    # else
 }
 ```
 
@@ -534,7 +534,7 @@ The `else` branch is optional. The condition must be `bool`. The body can be any
 
 ```mirage
 while condition {
-    // body
+    # body
 }
 ```
 
@@ -554,7 +554,7 @@ continue
 ```mirage
 return
 return value
-return val1, val2    // multi-return
+return val1, val2    # multi-return
 ```
 
 Returns from the current function. For multi-return functions, multiple values are returned separated by commas. Deferred statements run before the actual return.
@@ -589,9 +589,9 @@ Statement-level counterpart to `match`. No exhaustiveness requirement. Arm bodie
 ```mirage
 mut x: i32 = 5
 mut x := 5
-mut x: i32           // default-initialized
+mut x: i32           # default-initialized
 const y := 10
-mut a, b := func()   // group declaration
+mut a, b := func()   # group declaration
 ```
 
 ---
@@ -602,11 +602,11 @@ mut a, b := func()   // group declaration
 
 ```mirage
 fn name(param1: Type1, mut param2: Type2) -> ReturnType {
-    // body
+    # body
 }
 
 pub fn name(p: Type) -> (T1, T2) {
-    // multi-return
+    # multi-return
 }
 ```
 
@@ -619,7 +619,7 @@ pub fn name(p: Type) -> (T1, T2) {
 
 ```mirage
 ext fn puts(s: *u8) -> i32
-ext fn printf(fmt: *u8, ...) -> i32   // variadic
+ext fn printf(fmt: *u8, ...) -> i32   # variadic
 pub ext fn malloc(size: usize) -> anyptr
 ```
 
@@ -633,9 +633,9 @@ Declares an external C function. `ext fn` functions:
 
 The root module must define one of:
 ```mirage
-pub fn main()           // void; exits with code 0
-pub fn main() -> i32    // exits with this code
-pub fn main() -> error  // exits with this error value (truncated to i32)
+pub fn main()           # void; exits with code 0
+pub fn main() -> i32    # exits with this code
+pub fn main() -> error  # exits with this error value (truncated to i32)
 ```
 
 For freestanding builds (`--freestanding`), use `fn _start()` instead.
@@ -670,8 +670,8 @@ Both `match` (expression) and `switch` (statement) use the same arm pattern synt
 **Variant pattern** (for enum and tagged union operands):
 ```mirage
 .field_name
-.variant_name(capture)     // binds payload struct by value
-.variant_name(&capture)    // binds payload struct by reference (*PayloadType)
+.variant_name(capture)     # binds payload struct by value
+.variant_name(&capture)    # binds payload struct by reference (*PayloadType)
 ```
 
 **Literal pattern** (for integer and bool operands):
@@ -713,7 +713,7 @@ Matches any value. Must be the last arm. At most one `_` allowed per match/switc
 ```mirage
 impl TypeName {
     fn method_name(self) -> ReturnType {
-        // access self.field
+        # access self.field
     }
 
     pub fn mutable_method(mut self, arg: i32) -> i32 {
@@ -819,7 +819,7 @@ Fallible return values with an `error` component must be captured; ignoring them
 ```mirage
 mut result: i32 = try divide(10, 2)
 
-// In a group declaration:
+# In a group declaration:
 mut q, e := divide(20, 4)
 ```
 

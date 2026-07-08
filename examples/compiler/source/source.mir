@@ -15,7 +15,7 @@ pub fn load(canonical_path: []u8) -> []u8 {
         return source
     }
 
-    // TODO: Load the file content from disk...
+    # TODO: Load the file content from disk...
 
     return nil
 }

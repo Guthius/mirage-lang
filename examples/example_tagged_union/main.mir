@@ -1,4 +1,4 @@
-// example_tagged_union.mir — demonstrates tagged union types (union(enum))
+# example_tagged_union.mir — demonstrates tagged union types (union(enum))
 
 type Shape = union(enum) {
     circle: struct { radius: f64 }
@@ -10,10 +10,10 @@ type Shape = union(enum) {
 }
 
 pub fn main() -> i32 {
-    // Construct via qualified form: TypeName.variant{.field = val}
+    # Construct via qualified form: TypeName.variant{.field = val}
     const c: Shape = Shape.circle{.radius = 3.0}
 
-    // Match on a tagged union — exhaustive check required
+    # Match on a tagged union — exhaustive check required
     const area_c: f64 = match c {
         .circle(s): s.radius * s.radius * 3.14159,
         .rect(s):   s.w * s.h,
@@ -23,7 +23,7 @@ pub fn main() -> i32 {
         return 1
     }
 
-    // Construct via contextual form: .variant{.field = val}
+    # Construct via contextual form: .variant{.field = val}
     mut r: Shape = .rect{.w = 4.0, .h = 5.0}
 
     const area_r: f64 = match r {
@@ -35,7 +35,7 @@ pub fn main() -> i32 {
         return 2
     }
 
-    // Payload-free variant via contextual form
+    # Payload-free variant via contextual form
     const p: Shape = .point
 
     const area_p: f64 = match p {
@@ -47,7 +47,7 @@ pub fn main() -> i32 {
         return 3
     }
 
-    // sizeof reflects tag + alignment + max payload size
+    # sizeof reflects tag + alignment + max payload size
     const sz: usize = sizeof(Shape)
     if sz < 16 {
         return 4

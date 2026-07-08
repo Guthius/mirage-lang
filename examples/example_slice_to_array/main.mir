@@ -13,19 +13,19 @@ fn copy_into(s: []u8) -> [20]u8 {
 pub fn main() -> i32 {
     mut r: Rec
 
-    // shorter than array: copies + zero-fills tail
+    # shorter than array: copies + zero-fills tail
     r.Name = "hi"
     printf("hi:    '%s' byte19=%d\n", cast(r.Name, *u8), cast(r.Name[19], i32))
 
-    // longer than array: truncates to fit
+    # longer than array: truncates to fit
     r.Name = "this is definitely longer than twenty bytes"
     printf("long:  '%.*s'\n", 20, cast(r.Name, *u8))
 
-    // empty slice: clears the whole array
+    # empty slice: clears the whole array
     r.Name = ""
     printf("empty: byte0=%d byte19=%d\n", cast(r.Name[0], i32), cast(r.Name[19], i32))
 
-    // runtime (non-literal-in-this-scope) slice via function parameter
+    # runtime (non-literal-in-this-scope) slice via function parameter
     const out := copy_into("hey")
     printf("param: '%s' byte19=%d\n", cast(out, *u8), cast(out[19], i32))
 

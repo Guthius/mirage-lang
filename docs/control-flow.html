@@ -76,7 +76,7 @@
 
       <h3>Infinite Loop</h3>
       <pre><code><span class="kw">while</span> <span class="lit">true</span> {
-    <span class="cmt">// runs forever until break</span>
+    <span class="cmt"># runs forever until break</span>
     <span class="kw">if</span> <span class="var">done</span> { <span class="kw">break</span> }
 }</code></pre>
 
@@ -84,15 +84,15 @@
       <p>Since <code>--</code> is a post-decrement expression, it can be used directly as the while condition:</p>
       <pre><code><span class="kw">mut</span> <span class="var">n</span>: <span class="ty">usize</span> = <span class="num">5</span>
 <span class="kw">while</span> <span class="var">n</span>-- {
-    <span class="cmt">// runs 5 times: n is tested before decrement</span>
+    <span class="cmt"># runs 5 times: n is tested before decrement</span>
 }</code></pre>
 
       <h3>Break and Continue</h3>
       <pre><code><span class="kw">mut</span> <span class="var">i</span>: <span class="ty">i32</span> = <span class="num">0</span>
 <span class="kw">while</span> <span class="var">i</span> &lt; <span class="num">10</span> {
     <span class="var">i</span>++
-    <span class="kw">if</span> <span class="var">i</span> == <span class="num">3</span> { <span class="kw">continue</span> }  <span class="cmt">// skip 3</span>
-    <span class="kw">if</span> <span class="var">i</span> == <span class="num">7</span> { <span class="kw">break</span> }     <span class="cmt">// stop at 7</span>
+    <span class="kw">if</span> <span class="var">i</span> == <span class="num">3</span> { <span class="kw">continue</span> }  <span class="cmt"># skip 3</span>
+    <span class="kw">if</span> <span class="var">i</span> == <span class="num">7</span> { <span class="kw">break</span> }     <span class="cmt"># stop at 7</span>
     <span class="fn">printf</span>(<span class="str">"%d\n"</span>, <span class="var">i</span>)
 }</code></pre>
 
@@ -160,7 +160,7 @@
     }
 }
 
-<span class="cmt">// By-reference capture: s is *PayloadStruct</span>
+<span class="cmt"># By-reference capture: s is *PayloadStruct</span>
 <span class="kw">const</span> <span class="var">desc</span> := <span class="kw">match</span> <span class="var">shape</span> {
     .<span class="var">circle</span>(&amp;<span class="var">c</span>): <span class="var">c</span>.<span class="var">radius</span>,
     .<span class="var">rect</span>(<span class="var">r</span>):   <span class="var">r</span>.<span class="var">w</span>,
