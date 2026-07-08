@@ -1866,6 +1866,22 @@ namespace sema {
                         diag.report_error(DiagnosticStage::Sema, v.location, "'return' cannot escape a 'defer' body");
                         return;
                     }
+                    if (v.return_values.size() == 1 && expected_returns.size() > 1) {
+                        if (const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&v.return_values[0])) {
+                            const auto returns = check_group_call_returns(**call, locals, module_path, program, diag, loop_depth, defer_loop_base);
+                            if (returns.size() != expected_returns.size()) {
+                                diag.report_error(DiagnosticStage::Sema, v.location,
+                                                  std::format("expected {} return value(s), got {}", expected_returns.size(), returns.size()));
+                                return;
+                            }
+                            for (size_t i = 0; i < returns.size(); ++i) {
+                                if (!assignable_in_module(returns[i], expected_returns[i], module_path, program)) {
+                                    diag.report_error(DiagnosticStage::Sema, v.location, std::format("return value {} type mismatch", i + 1));
+                                }
+                            }
+                            return;
+                        }
+                    }
                     if (v.return_values.size() != expected_returns.size()) {
                         diag.report_error(DiagnosticStage::Sema, v.location,
                                           std::format("expected {} return value(s), got {}", expected_returns.size(), v.return_values.size()));

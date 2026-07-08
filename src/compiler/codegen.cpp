@@ -2854,6 +2854,15 @@ namespace codegen {
             }
 
             void emit_return(const ast::ReturnStmt &stmt) {
+                if (stmt.return_values.size() == 1 && current_returns_.size() > 1) {
+                    if (const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&stmt.return_values[0])) {
+                        auto *result = emit_call(**call);
+                        emit_defers_for_return();
+                        builder_.CreateRet(result);
+                        return;
+                    }
+                }
+
                 // Evaluate return values first, before running defers
                 std::vector<llvm::Value *> ret_vals;
                 ret_vals.reserve(stmt.return_values.size());
