@@ -115,6 +115,7 @@ namespace sema {
         auto is_cast_legal(const ResolvedType &from, const ResolvedType &to) -> bool {
             if (to.kind == TypeKind::Slice) return from.kind == TypeKind::Pointer || from.kind == TypeKind::Anyptr || from.kind == TypeKind::Array || from.kind == TypeKind::Slice;
             if (from.kind == TypeKind::Array && (to.kind == TypeKind::Pointer || to.kind == TypeKind::Anyptr)) return true;
+            if (from.kind == TypeKind::Slice && (to.kind == TypeKind::Pointer || to.kind == TypeKind::Anyptr)) return true;
             // Function pointers can be cast to/from anyptr (C callback interop)
             if (from.kind == TypeKind::Function && to.kind == TypeKind::Anyptr) return true;
             if (from.kind == TypeKind::Anyptr && to.kind == TypeKind::Function) return true;

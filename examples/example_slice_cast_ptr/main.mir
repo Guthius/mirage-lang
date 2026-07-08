@@ -1,0 +1,19 @@
+ext fn printf(fmt: *u8, ...) -> i32
+
+type Source = struct {
+    source: []u8
+}
+
+pub fn main() -> i32 {
+    mut sf: Source
+    sf.source = "hello slice"
+
+    # explicit cast() from a real slice (not array) to a raw pointer
+    printf("ptr:    '%.*s'\n", len(sf.source), cast(sf.source, *u8))
+
+    # explicit cast() from a slice to anyptr
+    const p: anyptr = cast(sf.source, anyptr)
+    printf("anyptr: '%.*s'\n", len(sf.source), cast(p, *u8))
+
+    return 0
+}

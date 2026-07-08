@@ -1800,6 +1800,9 @@ namespace codegen {
                                     lv.ptr,
                                     {builder_.getInt32(0), builder_.getInt64(0)});
                             }
+                            if (from.kind == sema::TypeKind::Slice && is_pointer_like(ty)) {
+                                return builder_.CreateExtractValue(emit_expr(v->value), {0});
+                            }
                             return emit_cast(emit_expr(v->value), from, ty);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
                             const auto lv = emit_lvalue(expr);
