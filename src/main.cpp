@@ -195,20 +195,37 @@ auto main(const int argc, char *argv[]) -> int {
     SourceManager source_manager;
     DiagnosticEngine diag(source_manager);
 
+    const auto parse_start = std::chrono::steady_clock::now();
     const auto ast = ast::resolve(options.module_path, source_manager, diag);
     if (!ast.ok) {
         return 1;
     }
+    const auto parse_elapsed = std::chrono::steady_clock::now() - parse_start;
 
+    const auto sema_start = std::chrono::steady_clock::now();
     const auto sema = sema::check_program(ast, diag);
     if (!sema.ok) {
         return 1;
     }
+    const auto sema_elapsed = std::chrono::steady_clock::now() - sema_start;
 
+    const auto codegen_start = std::chrono::steady_clock::now();
     const auto llvm_module = codegen::generate(ast, sema, diag, {.freestanding = options.freestanding});
     if (!llvm_module || diag.has_errors()) {
         return 1;
     }
+    const auto codegen_elapsed = std::chrono::steady_clock::now() - codegen_start;
+
+    const auto to_ms = [](auto elapsed) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    };
+    llvm::outs() << std::format(
+        "Processed {} file(s), {} token(s)\n"
+        "  parsing: {}ms\n"
+        "  sema:    {}ms\n"
+        "  codegen: {}ms\n",
+        ast.file_count, ast.token_count,
+        to_ms(parse_elapsed), to_ms(sema_elapsed), to_ms(codegen_elapsed));
 
     if (options.emit_ir) {
         llvm_module->print(llvm::outs(), nullptr);

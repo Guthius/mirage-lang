@@ -9,7 +9,7 @@
 
 namespace ast {
     namespace {
-        auto load_and_parse(const std::string &canonical_path, SourceManager &source_manager, DiagnosticEngine &diagnostics) -> Module {
+        auto load_and_parse(const std::string &canonical_path, SourceManager &source_manager, DiagnosticEngine &diagnostics, Program &program) -> Module {
             std::error_code ec;
             std::filesystem::directory_iterator dir(canonical_path, ec);
             if (ec) {
@@ -33,6 +33,8 @@ namespace ast {
                 if (source_file.text.empty()) continue;
                 auto tokens = lexer::tokenize(source_file.text, source_file.filename, diagnostics);
                 if (diagnostics.has_errors()) return {};
+                program.file_count += 1;
+                program.token_count += tokens.size();
                 auto decls = parse(tokens, diagnostics);
                 combined.insert(combined.end(), std::make_move_iterator(decls.begin()), std::make_move_iterator(decls.end()));
             }
@@ -101,7 +103,7 @@ namespace ast {
                 return;
             }
 
-            it->second = load_and_parse(it->first, source_manager, diagnostics);
+            it->second = load_and_parse(it->first, source_manager, diagnostics, program);
 
             for (auto &import_str : find_import_strings(program.modules[path])) {
                 auto resolved_path = resolve_import_path(path, import_str, mirage_path);

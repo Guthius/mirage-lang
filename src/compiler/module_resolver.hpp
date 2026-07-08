@@ -12,6 +12,8 @@ namespace ast {
         std::unordered_map<std::string, Module> modules;
         std::unordered_map<std::string, std::unordered_map<std::string, std::string>> module_imports;
         std::string root_module_path;
+        size_t file_count = 0;
+        size_t token_count = 0;
         bool ok = false;
     };
 
