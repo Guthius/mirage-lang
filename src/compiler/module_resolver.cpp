@@ -4,6 +4,7 @@
 #include "source_manager.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 
 namespace ast {
@@ -52,15 +53,45 @@ namespace ast {
             return found;
         }
 
-        auto resolve_import_path(const std::string &importer_path, const std::string &import_path) -> std::string {
-            auto candidate = std::filesystem::path(importer_path) / import_path;
-            if (!std::filesystem::is_directory(candidate)) {
-                return {};
+        auto is_contained_in(const std::filesystem::path &base, const std::filesystem::path &candidate) -> bool {
+            auto base_it = base.begin();
+            auto cand_it = candidate.begin();
+            for (; base_it != base.end(); ++base_it, ++cand_it) {
+                if (cand_it == candidate.end() || *cand_it != *base_it) {
+                    return false;
+                }
             }
-            return canonicalize(candidate.string());
+            return true;
         }
 
-        void visit(const std::string &path, Program &program, SourceManager &source_manager, DiagnosticEngine &diagnostics) {
+        auto resolve_import_path(const std::string &importer_path, const std::string &import_path, const std::string &mirage_path) -> std::string {
+            auto candidate = std::filesystem::path(importer_path) / import_path;
+            if (std::filesystem::is_directory(candidate)) {
+                return canonicalize(candidate.string());
+            }
+
+            if (mirage_path.empty()) {
+                return {};
+            }
+
+            auto fallback_candidate = std::filesystem::path(mirage_path) / import_path;
+            if (!std::filesystem::is_directory(fallback_candidate)) {
+                return {};
+            }
+
+            auto canonical_fallback = canonicalize(fallback_candidate.string());
+            if (canonical_fallback.empty()) {
+                return {};
+            }
+
+            if (!is_contained_in(std::filesystem::path(mirage_path), std::filesystem::path(canonical_fallback))) {
+                return {};
+            }
+
+            return canonical_fallback;
+        }
+
+        void visit(const std::string &path, Program &program, SourceManager &source_manager, DiagnosticEngine &diagnostics, const std::string &mirage_path) {
             if (program.modules.contains(path)) {
                 return;
             }
@@ -73,7 +104,7 @@ namespace ast {
             it->second = load_and_parse(it->first, source_manager, diagnostics);
 
             for (auto &import_str : find_import_strings(program.modules[path])) {
-                auto resolved_path = resolve_import_path(path, import_str);
+                auto resolved_path = resolve_import_path(path, import_str, mirage_path);
                 if (resolved_path.empty()) {
                     diagnostics.report_error(
                         DiagnosticStage::Parser, {},
@@ -84,7 +115,7 @@ namespace ast {
 
                 program.module_imports[path][import_str] = resolved_path;
 
-                visit(resolved_path, program, source_manager, diagnostics);
+                visit(resolved_path, program, source_manager, diagnostics, mirage_path);
             }
         }
     }
@@ -114,7 +145,15 @@ namespace ast {
 
         program.root_module_path = canonical;
 
-        visit(canonical, program, source_manager, diagnostics);
+        std::string mirage_path;
+        if (const char *env_value = std::getenv("MIRAGE_PATH"); env_value != nullptr) {
+            auto candidate = canonicalize(env_value);
+            if (!candidate.empty() && std::filesystem::is_directory(candidate)) {
+                mirage_path = candidate;
+            }
+        }
+
+        visit(canonical, program, source_manager, diagnostics, mirage_path);
 
         program.ok = !diagnostics.has_errors();
 
