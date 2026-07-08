@@ -248,9 +248,9 @@ primary_expr  ::= INT_LITERAL
                | dot_ident_expr
                | contextual_tagged_variant
 
-sizeof_expr   ::= 'sizeof' expr
+sizeof_expr   ::= 'sizeof' '(' expr ')'
 
-len_expr      ::= 'len' expr
+len_expr      ::= 'len' '(' expr ')'
 
 cast_expr     ::= 'cast' '(' expr ',' type [ ',' expr ] ')'
 

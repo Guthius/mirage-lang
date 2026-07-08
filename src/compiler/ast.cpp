@@ -515,18 +515,24 @@ namespace ast {
 
             if (parser.check(TokenKind::KwSizeOf)) {
                 parser.advance();
+                parser.expect(TokenKind::LParen, "'('");
+                auto operand = parse_expr(parser);
+                parser.expect(TokenKind::RParen, "')'");
 
                 return std::make_unique<SizeOfExpr>(SizeOfExpr{
-                    .operand = parse_expr(parser),
+                    .operand = std::move(operand),
                     .location = location,
                 });
             }
 
             if (parser.check(TokenKind::KwLen)) {
                 parser.advance();
+                parser.expect(TokenKind::LParen, "'('");
+                auto operand = parse_expr(parser);
+                parser.expect(TokenKind::RParen, "')'");
 
                 return std::make_unique<LenExpr>(LenExpr{
-                    .operand = parse_expr(parser),
+                    .operand = std::move(operand),
                     .location = location,
                 });
             }
