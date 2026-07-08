@@ -779,6 +779,7 @@ namespace sema {
         if (from.kind == TypeKind::Slice && to.kind == TypeKind::Array) return true;
         if (from.kind == TypeKind::Anyptr && to.kind == TypeKind::Slice) return true;
         if (from.kind == TypeKind::Slice && to.kind == TypeKind::Pointer) return true;
+        if (from.kind == TypeKind::Slice && to.kind == TypeKind::Anyptr) return true;
         return false;
     }
 

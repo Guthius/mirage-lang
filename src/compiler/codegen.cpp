@@ -736,23 +736,13 @@ namespace codegen {
                             if (!info.is_resolved) continue;
 
                             // First param: opaque pointer (self)
-                            std::vector<sema::ResolvedType> params_with_self;
-                            // Placeholder for pointer — we use llvm::PointerType directly below
                             std::vector<llvm::Type *> param_types;
                             param_types.push_back(llvm::PointerType::getUnqual(*context_));
                             for (const auto &p : info.param_types) {
                                 param_types.push_back(llvm_type(path, p));
                             }
 
-                            llvm::Type *ret = info.return_types.empty()
-                                                  ? llvm::Type::getVoidTy(*context_)
-                                                  : llvm_type(path, info.return_types.front());
-                            if (info.return_types.size() > 1) {
-                                // Multi-return: return struct (simplified - use first for now)
-                                // TODO: multi-return methods
-                            }
-
-                            auto *fn_type = llvm::FunctionType::get(ret, param_types, false);
+                            auto *fn_type = llvm::FunctionType::get(return_type(path, info.return_types), param_types, false);
                             const auto fname = symbol_name(path, method_fn_key(type_name, method_name));
                             auto *llvm_fn = llvm::Function::Create(
                                 fn_type, llvm::GlobalValue::InternalLinkage, fname, *module_);
@@ -1222,7 +1212,8 @@ namespace codegen {
                         lv.ptr,
                         {builder_.getInt32(0), builder_.getInt64(0)});
                 }
-                if (from.kind == sema::TypeKind::Slice && target.kind == sema::TypeKind::Pointer) {
+                if (from.kind == sema::TypeKind::Slice &&
+                    (target.kind == sema::TypeKind::Pointer || target.kind == sema::TypeKind::Anyptr)) {
                     return builder_.CreateExtractValue(emit_expr(expr), {0});
                 }
                 return emit_expr(expr);
