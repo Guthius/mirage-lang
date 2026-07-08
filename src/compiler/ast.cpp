@@ -307,6 +307,67 @@ namespace ast {
             });
         }
 
+        // Decodes a single escape sequence. `str` must point just past the
+        // backslash on entry (str[0] is the escape designator) and is left
+        // positioned just past the whole escape sequence on return.
+        auto decode_escape_sequence(Parser &parser, const SourceLocation location, std::string_view &str,
+                                     const std::string_view kind) -> uint8_t {
+            const auto HexDigitValue = [](const char ch) -> uint8_t {
+                if (ch >= '0' && ch <= '9') {
+                    return static_cast<uint8_t>(ch - '0');
+                }
+
+                return static_cast<uint8_t>(10 + (std::tolower(ch) - 'a'));
+            };
+
+            const char c = str[0];
+
+            switch (c) {
+            case '\\': str.remove_prefix(1); return '\\';
+            case '"':  str.remove_prefix(1); return '"';
+            case '\'': str.remove_prefix(1); return '\'';
+            case 'n':  str.remove_prefix(1); return '\n';
+            case 't':  str.remove_prefix(1); return '\t';
+            case 'r':  str.remove_prefix(1); return '\r';
+            case 'x': {
+                str.remove_prefix(1);
+
+                if (str.size() < 2 || !std::isxdigit(static_cast<unsigned char>(str[0])) ||
+                    !std::isxdigit(static_cast<unsigned char>(str[1]))) {
+                    parser.report_error(location,
+                                         std::format("hex escape sequence requires exactly 2 hex digits in {} literal", kind));
+                    return 0;
+                }
+
+                const uint8_t value = static_cast<uint8_t>(HexDigitValue(str[0]) * 16 + HexDigitValue(str[1]));
+                str.remove_prefix(2);
+                return value;
+            }
+            default:
+                if (c >= '0' && c <= '7') {
+                    unsigned value = 0;
+                    int count = 0;
+
+                    while (!str.empty() && count < 3 && str[0] >= '0' && str[0] <= '7') {
+                        value = value * 8 + static_cast<unsigned>(str[0] - '0');
+                        str.remove_prefix(1);
+                        ++count;
+                    }
+
+                    if (value > 0xFF) {
+                        parser.report_error(location, std::format("octal escape sequence out of range in {} literal", kind));
+                        value &= 0xFF;
+                    }
+
+                    return static_cast<uint8_t>(value);
+                }
+
+                parser.report_error(location, std::format("unknown escape sequence '\\{}' in {} literal", c, kind));
+                str.remove_prefix(1);
+                return 0;
+            }
+        }
+
         auto parse_string_literal(Parser &parser) -> LiteralStringExpr {
             const auto location = parser.current_location();
 
@@ -335,22 +396,11 @@ namespace ast {
                         break;
                     }
 
-                    switch (str[0]) {
-                    case '\\': oss << '\\'; break;
-                    case '"':  oss << '"'; break;
-                    case 'n':  oss << '\n'; break;
-                    case 't':  oss << '\t'; break;
-                    case 'r':  oss << '\r'; break;
-                    case '0':  oss << '\0'; break;
-                    default:
-                        parser.report_error(location, std::format("unkown escape sequence '\\{}' in string literal", str[0]));
-                        break;
-                    }
+                    oss << static_cast<char>(decode_escape_sequence(parser, location, str, "string"));
                 } else {
                     oss << str[0];
+                    str.remove_prefix(1);
                 }
-
-                str.remove_prefix(1);
             }
 
             return LiteralStringExpr{
@@ -373,17 +423,8 @@ namespace ast {
 
             uint8_t val = 0;
             if (str[0] == '\\' && str.size() > 1) {
-                switch (str[1]) {
-                case '\\': val = '\\'; break;
-                case '\'': val = '\''; break;
-                case 'n':  val = '\n'; break;
-                case 't':  val = '\t'; break;
-                case 'r':  val = '\r'; break;
-                case '0':  val = '\0'; break;
-                default:
-                    parser.report_error(location, std::format("unknown escape sequence '\\{}' in character literal", str[1]));
-                    break;
-                }
+                str.remove_prefix(1);
+                val = decode_escape_sequence(parser, location, str, "character");
             } else if (!str.empty()) {
                 val = static_cast<uint8_t>(str[0]);
             }

@@ -328,7 +328,21 @@ namespace lexer {
                 }
                 if (peek() == '\\') {
                     advance();
-                    if (!at_end()) advance();
+                    if (at_end()) {
+                        // fall through to unterminated check below
+                    } else if (peek() == 'x') {
+                        advance();
+                        for (int i = 0; i < 2 && !at_end() && is_hex_digit(peek()); ++i) {
+                            advance();
+                        }
+                    } else if (peek() >= '0' && peek() <= '7') {
+                        advance();
+                        for (int i = 0; i < 2 && !at_end() && peek() >= '0' && peek() <= '7'; ++i) {
+                            advance();
+                        }
+                    } else {
+                        advance();
+                    }
                 } else {
                     advance();
                 }
