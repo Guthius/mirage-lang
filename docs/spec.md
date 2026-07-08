@@ -308,7 +308,7 @@ pub const max_size: usize = 4096
 | 10    | `<<` `>>`                       | left          |
 | 11    | `+` `-`                          | left          |
 | 12    | `*` `/` `%`                      | left          |
-| 13    | Unary: `-` `!` `~` `&` `*` `try`| right         |
+| 13    | Unary: `-` `!` `~` `&` `*` `++` `--` `try`| right         |
 | 14    | Postfix: call `()` `.member` `[idx]` `++` `--` | left |
 | 15    | Primary                          |               |
 

@@ -829,6 +829,19 @@ namespace ast {
                 });
             }
 
+            if (parser.check(TokenKind::PlusPlus) || parser.check(TokenKind::MinusMinus)) {
+                const bool is_increment = parser.check(TokenKind::PlusPlus);
+                const auto location = parser.current_location();
+                parser.advance();
+
+                return make_expr(IncrDecrExpr{
+                    .operand = parse_unary(parser),
+                    .is_increment = is_increment,
+                    .is_prefix = true,
+                    .location = location,
+                });
+            }
+
             if (const auto op = match_unary_op(parser.current().kind)) {
                 const auto location = parser.current_location();
 

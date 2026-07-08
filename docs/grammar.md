@@ -208,7 +208,7 @@ additive_expr ::= mult_expr  { ( '+' | '-' ) mult_expr }
 mult_expr     ::= unary_expr { ( '*' | '/' | '%' ) unary_expr }
 
 unary_expr    ::= try_expr
-               | ( '-' | '!' | '~' | '&' | '*' ) unary_expr
+               | ( '-' | '!' | '~' | '&' | '*' | '++' | '--' ) unary_expr
                | postfix_expr
 
 try_expr      ::= 'try' postfix_expr
