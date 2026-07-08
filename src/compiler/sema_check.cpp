@@ -67,6 +67,23 @@ namespace sema {
             return ResolvedType{.kind = TypeKind::Invalid};
         }
 
+        auto is_coercible_literal(const ast::Expr &expr) -> bool {
+            return std::visit(
+                [&]<typename T0>(const T0 &v) -> bool {
+                    using V = std::decay_t<T0>;
+                    if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr> ||
+                                  std::is_same_v<V, ast::LiteralFloatExpr> ||
+                                  std::is_same_v<V, ast::LiteralNilExpr>) {
+                        return true;
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
+                        return v->op == ast::UnaryOp::Negate && is_coercible_literal(v->operand);
+                    } else {
+                        return false;
+                    }
+                },
+                expr);
+        }
+
         auto contains_undefined(const ast::Expr &expr) -> bool;
 
         auto contains_undefined_in_braced(const ast::BracedInitializerExpr &bi) -> bool {
@@ -651,8 +668,14 @@ namespace sema {
                     return ResolvedType{.kind = TypeKind::Invalid};
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
-                    ResolvedType lhs = check_expr(v->lhs, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
-                    const ResolvedType rhs = check_expr(v->rhs, locals, module_path, program, diag, lhs, loop_depth, defer_loop_base);
+                    ResolvedType lhs, rhs;
+                    if (is_coercible_literal(v->lhs) && !is_coercible_literal(v->rhs)) {
+                        rhs = check_expr(v->rhs, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
+                        lhs = check_expr(v->lhs, locals, module_path, program, diag, rhs, loop_depth, defer_loop_base);
+                    } else {
+                        lhs = check_expr(v->lhs, locals, module_path, program, diag, expected, loop_depth, defer_loop_base);
+                        rhs = check_expr(v->rhs, locals, module_path, program, diag, lhs, loop_depth, defer_loop_base);
+                    }
                     return binary_op_result(v->op, lhs, rhs, diag, v->location);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
