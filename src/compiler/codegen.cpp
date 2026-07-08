@@ -354,7 +354,7 @@ namespace codegen {
                 std::vector<llvm::Value *> args;
                 for (size_t i = 0; i < call.args.size(); ++i) {
                     if (i < sig.param_types.size()) {
-                        args.push_back(emit_value_as(call.args[i], sig.param_types[i]));
+                        args.push_back(emit_value_as(call.args[i], sig.param_types[i], *current_module_path_));
                     } else {
                         args.push_back(emit_expr(call.args[i]));
                     }
@@ -543,7 +543,7 @@ namespace codegen {
                     if (it == info.fields.end()) continue;
                     const auto field_pos = static_cast<size_t>(std::distance(info.fields.begin(), it));
                     const auto ll_idx = lowering.field_indices.at(field_pos);
-                    agg = builder_.CreateInsertValue(agg, emit_value_as(sf.expr, it->type), {ll_idx});
+                    agg = builder_.CreateInsertValue(agg, emit_value_as(sf.expr, it->type, struct_module), {ll_idx});
                 }
 
                 // Insert remaining fields from their default init exprs (in declaration order)
@@ -576,7 +576,7 @@ namespace codegen {
                 llvm::Value *fill_elem = nullptr;
                 for (size_t i = 0; i < ae.values.size(); ++i) {
                     if (std::holds_alternative<ast::UndefinedExpr>(ae.values[i])) continue;
-                    auto *elem = emit_value_as(ae.values[i], array_info.element_type);
+                    auto *elem = emit_value_as(ae.values[i], array_info.element_type, *current_module_path_);
                     agg = builder_.CreateInsertValue(agg, elem, {static_cast<unsigned>(i)});
                     if (ae.has_fill && i == ae.values.size() - 1) {
                         fill_elem = elem;
@@ -602,7 +602,7 @@ namespace codegen {
                     if (it != union_info.members.end()) {
                         // Opaque pointers: store the member value directly into the union alloca.
                         // The store uses the value's type; the union's [N x i8] storage holds it.
-                        auto *member_val = emit_value_as(sf.expr, it->type);
+                        auto *member_val = emit_value_as(sf.expr, it->type, union_info.module_path);
                         builder_.CreateStore(member_val, slot);
                     }
                 }
@@ -1180,10 +1180,39 @@ namespace codegen {
                 return slice;
             }
 
-            auto emit_value_as(const ast::Expr &expr, const sema::ResolvedType &target) -> llvm::Value * {
+            // Assigns a slice into a fixed-size array by value: copies min(len, count)
+            // elements and zero-fills any remaining tail (an empty slice clears the array).
+            auto emit_slice_to_array(const ast::Expr &expr, const sema::ResolvedType &array_type, const std::string &array_module) -> llvm::Value * {
+                auto *slice_val = emit_expr(expr);
+                auto *src_ptr = builder_.CreateExtractValue(slice_val, {0});
+                auto *src_len = builder_.CreateExtractValue(slice_val, {1});
+
+                const auto &array_info = module_for(array_module).arrays.at(array_type.array_index);
+                auto *ll_arr_ty = llvm_type(array_module, array_type);
+                auto *scratch = builder_.CreateAlloca(ll_arr_ty);
+
+                auto *total_count = builder_.getInt64(array_info.count);
+                auto *copy_count = builder_.CreateSelect(builder_.CreateICmpULT(src_len, total_count), src_len, total_count);
+                auto *elem_size = builder_.getInt64(size_of(array_module, array_info.element_type));
+                auto *copy_bytes = builder_.CreateMul(copy_count, elem_size);
+                auto *total_bytes = builder_.getInt64(array_info.size);
+                auto *remaining_bytes = builder_.CreateSub(total_bytes, copy_bytes);
+
+                const auto align = llvm::Align(array_info.align);
+                builder_.CreateMemCpy(scratch, align, src_ptr, align, copy_bytes);
+                auto *tail_ptr = builder_.CreateGEP(llvm::Type::getInt8Ty(*context_), scratch, copy_bytes);
+                builder_.CreateMemSet(tail_ptr, builder_.getInt8(0), remaining_bytes, align);
+
+                return builder_.CreateLoad(ll_arr_ty, scratch);
+            }
+
+            auto emit_value_as(const ast::Expr &expr, const sema::ResolvedType &target, const std::string &target_module) -> llvm::Value * {
                 const auto from = current_module_->expr_types.at(sema::get_expr_key(expr));
                 if (from.kind == sema::TypeKind::Array && target.kind == sema::TypeKind::Slice) {
                     return emit_array_to_slice(expr, from, target, expr_type_module_hint(expr));
+                }
+                if (from.kind == sema::TypeKind::Slice && target.kind == sema::TypeKind::Array) {
+                    return emit_slice_to_array(expr, target, target_module);
                 }
                 if (from.kind == sema::TypeKind::Array && target.kind == sema::TypeKind::Pointer) {
                     auto lv = emit_lvalue(expr);
@@ -1493,7 +1522,7 @@ namespace codegen {
                         std::vector<llvm::Value *> args;
                         args.push_back(self_ptr);
                         for (size_t i = 0; i < call.args.size(); ++i) {
-                            args.push_back(emit_value_as(call.args[i], method->param_types[i]));
+                            args.push_back(emit_value_as(call.args[i], method->param_types[i], *current_module_path_));
                         }
                         return builder_.CreateCall(
                             functions_.at(FunctionKey{method->impl_module, method_fn_key(method->type_name, method->decl->name)}),
@@ -1542,14 +1571,14 @@ namespace codegen {
                 std::vector<llvm::Value *> args;
                 if (const auto *fn = std::get_if<sema::FunctionSymbol>(&sym_it->second)) {
                     for (size_t i = 0; i < call.args.size(); ++i) {
-                        args.push_back(emit_value_as(call.args[i], fn->params[i]));
+                        args.push_back(emit_value_as(call.args[i], fn->params[i], *current_module_path_));
                     }
                     return builder_.CreateCall(functions_.at(FunctionKey{target_module, name}), args);
                 }
                 if (const auto *ef = std::get_if<sema::ExtFunctionSymbol>(&sym_it->second)) {
                     for (size_t i = 0; i < call.args.size(); ++i) {
                         if (i < ef->params.size()) {
-                            args.push_back(emit_value_as(call.args[i], ef->params[i]));
+                            args.push_back(emit_value_as(call.args[i], ef->params[i], *current_module_path_));
                         } else {
                             args.push_back(emit_expr(call.args[i]));
                         }
@@ -2309,7 +2338,7 @@ namespace codegen {
 
             auto emit_assign(const ast::AssignExpr &expr) -> llvm::Value * {
                 auto lv = emit_lvalue(expr.target);
-                auto *value = emit_value_as(expr.value, lv.type);
+                auto *value = emit_value_as(expr.value, lv.type, lv.type_module);
 
                 if (expr.op != ast::AssignOp::Assign) {
                     auto *old = builder_.CreateLoad(lv.storage_type, lv.ptr);
@@ -2582,7 +2611,7 @@ namespace codegen {
                             locals_[v.name] = LocalValue{.alloca = slot, .type = ty, .type_module = type_module};
                             if (v.init) {
                                 if (!std::holds_alternative<ast::UndefinedExpr>(*v.init)) {
-                                    builder_.CreateStore(emit_value_as(*v.init, ty), slot);
+                                    builder_.CreateStore(emit_value_as(*v.init, ty, type_module), slot);
                                 }
                             } else {
                                 builder_.CreateStore(emit_default_value(type_module, ty), slot);
@@ -2838,7 +2867,7 @@ namespace codegen {
                 std::vector<llvm::Value *> ret_vals;
                 ret_vals.reserve(stmt.return_values.size());
                 for (size_t i = 0; i < stmt.return_values.size(); ++i) {
-                    ret_vals.push_back(emit_value_as(stmt.return_values[i], current_returns_[i]));
+                    ret_vals.push_back(emit_value_as(stmt.return_values[i], current_returns_[i], *current_module_path_));
                 }
 
                 // Run all defers in LIFO order

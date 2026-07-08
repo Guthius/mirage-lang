@@ -121,6 +121,9 @@ namespace sema {
             if (from.kind == TypeKind::Array && to.kind == TypeKind::Slice) {
                 return array_element_type(from, module_path, program) == slice_element_type(to, module_path, program);
             }
+            if (from.kind == TypeKind::Slice && to.kind == TypeKind::Array) {
+                return slice_element_type(from, module_path, program) == array_element_type(to, module_path, program);
+            }
             if (from.kind == TypeKind::Array && to.kind == TypeKind::Pointer) {
                 return array_element_type(from, module_path, program) == program.modules.at(module_path).pointer_pointees.at(to.pointee_index);
             }
