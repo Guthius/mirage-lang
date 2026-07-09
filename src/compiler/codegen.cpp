@@ -2072,9 +2072,8 @@ namespace codegen {
                     const sema::TaggedUnionVariant &variant,
                     const ast::MatchExpr::VariantPattern &vp) -> void {
                 if (!vp.capture_name || variant.payload_struct_index < 0) return;
-                const sema::ResolvedType payload_ty{.kind = sema::TypeKind::Struct, .struct_index = variant.payload_struct_index};
-                const auto &payload_struct = sema_program_.structs.at(variant.payload_struct_index);
-                const auto &struct_module = payload_struct.module_path;
+                const sema::ResolvedType payload_ty = variant.payload_type;
+                const auto &struct_module = union_info.module_path;
                 auto *payload_ll_ty = llvm_type(struct_module, payload_ty);
                 auto *payload_ptr = builder_.CreateConstInBoundsGEP1_64(
                     llvm::Type::getInt8Ty(*context_), union_slot, union_info.payload_offset, "match.payload");

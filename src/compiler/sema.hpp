@@ -59,6 +59,9 @@ namespace sema {
         std::string name;
         int32_t tag_value = 0;             // 0..N-1 in declaration order
         int32_t payload_struct_index = -1; // global struct index; -1 if payload-free
+        ResolvedType payload_type;         // declared payload type: Struct{struct_index} for
+                                            // struct-literal payloads, the bare type (e.g. Slice)
+                                            // for wrapped scalar/slice/pointer/array payloads
     };
 
     struct UnionInfo {

@@ -1233,7 +1233,7 @@ namespace sema {
                                         if (variant.payload_struct_index < 0) {
                                             error(diag, arm.location, std::format("variant '{}' has no payload; cannot capture", vp.name));
                                         } else {
-                                            const ResolvedType payload_ty{.kind = TypeKind::Struct, .struct_index = variant.payload_struct_index};
+                                            const ResolvedType payload_ty = variant.payload_type;
                                             if (vp.capture_by_ref) {
                                                 arm_locals[*vp.capture_name] = LocalBinding{
                                                     .type = intern_pointer(program, payload_ty),
@@ -1882,7 +1882,7 @@ namespace sema {
                                         if (variant.payload_struct_index < 0) {
                                             diag.report_error(DiagnosticStage::Sema, arm.location, std::format("variant '{}' has no payload; cannot capture", vp.name));
                                         } else {
-                                            const ResolvedType payload_ty{.kind = TypeKind::Struct, .struct_index = variant.payload_struct_index};
+                                            const ResolvedType payload_ty = variant.payload_type;
                                             if (vp.capture_by_ref) {
                                                 arm_locals[*vp.capture_name] = LocalBinding{
                                                     .type = intern_pointer(program, payload_ty),

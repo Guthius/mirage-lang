@@ -609,6 +609,7 @@ namespace sema {
                             // For struct payload types, we inline the fields for ergonomics.
                             if (const auto *st = std::get_if<std::unique_ptr<ast::StructType>>(&member.type)) {
                                 layout_struct(module_path, struct_slot, *st);
+                                variant.payload_type = ResolvedType{.kind = TypeKind::Struct, .struct_index = struct_slot};
                             } else {
                                 // Non-struct payload: create a one-field anonymous struct
                                 auto payload_type = resolve_field_type(module_path, member.type, member.location);
@@ -626,6 +627,7 @@ namespace sema {
                                 payload_info.align = p_align;
                                 payload_info.layout_done = true;
                                 program.structs[struct_slot] = std::move(payload_info);
+                                variant.payload_type = payload_type;
                             }
 
                             variant.payload_struct_index = struct_slot;
