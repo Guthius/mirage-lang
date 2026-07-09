@@ -1961,16 +1961,30 @@ namespace ast {
 
         // Parse remaining params (with types)
         std::vector<ImplDecl::Function::Param> params;
+        bool seen_variadic = false;
         while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
             parser.expect(TokenKind::Comma, "','");
             const auto param_location = parser.current_location();
             const bool param_is_mut = parser.match(TokenKind::KwMut);
             auto param_name = parser.expect_identifier();
             parser.expect(TokenKind::Colon, "':'");
+
+            if (seen_variadic) {
+                parser.report_error(param_location, "'...' variadic parameter must be the last parameter in the parameter list");
+            }
+
+            bool param_is_variadic = false;
+            if (parser.check(TokenKind::DotDotDot)) {
+                parser.advance();
+                param_is_variadic = true;
+                seen_variadic = true;
+            }
+
             params.push_back(ImplDecl::Function::Param{
                 .name = std::move(param_name),
                 .type = parse_type(parser),
                 .is_mut = param_is_mut,
+                .is_variadic = param_is_variadic,
                 .location = param_location,
             });
         }

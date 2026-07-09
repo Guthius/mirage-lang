@@ -603,6 +603,7 @@ namespace ast {
                 std::string name;
                 Type type;
                 bool is_mut;
+                bool is_variadic = false;
                 SourceLocation location;
             };
 

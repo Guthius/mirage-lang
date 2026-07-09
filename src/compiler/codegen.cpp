@@ -1569,6 +1569,25 @@ namespace codegen {
 
                         std::vector<llvm::Value *> args;
                         args.push_back(self_ptr);
+                        if (method->is_variadic) {
+                            const size_t fixed_count = method->param_types.size() - 1;
+                            for (size_t i = 0; i < fixed_count; ++i) {
+                                args.push_back(emit_value_as(call.args[i], method->param_types[i], method->impl_module));
+                            }
+                            const auto &slice_ty = method->param_types.back();
+                            if (call.args.size() == fixed_count + 1) {
+                                if (const auto *spread = std::get_if<std::unique_ptr<ast::SpreadExpr>>(&call.args[fixed_count])) {
+                                    args.push_back(emit_value_as((*spread)->operand, slice_ty, method->impl_module));
+                                    return builder_.CreateCall(
+                                        functions_.at(FunctionKey{method->impl_module, method_fn_key(method->type_name, method->decl->name)}),
+                                        args);
+                                }
+                            }
+                            args.push_back(emit_variadic_tail_slice(call.args, fixed_count, slice_ty, method->impl_module));
+                            return builder_.CreateCall(
+                                functions_.at(FunctionKey{method->impl_module, method_fn_key(method->type_name, method->decl->name)}),
+                                args);
+                        }
                         for (size_t i = 0; i < call.args.size(); ++i) {
                             args.push_back(emit_value_as(call.args[i], method->param_types[i], *current_module_path_));
                         }

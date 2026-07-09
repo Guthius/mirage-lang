@@ -87,7 +87,14 @@ namespace sema {
                     info.self_type = self_type;
 
                     for (auto &p : info.decl->params) {
-                        info.param_types.push_back(resolve_type(p.type, module_path, program, diag));
+                        const auto pt = resolve_type(p.type, module_path, program, diag);
+                        if (p.is_variadic) {
+                            info.is_variadic = true;
+                            info.variadic_element_type = pt;
+                            info.param_types.push_back(intern_slice(program, pt));
+                        } else {
+                            info.param_types.push_back(pt);
+                        }
                     }
                     for (auto &rt : info.decl->return_types) {
                         info.return_types.push_back(resolve_type(rt, module_path, program, diag));

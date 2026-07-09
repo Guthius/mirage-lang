@@ -95,6 +95,8 @@ namespace sema {
         bool is_mut_self = false;
         bool is_pub = false;
         bool is_resolved = false;
+        bool is_variadic = false;             // true if the last param is native '...T'
+        ResolvedType variadic_element_type{}; // T; only meaningful if is_variadic
     };
 
     // Records an implicit tagged-union coercion decided by check_expr for a given expression node
