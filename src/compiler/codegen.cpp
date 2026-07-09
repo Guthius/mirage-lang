@@ -527,6 +527,51 @@ namespace codegen {
                 return zero_value(type_module, type);
             }
 
+            // Constant analogue of emit_default_value, for use inside emit_const_or_runtime
+            // (i.e. global initializers), where there is no valid instruction insertion point.
+            // Recurses via emit_const_or_runtime instead of emit_expr for field-level defaults.
+            auto emit_const_default_value(const std::string &type_module, const sema::ResolvedType &type) -> llvm::Constant * {
+                if (type.kind == sema::TypeKind::Struct) {
+                    const auto &info = sema_program_.structs.at(type.struct_index);
+                    const auto &struct_module = info.module_path;
+                    auto *ll_ty = llvm_type(struct_module, type);
+                    llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
+                    const auto &lowering = struct_lowering(type.struct_index);
+
+                    const auto *saved_path = current_module_path_;
+                    const auto *saved_module = current_module_;
+                    current_module_path_ = &struct_module;
+                    current_module_ = &module_for(struct_module);
+
+                    for (size_t i = 0; i < info.fields.size(); ++i) {
+                        const auto &field = info.fields[i];
+                        const auto ll_idx = lowering.field_indices.at(i);
+                        llvm::Constant *fval = field.init_expr
+                                                    ? llvm::cast<llvm::Constant>(emit_const_or_runtime(*field.init_expr, true))
+                                                    : emit_const_default_value(struct_module, field.type);
+                        agg = builder_.CreateInsertValue(agg, fval, {ll_idx});
+                    }
+
+                    current_module_path_ = saved_path;
+                    current_module_ = saved_module;
+                    return llvm::cast<llvm::Constant>(agg);
+                }
+                if (type.kind == sema::TypeKind::Array) {
+                    const auto &array_info = sema_program_.arrays.at(type.array_index);
+                    auto *ll_ty = llvm_type(type_module, type);
+                    llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
+                    for (uint64_t i = 0; i < array_info.count; ++i) {
+                        auto *elem = emit_const_default_value(type_module, array_info.element_type);
+                        agg = builder_.CreateInsertValue(agg, elem, {static_cast<unsigned>(i)});
+                    }
+                    return llvm::cast<llvm::Constant>(agg);
+                }
+                if (type.kind == sema::TypeKind::Union) {
+                    return llvm::Constant::getNullValue(unions_.at(type.union_index));
+                }
+                return zero_value(type_module, type);
+            }
+
             // Emit a struct value from an explicit StructExpr, filling in field defaults
             // for any fields not provided in the initializer.
             auto emit_struct_expr_value(const ast::StructExpr &se, const sema::ResolvedType &ty) -> llvm::Value * {
@@ -2610,6 +2655,78 @@ namespace codegen {
                                     }
                                 }
                             }
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
+                            return std::visit(
+                                [&]<typename BV>(const BV &bv) -> llvm::Value * {
+                                    using BVT = std::decay_t<BV>;
+                                    if constexpr (std::is_same_v<BVT, ast::EmptyExpr>) {
+                                        return emit_const_default_value(*current_module_path_, ty);
+                                    } else if constexpr (std::is_same_v<BVT, ast::StructExpr>) {
+                                        if (ty.kind != sema::TypeKind::Struct) {
+                                            // e.g. untagged-union member init: needs alloca+store,
+                                            // not reachable for a program that passed sema's
+                                            // is_constant_expr check, but guard against crashing
+                                            // codegen on an already-erroring program.
+                                            report_codegen_error(diag_, {}, "unsupported global constant initializer");
+                                            return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
+                                        }
+
+                                        const auto &info = sema_program_.structs.at(ty.struct_index);
+                                        const auto &struct_module = info.module_path;
+                                        auto *ll_ty = llvm_type(struct_module, ty);
+                                        llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
+                                        const auto &lowering = struct_lowering(ty.struct_index);
+
+                                        std::unordered_map<std::string, const ast::StructExpr::Field *> provided;
+                                        for (const auto &sf : bv.fields) {
+                                            provided[sf.name] = &sf;
+                                        }
+
+                                        for (const auto &sf : bv.fields) {
+                                            if (std::holds_alternative<ast::UndefinedExpr>(sf.expr)) continue;
+                                            const auto it = std::ranges::find(info.fields, sf.name, &sema::StructField::name);
+                                            if (it == info.fields.end()) continue;
+                                            const auto field_pos = static_cast<size_t>(std::distance(info.fields.begin(), it));
+                                            const auto ll_idx = lowering.field_indices.at(field_pos);
+                                            agg = builder_.CreateInsertValue(agg, llvm::cast<llvm::Constant>(emit_const_or_runtime(sf.expr, true)), {ll_idx});
+                                        }
+
+                                        const auto *saved_path = current_module_path_;
+                                        const auto *saved_module = current_module_;
+                                        current_module_path_ = &struct_module;
+                                        current_module_ = &module_for(struct_module);
+
+                                        for (size_t i = 0; i < info.fields.size(); ++i) {
+                                            const auto &field = info.fields[i];
+                                            if (provided.contains(field.name) || !field.init_expr) continue;
+                                            const auto ll_idx = lowering.field_indices.at(i);
+                                            agg = builder_.CreateInsertValue(agg, llvm::cast<llvm::Constant>(emit_const_or_runtime(*field.init_expr, true)), {ll_idx});
+                                        }
+
+                                        current_module_path_ = saved_path;
+                                        current_module_ = saved_module;
+                                        return llvm::cast<llvm::Constant>(agg);
+                                    } else { // ast::ArrayExpr
+                                        const auto &array_info = sema_program_.arrays.at(ty.array_index);
+                                        auto *ll_ty = llvm_type(*current_module_path_, ty);
+                                        llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
+                                        llvm::Constant *fill_elem = nullptr;
+                                        for (size_t i = 0; i < bv.values.size(); ++i) {
+                                            if (std::holds_alternative<ast::UndefinedExpr>(bv.values[i])) continue;
+                                            auto *elem = llvm::cast<llvm::Constant>(emit_const_or_runtime(bv.values[i], true));
+                                            agg = builder_.CreateInsertValue(agg, elem, {static_cast<unsigned>(i)});
+                                            if (bv.has_fill && i == bv.values.size() - 1) {
+                                                fill_elem = elem;
+                                            }
+                                        }
+                                        for (uint64_t i = bv.values.size(); i < array_info.count; ++i) {
+                                            auto *elem = fill_elem != nullptr ? fill_elem : emit_const_default_value(*current_module_path_, array_info.element_type);
+                                            agg = builder_.CreateInsertValue(agg, elem, {static_cast<unsigned>(i)});
+                                        }
+                                        return llvm::cast<llvm::Constant>(agg);
+                                    }
+                                },
+                                *v);
                         }
 
                         report_codegen_error(diag_, {}, "unsupported global constant initializer");

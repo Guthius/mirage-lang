@@ -1,11 +1,18 @@
 #include "sema.hpp"
 
+#include <algorithm>
 #include <format>
 #include <unordered_set>
 
 namespace sema {
     namespace {
         auto is_constant_expr_impl(const ast::Expr &expr, const std::string &module_path, const Program &program, const std::unordered_set<std::string> &treated_as_const) -> bool {
+            if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
+                if (mod_it->second.expr_variant_coercions.contains(get_expr_key(expr))) {
+                    return false; // implicit tagged-union coercion has runtime stores
+                }
+            }
+
             return std::visit(
                 [&]<typename T>(const T &v) -> bool {
                     using V = std::decay_t<T>;
@@ -55,6 +62,89 @@ namespace sema {
 
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::TaggedVariantExpr>>) {
                         return false; // has runtime stores
+                    }
+
+                    if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
+                        return std::visit(
+                            [&]<typename BV>(const BV &bv) -> bool {
+                                using BVT = std::decay_t<BV>;
+
+                                if constexpr (std::is_same_v<BVT, ast::EmptyExpr>) {
+                                    return true;
+                                } else if constexpr (std::is_same_v<BVT, ast::ArrayExpr>) {
+                                    for (const auto &elem : bv.values) {
+                                        if (std::holds_alternative<ast::UndefinedExpr>(elem)) continue;
+                                        if (!is_constant_expr_impl(elem, module_path, program, treated_as_const)) {
+                                            return false;
+                                        }
+                                    }
+                                    return true;
+                                } else { // ast::StructExpr
+                                    const auto mod_it = program.modules.find(module_path);
+                                    if (mod_it == program.modules.end()) {
+                                        return false;
+                                    }
+
+                                    const auto ty_it = mod_it->second.expr_types.find(get_expr_key(expr));
+                                    if (ty_it == mod_it->second.expr_types.end()) {
+                                        return false;
+                                    }
+
+                                    const auto &ty = ty_it->second;
+                                    if (ty.kind == TypeKind::Union) {
+                                        return false; // union member construction has runtime stores
+                                    }
+
+                                    std::unordered_set<std::string> provided;
+                                    for (const auto &sf : bv.fields) {
+                                        if (std::holds_alternative<ast::UndefinedExpr>(sf.expr)) {
+                                            provided.insert(sf.name);
+                                            continue;
+                                        }
+                                        if (!is_constant_expr_impl(sf.expr, module_path, program, treated_as_const)) {
+                                            return false;
+                                        }
+
+                                        // Reject values that require a runtime lvalue-based coercion
+                                        // (array<->slice, array/slice->pointer) that only emit_value_as
+                                        // can perform; the constant codegen path can't do this.
+                                        const auto field_ty_it = mod_it->second.expr_types.find(get_expr_key(sf.expr));
+                                        if (ty.kind == TypeKind::Struct && field_ty_it != mod_it->second.expr_types.end()) {
+                                            const auto &info = program.structs.at(ty.struct_index);
+                                            const auto field_it = std::ranges::find(info.fields, sf.name, &StructField::name);
+                                            if (field_it != info.fields.end()) {
+                                                const auto &from = field_ty_it->second;
+                                                const auto &target = field_it->type;
+                                                const bool needs_runtime_coercion =
+                                                    (from.kind == TypeKind::Array && target.kind == TypeKind::Slice) ||
+                                                    (from.kind == TypeKind::Slice && target.kind == TypeKind::Array) ||
+                                                    (from.kind == TypeKind::Array && (target.kind == TypeKind::Pointer || target.kind == TypeKind::Anyptr)) ||
+                                                    (from.kind == TypeKind::Slice && (target.kind == TypeKind::Pointer || target.kind == TypeKind::Anyptr));
+                                                if (needs_runtime_coercion) {
+                                                    return false;
+                                                }
+                                            }
+                                        }
+
+                                        provided.insert(sf.name);
+                                    }
+
+                                    if (ty.kind == TypeKind::Struct) {
+                                        const auto &info = program.structs.at(ty.struct_index);
+                                        for (const auto &field : info.fields) {
+                                            if (provided.contains(field.name) || !field.init_expr) {
+                                                continue;
+                                            }
+                                            if (!is_constant_expr_impl(*field.init_expr, module_path, program, treated_as_const)) {
+                                                return false;
+                                            }
+                                        }
+                                    }
+
+                                    return true;
+                                }
+                            },
+                            *v);
                     }
 
                     if constexpr (std::is_same_v<V, ast::DefaultExpr>) {
