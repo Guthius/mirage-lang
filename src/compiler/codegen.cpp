@@ -33,6 +33,12 @@ namespace codegen {
             const ast::Expr *expr = nullptr;
             const std::string *module_path = nullptr;
             const sema::ProgramModule *module = nullptr;
+            // The macro_args_ substitution map as it existed at the call site, before this
+            // macro's own parameters were bound. Restored while evaluating 'expr' so that an
+            // argument expression referencing an identifier with the same name as this macro's
+            // parameter (e.g. calling 'is_alpha(c)' where the macro parameter is itself 'c')
+            // resolves against the caller's scope instead of recursing into itself forever.
+            std::shared_ptr<const std::unordered_map<std::string, MacroArg>> outer_args;
         };
 
         struct LValue {
@@ -1267,9 +1273,12 @@ namespace codegen {
             auto emit_macro_arg(const MacroArg &arg) -> llvm::Value * {
                 const auto *saved_path = current_module_path_;
                 const auto *saved_module = current_module_;
+                auto saved_macro_args = std::move(macro_args_);
                 current_module_path_ = arg.module_path;
                 current_module_ = arg.module;
+                macro_args_ = arg.outer_args ? *arg.outer_args : std::unordered_map<std::string, MacroArg>{};
                 auto *value = emit_expr(*arg.expr);
+                macro_args_ = std::move(saved_macro_args);
                 current_module_path_ = saved_path;
                 current_module_ = saved_module;
                 return value;
@@ -1278,9 +1287,12 @@ namespace codegen {
             auto emit_const_macro_arg(const MacroArg &arg) -> llvm::Value * {
                 const auto *saved_path = current_module_path_;
                 const auto *saved_module = current_module_;
+                auto saved_macro_args = std::move(macro_args_);
                 current_module_path_ = arg.module_path;
                 current_module_ = arg.module;
+                macro_args_ = arg.outer_args ? *arg.outer_args : std::unordered_map<std::string, MacroArg>{};
                 auto *value = emit_const_or_runtime(*arg.expr, true);
+                macro_args_ = std::move(saved_macro_args);
                 current_module_path_ = saved_path;
                 current_module_ = saved_module;
                 return value;
@@ -1590,8 +1602,9 @@ namespace codegen {
 
                 if (const auto *macro = std::get_if<sema::MacroSymbol>(&sym_it->second)) {
                     auto saved = macro_args_;
+                    auto outer = std::make_shared<const std::unordered_map<std::string, MacroArg>>(saved);
                     for (size_t i = 0; i < macro->decl->params.size(); ++i) {
-                        macro_args_[macro->decl->params[i].name] = MacroArg{.expr = &call.args[i], .module_path = current_module_path_, .module = current_module_};
+                        macro_args_[macro->decl->params[i].name] = MacroArg{.expr = &call.args[i], .module_path = current_module_path_, .module = current_module_, .outer_args = outer};
                     }
                     const auto *saved_path = current_module_path_;
                     const auto *saved_module = current_module_;
@@ -2562,8 +2575,9 @@ namespace codegen {
                                 if (sym_it != target.symbols.end()) {
                                     if (const auto *macro = std::get_if<sema::MacroSymbol>(&sym_it->second)) {
                                         auto saved_args = macro_args_;
+                                        auto outer = std::make_shared<const std::unordered_map<std::string, MacroArg>>(saved_args);
                                         for (size_t i = 0; i < macro->decl->params.size(); ++i) {
-                                            macro_args_[macro->decl->params[i].name] = MacroArg{.expr = &v->args[i], .module_path = current_module_path_, .module = current_module_};
+                                            macro_args_[macro->decl->params[i].name] = MacroArg{.expr = &v->args[i], .module_path = current_module_path_, .module = current_module_, .outer_args = outer};
                                         }
                                         const auto *saved_path = current_module_path_;
                                         const auto *saved_module = current_module_;
@@ -2637,8 +2651,10 @@ namespace codegen {
                 case ast::BinaryOp::Mul:        opcode = lhs_type.is_float() ? llvm::Instruction::FMul : llvm::Instruction::Mul; break;
                 case ast::BinaryOp::Div:        opcode = lhs_type.is_float() ? llvm::Instruction::FDiv : (signedness(lhs_type) ? llvm::Instruction::SDiv : llvm::Instruction::UDiv); break;
                 case ast::BinaryOp::Mod:        opcode = lhs_type.is_float() ? llvm::Instruction::FRem : (signedness(lhs_type) ? llvm::Instruction::SRem : llvm::Instruction::URem); break;
-                case ast::BinaryOp::BitwiseAnd: opcode = llvm::Instruction::And; break;
-                case ast::BinaryOp::BitwiseOr:  opcode = llvm::Instruction::Or; break;
+                case ast::BinaryOp::BitwiseAnd:
+                case ast::BinaryOp::LogicalAnd: opcode = llvm::Instruction::And; break;
+                case ast::BinaryOp::BitwiseOr:
+                case ast::BinaryOp::LogicalOr:  opcode = llvm::Instruction::Or; break;
                 case ast::BinaryOp::BitwiseXor: opcode = llvm::Instruction::Xor; break;
                 case ast::BinaryOp::ShiftLeft:  opcode = llvm::Instruction::Shl; break;
                 case ast::BinaryOp::ShiftRight: opcode = signedness(lhs_type) ? llvm::Instruction::AShr : llvm::Instruction::LShr; break;
