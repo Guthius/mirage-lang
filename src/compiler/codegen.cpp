@@ -286,7 +286,7 @@ namespace codegen {
                     return sema_program_.structs.at(type.struct_index).size;
                 }
                 if (type.kind == sema::TypeKind::Array) {
-                    return module_for(module_path).arrays.at(type.array_index).size;
+                    return sema_program_.arrays.at(type.array_index).size;
                 }
                 if (type.kind == sema::TypeKind::Slice) {
                     return 16;
@@ -321,7 +321,7 @@ namespace codegen {
                 case sema::TypeKind::Struct:  return struct_lowering(type.struct_index).type;
                 case sema::TypeKind::Array:
                     {
-                        const auto &array = module_for(module_path).arrays.at(type.array_index);
+                        const auto &array = sema_program_.arrays.at(type.array_index);
                         return llvm::ArrayType::get(llvm_type(module_path, array.element_type), array.count);
                     }
                 case sema::TypeKind::Slice:
@@ -506,7 +506,7 @@ namespace codegen {
                     return agg;
                 }
                 if (type.kind == sema::TypeKind::Array) {
-                    const auto &array_info = module_for(type_module).arrays.at(type.array_index);
+                    const auto &array_info = sema_program_.arrays.at(type.array_index);
                     auto *ll_ty = llvm_type(type_module, type);
                     llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
                     for (uint64_t i = 0; i < array_info.count; ++i) {
@@ -570,7 +570,7 @@ namespace codegen {
             // provided value ends with '...' (has_fill), in which case it is repeated
             // (evaluated once) to fill the remaining elements instead.
             auto emit_array_expr_value(const ast::ArrayExpr &ae, const sema::ResolvedType &ty) -> llvm::Value * {
-                const auto &array_info = module_for(*current_module_path_).arrays.at(ty.array_index);
+                const auto &array_info = sema_program_.arrays.at(ty.array_index);
                 auto *ll_ty = llvm_type(*current_module_path_, ty);
                 llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
                 llvm::Value *fill_elem = nullptr;
@@ -652,6 +652,48 @@ namespace codegen {
                     current_module_ = saved_module;
                     (void)struct_ll_ty;
                 }
+
+                return builder_.CreateLoad(ll_ty, slot);
+            }
+
+            // Materializes an implicit tagged-union coercion (see sema::VariantCoercion): wraps the
+            // already-typechecked scalar expression in the single-field payload struct of the variant
+            // sema already decided, and stores it into the union's tag+payload layout. The variant
+            // choice (tag_value/payload_struct_index) comes verbatim from sema's output — this never
+            // re-scans UnionInfo::variants itself.
+            auto emit_variant_coercion(const ast::Expr &expr, const sema::VariantCoercion &vc) -> llvm::Value * {
+                auto *ll_ty = unions_.at(vc.union_type.union_index); // [total_size x i8]
+                auto *slot = builder_.CreateAlloca(ll_ty);
+
+                auto *tag_val = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), static_cast<uint64_t>(vc.tag_value), false);
+                builder_.CreateStore(tag_val, slot);
+
+                // Evaluate the scalar in the caller's own module context first (it may reference
+                // caller locals) — emit_expr, not emit_value_as, to avoid re-entering this branch;
+                // the coercion match was exact, so no conversion is needed.
+                auto *field_val = emit_expr(expr);
+
+                const sema::ResolvedType payload_ty{.kind = sema::TypeKind::Struct, .struct_index = vc.payload_struct_index};
+                const auto &payload_struct = sema_program_.structs.at(vc.payload_struct_index);
+                const auto &struct_module = payload_struct.module_path;
+                const auto &lowering = struct_lowering(vc.payload_struct_index);
+                const auto &union_info = sema_program_.unions.at(vc.union_type.union_index);
+
+                const auto *saved_path = current_module_path_;
+                const auto *saved_module = current_module_;
+                current_module_path_ = &struct_module;
+                current_module_ = &module_for(struct_module);
+
+                auto *struct_ll_ty = llvm_type(struct_module, payload_ty);
+                llvm::Value *struct_agg = llvm::Constant::getNullValue(struct_ll_ty);
+                struct_agg = builder_.CreateInsertValue(struct_agg, field_val, {lowering.field_indices.at(0)});
+
+                auto *payload_ptr = builder_.CreateConstInBoundsGEP1_64(
+                    llvm::Type::getInt8Ty(*context_), slot, union_info.payload_offset);
+                builder_.CreateStore(struct_agg, payload_ptr);
+
+                current_module_path_ = saved_path;
+                current_module_ = saved_module;
 
                 return builder_.CreateLoad(ll_ty, slot);
             }
@@ -754,8 +796,8 @@ namespace codegen {
 
             // Find the pointer ResolvedType for self_type in the current module's pointees.
             auto find_self_ptr_type(const sema::ResolvedType &self_type) const -> sema::ResolvedType {
-                for (size_t i = 0; i < current_module_->pointer_pointees.size(); ++i) {
-                    if (current_module_->pointer_pointees[i] == self_type) {
+                for (size_t i = 0; i < sema_program_.pointer_pointees.size(); ++i) {
+                    if (sema_program_.pointer_pointees[i] == self_type) {
                         return sema::ResolvedType{.kind = sema::TypeKind::Pointer, .pointee_index = static_cast<int>(i)};
                     }
                 }
@@ -1075,7 +1117,7 @@ namespace codegen {
                 if (type.kind == sema::TypeKind::Anyptr) {
                     return 1;
                 }
-                const auto &pointee = current_module_->pointer_pointees.at(type.pointee_index);
+                const auto &pointee = sema_program_.pointer_pointees.at(type.pointee_index);
                 return size_of(*current_module_path_, pointee);
             }
 
@@ -1159,7 +1201,7 @@ namespace codegen {
 
             auto emit_array_to_slice(const ast::Expr &expr, const sema::ResolvedType &array_type, const sema::ResolvedType &slice_type, const std::string &array_module) -> llvm::Value * {
                 auto lv = emit_lvalue(expr);
-                const auto &array = module_for(array_module).arrays.at(array_type.array_index);
+                const auto &array = sema_program_.arrays.at(array_type.array_index);
                 auto *ptr = builder_.CreateInBoundsGEP(
                     llvm_type(array_module, array_type),
                     lv.ptr,
@@ -1177,7 +1219,7 @@ namespace codegen {
                 auto *src_ptr = builder_.CreateExtractValue(slice_val, {0});
                 auto *src_len = builder_.CreateExtractValue(slice_val, {1});
 
-                const auto &array_info = module_for(array_module).arrays.at(array_type.array_index);
+                const auto &array_info = sema_program_.arrays.at(array_type.array_index);
                 auto *ll_arr_ty = llvm_type(array_module, array_type);
                 auto *scratch = builder_.CreateAlloca(ll_arr_ty);
 
@@ -1197,6 +1239,9 @@ namespace codegen {
             }
 
             auto emit_value_as(const ast::Expr &expr, const sema::ResolvedType &target, const std::string &target_module) -> llvm::Value * {
+                if (const auto it = current_module_->expr_variant_coercions.find(sema::get_expr_key(expr)); it != current_module_->expr_variant_coercions.end()) {
+                    return emit_variant_coercion(expr, it->second);
+                }
                 const auto from = current_module_->expr_types.at(sema::get_expr_key(expr));
                 if (from.kind == sema::TypeKind::Array && target.kind == sema::TypeKind::Slice) {
                     return emit_array_to_slice(expr, from, target, expr_type_module_hint(expr));
@@ -1296,7 +1341,7 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
                             if (v->op == ast::UnaryOp::Deref) {
                                 const auto ptr_type = current_module_->expr_types.at(sema::get_expr_key(v->operand));
-                                const auto pointee = current_module_->pointer_pointees.at(ptr_type.pointee_index);
+                                const auto pointee = sema_program_.pointer_pointees.at(ptr_type.pointee_index);
                                 const auto pointee_module = expr_type_module_hint(v->operand);
                                 return LValue{.ptr = emit_expr(v->operand), .type = pointee, .type_module = pointee_module, .storage_type = llvm_type_for(pointee, pointee_module)};
                             }
@@ -1331,7 +1376,7 @@ namespace codegen {
                 std::string struct_module = *current_module_path_;
                 llvm::Value *base = nullptr;
                 if (object_type.kind == sema::TypeKind::Pointer) {
-                    struct_type = current_module_->pointer_pointees.at(object_type.pointee_index);
+                    struct_type = sema_program_.pointer_pointees.at(object_type.pointee_index);
                     struct_module = expr_type_module_hint(member.object);
                     base = emit_expr(member.object);
                 } else {
@@ -1373,20 +1418,20 @@ namespace codegen {
                 }
 
                 if (operand_type.kind == sema::TypeKind::Pointer) {
-                    const auto element = current_module_->pointer_pointees.at(operand_type.pointee_index);
+                    const auto element = sema_program_.pointer_pointees.at(operand_type.pointee_index);
                     auto *ptr = builder_.CreateInBoundsGEP(llvm_type_for(element, type_module), emit_expr(index.operand), idx);
                     return LValue{.ptr = ptr, .type = element, .type_module = type_module, .storage_type = llvm_type_for(element, type_module)};
                 }
                 if (operand_type.kind == sema::TypeKind::Array) {
                     auto base = emit_lvalue(index.operand);
-                    const auto element = module_for(type_module).arrays.at(operand_type.array_index).element_type;
+                    const auto element = sema_program_.arrays.at(operand_type.array_index).element_type;
                     auto *ptr = builder_.CreateInBoundsGEP(llvm_type(type_module, operand_type), base.ptr, {builder_.getInt32(0), idx});
                     return LValue{.ptr = ptr, .type = element, .type_module = type_module, .storage_type = llvm_type_for(element, type_module)};
                 }
                 if (operand_type.kind == sema::TypeKind::Slice) {
                     auto *slice = emit_expr(index.operand);
                     auto *base = builder_.CreateExtractValue(slice, {0});
-                    const auto element = module_for(type_module).slices.at(operand_type.slice_index).element_type;
+                    const auto element = sema_program_.slices.at(operand_type.slice_index).element_type;
                     auto *ptr = builder_.CreateInBoundsGEP(llvm_type_for(element, type_module), base, idx);
                     return LValue{.ptr = ptr, .type = element, .type_module = type_module, .storage_type = llvm_type_for(element, type_module)};
                 }
@@ -1483,7 +1528,7 @@ namespace codegen {
                         const auto obj_type = current_module_->expr_types.at(sema::get_expr_key((*member)->object));
                         sema::ResolvedType receiver_type = obj_type;
                         if (obj_type.kind == sema::TypeKind::Pointer) {
-                            receiver_type = current_module_->pointer_pointees.at(obj_type.pointee_index);
+                            receiver_type = sema_program_.pointer_pointees.at(obj_type.pointee_index);
                         }
                         const auto *method = sema::find_method(receiver_type, (*member)->member, sema_program_);
                         if (!method) {
@@ -1561,6 +1606,21 @@ namespace codegen {
 
                 std::vector<llvm::Value *> args;
                 if (const auto *fn = std::get_if<sema::FunctionSymbol>(&sym_it->second)) {
+                    if (fn->is_variadic) {
+                        const size_t fixed_count = fn->params.size() - 1;
+                        for (size_t i = 0; i < fixed_count; ++i) {
+                            args.push_back(emit_value_as(call.args[i], fn->params[i], target_module));
+                        }
+                        const auto &slice_ty = fn->params.back();
+                        if (call.args.size() == fixed_count + 1) {
+                            if (const auto *spread = std::get_if<std::unique_ptr<ast::SpreadExpr>>(&call.args[fixed_count])) {
+                                args.push_back(emit_value_as((*spread)->operand, slice_ty, target_module));
+                                return builder_.CreateCall(functions_.at(FunctionKey{target_module, name}), args);
+                            }
+                        }
+                        args.push_back(emit_variadic_tail_slice(call.args, fixed_count, slice_ty, target_module));
+                        return builder_.CreateCall(functions_.at(FunctionKey{target_module, name}), args);
+                    }
                     for (size_t i = 0; i < call.args.size(); ++i) {
                         args.push_back(emit_value_as(call.args[i], fn->params[i], *current_module_path_));
                     }
@@ -1600,7 +1660,7 @@ namespace codegen {
                         const auto obj_type = current_module_->expr_types.at(sema::get_expr_key((*member)->object));
                         sema::ResolvedType receiver_type = obj_type;
                         if (obj_type.kind == sema::TypeKind::Pointer) {
-                            receiver_type = current_module_->pointer_pointees.at(obj_type.pointee_index);
+                            receiver_type = sema_program_.pointer_pointees.at(obj_type.pointee_index);
                         }
                         if (const auto *method = sema::find_method(receiver_type, (*member)->member, sema_program_)) {
                             return {*current_module_path_, method->return_types};
@@ -1784,7 +1844,7 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) {
                             const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(v->operand));
                             if (operand_type.kind == sema::TypeKind::Array) {
-                                return builder_.getInt64(module_for(expr_type_module_hint(v->operand)).arrays.at(operand_type.array_index).count);
+                                return builder_.getInt64(sema_program_.arrays.at(operand_type.array_index).count);
                             }
                             auto *slice = emit_expr(v->operand);
                             return builder_.CreateExtractValue(slice, {1});
@@ -1945,6 +2005,29 @@ namespace codegen {
                 return slice;
             }
 
+            // Builds the slice passed for the trailing loose arguments of a native '...T' variadic
+            // call (i.e. NOT the spread-passthrough case, which forwards an existing slice directly).
+            // Stack-allocates a '[N x T]' array in the caller, stores each argument into it left to
+            // right, then wraps it in a slice header. N=0 reuses the ordinary nil-slice convention.
+            auto emit_variadic_tail_slice(const std::vector<ast::Expr> &args, size_t fixed_count, const sema::ResolvedType &slice_ty, const std::string &callee_module) -> llvm::Value * {
+                const size_t n = args.size() - fixed_count;
+                if (n == 0) {
+                    return llvm::ConstantAggregateZero::get(llvm_type(callee_module, slice_ty));
+                }
+                const auto elem_ty = sema_program_.slices.at(slice_ty.slice_index).element_type;
+                auto *elem_ll = llvm_type(callee_module, elem_ty);
+                auto *arr_ll = llvm::ArrayType::get(elem_ll, n);
+                llvm::Value *agg = llvm::Constant::getNullValue(arr_ll);
+                for (size_t i = 0; i < n; ++i) {
+                    auto *elem_val = emit_value_as(args[fixed_count + i], elem_ty, callee_module);
+                    agg = builder_.CreateInsertValue(agg, elem_val, {static_cast<unsigned>(i)});
+                }
+                auto *slot = create_entry_alloca(current_function_, arr_ll, "variadic.tmp");
+                builder_.CreateStore(agg, slot);
+                auto *ptr = builder_.CreateInBoundsGEP(arr_ll, slot, {builder_.getInt32(0), builder_.getInt32(0)});
+                return build_slice_value(ptr, builder_.getInt64(n), slice_ty, callee_module);
+            }
+
             auto emit_slice_cast(const ast::CastExpr &expr, const sema::ResolvedType &from, const sema::ResolvedType &to) -> llvm::Value * {
                 const auto type_module = type_module_for_ast_type(expr.as_type, *current_module_path_, to);
                 if (from.kind == sema::TypeKind::Array) {
@@ -1975,7 +2058,7 @@ namespace codegen {
 
                 auto *slice = emit_expr(expr.operand);
                 auto *base = builder_.CreateExtractValue(slice, {0});
-                const auto element = module_for(type_module).slices.at(operand_type.slice_index).element_type;
+                const auto element = sema_program_.slices.at(operand_type.slice_index).element_type;
                 auto *ptr = builder_.CreateInBoundsGEP(llvm_type_for(element, type_module), base, start);
                 return build_slice_value(ptr, count, result_type, type_module);
             }
@@ -2776,13 +2859,13 @@ namespace codegen {
                 llvm::Value *len_val = nullptr;
 
                 if (is_array) {
-                    const auto &array_info = module_for(type_module).arrays.at(iterable_type.array_index);
+                    const auto &array_info = sema_program_.arrays.at(iterable_type.array_index);
                     elem_type = array_info.element_type;
                     base = emit_lvalue(stmt.iterable).ptr;
                     len_val = builder_.getInt64(array_info.count);
                 } else {
                     auto *slice_val = emit_expr(stmt.iterable);
-                    elem_type = module_for(type_module).slices.at(iterable_type.slice_index).element_type;
+                    elem_type = sema_program_.slices.at(iterable_type.slice_index).element_type;
                     base = builder_.CreateExtractValue(slice_val, {0}, "for.base");
                     len_val = builder_.CreateExtractValue(slice_val, {1}, "for.len");
                 }
@@ -2798,7 +2881,7 @@ namespace codegen {
                     if (stmt.element_by_ref) {
                         auto *ptr_ll_ty = llvm::PointerType::getUnqual(*context_);
                         elem_slot = create_entry_alloca(current_function_, ptr_ll_ty, stmt.element_name);
-                        const auto &pointees = module_for(type_module).pointer_pointees;
+                        const auto &pointees = sema_program_.pointer_pointees;
                         int ptr_idx = 0;
                         for (int i = 0; i < (int)pointees.size(); i++) {
                             if (pointees[i] == elem_type) { ptr_idx = i; break; }

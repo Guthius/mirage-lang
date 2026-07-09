@@ -5,14 +5,14 @@
 #include <unordered_map>
 
 namespace sema {
-    auto intern_pointer(ProgramModule &module, const ResolvedType &pointee) -> ResolvedType {
-        for (size_t i = 0; i < module.pointer_pointees.size(); ++i) {
-            if (module.pointer_pointees[i] == pointee) {
+    auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType {
+        for (size_t i = 0; i < program.pointer_pointees.size(); ++i) {
+            if (program.pointer_pointees[i] == pointee) {
                 return ResolvedType{.kind = TypeKind::Pointer, .pointee_index = static_cast<int>(i)};
             }
         }
-        module.pointer_pointees.push_back(pointee);
-        return ResolvedType{.kind = TypeKind::Pointer, .pointee_index = static_cast<int>(module.pointer_pointees.size()) - 1};
+        program.pointer_pointees.push_back(pointee);
+        return ResolvedType{.kind = TypeKind::Pointer, .pointee_index = static_cast<int>(program.pointer_pointees.size()) - 1};
     }
 
     auto intern_function_type(Program &program, FunctionTypeInfo sig) -> ResolvedType {
@@ -28,25 +28,25 @@ namespace sema {
         return ResolvedType{.kind = TypeKind::Function, .fn_index = static_cast<int>(program.fn_signatures.size()) - 1};
     }
 
-    auto intern_slice(ProgramModule &module, const ResolvedType &element) -> ResolvedType {
-        for (size_t i = 0; i < module.slices.size(); ++i) {
-            if (module.slices[i].element_type == element) {
+    auto intern_slice(Program &program, const ResolvedType &element) -> ResolvedType {
+        for (size_t i = 0; i < program.slices.size(); ++i) {
+            if (program.slices[i].element_type == element) {
                 return ResolvedType{.kind = TypeKind::Slice, .slice_index = static_cast<int>(i)};
             }
         }
-        module.slices.push_back(SliceInfo{.element_type = element});
-        return ResolvedType{.kind = TypeKind::Slice, .slice_index = static_cast<int>(module.slices.size()) - 1};
+        program.slices.push_back(SliceInfo{.element_type = element});
+        return ResolvedType{.kind = TypeKind::Slice, .slice_index = static_cast<int>(program.slices.size()) - 1};
     }
 
     namespace {
-        auto intern_array(ProgramModule &module, const ResolvedType &element, const uint64_t count, const uint32_t size, const uint32_t align) -> ResolvedType {
-            for (size_t i = 0; i < module.arrays.size(); ++i) {
-                if (module.arrays[i].element_type == element && module.arrays[i].count == count) {
+        auto intern_array(Program &program, const ResolvedType &element, const uint64_t count, const uint32_t size, const uint32_t align) -> ResolvedType {
+            for (size_t i = 0; i < program.arrays.size(); ++i) {
+                if (program.arrays[i].element_type == element && program.arrays[i].count == count) {
                     return ResolvedType{.kind = TypeKind::Array, .array_index = static_cast<int>(i)};
                 }
             }
-            module.arrays.push_back(ArrayInfo{.element_type = element, .count = count, .size = size, .align = align});
-            return ResolvedType{.kind = TypeKind::Array, .array_index = static_cast<int>(module.arrays.size()) - 1};
+            program.arrays.push_back(ArrayInfo{.element_type = element, .count = count, .size = size, .align = align});
+            return ResolvedType{.kind = TypeKind::Array, .array_index = static_cast<int>(program.arrays.size()) - 1};
         }
 
         auto primitive_size(const TypeKind kind) -> uint32_t {
@@ -311,7 +311,7 @@ namespace sema {
 
             [[nodiscard]] auto size_of(const std::string &module_path, const ResolvedType &t) const -> uint32_t {
                 if (t.kind == TypeKind::Struct) return program.structs[t.struct_index].size;
-                if (t.kind == TypeKind::Array) return program.modules.at(module_path).arrays[t.array_index].size;
+                if (t.kind == TypeKind::Array) return program.arrays[t.array_index].size;
                 if (t.kind == TypeKind::Slice) return 16;
                 if (t.kind == TypeKind::Enum) return primitive_size(program.enums[t.enum_index].underlying_type.kind);
                 if (t.kind == TypeKind::Union) return program.unions[t.union_index].size;
@@ -320,7 +320,7 @@ namespace sema {
 
             [[nodiscard]] auto align_of(const std::string &module_path, const ResolvedType &t) const -> uint32_t {
                 if (t.kind == TypeKind::Struct) return program.structs[t.struct_index].align;
-                if (t.kind == TypeKind::Array) return program.modules.at(module_path).arrays[t.array_index].align;
+                if (t.kind == TypeKind::Array) return program.arrays[t.array_index].align;
                 if (t.kind == TypeKind::Slice) return 8;
                 if (t.kind == TypeKind::Enum) return primitive_align(program.enums[t.enum_index].underlying_type.kind);
                 if (t.kind == TypeKind::Union) return program.unions[t.union_index].align;
@@ -694,7 +694,7 @@ namespace sema {
                             } else {
                                 pointee = resolve_type_impl(v->pointee, module_path);
                             }
-                            return intern_pointer(program.modules.at(module_path), pointee);
+                            return intern_pointer(program, pointee);
 
                         } else if constexpr (std::is_same_v<V, ast::NamedType>) {
                             auto target = walk_namespace_chain(module_path, v, program, diag);
@@ -710,11 +710,11 @@ namespace sema {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ArrayType>>) {
                             auto element = resolve_type_impl(v->base_type, module_path);
                             const auto count = array_len_expr_value(v->size, module_path);
-                            return intern_array(program.modules.at(module_path), element, count, size_of(module_path, element) * count, align_of(module_path, element));
+                            return intern_array(program, element, count, size_of(module_path, element) * count, align_of(module_path, element));
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceType>>) {
                             auto element = resolve_type_impl(v->base_type, module_path);
-                            return intern_slice(program.modules.at(module_path), element);
+                            return intern_slice(program, element);
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnumType>>) {
                             const int slot = static_cast<int>(program.enums.size());

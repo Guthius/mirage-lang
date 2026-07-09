@@ -1,0 +1,138 @@
+pub fn from_u64(buf: []u8, v: u64) -> ([]u8, error) {
+    if v == 0 {
+        if len(buf) == 0 {
+            return buf[0..0], 1
+        }
+        buf[0] = '0'
+        return buf[0..1], 0
+    }
+
+    mut tmp: [20]u8
+    mut n := v
+    mut i: usize = 0
+    while n > 0 {
+        tmp[i] = cast(n % 10, u8) + '0'
+        n /= 10
+        i += 1
+    }
+
+    if i > len(buf) {
+        return buf[0..0], 1
+    }
+
+    mut j: usize = 0
+    while j < i {
+        buf[j] = tmp[i - 1 - j]
+        j += 1
+    }
+    return buf[0..i], 0
+}
+
+pub fn from_i64(buf: []u8, v: i64) -> ([]u8, error) {
+    if v < 0 {
+        if len(buf) == 0 {
+            return buf[0..0], 1
+        }
+        buf[0] = '-'
+        const mag: u64 = 0 - cast(v, u64)
+        const rest, err := from_u64(buf[1..len(buf)], mag)
+        if err != 0 {
+            return buf[0..0], err
+        }
+        return buf[0..len(rest) + 1], 0
+    }
+    return from_u64(buf, cast(v, u64))
+}
+
+pub fn from_i32(buf: []u8, v: i32) -> ([]u8, error) {
+    return from_i64(buf, cast(v, i64))
+}
+
+pub fn from_u32(buf: []u8, v: u32) -> ([]u8, error) {
+    return from_u64(buf, cast(v, u64))
+}
+
+pub fn from_usize(buf: []u8, v: usize) -> ([]u8, error) {
+    return from_u64(buf, cast(v, u64))
+}
+
+pub fn from_bool(buf: []u8, v: bool) -> ([]u8, error) {
+    const src: []u8 = v ? "true" : "false"
+    if len(src) > len(buf) {
+        return buf[0..0], 1
+    }
+    mut i: usize = 0
+    while i < len(src) {
+        buf[i] = src[i]
+        i += 1
+    }
+    return buf[0..len(src)], 0
+}
+
+pub fn from_f64(buf: []u8, v: f64) -> ([]u8, error) {
+    mut x := v
+    mut neg := false
+    if x < 0.0 {
+        neg = true
+        x = 0.0 - x
+    }
+
+    const int_part: u64 = cast(x, u64)
+    const frac: f64 = x - cast(int_part, f64)
+
+    mut tmp: [32]u8
+    mut pos: usize = 0
+
+    if neg {
+        if pos >= len(buf) {
+            return buf[0..0], 1
+        }
+        tmp[pos] = '-'
+        pos += 1
+    }
+
+    const int_str, int_err := from_u64(tmp[pos..32], int_part)
+    if int_err != 0 {
+        return buf[0..0], 1
+    }
+    pos += len(int_str)
+
+    if pos >= 32 {
+        return buf[0..0], 1
+    }
+    tmp[pos] = '.'
+    pos += 1
+
+    # fixed 6-digit fractional part
+    mut scaled: u64 = cast(frac * 1000000.0, u64)
+    mut digits: [6]u8
+    mut k: usize = 6
+    while k > 0 {
+        k -= 1
+        digits[k] = cast(scaled % 10, u8) + '0'
+        scaled /= 10
+    }
+    mut d: usize = 0
+    while d < 6 {
+        if pos >= 32 {
+            return buf[0..0], 1
+        }
+        tmp[pos] = digits[d]
+        pos += 1
+        d += 1
+    }
+
+    if pos > len(buf) {
+        return buf[0..0], 1
+    }
+    mut m: usize = 0
+    while m < pos {
+        buf[m] = tmp[m]
+        m += 1
+    }
+    return buf[0..pos], 0
+}
+
+pub fn from_f32(buf: []u8, v: f32) -> ([]u8, error) {
+    return from_f64(buf, cast(v, f64))
+}

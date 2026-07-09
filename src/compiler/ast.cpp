@@ -761,7 +761,19 @@ namespace ast {
 
                     std::vector<Expr> args;
                     while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
-                        args.push_back(parse_expr(parser));
+                        // '...' here is call-argument spread (position 5, see parse_function_params'
+                        // comment for the full list of '...' positions) — forwards an existing slice
+                        // as a variadic argument. Legality (sole/last/variadic-callee) is sema's job.
+                        if (parser.check(TokenKind::DotDotDot)) {
+                            const auto spread_loc = parser.current_location();
+                            parser.advance();
+                            args.push_back(std::make_unique<SpreadExpr>(SpreadExpr{
+                                .operand = parse_expr(parser),
+                                .location = spread_loc,
+                            }));
+                        } else {
+                            args.push_back(parse_expr(parser));
+                        }
                         if (!parser.check(TokenKind::RParen)) {
                             parser.expect(TokenKind::Comma, "','");
                         }
@@ -1410,15 +1422,28 @@ namespace ast {
             };
         }
 
+        // The token '...' appears in four unrelated grammar positions, disambiguated purely by
+        // parse context (never by a shared representation):
+        //   1. Native variadic parameter: 'name: ...T' (here) — a type follows the dots; dissolves
+        //      to '[]T' in sema. Only legal as the final parameter of a 'fn'.
+        //   2. 'ext fn' C-varargs: a bare trailing '...' with no type (parse_ext_function_params).
+        //   3. 'fn(...)' function-pointer-type C-varargs: a bare trailing '...' with no type
+        //      (parse_function_type).
+        //   4. Array-fill initializer: trailing '...' after the last element of '{ ... }' repeats it
+        //      (braced-initializer parsing).
+        //   5. Call-site spread: '...expr' forwards an existing slice into a variadic parameter
+        //      (parse_postfix's call-argument loop).
         auto parse_function_params(Parser &parser) -> std::vector<FunctionDecl::Param> {
             parser.expect(TokenKind::LParen, "'('");
 
             std::vector<FunctionDecl::Param> params;
+            bool seen_variadic = false;
 
             while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
                 if (parser.check(TokenKind::DotDotDot)) {
                     parser.report_error(parser.current_location(),
-                        "variadic parameters ('...') are only allowed on 'ext fn' declarations, not 'fn'");
+                        "variadic parameters ('...') are only allowed on 'ext fn' declarations, not 'fn'; "
+                        "to declare a native variadic parameter, use 'name: ...T' with an element type");
                     parser.advance();
                     break;
                 }
@@ -1429,10 +1454,22 @@ namespace ast {
 
                 parser.expect(TokenKind::Colon, "':'");
 
+                if (seen_variadic) {
+                    parser.report_error(param_location, "'...' variadic parameter must be the last parameter in the parameter list");
+                }
+
+                bool param_is_variadic = false;
+                if (parser.check(TokenKind::DotDotDot)) {
+                    parser.advance();
+                    param_is_variadic = true;
+                    seen_variadic = true;
+                }
+
                 params.push_back({
                     .is_mut = param_is_mutable,
                     .name = param_name,
                     .type = parse_type(parser),
+                    .is_variadic = param_is_variadic,
                     .location = param_location,
                 });
 

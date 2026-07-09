@@ -1,0 +1,27 @@
+const fmt := import("../fmt")
+
+pub fn some_func_a(args: []fmt.Arg) -> error {
+    const _, e := fmt.format("Hello: {}", ...args)
+    return e
+}
+
+pub fn some_func_b(args: ...fmt.Arg) -> error {
+    const _, e := fmt.format("Hello: {}", ...args)
+    return e
+}
+
+pub fn main() -> i32 {
+    const some_usize_var: usize = 42
+    const _ := fmt.println("value = {}", some_usize_var)          # implicit coercion: usize -> Arg.size
+    const _ := fmt.println("no args here")                         # zero-variadic-arg call
+    const _ := fmt.println("mixed: {} and {}", 7, "literal str")   # int literal -> Arg.i, string literal -> Arg.str
+
+    mut arr: [2]fmt.Arg
+    arr[0] = .i{.value = 1}
+    arr[1] = .i{.value = 2}
+
+    if some_func_a(arr) != 0 { return 1 }               # []Arg spread-forwarded into ...Arg
+    if some_func_b(arr[0], arr[1]) != 0 { return 2 }     # loose args collected, then spread-forwarded
+
+    return 0
+}

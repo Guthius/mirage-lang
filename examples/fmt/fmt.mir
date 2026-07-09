@@ -1,0 +1,99 @@
+const string := import("../string")
+const builder := import("../builder")
+
+ext fn write(fd: i32, buf: *u8, count: usize) -> i64
+
+# Every variant's payload struct has exactly one field of a distinct scalar/slice type — this is
+# what makes the sema's implicit-coercion rule (exact single-field-type match) unambiguous for
+# every variant, letting callers pass e.g. a bare 'usize' where an 'Arg' is expected.
+pub type Arg = union(enum) {
+    str:  struct { value: []u8 }
+    ch:   struct { value: u8 }
+    flag: struct { value: bool }
+    i:    struct { value: i32 }
+    l:    struct { value: i64 }
+    u:    struct { value: u32 }
+    ul:   struct { value: u64 }
+    size: struct { value: usize }
+    f:    struct { value: f32 }
+    d:    struct { value: f64 }
+}
+
+fn format_arg(sb: *builder.StringBuilder, a: Arg) {
+    switch a {
+        .str(s): { builder.put_str(sb, s.value) },
+        .ch(c): { builder.put_char(sb, c.value) },
+        .flag(b): { builder.put_str(sb, b.value ? "true" : "false") },
+        .i(v): {
+            mut tmp: [16]u8
+            const s, _ := string.from_i32(tmp, v.value)
+            builder.put_str(sb, s)
+        },
+        .l(v): {
+            mut tmp: [24]u8
+            const s, _ := string.from_i64(tmp, v.value)
+            builder.put_str(sb, s)
+        },
+        .u(v): {
+            mut tmp: [16]u8
+            const s, _ := string.from_u32(tmp, v.value)
+            builder.put_str(sb, s)
+        },
+        .ul(v): {
+            mut tmp: [24]u8
+            const s, _ := string.from_u64(tmp, v.value)
+            builder.put_str(sb, s)
+        },
+        .size(v): {
+            mut tmp: [24]u8
+            const s, _ := string.from_usize(tmp, v.value)
+            builder.put_str(sb, s)
+        },
+        .f(v): {
+            mut tmp: [40]u8
+            const s, _ := string.from_f32(tmp, v.value)
+            builder.put_str(sb, s)
+        },
+        .d(v): {
+            mut tmp: [40]u8
+            const s, _ := string.from_f64(tmp, v.value)
+            builder.put_str(sb, s)
+        },
+    }
+}
+
+# Scans 'template' for '{}' placeholders, substituting each with the corresponding positional
+# 'args' entry. The returned slice is backed by a freshly allocated builder buffer that the
+# caller owns (free it with 'mem.free' on the underlying pointer when done, if desired).
+pub fn format(template: []u8, args: ...Arg) -> ([]u8, error) {
+    mut sb := builder.new_builder()
+    mut i: usize = 0
+    mut arg_idx: usize = 0
+    while i < len(template) {
+        if i + 1 < len(template) && template[i] == '{' && template[i + 1] == '}' {
+            if arg_idx >= len(args) {
+                builder.destroy(&sb)
+                return nil, 1
+            }
+            format_arg(&sb, args[arg_idx])
+            arg_idx += 1
+            i += 2
+        } else {
+            builder.put_char(&sb, template[i])
+            i += 1
+        }
+    }
+    return builder.to_slice(&sb), 0
+}
+
+pub fn println(template: []u8, args: ...Arg) -> error {
+    const s, err := format(template, ...args)
+    if err != 0 {
+        return err
+    }
+    if len(s) > 0 {
+        write(1, cast(s, *u8), len(s))
+    }
+    write(1, "\n", 1)
+    return 0
+}

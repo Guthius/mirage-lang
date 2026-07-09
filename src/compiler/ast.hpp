@@ -158,6 +158,11 @@ namespace ast {
     struct TryExpr;
     struct RangeExpr;
 
+    // Call-argument spread: '...expr' forwards an existing slice as a variadic argument.
+    // Only legal as the sole, final argument of a call to a native '...T' variadic function;
+    // all other legality is enforced in sema (see check_expr's default rejection for this node).
+    struct SpreadExpr;
+
     struct DefaultExpr {
         SourceLocation location;
     };
@@ -197,7 +202,8 @@ namespace ast {
         DefaultExpr,
         UndefinedExpr,
         std::unique_ptr<TryExpr>,
-        std::unique_ptr<RangeExpr>>;
+        std::unique_ptr<RangeExpr>,
+        std::unique_ptr<SpreadExpr>>;
 
     struct StructType {
         struct Field {
@@ -422,6 +428,11 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct SpreadExpr {
+        Expr operand;
+        SourceLocation location;
+    };
+
     struct BlockStmt;
     struct IfStmt;
     struct WhileStmt;
@@ -529,6 +540,7 @@ namespace ast {
             bool is_mut;
             std::string name;
             Type type;
+            bool is_variadic = false; // 'name: ...T' — native variadic; T is the element type, dissolves to []T in sema
             SourceLocation location;
         };
 

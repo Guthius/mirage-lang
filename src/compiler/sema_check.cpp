@@ -127,12 +127,12 @@ namespace sema {
             return program.fn_signatures.at(ty.fn_index);
         }
 
-        auto slice_element_type(const ResolvedType &slice, const std::string &module_path, Program &program) -> ResolvedType {
-            return program.modules.at(module_path).slices.at(slice.slice_index).element_type;
+        auto slice_element_type(const ResolvedType &slice, [[maybe_unused]] const std::string &module_path, Program &program) -> ResolvedType {
+            return program.slices.at(slice.slice_index).element_type;
         }
 
-        auto array_element_type(const ResolvedType &array, const std::string &module_path, Program &program) -> ResolvedType {
-            return program.modules.at(module_path).arrays.at(array.array_index).element_type;
+        auto array_element_type(const ResolvedType &array, [[maybe_unused]] const std::string &module_path, Program &program) -> ResolvedType {
+            return program.arrays.at(array.array_index).element_type;
         }
 
         auto assignable_in_module(const ResolvedType &from, const ResolvedType &to, const std::string &module_path, Program &program) -> bool {
@@ -143,7 +143,7 @@ namespace sema {
                 return slice_element_type(from, module_path, program) == array_element_type(to, module_path, program);
             }
             if (from.kind == TypeKind::Array && to.kind == TypeKind::Pointer) {
-                return array_element_type(from, module_path, program) == program.modules.at(module_path).pointer_pointees.at(to.pointee_index);
+                return array_element_type(from, module_path, program) == program.pointer_pointees.at(to.pointee_index);
             }
             return is_assignable(from, to);
         }
@@ -155,7 +155,7 @@ namespace sema {
             return true;
         }
 
-        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, int loop_depth, int defer_loop_base = -1) -> bool;
+        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, int loop_depth, int defer_loop_base = -1, bool native_variadic = false) -> bool;
         auto try_resolve_namespace_chain(const ast::Expr &expr, const std::string &module_path, LocalScope &locals, Program &program) -> std::optional<std::string>;
 
         auto check_group_call_returns(const ast::CallExpr &call, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base = -1) -> std::vector<ResolvedType> {
@@ -184,7 +184,7 @@ namespace sema {
                     // Method call on a value
                     auto receiver_type = check_expr((*member)->object, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
                     if (receiver_type.kind == TypeKind::Pointer) {
-                        receiver_type = program.modules.at(module_path).pointer_pointees[receiver_type.pointee_index];
+                        receiver_type = program.pointer_pointees[receiver_type.pointee_index];
                     }
                     const auto *method = find_method(receiver_type, (*member)->member, program);
                     if (!method) {
@@ -236,7 +236,7 @@ namespace sema {
                             error(diag, call.location, std::format("'{}' is not pub", name));
                             return {};
                         }
-                        check_call_args(call.args, sym.params, false, locals, module_path, program, diag, call.location, name, loop_depth, defer_loop_base);
+                        check_call_args(call.args, sym.params, false, locals, module_path, program, diag, call.location, name, loop_depth, defer_loop_base, sym.is_variadic);
                         return sym.return_types;
                     } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
                         if (check_pub && !sym.is_pub) {
@@ -268,7 +268,52 @@ namespace sema {
             }
         }
 
-        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, const bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, const int loop_depth, const int defer_loop_base) -> bool {
+        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, const bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, const int loop_depth, const int defer_loop_base, const bool native_variadic) -> bool {
+            if (native_variadic) {
+                // Last entry of 'params' is the dissolved '[]T' slot for the native '...T' parameter.
+                const size_t fixed_count = params.size() - 1;
+                if (args.size() < fixed_count) {
+                    error(diag, loc, std::format("'{}' expects at least {} argument(s), got {}", callee_desc, fixed_count, args.size()));
+                    return false;
+                }
+
+                bool ok = true;
+                for (size_t i = 0; i < fixed_count; ++i) {
+                    if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, params[i], loop_depth, defer_loop_base); !assignable_in_module(arg_ty, params[i], module_path, program)) {
+                        error(diag, loc, std::format("'{}' argument {} type mismatch", callee_desc, i + 1));
+                        ok = false;
+                    }
+                }
+
+                const auto &slice_ty = params.back();
+                const auto element_ty = slice_element_type(slice_ty, module_path, program);
+                const size_t tail_count = args.size() - fixed_count;
+
+                if (tail_count == 1) {
+                    if (const auto *spread = std::get_if<std::unique_ptr<ast::SpreadExpr>>(&args[fixed_count])) {
+                        const auto spread_ty = check_expr((*spread)->operand, locals, module_path, program, diag, slice_ty, loop_depth, defer_loop_base);
+                        if (!assignable_in_module(spread_ty, slice_ty, module_path, program)) {
+                            error(diag, loc, std::format("'{}' spread argument type mismatch: expected a slice matching the variadic element type", callee_desc));
+                            ok = false;
+                        }
+                        return ok;
+                    }
+                }
+
+                for (size_t i = fixed_count; i < args.size(); ++i) {
+                    if (std::holds_alternative<std::unique_ptr<ast::SpreadExpr>>(args[i])) {
+                        error(diag, loc, std::format("'{}': '...' spread argument must be the sole variadic argument", callee_desc));
+                        ok = false;
+                        continue;
+                    }
+                    if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, element_ty, loop_depth, defer_loop_base); !assignable_in_module(arg_ty, element_ty, module_path, program)) {
+                        error(diag, loc, std::format("'{}' variadic argument {} type mismatch", callee_desc, i - fixed_count + 1));
+                        ok = false;
+                    }
+                }
+                return ok;
+            }
+
             if (is_variadic) {
                 if (args.size() < params.size()) {
                     error(diag, loc, std::format("'{}' expects at least {} argument(s), got {}", callee_desc, params.size(), args.size()));
@@ -444,8 +489,7 @@ namespace sema {
             bool writable;
 
             if (object_type.kind == TypeKind::Pointer) {
-                const auto &mod = program.modules.at(module_path);
-                effective_type = mod.pointer_pointees[object_type.pointee_index];
+                effective_type = program.pointer_pointees[object_type.pointee_index];
                 writable = true;
             } else if (object_type.kind == TypeKind::Struct || object_type.kind == TypeKind::Union) {
                 effective_type = object_type;
@@ -519,7 +563,7 @@ namespace sema {
                             error(diag, v->location, "cannot dereference a non-pointer value");
                             return {ResolvedType{.kind = TypeKind::Invalid}, false};
                         }
-                        return {program.modules.at(module_path).pointer_pointees[ptr_ty.pointee_index], true};
+                        return {program.pointer_pointees[ptr_ty.pointee_index], true};
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                         return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base);
@@ -531,7 +575,7 @@ namespace sema {
                             error(diag, v->location, "index must be an integer expression");
                         }
                         if (operand.kind == TypeKind::Pointer) {
-                            return {program.modules.at(module_path).pointer_pointees.at(operand.pointee_index), true};
+                            return {program.pointer_pointees.at(operand.pointee_index), true};
                         }
                         if (operand.kind == TypeKind::Array) {
                             auto owner = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base);
@@ -566,7 +610,7 @@ namespace sema {
                     return ResolvedType{.kind = TypeKind::F64};
 
                 } else if constexpr (std::is_same_v<V, ast::LiteralStringExpr>) {
-                    return intern_slice(program.modules.at(module_path), ResolvedType{.kind = TypeKind::U8});
+                    return intern_slice(program, ResolvedType{.kind = TypeKind::U8});
 
                 } else if constexpr (std::is_same_v<V, ast::LiteralCharExpr>) {
                     return ResolvedType{.kind = TypeKind::U8};
@@ -599,6 +643,9 @@ namespace sema {
                             } else if constexpr (std::is_same_v<S, ImportSymbol>) {
                                 return ResolvedType{.kind = TypeKind::Namespace};
                             } else if constexpr (std::is_same_v<S, FunctionSymbol>) {
+                                if (sym.is_variadic) {
+                                    return error(diag, v.location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v.name));
+                                }
                                 // Allow taking address when expected type is a matching function type
                                 if (expected && expected->kind == TypeKind::Function) {
                                     const auto &exp_sig = fn_sig(*expected, program);
@@ -657,13 +704,13 @@ namespace sema {
                     case ast::UnaryOp::AddressOf:
                         {
                             const LvalueInfo lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base);
-                            return intern_pointer(program.modules.at(module_path), lv.type);
+                            return intern_pointer(program, lv.type);
                         }
                     case ast::UnaryOp::Deref:
                         {
                             const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
                             if (operand.kind != TypeKind::Pointer) return error(diag, v->location, "cannot dereference a non-pointer value");
-                            return program.modules.at(module_path).pointer_pointees[operand.pointee_index];
+                            return program.pointer_pointees[operand.pointee_index];
                         }
                     }
                     return ResolvedType{.kind = TypeKind::Invalid};
@@ -748,7 +795,7 @@ namespace sema {
                                     using S = std::decay_t<T1>;
                                     if constexpr (std::is_same_v<S, FunctionSymbol>) {
                                         if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
-                                        check_call_args(v->args, sym.params, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base);
+                                        check_call_args(v->args, sym.params, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, sym.is_variadic);
                                         if (sym.return_types.size() > 1) {
                                             return error(diag, v->location, "multi-value capture is not yet supported here");
                                         }
@@ -771,7 +818,7 @@ namespace sema {
                         // Method call on a value
                         auto receiver_type = check_expr((*member_callee)->object, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
                         if (receiver_type.kind == TypeKind::Pointer) {
-                            receiver_type = program.modules.at(module_path).pointer_pointees[receiver_type.pointee_index];
+                            receiver_type = program.pointer_pointees[receiver_type.pointee_index];
                         }
                         const auto *method = find_method(receiver_type, (*member_callee)->member, program);
                         if (!method) {
@@ -840,7 +887,7 @@ namespace sema {
                         [&]<typename T1>(const T1 &sym) -> ResolvedType {
                             using S = std::decay_t<T1>;
                             if constexpr (std::is_same_v<S, FunctionSymbol>) {
-                                check_call_args(v->args, sym.params, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base);
+                                check_call_args(v->args, sym.params, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, sym.is_variadic);
                                 if (sym.return_types.size() > 1) {
                                     return error(diag, v->location, "multi-value capture is not yet supported here");
                                 }
@@ -941,6 +988,9 @@ namespace sema {
                                     const auto &exp_sig = fn_sig(*expected, program);
                                     if (const auto *fn = std::get_if<FunctionSymbol>(&sym_it->second)) {
                                         if (!fn->is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
+                                        if (fn->is_variadic) {
+                                            return error(diag, v->location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v->member));
+                                        }
                                         if (fn->params == exp_sig.param_types &&
                                             fn->return_types == exp_sig.return_types &&
                                             !exp_sig.is_variadic) {
@@ -972,7 +1022,7 @@ namespace sema {
                         error(diag, v->location, "index must be an integer expression");
                     }
                     if (operand.kind == TypeKind::Pointer) {
-                        return program.modules.at(module_path).pointer_pointees.at(operand.pointee_index);
+                        return program.pointer_pointees.at(operand.pointee_index);
                     }
                     if (operand.kind == TypeKind::Array) {
                         return array_element_type(operand, module_path, program);
@@ -991,7 +1041,7 @@ namespace sema {
                     }
                     if (operand.kind == TypeKind::Array) {
                         const auto element = array_element_type(operand, module_path, program);
-                        return intern_slice(program.modules.at(module_path), element);
+                        return intern_slice(program, element);
                     }
                     if (operand.kind == TypeKind::Slice) {
                         return operand;
@@ -1186,7 +1236,7 @@ namespace sema {
                                             const ResolvedType payload_ty{.kind = TypeKind::Struct, .struct_index = variant.payload_struct_index};
                                             if (vp.capture_by_ref) {
                                                 arm_locals[*vp.capture_name] = LocalBinding{
-                                                    .type = intern_pointer(program.modules.at(module_path), payload_ty),
+                                                    .type = intern_pointer(program, payload_ty),
                                                     .is_mut = false,
                                                 };
                                             } else {
@@ -1469,7 +1519,7 @@ namespace sema {
                                 if (expected->kind != TypeKind::Array) {
                                     return error(diag, bv.location, "array initializer requires an array type");
                                 }
-                                const auto &array_info = program.modules.at(module_path).arrays.at(expected->array_index);
+                                const auto &array_info = program.arrays.at(expected->array_index);
                                 if (bv.values.size() > array_info.count) {
                                     return error(diag, bv.location, std::format("too many elements in array initializer: array has {} element(s), got {}", array_info.count, bv.values.size()));
                                 }
@@ -1491,11 +1541,62 @@ namespace sema {
                         check_expr(*v->lower, locals, module_path, program, diag, upper_type, loop_depth, defer_loop_base);
                     }
                     return error(diag, v->location, "range expression is only valid as a 'for-in' operand");
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SpreadExpr>>) {
+                    // Legal spreads are unwrapped and checked by check_call_args's variadic-tail
+                    // handling *before* recursing into check_expr on the operand directly — this
+                    // node is only ever visited here when the spread was in an illegal position
+                    // (not the sole trailing argument of a native-variadic call).
+                    check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
+                    return error(diag, v->location,
+                        "'...' spread argument is only valid as the sole trailing argument in a call to a "
+                        "function with a native '...T' variadic parameter");
                 }
             },
             expr);
 
         program.modules.at(module_path).expr_types[get_expr_key(expr)] = ty;
+
+        // Implicit tagged-union coercion: applies generically wherever an expected type is
+        // threaded through check_expr (call args, return statements, var-decl initializers,
+        // struct/array/union field init) — not special-cased to variadics, even though that's
+        // the primary motivating use case. See VariantCoercion's doc comment in sema.hpp for why
+        // this is recorded in a side table rather than overwriting expr_types for this node.
+        if (expected && ty.kind != TypeKind::Invalid && ty != *expected && expected->kind == TypeKind::Union) {
+            const auto &union_info = program.unions.at(expected->union_index);
+            if (union_info.is_tagged) {
+                const TaggedUnionVariant *match = nullptr;
+                std::vector<std::string> match_names;
+                for (const auto &variant : union_info.variants) {
+                    if (variant.payload_struct_index < 0) continue;
+                    const auto &payload_struct = program.structs.at(variant.payload_struct_index);
+                    if (payload_struct.fields.size() != 1) continue;
+                    if (payload_struct.fields[0].type != ty) continue;
+                    match = &variant;
+                    match_names.push_back(variant.name);
+                }
+                if (match_names.size() == 1) {
+                    program.modules.at(module_path).expr_variant_coercions[get_expr_key(expr)] = VariantCoercion{
+                        .union_type = *expected,
+                        .tag_value = match->tag_value,
+                        .payload_struct_index = match->payload_struct_index,
+                    };
+                    return *expected;
+                }
+                if (match_names.size() > 1) {
+                    std::string joined;
+                    for (size_t i = 0; i < match_names.size(); ++i) {
+                        if (i > 0) joined += ", ";
+                        joined += match_names[i];
+                    }
+                    const auto [union_module, union_name] = find_type_module_and_name(*expected, program);
+                    return error(diag, get_expr_location(expr), std::format(
+                        "ambiguous implicit coercion to tagged union '{}': variants {} all accept a payload of this type; "
+                        "use an explicit variant constructor",
+                        union_name.empty() ? "<union>" : union_name, joined));
+                }
+            }
+        }
+
         return ty;
     }
 
@@ -1561,7 +1662,7 @@ namespace sema {
                     }
                     if (v->element_name != "_") {
                         if (v->element_by_ref) {
-                            auto ptr_type = intern_pointer(program.modules.at(module_path), elem_type);
+                            auto ptr_type = intern_pointer(program, elem_type);
                             inner[v->element_name] = LocalBinding{.type = ptr_type, .is_mut = false};
                         } else {
                             inner[v->element_name] = LocalBinding{.type = elem_type, .is_mut = false};
@@ -1784,7 +1885,7 @@ namespace sema {
                                             const ResolvedType payload_ty{.kind = TypeKind::Struct, .struct_index = variant.payload_struct_index};
                                             if (vp.capture_by_ref) {
                                                 arm_locals[*vp.capture_name] = LocalBinding{
-                                                    .type = intern_pointer(program.modules.at(module_path), payload_ty),
+                                                    .type = intern_pointer(program, payload_ty),
                                                     .is_mut = false,
                                                 };
                                             } else {

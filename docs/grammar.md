@@ -27,6 +27,7 @@ declaration   ::= [ 'pub' ] fn_decl
 fn_decl       ::= 'fn' IDENT '(' [ param { ',' param } ] ')' [ return_types ] stmt
 
 param         ::= [ 'mut' ] IDENT ':' type
+               | IDENT ':' '...' type             (* native variadic; must be the last parameter *)
 
 return_types  ::= '->' type                       (* single return *)
                | '->' '(' type { ',' type } ')'  (* multi-return *)
@@ -129,6 +130,7 @@ Note: Struct and enum fields in type definitions are newline-separated (not comm
 stmt          ::= block_stmt
                | if_stmt
                | while_stmt
+               | for_stmt
                | switch_stmt
                | var_decl_stmt
                | continue_stmt
@@ -142,6 +144,14 @@ block_stmt    ::= '{' { stmt } '}'
 if_stmt       ::= 'if' expr stmt [ 'else' stmt ]
 
 while_stmt    ::= 'while' expr block_stmt
+
+for_stmt      ::= 'for' for_binding 'in' for_iterable block_stmt
+
+for_binding   ::= '&' IDENT                          (* for &val in ...: element bound by reference *)
+               | IDENT [ ',' [ '&' ] IDENT ]         (* for val in ...  OR  for idx, [&]val in ... *)
+
+for_iterable  ::= '..' expr                          (* upper-bound-only range; lower defaults to 0 *)
+               | expr [ '..' expr ]                  (* a slice/array, or a lower..upper range *)
 
 switch_stmt   ::= 'switch' expr '{' [ switch_arm { ',' switch_arm } [ ',' ] ] '}'
 
@@ -223,7 +233,9 @@ postfix_op    ::= '(' [ arg { ',' arg } ] ')'    (* call *)
                | '++'
                | '--'
 
-arg           ::= expr
+arg           ::= '...' expr                      (* spread — expr must be a slice; only legal as the
+                                                       sole, final argument of a native-variadic call *)
+               | expr
 ```
 
 ### Primary Expressions
@@ -316,8 +328,13 @@ LETTER        ::= 'a'..'z' | 'A'..'Z' | '_'
 
 7. **`_` in group declarations**: The underscore `_` is recognized as an `IDENT` with value `"_"` in group declarations and match default patterns; it is not a keyword.
 
-8. **Variadic `...` in `fn` type**: Inside a function-pointer type expression, `...` marks the function as variadic and must be the last parameter.
+8. **`...` is lexically one token used in five unrelated grammar positions**, disambiguated purely by parse context — never by a shared representation:
+   - *Native variadic parameter* (`param`): `name: ...T` — a type follows the dots; the parameter dissolves to `[]T` inside the function body. Only legal as the final parameter of a `fn`.
+   - *`ext fn` C-varargs* (`ext_params`): a bare trailing `...` with no type, requiring at least one named parameter before it.
+   - *`fn(...)` function-pointer-type C-varargs* (`fn_type_params`): a bare trailing `...` with no type, same C-vararg semantics as `ext fn`.
+   - *Array-fill initializer* (`braced_initializer`): trailing `...` after the last element of `{ expr, ... }` repeats it (see note 10).
+   - *Call-argument spread* (`arg`): `...expr` forwards an existing slice as a variadic argument; only legal as the sole, final argument of a call whose callee has a native `...T` parameter.
 
-9. **`for` keyword**: Reserved but not yet implemented as a statement form.
+9. **`for` statement**: Implemented as `for_stmt` above. `for val in iterable`, `for idx, val in iterable`, and `for &val`/`for idx, &val` (element bound by reference) are all supported. `iterable` is a slice, a fixed-size array, or a range (`lower..upper`, or `..upper` with an implicit lower bound of 0).
 
 10. **Array fill `...` in array initializer**: In an array initializer `{ expr, ... }`, a trailing `...` immediately after the last value repeats that value (evaluated once) to fill all remaining elements of the array. It must be the last token before `}`.

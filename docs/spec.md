@@ -159,6 +159,32 @@ Payload fields in constructors use the `.field = value` syntax inside braces.
 
 Tagged union members cannot be accessed directly; use `match` to destructure.
 
+**Implicit coercion:** wherever an expected type is known (call arguments, return statements,
+variable initializers, struct/array/union field initializers), a value whose type exactly matches
+the payload type of exactly one variant of the expected tagged-union type is automatically wrapped
+in that variant — no explicit `TypeName.variant{...}` construction is required:
+
+```mirage
+type Arg = union(enum) {
+    size: struct { value: usize }
+    str:  struct { value: []u8 }
+}
+
+fn take(a: Arg) -> error { ... }
+
+const n: usize = 42
+take(n)          # implicitly wrapped as Arg.size{.value = n}
+take("hello")    # implicitly wrapped as Arg.str{.value = "hello"}
+```
+
+The match is exact (the argument's type must equal the variant's single payload-field type
+precisely, not merely be assignable to it) and requires the payload struct to have exactly one
+field. If the argument's type doesn't exactly match any variant's single field, this coercion is
+not attempted and normal type-checking rules apply. If it exactly matches more than one variant
+(e.g. two variants both have a single `usize` field), the coercion is ambiguous and is a sema
+error naming the union type and all matching variants — write an explicit
+`TypeName.variant{...}` in that case.
+
 ### Function Pointer Types
 
 ```mirage
@@ -426,6 +452,22 @@ fp(arg1)            # call through function pointer
 mod.fn_name(arg)    # cross-module call
 ```
 
+**Spread argument:** `...expr` forwards an existing slice as the variadic argument of a call to a
+function with a native `...T` parameter (see [Variadic Arguments](#15-variadic-arguments)):
+
+```mirage
+fn sum(base: i32, nums: ...i32) -> i32 { ... }
+
+fn forward(nums: []i32) -> i32 {
+    return sum(0, ...nums)
+}
+```
+
+A spread argument must be the sole, final argument in the variadic slot — it cannot be combined
+with additional loose variadic arguments (`f(a, ...xs, b)` and `f(a, 1, ...xs)` are both errors),
+and it is only legal when the callee's variadic parameter is native `...T` (not an `ext fn`'s C
+`...` varargs). The spread expression's type must be a slice assignable to `[]T`.
+
 ### `cast`
 
 ```mirage
@@ -540,6 +582,23 @@ while condition {
 
 Loops while `condition` is `true`. The condition is `bool`. The body must be a block statement. `break` exits the loop; `continue` jumps to the next iteration.
 
+### For Loop
+
+```mirage
+for x in 0..10 { ... }        # range, exclusive upper bound
+for x in ..10 { ... }         # range with implicit lower bound of 0
+for x in some_slice { ... }   # element by value
+for i, x in some_slice { ... }  # index + element by value
+for &x in some_slice { ... }    # element by reference (*T)
+for i, &x in some_slice { ... } # index + element by reference
+```
+
+Iterates a range (`lower..upper`, exclusive of `upper`), or a slice/fixed-size array. With a single
+binding, only the element is bound; with two bindings, the first is the `usize` index and the
+second is the element. Prefixing the element binding with `&` binds a pointer to the element
+in-place (mutating through it mutates the underlying slice/array) instead of a by-value copy. Any
+binding name may be `_` to discard it. `break` and `continue` behave as in `while`.
+
 ### Break and Continue
 
 ```mirage
@@ -614,6 +673,28 @@ pub fn name(p: Type) -> (T1, T2) {
 - `pub` makes the function visible to importing modules.
 - Multi-return: `-> (T1, T2, ...)` syntax.
 - Void return: omit the `->` clause.
+
+### Native Variadic Parameters
+
+```mirage
+fn sum(base: i32, nums: ...i32) -> i32 {
+    mut total := base
+    for n in nums {
+        total += n
+    }
+    return total
+}
+
+sum(10)          # zero variadic args -> nums is an empty slice
+sum(10, 1, 2, 3) # nums is []i32{1, 2, 3}
+```
+
+The final parameter of a `fn` may be declared `name: ...T`, where `T` is any valid element type.
+Inside the function body, `name` behaves as an ordinary `[]i32` — a value of `[N]T` collected from
+the trailing call arguments, or the slice passed directly via [spread](#function-call). A call must
+supply zero or more trailing arguments assignable to `T` beyond the fixed parameters. This is
+distinct from `ext fn`'s untyped C `...` varargs (see [Variadic Arguments](#15-variadic-arguments))
+— the address of a variadic function cannot be taken as a function pointer.
 
 ### Extern Functions
 
@@ -833,7 +914,32 @@ Deferred statements registered at the time of `try` propagation run before the e
 
 ## 15. Variadic Arguments
 
-Only `ext fn` functions may be variadic. In variadic calls, arguments after the fixed parameters must be at least 32 bits wide (C default argument promotion rules). Valid variadic argument types: `i32`, `u32`, `i64`, `u64`, `usize`, `error`, `f64`, typed pointers, `anyptr`. Narrower types (e.g., `f32`, `u8`, `i16`) must be cast to a valid type before passing.
+There are two distinct kinds of variadic function, with different syntax and different rules.
+
+### C-style Variadics (`ext fn`)
+
+```mirage
+ext fn printf(fmt: *u8, ...) -> i32
+```
+
+Only `ext fn` functions may take C-style `...` varargs, matching C ABI variadic-argument
+promotion. In variadic calls, arguments after the fixed parameters must be at least 32 bits wide
+(C default argument promotion rules). Valid variadic argument types: `i32`, `u32`, `i64`, `u64`,
+`usize`, `error`, `f64`, typed pointers, `anyptr`. Narrower types (e.g., `f32`, `u8`, `i16`) must
+be cast to a valid type before passing. `...` spread ([Function Call](#function-call)) is not
+valid for C-style varargs, since they carry no element type to check a slice against.
+
+### Native Variadics (`fn f(args: ...T)`)
+
+See [Native Variadic Parameters](#native-variadic-parameters). A `fn`'s final parameter may be
+declared `...T`, dissolving to `[]T` inside the function body. Unlike C-style varargs:
+- Trailing arguments are checked against the declared element type `T` like an ordinary parameter
+  (including [implicit tagged-union coercion](#tagged-union-types) and literal defaulting) — no
+  promotion-rule restrictions apply.
+- Zero variadic arguments is legal (`nums` is an empty slice).
+- An existing `[]T` (or `[N]T`) can be forwarded directly with `...expr` spread, without
+  allocating a new array (see [Function Call](#function-call)).
+- The function's address cannot be taken as a function pointer.
 
 ---
 
@@ -842,7 +948,5 @@ Only `ext fn` functions may be variadic. In variadic calls, arguments after the 
 The following identifiers are reserved by the language:
 
 `break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `iota` `len` `macro` `match` `mut` `nil` `return` `sizeof` `struct` `switch` `true` `try` `type` `undefined` `union` `while`
-
-Note: `for` is reserved but not yet implemented.
 
 `ext` is parsed as an identifier, not a keyword; it is used as the prefix for extern function declarations.

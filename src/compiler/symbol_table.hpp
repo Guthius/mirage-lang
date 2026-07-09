@@ -19,6 +19,8 @@ namespace sema {
         std::vector<ResolvedType> params;
         std::vector<ResolvedType> return_types;
         bool is_pub = false;
+        bool is_variadic = false;             // true if the last param is native '...T'
+        ResolvedType variadic_element_type{};  // T; only meaningful if is_variadic
     };
 
     struct ExtFunctionSymbol {

@@ -18,7 +18,14 @@ namespace sema {
             for (auto &sym : module.symbols | std::views::values) {
                 if (auto *fn = std::get_if<FunctionSymbol>(&sym)) {
                     for (auto &p : fn->decl->params) {
-                        fn->params.push_back(resolve_type(p.type, module_path, program, diag));
+                        const auto pt = resolve_type(p.type, module_path, program, diag);
+                        if (p.is_variadic) {
+                            fn->is_variadic = true;
+                            fn->variadic_element_type = pt;
+                            fn->params.push_back(intern_slice(program, pt));
+                        } else {
+                            fn->params.push_back(pt);
+                        }
                     }
                     for (auto &rt : fn->decl->return_types) {
                         fn->return_types.push_back(resolve_type(rt, module_path, program, diag));
@@ -150,7 +157,7 @@ namespace sema {
                     }
 
                     // Bind 'self' as a pointer to the type
-                    const auto self_ptr = intern_pointer(module, info.self_type);
+                    const auto self_ptr = intern_pointer(program, info.self_type);
                     locals["self"] = LocalBinding{.type = self_ptr, .is_mut = info.is_mut_self};
 
                     for (size_t i = 0; i < info.decl->params.size(); ++i) {

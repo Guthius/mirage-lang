@@ -94,14 +94,24 @@ namespace sema {
         bool is_resolved = false;
     };
 
+    // Records an implicit tagged-union coercion decided by check_expr for a given expression node
+    // (see check_expr's expected-type tail). The scalar expression's own natural type is left
+    // untouched in expr_types (overwriting it would corrupt leaf codegen, e.g. integer/float literal
+    // constant construction, which reads its LLVM type directly from expr_types); codegen instead
+    // consults this side table and materializes the wrapped union value from the already-decided
+    // variant, never re-scanning UnionInfo::variants itself.
+    struct VariantCoercion {
+        ResolvedType union_type;
+        int32_t tag_value = 0;
+        int32_t payload_struct_index = -1;
+    };
+
     struct ProgramModule {
         SymbolTable symbols;
-        std::vector<ResolvedType> pointer_pointees;
-        std::vector<ArrayInfo> arrays;
-        std::vector<SliceInfo> slices;
         // type_name -> method_name -> MethodInfo
         std::unordered_map<std::string, std::unordered_map<std::string, MethodInfo>> methods;
         std::unordered_map<const void *, ResolvedType> expr_types;
+        std::unordered_map<const void *, VariantCoercion> expr_variant_coercions;
         bool ok = false;
     };
 
@@ -118,6 +128,9 @@ namespace sema {
         std::vector<EnumInfo> enums;
         std::vector<UnionInfo> unions;            // global; union_index is unique across all modules
         std::vector<FunctionTypeInfo> fn_signatures; // global; fn_index is unique across all modules
+        std::vector<ResolvedType> pointer_pointees; // global; pointee_index is unique across all modules
+        std::vector<ArrayInfo> arrays;             // global; array_index is unique across all modules
+        std::vector<SliceInfo> slices;             // global; slice_index is unique across all modules
         ResolveState resolve_state;
         bool ok = false;
     };
@@ -133,11 +146,27 @@ namespace sema {
         return std::visit([](const auto &v) -> const void * { return &v; }, expr);
     }
 
+    // Expr alternatives are a mix of by-value nodes ('.location'), boxed 'unique_ptr<T>' nodes
+    // ('->location'), and the boxed BracedInitializerExpr (a unique_ptr to a nested variant with
+    // no location of its own); this uniformly extracts the location regardless of which.
+    inline auto get_expr_location(const ast::Expr &expr) -> SourceLocation {
+        return std::visit([](const auto &v) -> SourceLocation {
+            using V = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
+                return std::visit([](const auto &bv) -> SourceLocation { return bv.location; }, *v);
+            } else if constexpr (requires { v->location; }) {
+                return v->location;
+            } else {
+                return v.location;
+            }
+        }, expr);
+    }
+
     auto check_program(const ast::Program &program, DiagnosticEngine &diag) -> Program;
     auto resolve_type(const ast::Type &type, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType;
     auto is_assignable(const ResolvedType &from, const ResolvedType &to) -> bool;
-    auto intern_pointer(ProgramModule &module, const ResolvedType &pointee) -> ResolvedType;
-    auto intern_slice(ProgramModule &module, const ResolvedType &element) -> ResolvedType;
+    auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType;
+    auto intern_slice(Program &program, const ResolvedType &element) -> ResolvedType;
     auto intern_function_type(Program &program, FunctionTypeInfo sig) -> ResolvedType;
     auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
     auto resolve_global_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;

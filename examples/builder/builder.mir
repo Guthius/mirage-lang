@@ -1,0 +1,63 @@
+const mem := import("../mem")
+
+pub type StringBuilder = struct {
+    data: anyptr
+    length: usize
+    capacity: usize
+}
+
+pub fn new_builder() -> StringBuilder {
+    return {.data = nil, .length = 0, .capacity = 0}
+}
+
+fn ensure_capacity(self: *StringBuilder, extra: usize) -> bool {
+    if self.length + extra <= self.capacity {
+        return true
+    }
+
+    mut new_cap: usize = self.capacity == 0 ? 64 : self.capacity * 2
+    while new_cap < self.length + extra {
+        new_cap *= 2
+    }
+
+    const new_data := mem.realloc(self.data, new_cap)
+    if new_data == nil {
+        return false
+    }
+
+    self.data = new_data
+    self.capacity = new_cap
+    return true
+}
+
+pub fn put_str(self: *StringBuilder, s: []u8) -> bool {
+    if len(s) == 0 {
+        return true
+    }
+    if !ensure_capacity(self, len(s)) {
+        return false
+    }
+    mem.copy(self.data + self.length, cast(s, *u8), len(s))
+    self.length += len(s)
+    return true
+}
+
+pub fn put_char(self: *StringBuilder, c: u8) -> bool {
+    if !ensure_capacity(self, 1) {
+        return false
+    }
+    cast(self.data, *u8)[self.length] = c
+    self.length += 1
+    return true
+}
+
+pub fn to_slice(self: *StringBuilder) -> []u8 {
+    return cast(self.data, []u8, self.length)
+}
+
+pub fn destroy(self: *StringBuilder) {
+    mem.free(self.data)
+    self.data = nil
+    self.length = 0
+    self.capacity = 0
+}
