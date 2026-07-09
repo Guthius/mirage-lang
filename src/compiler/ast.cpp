@@ -763,16 +763,18 @@ namespace ast {
                     while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
                         // '...' here is call-argument spread (position 5, see parse_function_params'
                         // comment for the full list of '...' positions) — forwards an existing slice
-                        // as a variadic argument. Legality (sole/last/variadic-callee) is sema's job.
+                        // as a variadic argument, written as a postfix suffix: 'expr...'. Legality
+                        // (sole/last/variadic-callee) is sema's job.
+                        auto arg = parse_expr(parser);
                         if (parser.check(TokenKind::DotDotDot)) {
                             const auto spread_loc = parser.current_location();
                             parser.advance();
                             args.push_back(std::make_unique<SpreadExpr>(SpreadExpr{
-                                .operand = parse_expr(parser),
+                                .operand = std::move(arg),
                                 .location = spread_loc,
                             }));
                         } else {
-                            args.push_back(parse_expr(parser));
+                            args.push_back(std::move(arg));
                         }
                         if (!parser.check(TokenKind::RParen)) {
                             parser.expect(TokenKind::Comma, "','");
@@ -1431,7 +1433,7 @@ namespace ast {
         //      (parse_function_type).
         //   4. Array-fill initializer: trailing '...' after the last element of '{ ... }' repeats it
         //      (braced-initializer parsing).
-        //   5. Call-site spread: '...expr' forwards an existing slice into a variadic parameter
+        //   5. Call-site spread: 'expr...' forwards an existing slice into a variadic parameter
         //      (parse_postfix's call-argument loop).
         auto parse_function_params(Parser &parser) -> std::vector<FunctionDecl::Param> {
             parser.expect(TokenKind::LParen, "'('");

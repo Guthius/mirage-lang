@@ -452,19 +452,19 @@ fp(arg1)            # call through function pointer
 mod.fn_name(arg)    # cross-module call
 ```
 
-**Spread argument:** `...expr` forwards an existing slice as the variadic argument of a call to a
+**Spread argument:** `expr...` forwards an existing slice as the variadic argument of a call to a
 function with a native `...T` parameter (see [Variadic Arguments](#15-variadic-arguments)):
 
 ```mirage
 fn sum(base: i32, nums: ...i32) -> i32 { ... }
 
 fn forward(nums: []i32) -> i32 {
-    return sum(0, ...nums)
+    return sum(0, nums...)
 }
 ```
 
 A spread argument must be the sole, final argument in the variadic slot — it cannot be combined
-with additional loose variadic arguments (`f(a, ...xs, b)` and `f(a, 1, ...xs)` are both errors),
+with additional loose variadic arguments (`f(a, xs..., b)` and `f(a, 1, xs...)` are both errors),
 and it is only legal when the callee's variadic parameter is native `...T` (not an `ext fn`'s C
 `...` varargs). The spread expression's type must be a slice assignable to `[]T`.
 
@@ -926,7 +926,7 @@ Only `ext fn` functions may take C-style `...` varargs, matching C ABI variadic-
 promotion. In variadic calls, arguments after the fixed parameters must be at least 32 bits wide
 (C default argument promotion rules). Valid variadic argument types: `i32`, `u32`, `i64`, `u64`,
 `usize`, `error`, `f64`, typed pointers, `anyptr`. Narrower types (e.g., `f32`, `u8`, `i16`) must
-be cast to a valid type before passing. `...` spread ([Function Call](#function-call)) is not
+be cast to a valid type before passing. `expr...` spread ([Function Call](#function-call)) is not
 valid for C-style varargs, since they carry no element type to check a slice against.
 
 ### Native Variadics (`fn f(args: ...T)`)
@@ -937,7 +937,7 @@ declared `...T`, dissolving to `[]T` inside the function body. Unlike C-style va
   (including [implicit tagged-union coercion](#tagged-union-types) and literal defaulting) — no
   promotion-rule restrictions apply.
 - Zero variadic arguments is legal (`nums` is an empty slice).
-- An existing `[]T` (or `[N]T`) can be forwarded directly with `...expr` spread, without
+- An existing `[]T` (or `[N]T`) can be forwarded directly with `expr...` spread, without
   allocating a new array (see [Function Call](#function-call)).
 - The function's address cannot be taken as a function pointer.
 

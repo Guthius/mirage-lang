@@ -87,7 +87,7 @@ pub fn format(template: []u8, args: ...Arg) -> ([]u8, error) {
 }
 
 pub fn println(template: []u8, args: ...Arg) -> error {
-    const s, err := format(template, ...args)
+    const s, err := format(template, args...)
     if err != 0 {
         return err
     }

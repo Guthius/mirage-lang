@@ -1,12 +1,12 @@
 const fmt := import("../fmt")
 
 pub fn some_func_a(args: []fmt.Arg) -> error {
-    const _, e := fmt.format("Hello: {}", ...args)
+    const _, e := fmt.format("Hello: {}", args...)
     return e
 }
 
 pub fn some_func_b(args: ...fmt.Arg) -> error {
-    const _, e := fmt.format("Hello: {}", ...args)
+    const _, e := fmt.format("Hello: {}", args...)
     return e
 }
 

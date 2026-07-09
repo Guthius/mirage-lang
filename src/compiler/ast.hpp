@@ -158,7 +158,7 @@ namespace ast {
     struct TryExpr;
     struct RangeExpr;
 
-    // Call-argument spread: '...expr' forwards an existing slice as a variadic argument.
+    // Call-argument spread: 'expr...' forwards an existing slice as a variadic argument.
     // Only legal as the sole, final argument of a call to a native '...T' variadic function;
     // all other legality is enforced in sema (see check_expr's default rejection for this node).
     struct SpreadExpr;

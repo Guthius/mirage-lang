@@ -233,7 +233,7 @@ postfix_op    ::= '(' [ arg { ',' arg } ] ')'    (* call *)
                | '++'
                | '--'
 
-arg           ::= '...' expr                      (* spread — expr must be a slice; only legal as the
+arg           ::= expr '...'                      (* spread — expr must be a slice; only legal as the
                                                        sole, final argument of a native-variadic call *)
                | expr
 ```
@@ -333,7 +333,7 @@ LETTER        ::= 'a'..'z' | 'A'..'Z' | '_'
    - *`ext fn` C-varargs* (`ext_params`): a bare trailing `...` with no type, requiring at least one named parameter before it.
    - *`fn(...)` function-pointer-type C-varargs* (`fn_type_params`): a bare trailing `...` with no type, same C-vararg semantics as `ext fn`.
    - *Array-fill initializer* (`braced_initializer`): trailing `...` after the last element of `{ expr, ... }` repeats it (see note 10).
-   - *Call-argument spread* (`arg`): `...expr` forwards an existing slice as a variadic argument; only legal as the sole, final argument of a call whose callee has a native `...T` parameter.
+   - *Call-argument spread* (`arg`): `expr...` forwards an existing slice as a variadic argument; only legal as the sole, final argument of a call whose callee has a native `...T` parameter.
 
 9. **`for` statement**: Implemented as `for_stmt` above. `for val in iterable`, `for idx, val in iterable`, and `for &val`/`for idx, &val` (element bound by reference) are all supported. `iterable` is a slice, a fixed-size array, or a range (`lower..upper`, or `..upper` with an implicit lower bound of 0).
 
