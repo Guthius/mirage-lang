@@ -1689,8 +1689,8 @@ namespace sema {
                 } else if constexpr (std::is_same_v<V, ast::VarDeclStmt>) {
                     ResolvedType declared_ty{.kind = TypeKind::Void};
                     bool has_declared_ty = false;
-                    if (v.type) {
-                        declared_ty = resolve_type(*v.type, module_path, program, diag);
+                    if (const auto resolved = resolve_declared_type(v.type, v.init, module_path, program, diag, v.location)) {
+                        declared_ty = *resolved;
                         has_declared_ty = true;
                     }
                     if (v.init) {

@@ -169,6 +169,9 @@ namespace sema {
 
     auto check_program(const ast::Program &program, DiagnosticEngine &diag) -> Program;
     auto resolve_type(const ast::Type &type, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType;
+    auto resolve_declared_type(const std::optional<ast::Type> &type, const std::optional<ast::Expr> &init,
+                                const std::string &module_path, Program &program, DiagnosticEngine &diag,
+                                const SourceLocation &decl_loc) -> std::optional<ResolvedType>;
     auto is_assignable(const ResolvedType &from, const ResolvedType &to) -> bool;
     auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType;
     auto intern_slice(Program &program, const ResolvedType &element) -> ResolvedType;

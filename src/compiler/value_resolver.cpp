@@ -252,8 +252,8 @@ namespace sema {
         ResolvedType declared_ty{.kind = TypeKind::Void};
 
         bool has_declared_ty = false;
-        if (g->decl->type) {
-            declared_ty = resolve_type(*g->decl->type, module_path, program, diag);
+        if (const auto resolved = resolve_declared_type(g->decl->type, g->decl->init, module_path, program, diag, g->decl->location)) {
+            declared_ty = *resolved;
             has_declared_ty = true;
         }
 

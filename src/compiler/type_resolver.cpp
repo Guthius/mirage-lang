@@ -710,8 +710,12 @@ namespace sema {
                             return ResolvedType{.kind = TypeKind::Struct, .struct_index = slot};
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ArrayType>>) {
+                            if (!v->size.has_value()) {
+                                return error(diag, v->location,
+                                    "array type '[?]T' can only be used as the declared type of a 'const'/'let' declaration with an array literal initializer");
+                            }
                             auto element = resolve_type_impl(v->base_type, module_path);
-                            const auto count = array_len_expr_value(v->size, module_path);
+                            const auto count = array_len_expr_value(*v->size, module_path);
                             return intern_array(program, element, count, size_of(module_path, element) * count, align_of(module_path, element));
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceType>>) {
@@ -788,6 +792,37 @@ namespace sema {
     auto resolve_type(const ast::Type &type, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType {
         Resolver resolver{program, diag};
         return resolver.resolve_type_impl(type, module_path);
+    }
+
+    auto resolve_declared_type(const std::optional<ast::Type> &type, const std::optional<ast::Expr> &init,
+                                const std::string &module_path, Program &program, DiagnosticEngine &diag,
+                                const SourceLocation &decl_loc) -> std::optional<ResolvedType> {
+        if (!type) return std::nullopt;
+
+        const auto *array_type = std::get_if<std::unique_ptr<ast::ArrayType>>(&*type);
+        if (!array_type || (*array_type)->size.has_value()) {
+            return resolve_type(*type, module_path, program, diag); // unchanged behavior
+        }
+
+        // '[?]T': infer the element count from a literal array initializer.
+        if (!init) {
+            return error(diag, decl_loc, "cannot infer array length: '[?]' array declaration requires an initializer");
+        }
+        const auto *braced = std::get_if<std::unique_ptr<ast::BracedInitializerExpr>>(&*init);
+        const auto *array_lit = braced ? std::get_if<ast::ArrayExpr>(braced->get()) : nullptr;
+        if (!array_lit) {
+            return error(diag, expr_location(*init), "cannot infer array length: initializer for a '[?]' array type must be an array literal");
+        }
+        if (array_lit->has_fill) {
+            return error(diag, array_lit->location, "cannot infer array length: initializer must not use '...' to fill remaining elements");
+        }
+
+        Resolver resolver{program, diag};
+        const auto element = resolver.resolve_type_impl((*array_type)->base_type, module_path);
+        const auto count = static_cast<uint64_t>(array_lit->values.size());
+        return intern_array(program, element, count,
+                             resolver.size_of(module_path, element) * static_cast<uint32_t>(count),
+                             resolver.align_of(module_path, element));
     }
 
     auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType {

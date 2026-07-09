@@ -1758,7 +1758,10 @@ namespace ast {
                 });
             }
 
-            auto size = parse_expr(parser);
+            std::optional<Expr> size;
+            if (!parser.match(TokenKind::Question)) {
+                size = parse_expr(parser);
+            }
 
             parser.expect(TokenKind::RBracket, "']'");
             return std::make_unique<ArrayType>(ArrayType{

@@ -91,6 +91,7 @@ method_decl   ::= [ 'pub' ] 'fn' IDENT
 type          ::= '*' type                              (* pointer *)
                | '[' ']' type                          (* slice *)
                | '[' expr ']' type                     (* array *)
+               | '[' '?' ']' type                       (* array, size inferred from initializer *)
                | 'struct' [ '(' 'packed' ')' ] '{'
                    { IDENT ':' type [ '=' expr ] }
                  '}'
@@ -338,3 +339,5 @@ LETTER        ::= 'a'..'z' | 'A'..'Z' | '_'
 9. **`for` statement**: Implemented as `for_stmt` above. `for val in iterable`, `for idx, val in iterable`, and `for &val`/`for idx, &val` (element bound by reference) are all supported. `iterable` is a slice, a fixed-size array, or a range (`lower..upper`, or `..upper` with an implicit lower bound of 0).
 
 10. **Array fill `...` in array initializer**: In an array initializer `{ expr, ... }`, a trailing `...` immediately after the last value repeats that value (evaluated once) to fill all remaining elements of the array. It must be the last token before `}`.
+
+11. **Inferred array size `[?]T`**: Valid only as the declared type of a `const`/`let` (or local `const`/`mut`) declaration. The element count is taken directly from the initializer, which must be a literal array initializer `{ ... }` with no trailing `...` fill (note 10) and must not be an identifier, function call, or other computed expression.

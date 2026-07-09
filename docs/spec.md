@@ -64,6 +64,12 @@ Auto-deref: accessing members or calling methods on a pointer-to-struct automati
 
 A fixed-size array of `N` elements of type `T`. `N` must be a compile-time constant expression. Arrays are value types (copied on assignment). Arrays are implicitly assignable to matching slice types.
 
+```
+[?]T
+```
+
+An array whose size is inferred from its initializer. Valid only as the declared type of a `const`/`let` declaration whose initializer is a literal array initializer with no `...` fill; the element count becomes the number of elements written. Once resolved, `[?]T` behaves identically to the equivalent `[N]T`.
+
 ### Slice Types
 
 ```

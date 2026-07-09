@@ -2595,6 +2595,21 @@ namespace codegen {
                                     }
                                 }
                             }
+                        } else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
+                            if (ty.kind == sema::TypeKind::Enum) {
+                                const auto &enum_info = sema_program_.enums.at(ty.enum_index);
+                                for (const auto &field : enum_info.fields) {
+                                    if (field.name == v.name) {
+                                        return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty),
+                                                                      static_cast<uint64_t>(field.value),
+                                                                      enum_info.underlying_type.is_signed());
+                                    }
+                                }
+                                report_codegen_error(diag_, v.location, std::format("unknown enum field '{}'", v.name));
+                                return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
+                            }
+                            // Payload-free tagged-union variant (.name where ty is a Union) needs
+                            // alloca/store, which can't be constant-folded — falls through below.
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                             return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), sizeof_operand(*v));
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
@@ -2830,7 +2845,7 @@ namespace codegen {
                             emit_expr(v.expr);
                         } else if constexpr (std::is_same_v<V, ast::VarDeclStmt>) {
                             const auto ty = v.type
-                                                ? sema::resolve_type(*v.type, *current_module_path_, const_cast<sema::Program &>(sema_program_), diag_)
+                                                ? *sema::resolve_declared_type(v.type, v.init, *current_module_path_, const_cast<sema::Program &>(sema_program_), diag_, v.location)
                                                 : current_module_->expr_types.at(sema::get_expr_key(*v.init));
                             const auto type_module = v.type
                                                          ? type_module_for_ast_type(*v.type, *current_module_path_, ty)

@@ -220,7 +220,7 @@ namespace ast {
 
     struct ArrayType {
         Type base_type;
-        Expr size;
+        std::optional<Expr> size; // nullopt = '[?]T', size inferred from the initializer
         SourceLocation location;
     };
 
