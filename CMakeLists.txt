@@ -62,3 +62,23 @@ target_link_libraries(mirage
 )
 
 target_compile_definitions(mirage PUBLIC ${LLVM_DEFINITIONS})
+
+add_executable(lexer_asi_test
+        tests/lexer_asi_test.cpp
+        src/compiler/lexer.cpp
+        src/compiler/lexer.hpp
+        src/compiler/token.cpp
+        src/compiler/token.hpp
+        src/compiler/diagnostic_engine.cpp
+        src/compiler/diagnostic_engine.hpp
+        src/compiler/source_manager.cpp
+        src/compiler/source_manager.hpp
+        src/compiler/source_location.hpp
+)
+
+target_include_directories(lexer_asi_test
+        PRIVATE src
+)
+
+enable_testing()
+add_test(NAME lexer_asi_test COMMAND lexer_asi_test)

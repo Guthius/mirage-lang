@@ -1,0 +1,45 @@
+# Regression test for two related fixes:
+#   1. Automatic semicolon insertion (ASI): a newline now terminates a statement, so a
+#      line ending in a call no longer silently continues into the next line's leading token.
+#   2. Postfix pointer dereference 'expr.*' (replacing prefix '*expr'), which removes '*'
+#      from the prefix-unary/binary-infix ambiguity that originally motivated this fix.
+#
+# Mirrors the originally reported bug shape: a pointer variable is initialized from an
+# allocating call, and the very next line assigns through the pointer.
+
+const mem := import("../mem")
+
+type Point = struct {
+    x: i32
+    y: i32
+}
+
+fn make_point(x: i32, y: i32) -> Point {
+    return {.x = x, .y = y}
+}
+
+fn alloc_point() -> *Point {
+    mut point_ptr: *Point = cast(mem.malloc(sizeof(Point)), *Point)
+    point_ptr.* = make_point(1, 2)
+    return point_ptr
+}
+
+pub fn main() -> i32 {
+    const point_ptr := alloc_point()
+
+    if point_ptr.x != 1 {
+        return 1
+    }
+    if point_ptr.y != 2 {
+        return 1
+    }
+
+    # Chained postfix deref + field access, both directions.
+    mut chained: *Point = point_ptr
+    chained.*.x = 42
+    if chained.x != 42 {
+        return 1
+    }
+
+    return 0
+}

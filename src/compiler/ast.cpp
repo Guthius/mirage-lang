@@ -63,7 +63,12 @@ namespace ast {
             parser.expect(TokenKind::LBrace, "'{'");
 
             std::vector<StructType::Field> fields;
-            while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+            while (true) {
+                skip_semicolons(parser);
+                if (parser.check(TokenKind::RBrace) || parser.at_end()) {
+                    break;
+                }
+
                 const auto field_location = parser.current_location();
                 const auto field_name = parser.expect_identifier();
 
@@ -126,7 +131,12 @@ namespace ast {
             parser.expect(TokenKind::LBrace, "'{'");
 
             std::vector<UnionType::Member> members;
-            while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+            while (true) {
+                skip_semicolons(parser);
+                if (parser.check(TokenKind::RBrace) || parser.at_end()) {
+                    break;
+                }
+
                 const auto member_location = parser.current_location();
                 const auto member_name = parser.expect_identifier();
 
@@ -189,7 +199,12 @@ namespace ast {
             parser.expect(TokenKind::LBrace, "'{'");
 
             std::vector<EnumType::Field> fields;
-            while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+            while (true) {
+                skip_semicolons(parser);
+                if (parser.check(TokenKind::RBrace) || parser.at_end()) {
+                    break;
+                }
+
                 fields.push_back(parse_enum_field(parser));
             }
 
@@ -458,6 +473,7 @@ namespace ast {
                         .location = value_location,
                     });
 
+                    skip_semicolons(parser);
                     if (parser.check(TokenKind::RBrace)) {
                         break;
                     }
@@ -486,6 +502,7 @@ namespace ast {
                 }
             }
 
+            skip_semicolons(parser);
             parser.expect(TokenKind::RBrace, "'}'");
 
             return std::make_unique<BracedInitializerExpr>(ArrayExpr{
@@ -632,6 +649,7 @@ namespace ast {
                             .expr = parse_expr(parser),
                             .location = field_loc,
                         });
+                        skip_semicolons(parser);
                         if (parser.check(TokenKind::RBrace)) break;
                         parser.expect(TokenKind::Comma, "','");
                     }
@@ -700,6 +718,11 @@ namespace ast {
                         .location = arm_location,
                     });
 
+                    // A block-bodied-looking arm value (or any value ending in an ASI trigger
+                    // token) immediately followed by a newline before the closing '}' picks up
+                    // a virtual semicolon here if the arm has no trailing comma; skip it before
+                    // checking for the terminator, same as skip_semicolons' other call sites.
+                    skip_semicolons(parser);
                     if (!parser.check(TokenKind::RBrace)) {
                         parser.expect(TokenKind::Comma, "','");
                     }
@@ -798,6 +821,7 @@ namespace ast {
                         } else {
                             args.push_back(std::move(arg));
                         }
+                        skip_semicolons(parser);
                         if (!parser.check(TokenKind::RParen)) {
                             parser.expect(TokenKind::Comma, "','");
                         }
@@ -809,6 +833,17 @@ namespace ast {
                         .callee = std::move(expr),
                         .args = std::move(args),
                         .location = location,
+                    });
+
+                } else if (parser.check(TokenKind::Dot) && parser.check_next(TokenKind::Star)) {
+                    const auto deref_location = parser.current_location();
+                    parser.advance(); // '.'
+                    parser.advance(); // '*'
+
+                    expr = make_expr(UnaryExpr{
+                        .op = UnaryOp::Deref,
+                        .operand = std::move(expr),
+                        .location = deref_location,
                     });
 
                 } else if (parser.check(TokenKind::Dot)) {
@@ -833,6 +868,7 @@ namespace ast {
                                     .expr = parse_expr(parser),
                                     .location = field_loc,
                                 });
+                                skip_semicolons(parser);
                                 if (parser.check(TokenKind::RBrace)) break;
                                 parser.expect(TokenKind::Comma, "','");
                             }
@@ -891,7 +927,6 @@ namespace ast {
                 case TokenKind::Bang:      return UnaryOp::LogicalNot;
                 case TokenKind::Tilde:     return UnaryOp::BitwiseNot;
                 case TokenKind::Ampersand: return UnaryOp::AddressOf;
-                case TokenKind::Star:      return UnaryOp::Deref;
                 default:                   return std::nullopt;
                 }
             };
@@ -1226,7 +1261,12 @@ namespace ast {
             parser.expect(TokenKind::LBrace, "'{'");
 
             std::vector<Stmt> stmts;
-            while (!parser.check(TokenKind::RBrace)) {
+            while (true) {
+                skip_semicolons(parser);
+                if (parser.check(TokenKind::RBrace) || parser.at_end()) {
+                    break;
+                }
+
                 stmts.push_back(parse_stmt(parser));
             }
 
@@ -1498,6 +1538,7 @@ namespace ast {
                     .location = param_location,
                 });
 
+                skip_semicolons(parser);
                 if (!parser.check(TokenKind::RParen)) {
                     parser.expect(TokenKind::Comma, "','");
                 }
@@ -1516,6 +1557,7 @@ namespace ast {
                     // Multi-return: -> (T1, T2, ...)
                     while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
                         return_types.push_back(parse_type(parser));
+                        skip_semicolons(parser);
                         if (!parser.check(TokenKind::RParen)) {
                             parser.expect(TokenKind::Comma, "','");
                         }
@@ -1547,6 +1589,7 @@ namespace ast {
                     break;
                 }
                 param_types.push_back(parse_type(parser));
+                skip_semicolons(parser);
                 if (!parser.check(TokenKind::RParen)) {
                     parser.expect(TokenKind::Comma, "','");
                 }
@@ -1559,6 +1602,7 @@ namespace ast {
                     // Multi-return: -> (T1, T2, ...)
                     while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
                         return_types.push_back(parse_type(parser));
+                        skip_semicolons(parser);
                         if (!parser.check(TokenKind::RParen)) {
                             parser.expect(TokenKind::Comma, "','");
                         }
@@ -1629,6 +1673,7 @@ namespace ast {
                     .location = param_location,
                 });
 
+                skip_semicolons(parser);
                 if (!parser.check(TokenKind::RParen)) {
                     parser.expect(TokenKind::Comma, "','");
                 }
@@ -1723,6 +1768,7 @@ namespace ast {
                     .location = param_location,
                 });
 
+                skip_semicolons(parser);
                 if (!parser.check(TokenKind::RParen)) {
                     parser.expect(TokenKind::Comma, "','");
                 }
@@ -1792,6 +1838,11 @@ namespace ast {
                 .size = std::move(size),
                 .location = location,
             });
+        }
+    }
+
+    auto skip_semicolons(Parser &parser) -> void {
+        while (parser.match(TokenKind::Semicolon)) {
         }
     }
 
@@ -1902,6 +1953,9 @@ namespace ast {
                 .location = arm_location,
             });
 
+            // See the identical comment in the match-expr arm loop above: a block-bodied arm
+            // with no trailing comma picks up a virtual semicolon before the closing '}'.
+            skip_semicolons(parser);
             if (!parser.check(TokenKind::RBrace)) {
                 parser.expect(TokenKind::Comma, "','");
             }
@@ -2039,7 +2093,12 @@ namespace ast {
         parser.expect(TokenKind::LBrace, "'{'");
 
         std::vector<ImplDecl::Function> functions;
-        while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+        while (true) {
+            skip_semicolons(parser);
+            if (parser.check(TokenKind::RBrace) || parser.at_end()) {
+                break;
+            }
+
             functions.push_back(parse_impl_method(parser));
         }
 

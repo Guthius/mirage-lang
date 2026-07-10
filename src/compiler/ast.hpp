@@ -625,6 +625,12 @@ namespace ast {
 
     auto parse(std::span<Token> tokens, DiagnosticEngine &diagnostics) -> std::vector<Decl>;
 
+    // Consumes any run of (explicit or ASI-inserted) ';' separators. Struct/union/enum bodies
+    // and statement lists are newline-delimited with no comma requirement, so once ASI starts
+    // emitting real Semicolon tokens between items, these list-parsing loops need to tolerate
+    // (not require) them as stray separators.
+    auto skip_semicolons(Parser &parser) -> void;
+
     auto parse_type(Parser &parser) -> Type;
     auto parse_decl(Parser &parser, bool top_level) -> std::optional<Decl>;
     auto parse_stmt(Parser &parser) -> Stmt;

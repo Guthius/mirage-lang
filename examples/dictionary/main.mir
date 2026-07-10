@@ -19,7 +19,7 @@ fn hash(mut k: anyptr, count: usize) -> u32 {
 
     mut hash: u32 = 5381
     while cur < end {
-        hash = ((hash << 5) + hash) + *k++
+        hash = ((hash << 5) + hash) + k++.*
     }
 
     return hash % table_size
@@ -48,7 +48,7 @@ impl dictionary(K: type, V: type) {
         mut cur := self.buckets[index]
         while cur {
             if mem.compare(&cur.key, &key, sizeof(K)) == 0 {
-                *value = cur.value
+                value.* = cur.value
                 return true
             }
             cur = cur.next
@@ -59,10 +59,10 @@ impl dictionary(K: type, V: type) {
     pub fn remove(self, key: K) -> bool {
         const index := hash(&key, sizeof(K))
         mut cur := &self.buckets[index]
-        while *cur != nil {
-             const temp := *cur
+        while cur.* != nil {
+             const temp := cur.*
             if mem.compare(&temp.key, &key, sizeof(K)) == 0 {
-               *cur = temp.next
+               cur.* = temp.next
                mem.free(temp)
                return true
             }

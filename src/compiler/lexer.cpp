@@ -70,6 +70,33 @@ namespace lexer {
         auto is_alpha(const char ch) -> bool { return std::isalpha(ch) != 0; }
         auto is_alpha_numeric(const char ch) -> bool { return std::isalnum(ch) != 0; }
 
+        // Go-style automatic semicolon insertion: a virtual ';' is inserted after the last
+        // token on a line if that token could legally end a statement/expression. Kept in sync
+        // with TokenKind::Semicolon's exclusion below (never a trigger) to avoid double-insertion.
+        auto is_asi_trigger(const TokenKind kind) -> bool {
+            switch (kind) {
+            case TokenKind::Identifier:
+            case TokenKind::IntLiteral:
+            case TokenKind::FloatLiteral:
+            case TokenKind::StringLiteral:
+            case TokenKind::CharLiteral:
+            case TokenKind::KwTrue:
+            case TokenKind::KwFalse:
+            case TokenKind::KwNil:
+            case TokenKind::RParen:
+            case TokenKind::RBrace:
+            case TokenKind::RBracket:
+            case TokenKind::PlusPlus:
+            case TokenKind::MinusMinus:
+            case TokenKind::KwReturn:
+            case TokenKind::KwBreak:
+            case TokenKind::KwContinue:
+                return true;
+            default:
+                return false;
+            }
+        }
+
         struct LexerImpl {
             std::string_view source_;
             std::string_view filename_;
@@ -77,6 +104,15 @@ namespace lexer {
             size_t pos_ = 0;
             uint32_t line_ = 1;
             uint32_t col_ = 1;
+            std::optional<TokenKind> last_real_kind_ = std::nullopt;
+            // Whether the last real token could legally end a statement/expression. Usually
+            // just is_asi_trigger(last_real_kind_), but 'Star' is dual-purpose: it's the
+            // binary-multiply operator (never a trigger — 'a *\n b' must keep continuing) AND
+            // the second token of postfix deref 'expr.*' (always a trigger, since '.*' can
+            // complete a statement, e.g. 'x := p.*'). Distinguishing them needs one token of
+            // extra lookback (was the token before this Star a Dot?), which is still a purely
+            // lexer-level, previous-token-based decision — just over 2 tokens instead of 1.
+            bool last_token_is_asi_trigger_ = false;
 
             LexerImpl(const std::string_view source, const std::string_view filename, DiagnosticEngine &diagnostics) : source_(source), filename_(filename), diagnostics_(diagnostics) {}
 
@@ -86,11 +122,28 @@ namespace lexer {
                 while (true) {
                     auto token = lex_token();
 
+                    // Go-style ASI also fires before EOF, so the last statement in a file
+                    // terminates even without a trailing newline. Semicolon is never itself
+                    // a trigger, so this can't double-insert. lex_token() deliberately leaves
+                    // last_token_is_asi_trigger_/last_real_kind_ untouched on its EOF path, so
+                    // they still reflect the last real token here.
+                    if (token.kind == TokenKind::Eof && last_token_is_asi_trigger_) {
+                        tokens.push_back(Token{
+                            .kind = TokenKind::Semicolon,
+                            .lexeme = {},
+                            .location = token.location,
+                        });
+                        last_real_kind_ = TokenKind::Semicolon;
+                        last_token_is_asi_trigger_ = false;
+                    }
+
                     tokens.push_back(token);
 
                     if (token.kind == TokenKind::KwAsm) {
                         if (auto asm_token = lex_asm_block(); asm_token.has_value()) {
                             tokens.push_back(std::move(*asm_token));
+                            last_real_kind_ = TokenKind::AsmBlock;
+                            last_token_is_asi_trigger_ = false;
                         }
                     }
 
@@ -174,10 +227,16 @@ namespace lexer {
                 return true;
             }
 
-            void skip_whitespace_and_comments() {
+            // Returns whether a '\n' was consumed while skipping, so the caller can decide
+            // whether an ASI-triggering token just crossed a statement boundary.
+            auto skip_whitespace_and_comments() -> bool {
+                bool crossed_newline = false;
                 while (!at_end()) {
                     const char ch = peek();
-                    if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') {
+                    if (ch == ' ' || ch == '\t' || ch == '\r') {
+                        advance();
+                    } else if (ch == '\n') {
+                        crossed_newline = true;
                         advance();
                     } else if (ch == '#') {
                         while (!at_end() && peek() != '\n') {
@@ -187,6 +246,7 @@ namespace lexer {
                         break;
                     }
                 }
+                return crossed_newline;
             }
 
             void skip_digits() {
@@ -196,32 +256,54 @@ namespace lexer {
             }
 
             auto lex_token() -> Token {
-                skip_whitespace_and_comments();
+                const bool crossed_newline = skip_whitespace_and_comments();
+
+                if (crossed_newline && last_token_is_asi_trigger_) {
+                    last_real_kind_ = TokenKind::Semicolon;
+                    last_token_is_asi_trigger_ = false;
+                    return Token{
+                        .kind = TokenKind::Semicolon,
+                        .lexeme = {},
+                        .location = make_location(),
+                    };
+                }
 
                 if (at_end()) {
+                    // Deliberately do not touch last_real_kind_/last_token_is_asi_trigger_ here:
+                    // tokenize() needs to see the last *real* token's trigger status to decide
+                    // whether to insert a semicolon before this Eof.
                     return make_eof();
                 }
 
                 const auto start = pos_;
                 const auto ch = advance();
 
-                if (is_digit(ch)) {
-                    return lex_number(start);
-                }
+                Token token = [&]() -> Token {
+                    if (is_digit(ch)) {
+                        return lex_number(start);
+                    }
 
-                if (is_alpha(ch) || ch == '_') {
-                    return lex_identifier_or_keyword(start);
-                }
+                    if (is_alpha(ch) || ch == '_') {
+                        return lex_identifier_or_keyword(start);
+                    }
 
-                if (ch == '"') {
-                    return lex_string(start);
-                }
+                    if (ch == '"') {
+                        return lex_string(start);
+                    }
 
-                if (ch == '\'') {
-                    return lex_char(start);
-                }
+                    if (ch == '\'') {
+                        return lex_char(start);
+                    }
 
-                return lex_symbol(start, ch);
+                    return lex_symbol(start, ch);
+                }();
+
+                // 'expr.*' (postfix deref) can end a statement even though bare Star (binary
+                // multiply) cannot — see last_token_is_asi_trigger_'s doc comment.
+                const bool is_dot_star = token.kind == TokenKind::Star && last_real_kind_ == TokenKind::Dot;
+                last_token_is_asi_trigger_ = is_asi_trigger(token.kind) || is_dot_star;
+                last_real_kind_ = token.kind;
+                return token;
             }
 
             auto lex_number(const size_t start) -> Token {

@@ -599,34 +599,42 @@ namespace sema {
                         variant.payload_struct_index = -1;
 
                         if (!std::holds_alternative<std::monostate>(member.type)) {
-                            // Variant has a payload type — allocate an anonymous struct slot
-                            const int struct_slot = static_cast<int>(program.structs.size());
-                            program.structs.push_back(StructInfo{.module_path = module_path});
+                            // Variant has a payload type. Struct payloads (whether an inline
+                            // `struct{...}` or a reference to a separately-named struct type) use
+                            // their own fields directly for ergonomics; any other payload type is
+                            // wrapped in a synthetic one-field struct named "v".
+                            int struct_slot;
 
-                            // Build a fake ast::StructType with a single field named "v"
-                            // if the payload is not already a struct type, or use its fields directly.
-                            // We support any payload type by wrapping in a one-field struct.
-                            // For struct payload types, we inline the fields for ergonomics.
                             if (const auto *st = std::get_if<std::unique_ptr<ast::StructType>>(&member.type)) {
+                                // Inline struct payload — allocate an anonymous struct slot for it.
+                                struct_slot = static_cast<int>(program.structs.size());
+                                program.structs.push_back(StructInfo{.module_path = module_path});
                                 layout_struct(module_path, struct_slot, *st);
                                 variant.payload_type = ResolvedType{.kind = TypeKind::Struct, .struct_index = struct_slot};
                             } else {
-                                // Non-struct payload: create a one-field anonymous struct
                                 auto payload_type = resolve_field_type(module_path, member.type, member.location);
-                                StructInfo payload_info;
-                                payload_info.module_path = module_path;
-                                const uint32_t p_size = size_of(module_path, payload_type);
-                                const uint32_t p_align = align_of(module_path, payload_type);
-                                payload_info.fields.push_back(StructField{
-                                    .name = "v",
-                                    .type = payload_type,
-                                    .offset = 0,
-                                    .init_expr = nullptr,
-                                });
-                                payload_info.size = p_size;
-                                payload_info.align = p_align;
-                                payload_info.layout_done = true;
-                                program.structs[struct_slot] = std::move(payload_info);
+                                if (payload_type.kind == TypeKind::Struct) {
+                                    // Named struct payload — reuse its own slot, no wrapping.
+                                    struct_slot = payload_type.struct_index;
+                                } else {
+                                    // Non-struct payload: create a one-field anonymous struct
+                                    struct_slot = static_cast<int>(program.structs.size());
+                                    program.structs.push_back(StructInfo{.module_path = module_path});
+                                    StructInfo payload_info;
+                                    payload_info.module_path = module_path;
+                                    const uint32_t p_size = size_of(module_path, payload_type);
+                                    const uint32_t p_align = align_of(module_path, payload_type);
+                                    payload_info.fields.push_back(StructField{
+                                        .name = "v",
+                                        .type = payload_type,
+                                        .offset = 0,
+                                        .init_expr = nullptr,
+                                    });
+                                    payload_info.size = p_size;
+                                    payload_info.align = p_align;
+                                    payload_info.layout_done = true;
+                                    program.structs[struct_slot] = std::move(payload_info);
+                                }
                                 variant.payload_type = payload_type;
                             }
 

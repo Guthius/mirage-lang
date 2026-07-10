@@ -112,7 +112,12 @@ namespace ast {
 
         std::vector<Decl> decls;
 
-        while (!parser.at_end()) {
+        while (true) {
+            skip_semicolons(parser);
+            if (parser.at_end()) {
+                break;
+            }
+
             if (auto decl = parse_decl(parser, true); decl.has_value()) {
                 decls.push_back(std::move(*decl));
             }

@@ -51,7 +51,7 @@ pub fn main() -> i32 {
     mut got: u64 = 0
     switch d {
         .uint64(&v): {
-            got = *v
+            got = v.*
         },
         .str(s): {},
         .uint8(v): {},

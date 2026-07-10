@@ -43,8 +43,8 @@ pub fn main() -> i32 {
     # arr[0]==1, arr[1]==0, arr[2]==3, u==42, s.x==7, s.y==99,
     # brr[0]==11, brr[1]==2, brr[2]==3
     # sum = 0+10+20+5+0+1+0+3+42+7+99+11+2+3 = 203
-    return a + p.first + p.second + r.x + r.y
-         + arr[0] + arr[1] + arr[2]
-         + u + s.x + s.y
-         + brr[0] + brr[1] + brr[2]
+    return a + p.first + p.second + r.x + r.y +
+         arr[0] + arr[1] + arr[2] +
+         u + s.x + s.y +
+         brr[0] + brr[1] + brr[2]
 }

@@ -129,7 +129,7 @@ impl Dictionary {
     
     pub fn clear(mut self) {
         for &bucket in self.buckets {
-            mut cur := *bucket
+            mut cur := bucket.*
             while cur != nil {
                 const next := cur.next
 
@@ -139,7 +139,7 @@ impl Dictionary {
 
                 cur = next
             }
-            *bucket = nil
+            bucket.* = nil
         }
     }
 }
