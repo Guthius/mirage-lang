@@ -159,8 +159,8 @@ namespace codegen {
             }
 
             auto run() -> std::unique_ptr<llvm::Module> {
-                declare_structs();
                 declare_unions();
+                declare_structs();
                 declare_globals_and_functions();
                 declare_methods();
                 const sema::FunctionSymbol *entry_main = nullptr;
