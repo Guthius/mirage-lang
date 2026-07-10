@@ -411,7 +411,7 @@ namespace ast {
     // Tagged union variant construction: `TypeName.variant{field = val}` (qualified)
     // or `.variant{field = val}` (contextual). Payload-free variants use DotIdentExpr.
     struct TaggedVariantExpr {
-        std::string type_name;               // empty for contextual form
+        std::optional<NamedType> type_path;  // nullopt for contextual form
         std::string variant_name;
         std::optional<StructExpr> payload;   // nullopt only for qualified payload-free
         SourceLocation location;

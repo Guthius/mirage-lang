@@ -16,6 +16,25 @@ namespace sema {
             return ResolvedType{.kind = TypeKind::Invalid};
         }
 
+        auto format_named_type(const ast::NamedType &named) -> std::string {
+            std::string result = named.name;
+            for (const ast::NamedType *m = named.member.get(); m; m = m->member.get()) {
+                result += '.';
+                result += m->name;
+            }
+            return result;
+        }
+
+        // NamedType holds its `member` chain via unique_ptr, so it's move-only; deep-copy it here
+        // rather than moving out of an AST node, since expressions can be re-checked more than once.
+        auto clone_named_type(const ast::NamedType &named) -> ast::NamedType {
+            return ast::NamedType{
+                .name = named.name,
+                .member = named.member ? std::make_unique<ast::NamedType>(clone_named_type(*named.member)) : nullptr,
+                .location = named.location,
+            };
+        }
+
         auto binary_op_result(const ast::BinaryOp op, const ResolvedType &lhs, const ResolvedType &rhs, DiagnosticEngine &diag, SourceLocation loc) -> ResolvedType {
             // Function pointers do not support arithmetic; only equality comparison is allowed
             const bool is_cmp = op == ast::BinaryOp::Equal || op == ast::BinaryOp::NotEqual ||
@@ -1123,7 +1142,7 @@ namespace sema {
                             if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
                                 // Default arm value
                                 const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
-                                    first_arm ? std::nullopt : std::optional<ResolvedType>{arm_type}, loop_depth, defer_loop_base);
+                                    arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base);
                                 if (first_arm) { arm_type = val_type; first_arm = false; }
                                 else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
                                     error(diag, arm_loc, "all match arms must have the same type");
@@ -1153,7 +1172,7 @@ namespace sema {
                             }
                             // Check arm result value
                             const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
-                                first_arm ? std::nullopt : std::optional<ResolvedType>{arm_type}, loop_depth, defer_loop_base);
+                                arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base);
                             if (first_arm) { arm_type = val_type; first_arm = false; }
                             else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
                                 error(diag, arm_loc, "all match arms must have the same type");
@@ -1204,7 +1223,7 @@ namespace sema {
                         for (const auto &arm : v->arms) {
                             if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
                                 const auto val_type = check_expr(arm.value, locals, module_path, program, diag,
-                                    first_arm ? std::nullopt : std::optional<ResolvedType>{arm_type}, loop_depth, defer_loop_base);
+                                    arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base);
                                 if (first_arm) { arm_type = val_type; first_arm = false; }
                                 else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
                                     error(diag, arm.location, "all match arms must have the same type");
@@ -1246,7 +1265,7 @@ namespace sema {
                                     }
 
                                     const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
-                                                                     first_arm ? std::nullopt : std::optional<ResolvedType>{arm_type}, loop_depth, defer_loop_base);
+                                                                     arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base);
                                     if (first_arm) {
                                         arm_type = val_type;
                                         first_arm = false;
@@ -1292,7 +1311,7 @@ namespace sema {
                     for (const auto &arm : v->arms) {
                         if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
                             const auto val_type = check_expr(arm.value, locals, module_path, program, diag,
-                                first_arm ? std::nullopt : std::optional<ResolvedType>{arm_type}, loop_depth, defer_loop_base);
+                                arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base);
                             if (first_arm) { arm_type = val_type; first_arm = false; }
                             else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
                                 error(diag, arm.location, "all match arms must have the same type");
@@ -1324,7 +1343,7 @@ namespace sema {
                         }
 
                         const auto val_type = check_expr(arm.value, locals, module_path, program, diag,
-                            first_arm ? std::nullopt : std::optional<ResolvedType>{arm_type}, loop_depth, defer_loop_base);
+                            arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base);
                         if (first_arm) { arm_type = val_type; first_arm = false; }
                         else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
                             error(diag, arm.location, "all match arms must have the same type");
@@ -1390,15 +1409,15 @@ namespace sema {
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TaggedVariantExpr>>) {
                     // Resolve the tagged union type
                     ResolvedType union_ty;
-                    if (!v->type_name.empty()) {
-                        union_ty = resolve_type_symbol(module_path, v->type_name, program, diag, v->location);
+                    if (v->type_path) {
+                        union_ty = resolve_type(ast::Type{clone_named_type(*v->type_path)}, module_path, program, diag);
                     } else if (expected && expected->kind == TypeKind::Union) {
                         union_ty = *expected;
                     } else {
                         return error(diag, v->location, "cannot infer tagged union type; provide an explicit type name (e.g. 'TypeName.variant{...}')");
                     }
                     if (union_ty.kind != TypeKind::Union) {
-                        return error(diag, v->location, std::format("'{}' is not a union type", v->type_name));
+                        return error(diag, v->location, std::format("'{}' is not a union type", format_named_type(*v->type_path)));
                     }
                     const auto &union_info = program.unions.at(union_ty.union_index);
                     if (!union_info.is_tagged) {

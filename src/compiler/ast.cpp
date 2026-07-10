@@ -637,7 +637,7 @@ namespace ast {
                     }
                     parser.expect(TokenKind::RBrace, "'}'");
                     return std::make_unique<TaggedVariantExpr>(TaggedVariantExpr{
-                        .type_name = "",
+                        .type_path = std::nullopt,
                         .variant_name = name,
                         .payload = StructExpr{.fields = std::move(fields), .location = brace_loc},
                         .location = location,
@@ -750,6 +750,28 @@ namespace ast {
             });
         }
 
+        // Converts a plain dotted-identifier chain (e.g. `Type` or `mod.Type`) into a NamedType
+        // path for qualified tagged-variant construction. Returns nullopt if expr contains
+        // anything other than identifiers/member access (e.g. a call or index result), so the
+        // caller can fall back to ordinary member-access parsing.
+        auto named_type_from_expr(const Expr &expr) -> std::optional<NamedType> {
+            if (const auto *ident = std::get_if<IdentExpr>(&expr)) {
+                return NamedType{.name = ident->name, .location = ident->location};
+            }
+            if (const auto *member = std::get_if<std::unique_ptr<MemberExpr>>(&expr)) {
+                auto base = named_type_from_expr((*member)->object);
+                if (!base) return std::nullopt;
+                NamedType *tail = &*base;
+                while (tail->member) tail = tail->member.get();
+                tail->member = std::make_unique<NamedType>(NamedType{
+                    .name = (*member)->member,
+                    .location = (*member)->location,
+                });
+                return base;
+            }
+            return std::nullopt;
+        }
+
         auto parse_postfix(Parser &parser) -> Expr {
             auto expr = parse_primary(parser);
 
@@ -793,10 +815,11 @@ namespace ast {
                     parser.advance();
                     const auto member_name = parser.expect_identifier();
 
-                    // If followed by '{.' and base is an IdentExpr, parse as qualified tagged variant.
+                    // If followed by '{.' and base is a dotted-identifier chain (e.g. `Type` or
+                    // `mod.Type`), parse as a (possibly qualified) tagged variant constructor.
                     // The leading '.' inside braces disambiguates payload from block statements.
                     if (parser.check(TokenKind::LBrace) && parser.peek().kind == TokenKind::Dot) {
-                        if (const auto *base_ident = std::get_if<IdentExpr>(&expr)) {
+                        if (auto type_path = named_type_from_expr(expr)) {
                             const auto brace_loc = parser.current_location();
                             parser.advance(); // consume '{'
                             std::vector<StructExpr::Field> fields;
@@ -815,7 +838,7 @@ namespace ast {
                             }
                             parser.expect(TokenKind::RBrace, "'}'");
                             expr = std::make_unique<TaggedVariantExpr>(TaggedVariantExpr{
-                                .type_name = base_ident->name,
+                                .type_path = std::move(type_path),
                                 .variant_name = member_name,
                                 .payload = StructExpr{.fields = std::move(fields), .location = brace_loc},
                                 .location = location,
