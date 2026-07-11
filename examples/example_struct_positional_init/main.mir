@@ -1,0 +1,45 @@
+# Struct with no field defaults: positional init must supply every field.
+type Color = struct {
+    r: u8
+    g: u8
+    b: u8
+    a: u8
+}
+
+# Struct with field-level defaults, to exercise partial positional init.
+type Item = struct {
+    val: i32 = 7
+    tag: i32 = 9
+}
+
+type Vec2 = struct {
+    x: i32
+    y: i32 = 20
+}
+
+type Rect = struct {
+    origin: Vec2
+    width: i32 = 100
+}
+
+# Global constant using a positional struct initializer.
+pub const RAYWHITE: Color = {245, 245, 245, 255}
+
+pub fn main() -> i32 {
+    # Full positional init.
+    mut white: Color = {245, 245, 245, 255}
+
+    # Partial positional init: val is provided, tag falls back to its default.
+    mut item: Item = {3}
+
+    # Positional struct literal nested as a field value inside a named initializer.
+    mut r1: Rect = {.origin = {1, 2}, .width = 5}
+
+    # Named struct literal nested as a value inside a positional initializer.
+    mut r2: Rect = {{.x = 7, .y = 8}, 50}
+
+    return cast(RAYWHITE.r, i32) + cast(white.a, i32) + item.val + item.tag +
+        r1.origin.x + r1.origin.y + r1.width +
+        r2.origin.x + r2.origin.y + r2.width
+    # 245 + 255 + 3 + 9 + 1 + 2 + 5 + 7 + 8 + 50 = 585
+}

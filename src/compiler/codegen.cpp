@@ -616,6 +616,39 @@ namespace codegen {
                 return agg;
             }
 
+            // Emit a struct value from a positional ArrayExpr, assigning values to
+            // fields by declaration order and filling remaining fields from their
+            // default init exprs.
+            auto emit_positional_struct_expr_value(const ast::ArrayExpr &ae, const sema::ResolvedType &ty) -> llvm::Value * {
+                const auto &info = sema_program_.structs.at(ty.struct_index);
+                const auto &struct_module = info.module_path;
+                auto *ll_ty = llvm_type(struct_module, ty);
+                llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
+                const auto &lowering = struct_lowering(ty.struct_index);
+
+                for (size_t i = 0; i < ae.values.size(); ++i) {
+                    if (std::holds_alternative<ast::UndefinedExpr>(ae.values[i])) continue;
+                    const auto ll_idx = lowering.field_indices.at(i);
+                    agg = builder_.CreateInsertValue(agg, emit_value_as(ae.values[i], info.fields[i].type, struct_module), {ll_idx});
+                }
+
+                const auto *saved_path = current_module_path_;
+                const auto *saved_module = current_module_;
+                current_module_path_ = &struct_module;
+                current_module_ = &module_for(struct_module);
+
+                for (size_t i = ae.values.size(); i < info.fields.size(); ++i) {
+                    const auto &field = info.fields[i];
+                    if (!field.init_expr) continue;
+                    const auto ll_idx = lowering.field_indices.at(i);
+                    agg = builder_.CreateInsertValue(agg, emit_expr(*field.init_expr), {ll_idx});
+                }
+
+                current_module_path_ = saved_path;
+                current_module_ = saved_module;
+                return agg;
+            }
+
             // Emit an array value from an explicit ArrayExpr; trailing elements are
             // default-initialized (per rule 1) if not all provided, unless the last
             // provided value ends with '...' (has_fill), in which case it is repeated
@@ -2045,6 +2078,9 @@ namespace codegen {
                                         }
                                         return emit_struct_expr_value(bv, ty);
                                     } else {  // ast::ArrayExpr
+                                        if (ty.kind == sema::TypeKind::Struct) {
+                                            return emit_positional_struct_expr_value(bv, ty);
+                                        }
                                         return emit_array_expr_value(bv, ty);
                                     }
                                 },
@@ -2720,6 +2756,34 @@ namespace codegen {
                                         for (size_t i = 0; i < info.fields.size(); ++i) {
                                             const auto &field = info.fields[i];
                                             if (provided.contains(field.name) || !field.init_expr) continue;
+                                            const auto ll_idx = lowering.field_indices.at(i);
+                                            agg = builder_.CreateInsertValue(agg, llvm::cast<llvm::Constant>(emit_const_or_runtime(*field.init_expr, true)), {ll_idx});
+                                        }
+
+                                        current_module_path_ = saved_path;
+                                        current_module_ = saved_module;
+                                        return llvm::cast<llvm::Constant>(agg);
+                                    } else if (ty.kind == sema::TypeKind::Struct) { // positional struct init
+                                        const auto &info = sema_program_.structs.at(ty.struct_index);
+                                        const auto &struct_module = info.module_path;
+                                        auto *ll_ty = llvm_type(struct_module, ty);
+                                        llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
+                                        const auto &lowering = struct_lowering(ty.struct_index);
+
+                                        for (size_t i = 0; i < bv.values.size(); ++i) {
+                                            if (std::holds_alternative<ast::UndefinedExpr>(bv.values[i])) continue;
+                                            const auto ll_idx = lowering.field_indices.at(i);
+                                            agg = builder_.CreateInsertValue(agg, llvm::cast<llvm::Constant>(emit_const_or_runtime(bv.values[i], true)), {ll_idx});
+                                        }
+
+                                        const auto *saved_path = current_module_path_;
+                                        const auto *saved_module = current_module_;
+                                        current_module_path_ = &struct_module;
+                                        current_module_ = &module_for(struct_module);
+
+                                        for (size_t i = bv.values.size(); i < info.fields.size(); ++i) {
+                                            const auto &field = info.fields[i];
+                                            if (!field.init_expr) continue;
                                             const auto ll_idx = lowering.field_indices.at(i);
                                             agg = builder_.CreateInsertValue(agg, llvm::cast<llvm::Constant>(emit_const_or_runtime(*field.init_expr, true)), {ll_idx});
                                         }

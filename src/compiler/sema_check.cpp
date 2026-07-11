@@ -1536,7 +1536,26 @@ namespace sema {
                                     return error(diag, bv.location, "array initializer requires an expected type");
                                 }
                                 if (expected->kind == TypeKind::Struct) {
-                                    return error(diag, bv.location, "array initializer used where struct type is expected");
+                                    if (bv.has_fill) {
+                                        return error(diag, bv.location, "fill '...' is not allowed in a positional struct initializer");
+                                    }
+                                    const auto &info = program.structs.at(expected->struct_index);
+                                    if (bv.values.size() > info.fields.size()) {
+                                        return error(diag, bv.location, std::format("too many values in struct initializer: struct has {} field(s), got {}", info.fields.size(), bv.values.size()));
+                                    }
+                                    for (size_t i = 0; i < bv.values.size(); ++i) {
+                                        const auto &field = info.fields[i];
+                                        const auto val_ty = check_expr(bv.values[i], locals, module_path, program, diag, field.type, loop_depth, defer_loop_base);
+                                        if (!assignable_in_module(val_ty, field.type, module_path, program)) {
+                                            error(diag, bv.location, std::format("type mismatch for field '{}'", field.name));
+                                        }
+                                    }
+                                    for (size_t i = bv.values.size(); i < info.fields.size(); ++i) {
+                                        if (info.fields[i].init_expr == nullptr) {
+                                            error(diag, bv.location, std::format("missing field '{}' in struct initializer", info.fields[i].name));
+                                        }
+                                    }
+                                    return *expected;
                                 }
                                 if (expected->kind != TypeKind::Array) {
                                     return error(diag, bv.location, "array initializer requires an array type");
