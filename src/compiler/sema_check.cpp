@@ -2020,6 +2020,55 @@ namespace sema {
                         }
                     }
 
+                } else if constexpr (std::is_same_v<V, ast::ReturnErrStmt>) {
+                    if (defer_loop_base >= 0) {
+                        diag.report_error(DiagnosticStage::Sema, v.location, "'return_err' cannot escape a 'defer' body");
+                        return;
+                    }
+                    if (expected_returns.empty() || expected_returns.back().kind != TypeKind::Error) {
+                        diag.report_error(DiagnosticStage::Sema, v.location,
+                                          "enclosing function must return 'error' to use 'return_err'");
+                        check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
+                        return;
+                    }
+                    auto ty = check_expr(v.error_value, locals, module_path, program, diag,
+                                         ResolvedType{.kind = TypeKind::Error}, loop_depth, defer_loop_base);
+                    if (!assignable_in_module(ty, ResolvedType{.kind = TypeKind::Error}, module_path, program)) {
+                        diag.report_error(DiagnosticStage::Sema, v.location, "'return_err' operand must be of type 'error'");
+                    } else if (is_constant_expr(v.error_value, module_path, program)) {
+                        if (const auto val = evaluate_integer_constant(v.error_value, module_path, program); val && *val == 0) {
+                            diag.report_error(DiagnosticStage::Sema, v.location,
+                                              "returning E_OK via return_err is certainly a bug; use return_ok or return 0");
+                        }
+                    }
+
+                } else if constexpr (std::is_same_v<V, ast::ReturnOkStmt>) {
+                    if (defer_loop_base >= 0) {
+                        diag.report_error(DiagnosticStage::Sema, v.location, "'return_ok' cannot escape a 'defer' body");
+                        return;
+                    }
+                    if (expected_returns.empty() || expected_returns.back().kind != TypeKind::Error) {
+                        diag.report_error(DiagnosticStage::Sema, v.location,
+                                          "enclosing function must return 'error' to use 'return_ok'");
+                        for (auto &val : v.return_values)
+                            check_expr(val, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
+                        return;
+                    }
+                    const size_t expected_count = expected_returns.size() - 1;
+                    if (v.return_values.size() != expected_count) {
+                        diag.report_error(DiagnosticStage::Sema, v.location,
+                                          std::format("expected {} return value(s), got {}", expected_count, v.return_values.size()));
+                        for (auto &val : v.return_values)
+                            check_expr(val, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
+                        return;
+                    }
+                    for (size_t i = 0; i < v.return_values.size(); ++i) {
+                        auto ty = check_expr(v.return_values[i], locals, module_path, program, diag, expected_returns[i], loop_depth, defer_loop_base);
+                        if (!assignable_in_module(ty, expected_returns[i], module_path, program)) {
+                            diag.report_error(DiagnosticStage::Sema, v.location, std::format("return value {} type mismatch", i + 1));
+                        }
+                    }
+
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::DeferStmt>>) {
                     // Register defer: validate the defer body with defer_loop_base = current loop_depth.
                     // Inside the defer body, return/try are forbidden; break/continue only allowed for loops

@@ -624,6 +624,51 @@ return val1, val2    # multi-return
 
 Returns from the current function. For multi-return functions, multiple values are returned separated by commas. Deferred statements run before the actual return.
 
+### `return_err` and `return_ok`
+
+```mirage
+return_err error_value
+return_ok [value1, value2, ...]
+```
+
+Sugar over `return` for fallible functions (functions whose last return type
+is `error`). Both run deferred statements before returning, exactly like
+`return`.
+
+`return_err <expr>` returns from the current function with the given error
+value; all non-error return slots are `undefined` (matching what `try`
+emits on its error-propagation path — the two lower identically). The
+operand must be of type `error`.
+
+```mirage
+if named_type == nil {
+    return_err E_OOM
+}
+```
+
+Sema errors:
+- `return_err` used in a function whose last return type is not `error`.
+- Operand is not of type `error`.
+- Operand is a compile-time constant `0` — "returning E_OK via return_err
+  is certainly a bug; use return_ok or return 0".
+
+`return_ok [expr {, expr}]` returns from the current function with error
+`0` (success). The operands supply the non-error return values in order,
+matching the function's non-error return types exactly via the same
+checking rules as `return`.
+
+```mirage
+return_ok named_type          # -> (*ast.NamedType, error)
+return_ok a, b                # -> (T1, T2, error)
+return_ok                     # -> error  (bare error return, no other values)
+```
+
+Sema errors:
+- `return_ok` used in a function whose last return type is not `error`
+  (including non-fallible functions).
+- Wrong number of non-error values supplied.
+- Type mismatch on any supplied value (same checks as `return`).
+
 ### Defer
 
 ```mirage
@@ -953,6 +998,6 @@ declared `...T`, dissolving to `[]T` inside the function body. Unlike C-style va
 
 The following identifiers are reserved by the language:
 
-`break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `iota` `len` `macro` `match` `mut` `nil` `return` `sizeof` `struct` `switch` `true` `try` `type` `undefined` `union` `while`
+`break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `iota` `len` `macro` `match` `mut` `nil` `return` `return_err` `return_ok` `sizeof` `struct` `switch` `true` `try` `type` `undefined` `union` `while`
 
 `ext` is parsed as an identifier, not a keyword; it is used as the prefix for extern function declarations.

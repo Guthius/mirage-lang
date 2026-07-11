@@ -1791,18 +1791,12 @@ namespace codegen {
             // Emit the error-propagation branch for a try expression or try group decl.
             // err_val: the LLVM i64 error value extracted from the call result.
             // Returns the ok_bb where execution continues if no error.
-            auto emit_try_propagation(llvm::Value *err_val, const SourceLocation &loc) -> llvm::BasicBlock * {
-                auto *fn = builder_.GetInsertBlock()->getParent();
-                auto *propagate_bb = llvm::BasicBlock::Create(*context_, "try.propagate", fn);
-                auto *ok_bb = llvm::BasicBlock::Create(*context_, "try.ok", fn);
-                auto *zero = llvm::ConstantInt::get(err_val->getType(), 0, false);
-                auto *is_err = builder_.CreateICmpNE(err_val, zero);
-                builder_.CreateCondBr(is_err, propagate_bb, ok_bb);
-
-                builder_.SetInsertPoint(propagate_bb);
+            // Returns err_val as the enclosing function's error result (zero-valuing any
+            // non-error slots), running defers first. Shared by `try` propagation and
+            // `return_err` so both lower identically.
+            void emit_error_return(llvm::Value *err_val) {
                 emit_defers_for_return();
 
-                // Propagate error into enclosing function's return
                 if (current_returns_.empty()) {
                     // Sema should have caught this; emit unreachable as a safeguard
                     builder_.CreateUnreachable();
@@ -1819,6 +1813,18 @@ namespace codegen {
                     agg = builder_.CreateInsertValue(agg, err_val, {static_cast<unsigned>(current_returns_.size() - 1)});
                     builder_.CreateRet(agg);
                 }
+            }
+
+            auto emit_try_propagation(llvm::Value *err_val, const SourceLocation &loc) -> llvm::BasicBlock * {
+                auto *fn = builder_.GetInsertBlock()->getParent();
+                auto *propagate_bb = llvm::BasicBlock::Create(*context_, "try.propagate", fn);
+                auto *ok_bb = llvm::BasicBlock::Create(*context_, "try.ok", fn);
+                auto *zero = llvm::ConstantInt::get(err_val->getType(), 0, false);
+                auto *is_err = builder_.CreateICmpNE(err_val, zero);
+                builder_.CreateCondBr(is_err, propagate_bb, ok_bb);
+
+                builder_.SetInsertPoint(propagate_bb);
+                emit_error_return(err_val);
 
                 builder_.SetInsertPoint(ok_bb);
                 return ok_bb;
@@ -2904,6 +2910,10 @@ namespace codegen {
                             builder_.CreateBr(break_targets_.back());
                         } else if constexpr (std::is_same_v<V, ast::ReturnStmt>) {
                             emit_return(v);
+                        } else if constexpr (std::is_same_v<V, ast::ReturnErrStmt>) {
+                            emit_return_err(v);
+                        } else if constexpr (std::is_same_v<V, ast::ReturnOkStmt>) {
+                            emit_return_ok(v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::DeferStmt>>) {
                             // Register defer in the current scope; emit at scope exit
                             defer_scopes_.back().defers.push_back(v.get());
@@ -3129,6 +3139,33 @@ namespace codegen {
                     builder_.CreateRetVoid();
                     return;
                 }
+                if (ret_vals.size() == 1) {
+                    builder_.CreateRet(ret_vals.front());
+                    return;
+                }
+                auto *agg_ty = llvm::cast<llvm::StructType>(return_type(*current_module_path_, current_returns_));
+                llvm::Value *agg = llvm::UndefValue::get(agg_ty);
+                for (size_t i = 0; i < ret_vals.size(); ++i) {
+                    agg = builder_.CreateInsertValue(agg, ret_vals[i], {static_cast<unsigned>(i)});
+                }
+                builder_.CreateRet(agg);
+            }
+
+            void emit_return_err(const ast::ReturnErrStmt &stmt) {
+                auto *err_val = emit_value_as(stmt.error_value, current_returns_.back(), *current_module_path_);
+                emit_error_return(err_val);
+            }
+
+            void emit_return_ok(const ast::ReturnOkStmt &stmt) {
+                std::vector<llvm::Value *> ret_vals;
+                ret_vals.reserve(stmt.return_values.size() + 1);
+                for (size_t i = 0; i < stmt.return_values.size(); ++i) {
+                    ret_vals.push_back(emit_value_as(stmt.return_values[i], current_returns_[i], *current_module_path_));
+                }
+                ret_vals.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), 0, false));
+
+                emit_defers_for_return();
+
                 if (ret_vals.size() == 1) {
                     builder_.CreateRet(ret_vals.front());
                     return;

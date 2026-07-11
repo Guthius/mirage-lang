@@ -137,6 +137,8 @@ stmt          ::= block_stmt
                | continue_stmt
                | break_stmt
                | return_stmt
+               | return_err_stmt
+               | return_ok_stmt
                | defer_stmt
                | expr_stmt
 
@@ -163,6 +165,10 @@ continue_stmt ::= 'continue'
 break_stmt    ::= 'break'
 
 return_stmt   ::= 'return' [ expr { ',' expr } ]
+
+return_err_stmt ::= 'return_err' expr
+
+return_ok_stmt  ::= 'return_ok' [ expr { ',' expr } ]
 
 defer_stmt    ::= 'defer' stmt
 

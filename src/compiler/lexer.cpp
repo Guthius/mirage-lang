@@ -21,6 +21,8 @@ namespace lexer {
             {"continue",  TokenKind::KwContinue },
             {"break",     TokenKind::KwBreak    },
             {"return",    TokenKind::KwReturn   },
+            {"return_err",TokenKind::KwReturnErr},
+            {"return_ok", TokenKind::KwReturnOk },
             {"if",        TokenKind::KwIf       },
             {"else",      TokenKind::KwElse     },
             {"while",     TokenKind::KwWhile    },
@@ -89,6 +91,7 @@ namespace lexer {
             case TokenKind::PlusPlus:
             case TokenKind::MinusMinus:
             case TokenKind::KwReturn:
+            case TokenKind::KwReturnOk:
             case TokenKind::KwBreak:
             case TokenKind::KwContinue:
                 return true;

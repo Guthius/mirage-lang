@@ -1487,6 +1487,39 @@ namespace ast {
             };
         }
 
+        auto parse_return_err_stmt(Parser &parser) -> ReturnErrStmt {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwReturnErr, "'return_err'");
+
+            auto value = parse_expr(parser);
+
+            return ReturnErrStmt{
+                .error_value = std::move(value),
+                .location = location,
+            };
+        }
+
+        auto parse_return_ok_stmt(Parser &parser) -> ReturnOkStmt {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwReturnOk, "'return_ok'");
+
+            std::vector<Expr> values;
+            if (can_start_expr(parser.current().kind)) {
+                values.push_back(parse_expr(parser));
+
+                while (parser.match(TokenKind::Comma)) {
+                    values.push_back(parse_expr(parser));
+                }
+            }
+
+            return ReturnOkStmt{
+                .return_values = std::move(values),
+                .location = location,
+            };
+        }
+
         // The token '...' appears in four unrelated grammar positions, disambiguated purely by
         // parse context (never by a shared representation):
         //   1. Native variadic parameter: 'name: ...T' (here) — a type follows the dots; dissolves
@@ -2005,6 +2038,14 @@ namespace ast {
 
         if (parser.check(TokenKind::KwReturn)) {
             return parse_return_stmt(parser);
+        }
+
+        if (parser.check(TokenKind::KwReturnErr)) {
+            return parse_return_err_stmt(parser);
+        }
+
+        if (parser.check(TokenKind::KwReturnOk)) {
+            return parse_return_ok_stmt(parser);
         }
 
         if (parser.check(TokenKind::KwDefer)) {

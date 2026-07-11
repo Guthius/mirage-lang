@@ -471,6 +471,16 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct ReturnErrStmt {
+        Expr error_value;
+        SourceLocation location;
+    };
+
+    struct ReturnOkStmt {
+        std::vector<Expr> return_values;
+        SourceLocation location;
+    };
+
     struct DeferStmt;
     struct ForInStmt;
 
@@ -486,6 +496,8 @@ namespace ast {
         ContinueStmt,
         BreakStmt,
         ReturnStmt,
+        ReturnErrStmt,
+        ReturnOkStmt,
         std::unique_ptr<DeferStmt>>;
 
     struct DeferStmt {

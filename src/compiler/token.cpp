@@ -19,6 +19,8 @@ auto token_kind_name(const TokenKind kind) -> const char * {
     case TokenKind::KwContinue:      return "KW_CONTINUE";
     case TokenKind::KwBreak:         return "KW_BREAK";
     case TokenKind::KwReturn:        return "KW_RETURN";
+    case TokenKind::KwReturnErr:     return "KW_RETURN_ERR";
+    case TokenKind::KwReturnOk:      return "KW_RETURN_OK";
     case TokenKind::KwIf:            return "KW_IF";
     case TokenKind::KwElse:          return "KW_ELSE";
     case TokenKind::KwWhile:         return "KW_WHILE";

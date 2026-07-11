@@ -26,6 +26,8 @@ enum class TokenKind : uint8_t {
     KwContinue,
     KwBreak,
     KwReturn,
+    KwReturnErr,
+    KwReturnOk,
     KwIf,
     KwElse,
     KwWhile,
