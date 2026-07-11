@@ -860,6 +860,9 @@ namespace sema {
                             return error(diag, v->location, std::format("no method '{}' on type", (*member_callee)->member));
                         }
                         check_call_args(v->args, method->param_types, false, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, method->is_variadic);
+                        if (method->return_types.size() > 1) {
+                            return error(diag, v->location, "multi-value capture is not yet supported here");
+                        }
                         return method->return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : method->return_types.front();
                     }
 
