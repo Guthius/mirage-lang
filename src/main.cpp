@@ -278,7 +278,9 @@ auto main(const int argc, char *argv[]) -> int {
         waitpid(pid, &status, 0);
         std::filesystem::remove(exe_path, remove_error);
         if (WIFEXITED(status)) {
-            return WEXITSTATUS(status);
+            const int code = WEXITSTATUS(status);
+            llvm::outs() << std::format("process exited with code {}\n", code);
+            return code;
         }
         return 1;
     }
