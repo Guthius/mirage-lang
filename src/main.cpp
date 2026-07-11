@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <format>
 #include <string>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
 
@@ -149,7 +150,8 @@ namespace {
         return true;
     }
 
-    auto link_executable(const std::filesystem::path &object_path, const Options &options) -> bool {
+    auto link_executable(const std::filesystem::path &object_path, const std::filesystem::path &output_path,
+                          const Options &options) -> bool {
         std::vector<std::string> args{"clang"};
         if (options.freestanding) {
             args.emplace_back("-ffreestanding");
@@ -164,7 +166,7 @@ namespace {
             args.push_back("-l" + lib);
         }
         args.emplace_back("-o");
-        args.push_back(options.output);
+        args.push_back(output_path.string());
 
         std::string command;
         for (size_t i = 0; i < args.size(); ++i) {
@@ -237,7 +239,11 @@ auto main(const int argc, char *argv[]) -> int {
         return 1;
     }
 
-    if (!link_executable(object_path, options)) {
+    const auto exe_path = options.action == Action::Run
+        ? std::filesystem::temp_directory_path() / std::format("mirage-{}", std::rand())
+        : std::filesystem::path(options.output);
+
+    if (!link_executable(object_path, exe_path, options)) {
         std::error_code remove_error;
         std::filesystem::remove(object_path, remove_error);
         llvm::errs() << "mirage: linker failed\n";
@@ -249,13 +255,31 @@ auto main(const int argc, char *argv[]) -> int {
 
     const auto elapsed = std::chrono::steady_clock::now() - start_time;
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-    llvm::outs() << std::format("Compiled '{}' -> '{}' in {}ms\n", options.module_path, options.output, ms);
+    if (options.action == Action::Run) {
+        llvm::outs() << std::format("Compiled '{}' in {}ms\n", options.module_path, ms);
+    } else {
+        llvm::outs() << std::format("Compiled '{}' -> '{}' in {}ms\n", options.module_path, options.output, ms);
+    }
     llvm::outs().flush();
 
     if (options.action == Action::Run) {
-        const char *args[] = {options.output.c_str(), nullptr};
-        execv(options.output.c_str(), const_cast<char *const *>(args));
-        llvm::errs() << "mirage: failed to execute '" << options.output << "'\n";
+        const pid_t pid = fork();
+        if (pid < 0) {
+            llvm::errs() << "mirage: fork failed\n";
+            std::filesystem::remove(exe_path, remove_error);
+            return 1;
+        }
+        if (pid == 0) {
+            const char *args[] = {exe_path.c_str(), nullptr};
+            execv(exe_path.c_str(), const_cast<char *const *>(args));
+            _exit(127);
+        }
+        int status = 0;
+        waitpid(pid, &status, 0);
+        std::filesystem::remove(exe_path, remove_error);
+        if (WIFEXITED(status)) {
+            return WEXITSTATUS(status);
+        }
         return 1;
     }
 
