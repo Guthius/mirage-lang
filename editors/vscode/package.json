@@ -3,6 +3,7 @@
   "displayName": "Mirage Language Support",
   "description": "Diagnostics, go-to-definition, and hover for Mirage (.mir) files via mirage-lsp.",
   "version": "0.0.1",
+  "publisher": "mirage-lang",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -33,9 +34,12 @@
   "devDependencies": {
     "@types/vscode": "^1.85.0",
     "@types/node": "^20.0.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "@vscode/vsce": "^3.0.0"
   },
   "scripts": {
-    "compile": "tsc -p ./"
+    "compile": "tsc -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package"
   }
 }

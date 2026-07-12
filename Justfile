@@ -1,6 +1,7 @@
 build_dir := "build"
 cxx_compiler := "clang++"
 cxx_standard := "23"
+vscode_dir := "editors/vscode"
 
 # Clean build artifacts
 clean:
@@ -31,6 +32,14 @@ run: build
 # Install the compiler to the system
 install prefix="/usr/local": build
     install -Dm755 {{ build_dir }}/mirage {{ prefix }}/bin/mirage
+
+# Install mirage-lsp to the system
+install-lsp prefix="/usr/local": build
+    install -Dm755 {{ build_dir }}/mirage-lsp {{ prefix }}/bin/mirage-lsp
+
+# Package the VS Code extension into a .vsix installable via `code --install-extension`
+package-vscode:
+    cd {{ vscode_dir }} && npm install && npm run package
 
 # Format all source files that are part of the project
 format:
