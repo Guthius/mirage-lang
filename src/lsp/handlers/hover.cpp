@@ -53,7 +53,7 @@ namespace lsp::handlers {
                     } else if constexpr (std::is_same_v<S, sema::ImportSymbol>) {
                         return "import \"" + sym.module_path + "\"";
                     } else if constexpr (std::is_same_v<S, sema::TypeSymbol>) {
-                        return "type " + name;
+                        return sym.resolved ? describe_type_definition(*sym.resolved, program, module_path) : "type " + name;
                     } else {
                         return name;
                     }
@@ -90,6 +90,7 @@ namespace lsp::handlers {
             return hover_json(res.name + ": " + type_to_string(res.type, result.sema_program, module_path));
 
         case Resolution::Kind::EnumField:
+        case Resolution::Kind::Variant:
             return hover_json(type_to_string(res.type, result.sema_program, module_path) + "." + res.name);
 
         case Resolution::Kind::Method: {
@@ -99,6 +100,9 @@ namespace lsp::handlers {
             std::string ret = res.method ? join_return_types(res.method->return_types, result.sema_program, module_path) : "";
             return hover_json("fn " + res.name + "(" + params + ")" + ret);
         }
+
+        case Resolution::Kind::Builtin:
+            return hover_json("builtin " + res.name + "(): " + type_to_string(res.type, result.sema_program, module_path));
 
         default:
             return nullptr;

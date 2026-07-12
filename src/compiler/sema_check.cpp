@@ -16,6 +16,16 @@ namespace sema {
             return ResolvedType{.kind = TypeKind::Invalid};
         }
 
+        // Like error(), but returns a caller-supplied fallback type instead of Invalid. Used
+        // where the expected type is already known (that's how the mismatch was detected), so
+        // resolving to it here prevents the same root-cause error from cascading into a second,
+        // redundant diagnostic at the call site (e.g. a return-statement type mismatch).
+        auto error_as(DiagnosticEngine &diag, const SourceLocation &loc, std::string msg,
+                       const ResolvedType &fallback) -> ResolvedType {
+            diag.report_error(DiagnosticStage::Sema, loc, std::move(msg));
+            return fallback;
+        }
+
         auto format_named_type(const ast::NamedType &named) -> std::string {
             std::string result = named.name;
             for (const ast::NamedType *m = named.member.get(); m; m = m->member.get()) {
@@ -1122,17 +1132,17 @@ namespace sema {
                                 return *expected;
                             }
                         }
-                        return error(diag, v.location, std::format("no enum field named '{}'", v.name));
+                        return error_as(diag, v.location, std::format("no enum field named '{}'", v.name), *expected);
                     }
                     if (expected && expected->kind == TypeKind::Union) {
                         const auto *union_info = program.union_at(expected->union_index);
                         if (union_info && union_info->is_tagged) {
                             const auto it = std::ranges::find(union_info->variants, v.name, &TaggedUnionVariant::name);
                             if (it == union_info->variants.end()) {
-                                return error(diag, v.location, std::format("no variant '{}' on tagged union", v.name));
+                                return error_as(diag, v.location, std::format("no variant '{}' on tagged union", v.name), *expected);
                             }
                             if (it->payload_struct_index >= 0) {
-                                return error(diag, v.location, std::format("variant '{}' has a payload; use '.{}{{...}}' syntax", v.name, v.name));
+                                return error_as(diag, v.location, std::format("variant '{}' has a payload; use '.{}{{...}}' syntax", v.name, v.name), *expected);
                             }
                             return *expected;
                         }
@@ -1480,15 +1490,15 @@ namespace sema {
                     }
                     const auto variant_it = std::ranges::find(union_info.variants, v->variant_name, &TaggedUnionVariant::name);
                     if (variant_it == union_info.variants.end()) {
-                        return error(diag, v->location, std::format("no variant '{}' on tagged union", v->variant_name));
+                        return error_as(diag, v->location, std::format("no variant '{}' on tagged union", v->variant_name), union_ty);
                     }
                     const bool has_payload = variant_it->payload_struct_index >= 0;
                     if (!has_payload && v->payload.has_value()) {
-                        return error(diag, v->location, std::format("variant '{}' has no payload; use '.{}' without braces", v->variant_name, v->variant_name));
+                        return error_as(diag, v->location, std::format("variant '{}' has no payload; use '.{}' without braces", v->variant_name, v->variant_name), union_ty);
                     }
                     if (has_payload) {
                         if (!v->payload.has_value()) {
-                            return error(diag, v->location, std::format("variant '{}' requires a payload initializer; use '.{}{{field = val}}'", v->variant_name, v->variant_name));
+                            return error_as(diag, v->location, std::format("variant '{}' requires a payload initializer; use '.{}{{field = val}}'", v->variant_name, v->variant_name), union_ty);
                         }
                         const auto &bv = *v->payload;
                         const auto *struct_info_ptr = program.struct_at(variant_it->payload_struct_index);

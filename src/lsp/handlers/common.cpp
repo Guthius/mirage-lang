@@ -93,6 +93,98 @@ namespace lsp::handlers {
             return {};
         }
 
+        // EnumFieldInfo/TaggedUnionVariant carry no location of their own - fall back to the
+        // enum/union type's own declaration site.
+        auto type_decl_location(const sema::ResolvedType &type, const sema::Program &program) -> SourceLocation {
+            SourceLocation loc{};
+            const auto [mod_path, type_name] = sema::find_type_module_and_name(type, program);
+            if (!type_name.empty()) {
+                if (const auto mod_it = program.modules.find(mod_path); mod_it != program.modules.end()) {
+                    if (const auto sym_it = mod_it->second.symbols.find(type_name); sym_it != mod_it->second.symbols.end()) {
+                        if (const auto *ts = std::get_if<sema::TypeSymbol>(&sym_it->second)) {
+                            loc = ts->location;
+                        }
+                    }
+                }
+            }
+            return loc;
+        }
+
+        // Matches `member` against an enum's fields or a tagged union's variants by name.
+        // Returns a Resolution with Kind::None if `type` isn't Enum/tagged-Union or has no such
+        // field/variant. Shared by step()'s Type-container walk (qualified access, e.g.
+        // `Module.Type.Field`) and by contextual variant-reference resolution (`.Field`), which
+        // needs the lookup without the rest of step()'s chaining machinery.
+        auto match_enum_or_variant(const sema::ResolvedType &type, const std::string &member,
+                                    const sema::Program &program) -> Resolution {
+            if (type.kind == sema::TypeKind::Enum && type.enum_index >= 0 &&
+                static_cast<size_t>(type.enum_index) < program.enums.size()) {
+                const auto &info = program.enums[type.enum_index];
+                for (const auto &field : info.fields) {
+                    if (field.name == member) {
+                        return Resolution{
+                            .kind = Resolution::Kind::EnumField,
+                            .name = member,
+                            .location = type_decl_location(type, program),
+                            .type = type,
+                        };
+                    }
+                }
+            } else if (type.kind == sema::TypeKind::Union && type.union_index >= 0 &&
+                       static_cast<size_t>(type.union_index) < program.unions.size()) {
+                const auto &info = program.unions[type.union_index];
+                if (info.is_tagged) {
+                    for (const auto &variant : info.variants) {
+                        if (variant.name == member) {
+                            return Resolution{
+                                .kind = Resolution::Kind::Variant,
+                                .name = member,
+                                .location = type_decl_location(type, program),
+                                .type = type,
+                            };
+                        }
+                    }
+                }
+            }
+            return {};
+        }
+
+        // Resolves `member` against `type_in`: struct/union field, enum field/tagged-union
+        // variant, or method - transparently dereferencing one level of pointer first (so
+        // `p.field`/`p.method()` resolve whether `p` is `T` or `*T`). Kind::None if `member`
+        // doesn't match anything. Shared by step()'s Type-container walk (which additionally
+        // needs to know whether to keep chaining - only struct/union fields do) and by direct
+        // AST-node-based resolution (which doesn't need to chain further, e.g. resolving a
+        // member access whose receiver is a call/index result rather than an identifier chain).
+        auto resolve_member(const sema::ResolvedType &type_in, const std::string &member,
+                             const sema::Program &program) -> Resolution {
+            auto type = type_in;
+            if (type.kind == sema::TypeKind::Pointer) {
+                const auto *pointee = program.pointee_at(type.pointee_index);
+                if (!pointee) return {};
+                type = *pointee;
+            }
+
+            if (auto field_res = match_struct_or_union_field(type, member, program);
+                field_res.kind != Resolution::Kind::None) {
+                return field_res;
+            }
+            if (auto variant_res = match_enum_or_variant(type, member, program);
+                variant_res.kind != Resolution::Kind::None) {
+                return variant_res;
+            }
+            // Struct/union/enum method call, e.g. `hash_map.init(...)`.
+            if (const auto *method = sema::find_method(type, member, program)) {
+                return Resolution{
+                    .kind = Resolution::Kind::Method,
+                    .name = member,
+                    .location = method->decl ? method->decl->location : SourceLocation{},
+                    .method = method,
+                };
+            }
+            return {};
+        }
+
         // One step of a dotted-chain walk: resolves `member` within
         // `container`, returning both the Resolution describing it and the
         // Container to keep chaining from (Kind::None if `member` is a dead
@@ -115,50 +207,11 @@ namespace lsp::handlers {
             }
 
             if (container.kind == Container::Kind::Type) {
-                auto type = container.type;
-                if (type.kind == sema::TypeKind::Pointer) {
-                    const auto *pointee = program.pointee_at(type.pointee_index);
-                    if (!pointee) return {};
-                    type = *pointee;
+                auto res = resolve_member(container.type, member, program);
+                if (res.kind == Resolution::Kind::StructField || res.kind == Resolution::Kind::UnionMember) {
+                    return {res, Container{.kind = Container::Kind::Type, .module_path = "", .type = res.type}};
                 }
-
-                if (auto field_res = match_struct_or_union_field(type, member, program);
-                    field_res.kind != Resolution::Kind::None) {
-                    return {field_res, Container{.kind = Container::Kind::Type, .module_path = "", .type = field_res.type}};
-                }
-
-                if (type.kind == sema::TypeKind::Enum && type.enum_index >= 0 &&
-                    static_cast<size_t>(type.enum_index) < program.enums.size()) {
-                    const auto &info = program.enums[type.enum_index];
-                    for (const auto &field : info.fields) {
-                        if (field.name == member) {
-                            // EnumFieldInfo carries no location - fall back to
-                            // the enum type's own declaration site.
-                            SourceLocation loc{};
-                            const auto [mod_path, type_name] = sema::find_type_module_and_name(type, program);
-                            if (!type_name.empty()) {
-                                if (const auto mod_it = program.modules.find(mod_path); mod_it != program.modules.end()) {
-                                    if (const auto sym_it = mod_it->second.symbols.find(type_name); sym_it != mod_it->second.symbols.end()) {
-                                        if (const auto *ts = std::get_if<sema::TypeSymbol>(&sym_it->second)) {
-                                            loc = ts->location;
-                                        }
-                                    }
-                                }
-                            }
-                            Resolution res{.kind = Resolution::Kind::EnumField, .name = member, .location = loc, .type = type};
-                            return {res, {}};
-                        }
-                    }
-                }
-
-                // Struct/union/enum method call, e.g. `hash_map.init(...)`.
-                if (const auto *method = sema::find_method(type, member, program)) {
-                    Resolution res{
-                        .kind = Resolution::Kind::Method,
-                        .name = member,
-                        .location = method->decl ? method->decl->location : SourceLocation{},
-                        .method = method,
-                    };
+                if (res.kind != Resolution::Kind::None) {
                     return {res, {}};
                 }
             }
@@ -167,11 +220,8 @@ namespace lsp::handlers {
         }
 
         // Bundles the mutable sema state a local-variable-type lookup needs:
-        // most locals have their type read straight out of expr_types (the
-        // already-computed type of their init expression), but a `mut x: T`
-        // with no initializer has no init expr to look up - for that case we
-        // fall back to resolving the declared type annotation directly via
-        // sema::resolve_type(), which needs a mutable Program& and a
+        // resolving the declared type annotation (when present) via
+        // sema::resolve_declared_type() needs a mutable Program& and a
         // DiagnosticEngine& (harmless to call again here: types are interned,
         // so this cannot produce new errors or diverge from what sema itself
         // already resolved during body checking).
@@ -182,15 +232,20 @@ namespace lsp::handlers {
             DiagnosticEngine &diag;
         };
 
+        // Mirrors sema_check.cpp's own VarDeclStmt handling: when a declared type annotation
+        // is present, it - not the initializer's own natural type - is the variable's actual
+        // type (`locals[v.name] = LocalBinding{.type = has_declared_ty ? declared_ty : init_ty,
+        // ...}`). Without this, hovering a var like `mut p: *T = try alloc(...)` would show
+        // `alloc`'s raw return type (e.g. `anyptr`) instead of the declared/coerced-to type.
         auto resolve_var_decl_type(const ast::VarDeclStmt &node, const LocalLookupContext &ctx) -> sema::ResolvedType {
+            if (const auto declared = sema::resolve_declared_type(node.type, node.init, ctx.module_path, ctx.sema_program, ctx.diag, node.location)) {
+                return *declared;
+            }
             if (node.init) {
                 if (const auto it = ctx.sema_module.expr_types.find(sema::get_expr_key(*node.init));
                     it != ctx.sema_module.expr_types.end()) {
                     return it->second;
                 }
-            }
-            if (node.type) {
-                return sema::resolve_type(*node.type, ctx.module_path, ctx.sema_program, ctx.diag);
             }
             return {};
         }
@@ -353,16 +408,21 @@ namespace lsp::handlers {
             return a.line == b.line && a.column == b.column;
         }
 
-        auto find_struct_literal_expr(const ast::Stmt &stmt, const SourceLocation &target) -> const ast::Expr *;
+        auto find_expr_by_location(const ast::Stmt &stmt, const SourceLocation &target) -> const ast::Expr *;
 
-        // Recursively searches `expr` (and everything nested inside it) for
-        // the exact ast::Expr slot holding a BracedInitializerExpr whose
-        // alternative is StructExpr and whose StructExpr::location equals
-        // `target`. Returns nullptr if none found. Source locations are
-        // unique per position, so at most one node in the whole tree can
-        // match - no separate innermost/outermost disambiguation is needed
-        // beyond exact equality (enclosing_struct_literal_brace already found
-        // the innermost enclosing '{' via token-stream scanning).
+        // Recursively searches `expr` (and everything nested inside it) for the exact
+        // ast::Expr slot whose location equals `target`. Shapes matched: a
+        // BracedInitializerExpr whose alternative is StructExpr (struct-literal field
+        // designator resolution, `.field = value`); a DotIdentExpr/TaggedVariantExpr
+        // (contextual variant-reference resolution, `.Variant` / `.Variant{...}`); and a
+        // MemberExpr (member-access resolution, `expr.field`) - the latter needs its own
+        // per-node location (set fresh per postfix-chain iteration in parse_postfix, see
+        // ast.cpp) rather than the token-based chain_prefix reconstruction below, since it
+        // works even when the receiver isn't a plain identifier chain (`f().field`,
+        // `a[0].field`). Returns nullptr if none found. Source locations are unique per
+        // position, so at most one node in the whole tree can match - no separate
+        // innermost/outermost disambiguation is needed beyond exact equality (callers already
+        // narrow `target` to the specific token they care about before calling this).
         //
         // Mirrors the dispatch shape of check_expr/check_stmt in
         // sema_check.cpp (which already exhaustively enumerate every
@@ -374,56 +434,57 @@ namespace lsp::handlers {
         // no corresponding get_expr_key() slot - field designators inside a
         // tagged-union-variant literal payload (`.Foo{ .x = 1 }`) are out of
         // scope for this helper.
-        auto find_struct_literal_expr(const ast::Expr &expr, const SourceLocation &target) -> const ast::Expr * {
+        auto find_expr_by_location(const ast::Expr &expr, const SourceLocation &target) -> const ast::Expr * {
             return std::visit(
                 [&]<typename T>(const T &node) -> const ast::Expr * {
                     using U = std::decay_t<T>;
                     if constexpr (std::is_same_v<U, std::unique_ptr<ast::UnaryExpr>>) {
-                        return find_struct_literal_expr(node->operand, target);
+                        return find_expr_by_location(node->operand, target);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::BinaryExpr>>) {
-                        if (const auto *r = find_struct_literal_expr(node->lhs, target)) return r;
-                        return find_struct_literal_expr(node->rhs, target);
+                        if (const auto *r = find_expr_by_location(node->lhs, target)) return r;
+                        return find_expr_by_location(node->rhs, target);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TernaryExpr>>) {
-                        if (const auto *r = find_struct_literal_expr(node->condition, target)) return r;
-                        if (const auto *r = find_struct_literal_expr(node->then_expr, target)) return r;
-                        return find_struct_literal_expr(node->else_expr, target);
+                        if (const auto *r = find_expr_by_location(node->condition, target)) return r;
+                        if (const auto *r = find_expr_by_location(node->then_expr, target)) return r;
+                        return find_expr_by_location(node->else_expr, target);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::AssignExpr>>) {
-                        if (const auto *r = find_struct_literal_expr(node->target, target)) return r;
-                        return find_struct_literal_expr(node->value, target);
+                        if (const auto *r = find_expr_by_location(node->target, target)) return r;
+                        return find_expr_by_location(node->value, target);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::CallExpr>>) {
-                        if (const auto *r = find_struct_literal_expr(node->callee, target)) return r;
+                        if (const auto *r = find_expr_by_location(node->callee, target)) return r;
                         for (const auto &arg : node->args) {
-                            if (const auto *r = find_struct_literal_expr(arg, target)) return r;
+                            if (const auto *r = find_expr_by_location(arg, target)) return r;
                         }
                         return nullptr;
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IncrDecrExpr>>) {
-                        return find_struct_literal_expr(node->operand, target);
+                        return find_expr_by_location(node->operand, target);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SizeOfExpr>>) {
-                        return find_struct_literal_expr(node->operand, target);
+                        return find_expr_by_location(node->operand, target);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::LenExpr>>) {
-                        return find_struct_literal_expr(node->operand, target);
+                        return find_expr_by_location(node->operand, target);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::CastExpr>>) {
-                        if (const auto *r = find_struct_literal_expr(node->value, target)) return r;
-                        if (node->len_expr) return find_struct_literal_expr(*node->len_expr, target);
+                        if (const auto *r = find_expr_by_location(node->value, target)) return r;
+                        if (node->len_expr) return find_expr_by_location(*node->len_expr, target);
                         return nullptr;
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IndexExpr>>) {
-                        if (const auto *r = find_struct_literal_expr(node->operand, target)) return r;
-                        return find_struct_literal_expr(node->index, target);
+                        if (const auto *r = find_expr_by_location(node->operand, target)) return r;
+                        return find_expr_by_location(node->index, target);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SliceExpr>>) {
-                        if (const auto *r = find_struct_literal_expr(node->operand, target)) return r;
-                        if (const auto *r = find_struct_literal_expr(node->start, target)) return r;
-                        return find_struct_literal_expr(node->end, target);
+                        if (const auto *r = find_expr_by_location(node->operand, target)) return r;
+                        if (const auto *r = find_expr_by_location(node->start, target)) return r;
+                        return find_expr_by_location(node->end, target);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::MemberExpr>>) {
-                        return find_struct_literal_expr(node->object, target);
+                        if (location_matches(node->location, target)) return &expr;
+                        return find_expr_by_location(node->object, target);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::MatchExpr>>) {
-                        if (const auto *r = find_struct_literal_expr(node->operand, target)) return r;
+                        if (const auto *r = find_expr_by_location(node->operand, target)) return r;
                         for (const auto &arm : node->arms) {
                             if (const auto *lit = std::get_if<ast::MatchExpr::LiteralPattern>(&arm.pattern)) {
                                 if (lit->expr) {
-                                    if (const auto *r = find_struct_literal_expr(*lit->expr, target)) return r;
+                                    if (const auto *r = find_expr_by_location(*lit->expr, target)) return r;
                                 }
                             }
-                            if (const auto *r = find_struct_literal_expr(arm.value, target)) return r;
+                            if (const auto *r = find_expr_by_location(arm.value, target)) return r;
                         }
                         return nullptr;
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::BracedInitializerExpr>>) {
@@ -432,13 +493,13 @@ namespace lsp::handlers {
                                 using W = std::decay_t<V>;
                                 if constexpr (std::is_same_v<W, ast::StructExpr>) {
                                     for (const auto &field : alt.fields) {
-                                        if (const auto *r = find_struct_literal_expr(field.expr, target)) return r;
+                                        if (const auto *r = find_expr_by_location(field.expr, target)) return r;
                                     }
                                     if (location_matches(alt.location, target)) return &expr;
                                     return nullptr;
                                 } else if constexpr (std::is_same_v<W, ast::ArrayExpr>) {
                                     for (const auto &v : alt.values) {
-                                        if (const auto *r = find_struct_literal_expr(v, target)) return r;
+                                        if (const auto *r = find_expr_by_location(v, target)) return r;
                                     }
                                     return nullptr;
                                 } else {
@@ -447,17 +508,20 @@ namespace lsp::handlers {
                             },
                             *node);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TryExpr>>) {
-                        return find_struct_literal_expr(node->call, target);
+                        return find_expr_by_location(node->call, target);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::RangeExpr>>) {
                         if (node->lower) {
-                            if (const auto *r = find_struct_literal_expr(*node->lower, target)) return r;
+                            if (const auto *r = find_expr_by_location(*node->lower, target)) return r;
                         }
-                        return find_struct_literal_expr(node->upper, target);
+                        return find_expr_by_location(node->upper, target);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SpreadExpr>>) {
-                        return find_struct_literal_expr(node->operand, target);
+                        return find_expr_by_location(node->operand, target);
+                    } else if constexpr (std::is_same_v<U, ast::DotIdentExpr>) {
+                        return location_matches(node.location, target) ? &expr : nullptr;
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TaggedVariantExpr>>) {
+                        return location_matches(node->location, target) ? &expr : nullptr;
                     } else {
-                        // Literals, IdentExpr, ImportExpr, IotaExpr, DotIdentExpr,
-                        // TaggedVariantExpr (payload out of scope, see above),
+                        // Literals, IdentExpr, ImportExpr, IotaExpr,
                         // DefaultExpr, UndefinedExpr - none contain a nested Expr.
                         return nullptr;
                     }
@@ -465,56 +529,56 @@ namespace lsp::handlers {
                 expr);
         }
 
-        auto find_struct_literal_expr(const ast::Stmt &stmt, const SourceLocation &target) -> const ast::Expr * {
+        auto find_expr_by_location(const ast::Stmt &stmt, const SourceLocation &target) -> const ast::Expr * {
             return std::visit(
                 [&]<typename T>(const T &node) -> const ast::Expr * {
                     using U = std::decay_t<T>;
                     if constexpr (std::is_same_v<U, std::unique_ptr<ast::BlockStmt>>) {
                         for (const auto &s : node->stmts) {
-                            if (const auto *r = find_struct_literal_expr(s, target)) return r;
+                            if (const auto *r = find_expr_by_location(s, target)) return r;
                         }
                         return nullptr;
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IfStmt>>) {
-                        if (const auto *r = find_struct_literal_expr(node->condition, target)) return r;
-                        if (const auto *r = find_struct_literal_expr(node->then_stmt, target)) return r;
-                        if (node->else_stmt) return find_struct_literal_expr(*node->else_stmt, target);
+                        if (const auto *r = find_expr_by_location(node->condition, target)) return r;
+                        if (const auto *r = find_expr_by_location(node->then_stmt, target)) return r;
+                        if (node->else_stmt) return find_expr_by_location(*node->else_stmt, target);
                         return nullptr;
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::WhileStmt>>) {
-                        if (const auto *r = find_struct_literal_expr(node->condition, target)) return r;
-                        return find_struct_literal_expr(node->body, target);
+                        if (const auto *r = find_expr_by_location(node->condition, target)) return r;
+                        return find_expr_by_location(node->body, target);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::ForInStmt>>) {
-                        if (const auto *r = find_struct_literal_expr(node->iterable, target)) return r;
-                        return find_struct_literal_expr(node->body, target);
+                        if (const auto *r = find_expr_by_location(node->iterable, target)) return r;
+                        return find_expr_by_location(node->body, target);
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SwitchStmt>>) {
-                        if (const auto *r = find_struct_literal_expr(node->operand, target)) return r;
+                        if (const auto *r = find_expr_by_location(node->operand, target)) return r;
                         for (const auto &arm : node->arms) {
                             if (const auto *lit = std::get_if<ast::MatchExpr::LiteralPattern>(&arm.pattern)) {
                                 if (lit->expr) {
-                                    if (const auto *r = find_struct_literal_expr(*lit->expr, target)) return r;
+                                    if (const auto *r = find_expr_by_location(*lit->expr, target)) return r;
                                 }
                             }
-                            if (const auto *r = find_struct_literal_expr(arm.body, target)) return r;
+                            if (const auto *r = find_expr_by_location(arm.body, target)) return r;
                         }
                         return nullptr;
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::DeferStmt>>) {
-                        return find_struct_literal_expr(node->body, target);
+                        return find_expr_by_location(node->body, target);
                     } else if constexpr (std::is_same_v<U, ast::ExprStmt>) {
-                        return find_struct_literal_expr(node.expr, target);
+                        return find_expr_by_location(node.expr, target);
                     } else if constexpr (std::is_same_v<U, ast::VarDeclStmt>) {
-                        if (node.init) return find_struct_literal_expr(*node.init, target);
+                        if (node.init) return find_expr_by_location(*node.init, target);
                         return nullptr;
                     } else if constexpr (std::is_same_v<U, ast::VarDeclGroupStmt>) {
-                        return find_struct_literal_expr(node.init, target);
+                        return find_expr_by_location(node.init, target);
                     } else if constexpr (std::is_same_v<U, ast::ReturnStmt>) {
                         for (const auto &e : node.return_values) {
-                            if (const auto *r = find_struct_literal_expr(e, target)) return r;
+                            if (const auto *r = find_expr_by_location(e, target)) return r;
                         }
                         return nullptr;
                     } else if constexpr (std::is_same_v<U, ast::ReturnErrStmt>) {
-                        return find_struct_literal_expr(node.error_value, target);
+                        return find_expr_by_location(node.error_value, target);
                     } else if constexpr (std::is_same_v<U, ast::ReturnOkStmt>) {
                         for (const auto &e : node.return_values) {
-                            if (const auto *r = find_struct_literal_expr(e, target)) return r;
+                            if (const auto *r = find_expr_by_location(e, target)) return r;
                         }
                         return nullptr;
                     } else {
@@ -558,7 +622,20 @@ namespace lsp::handlers {
 
         auto tokens = lexer::tokenize(source_file.text, source_file.filename, throwaway_diag);
         const auto idx_opt = token_at(tokens, line, column);
-        if (!idx_opt || tokens[*idx_opt].kind != TokenKind::Identifier) return {};
+        if (!idx_opt) return {};
+
+        // sizeof/len are dedicated keyword tokens (TokenKind::KwSizeOf/KwLen), not
+        // TokenKind::Identifier, so they'd otherwise be rejected by the guard below - resolve
+        // them directly as a synthetic builtin, always usize (see SizeOfExpr/LenExpr handling
+        // in sema_check.cpp).
+        if (tokens[*idx_opt].kind == TokenKind::KwSizeOf || tokens[*idx_opt].kind == TokenKind::KwLen) {
+            return Resolution{
+                .kind = Resolution::Kind::Builtin,
+                .name = tokens[*idx_opt].kind == TokenKind::KwSizeOf ? "sizeof" : "len",
+                .type = sema::ResolvedType{.kind = sema::TypeKind::USize},
+            };
+        }
+        if (tokens[*idx_opt].kind != TokenKind::Identifier) return {};
         const auto idx = *idx_opt;
 
         const auto mod_it = result.ast_program.modules.find(module_path);
@@ -600,6 +677,36 @@ namespace lsp::handlers {
 
         const auto prefix = chain_prefix(tokens, idx);
 
+        // Resolve '.name' positions directly off the AST's own node before falling back to
+        // the token-based chain_prefix walk below. chain_prefix can only reconstruct pure
+        // identifier.identifier chains; it comes back empty - or worse, a bogus partial chain
+        // - as soon as a call/index appears anywhere in the receiver (`f().field`,
+        // `a[0].field`, `a.f().field`). Sema has already fully resolved the receiver's type
+        // regardless of how complex it is, so looking that up directly handles every case
+        // uniformly: MemberExpr (member access) and DotIdentExpr/TaggedVariantExpr
+        // (contextual variant reference, `.Variant`). Falls through to chain_prefix for
+        // module-qualified chains (`greet.hello`), which this doesn't handle since a module
+        // alias isn't itself a typed value in expr_types.
+        if (enclosing.body && idx >= 1 && tokens[idx - 1].kind == TokenKind::Dot) {
+            if (const auto *found = find_expr_by_location(*enclosing.body, tokens[idx - 1].location)) {
+                if (const auto *member_expr = std::get_if<std::unique_ptr<ast::MemberExpr>>(found)) {
+                    if (const auto ty_it = ctx.sema_module.expr_types.find(sema::get_expr_key((*member_expr)->object));
+                        ty_it != ctx.sema_module.expr_types.end()) {
+                        if (auto res = resolve_member(ty_it->second, tokens[idx].lexeme, result.sema_program);
+                            res.kind != Resolution::Kind::None) {
+                            return res;
+                        }
+                    }
+                } else if (const auto ty_it = ctx.sema_module.expr_types.find(sema::get_expr_key(*found));
+                           ty_it != ctx.sema_module.expr_types.end()) {
+                    if (auto res = match_enum_or_variant(ty_it->second, tokens[idx].lexeme, result.sema_program);
+                        res.kind != Resolution::Kind::None) {
+                        return res;
+                    }
+                }
+            }
+        }
+
         if (prefix.empty()) {
             // Struct-literal field designator (`.field = value`), e.g. inside
             // `{ .name = name, .member = member_slot }` - resolve against the
@@ -608,7 +715,7 @@ namespace lsp::handlers {
             // silently hijack the answer.
             if (enclosing.body) {
                 if (const auto brace_loc = enclosing_struct_literal_brace(tokens, idx)) {
-                    if (const auto *literal_expr = find_struct_literal_expr(*enclosing.body, *brace_loc)) {
+                    if (const auto *literal_expr = find_expr_by_location(*enclosing.body, *brace_loc)) {
                         if (const auto ty_it = ctx.sema_module.expr_types.find(sema::get_expr_key(*literal_expr));
                             ty_it != ctx.sema_module.expr_types.end()) {
                             if (auto field_res = match_struct_or_union_field(ty_it->second, tokens[idx].lexeme, result.sema_program);

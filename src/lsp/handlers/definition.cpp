@@ -72,6 +72,7 @@ namespace lsp::handlers {
         case Resolution::Kind::StructField:
         case Resolution::Kind::UnionMember:
         case Resolution::Kind::EnumField:
+        case Resolution::Kind::Variant:
         case Resolution::Kind::Method:
             return location_json(res.location);
 

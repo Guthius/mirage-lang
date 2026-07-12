@@ -631,7 +631,14 @@ namespace ast {
 
             if (parser.check(TokenKind::Dot)) {
                 parser.advance();
+                const auto name_location = parser.current_location();
                 const auto name = parser.expect_identifier();
+
+                // Extend the '.' token's span to cover the identifier too, so diagnostics
+                // and LSP lookups for '.name' underline/target the whole expression rather
+                // than just the leading dot.
+                auto span = location;
+                span.length = name_location.offset + name_location.length - location.offset;
 
                 // If followed by '{.' this is a contextual tagged variant: .variant{.field = val}
                 // The leading '.' inside the braces disambiguates payload from block statements.
@@ -658,13 +665,13 @@ namespace ast {
                         .type_path = std::nullopt,
                         .variant_name = name,
                         .payload = StructExpr{.fields = std::move(fields), .location = brace_loc},
-                        .location = location,
+                        .location = span,
                     });
                 }
 
                 return DotIdentExpr{
                     .name = name,
-                    .location = location,
+                    .location = span,
                 };
             }
 
@@ -798,9 +805,13 @@ namespace ast {
         auto parse_postfix(Parser &parser) -> Expr {
             auto expr = parse_primary(parser);
 
-            const auto location = parser.current_location();
-
             while (true) {
+                // Captured fresh each iteration (not once before the loop) so each postfix
+                // node in a chain (`a.b().c`) gets its own location - pointing at its own
+                // operator token - rather than every node after the first sharing the
+                // position of the chain's very first postfix operator.
+                const auto location = parser.current_location();
+
                 if (parser.check(TokenKind::LParen)) {
                     parser.advance();
 

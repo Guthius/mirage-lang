@@ -20,7 +20,9 @@ namespace lsp::handlers {
             StructField,
             UnionMember,
             EnumField,
+            Variant, // tagged-union variant, e.g. `.Invalid` or `TypeName.Invalid`
             Method,
+            Builtin, // sizeof/len - synthetic, no declaration site; only .name/.type are set
         };
 
         Kind kind = Kind::None;
@@ -31,8 +33,9 @@ namespace lsp::handlers {
         const sema::Symbol *symbol = nullptr;
 
         // Kind::Local / Kind::Param / Kind::StructField / Kind::UnionMember /
-        // Kind::EnumField / Kind::Method: declaration-site location and
-        // (best-effort; TypeKind::Invalid if not determinable) resolved type.
+        // Kind::EnumField / Kind::Variant / Kind::Method: declaration-site location and
+        // (best-effort; TypeKind::Invalid if not determinable) resolved type. Kind::Builtin
+        // only sets .type (always usize); .location is unused (no declaration site).
         SourceLocation location;
         sema::ResolvedType type;
 
@@ -48,13 +51,15 @@ namespace lsp::handlers {
     // Returns the dotted-chain identifier prefix immediately preceding
     // tokens[index], left to right, NOT including tokens[index] itself.
     // E.g. for "io.load_file" with `index` on "load_file", returns ["io"].
-    // Empty if tokens[index] isn't preceded by '.'.
+    // Empty if tokens[index] isn't preceded by '.', or if the chain's
+    // receiver isn't a plain identifier.identifier sequence (e.g. it
+    // involves a call or index, as in "f().field").
     //
-    // This sidesteps a quirk in the parser: ast::MemberExpr.location is set
-    // once per postfix-chain (see parse_postfix) rather than per member
-    // token, so it cannot be used to locate which identifier in a chain like
-    // "a.b.c" the cursor is actually on - re-deriving the chain from the
-    // token stream avoids relying on that field for this purpose.
+    // resolve_at() prefers resolving '.name' positions directly off the
+    // AST's own (now per-node-precise) MemberExpr/DotIdentExpr/
+    // TaggedVariantExpr locations; this token-based reconstruction remains
+    // the fallback for module-qualified chains ("greet.hello"), where the
+    // chain's base isn't itself a typed value sema records in expr_types.
     auto chain_prefix(const std::vector<Token> &tokens, size_t index) -> std::vector<std::string>;
 
     // Resolves whatever identifier sits at 1-based (line, column) in the
