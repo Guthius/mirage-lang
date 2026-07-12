@@ -1684,11 +1684,21 @@ namespace sema {
                 std::vector<std::string> match_names;
                 for (const auto &variant : union_info.variants) {
                     if (variant.payload_struct_index < 0) continue;
+                    // Either the value's type is exactly the declared payload type (covers
+                    // scalar/slice/pointer payloads directly, and struct payloads reused
+                    // verbatim without wrapping — see layout_union in type_resolver.cpp), or
+                    // the payload struct has exactly one field and the value matches that
+                    // field's type (covers single-field struct payloads passed as a bare value).
+                    if (variant.payload_type == ty) {
+                        match = &variant;
+                        match_names.push_back(variant.name);
+                        continue;
+                    }
                     const auto *payload_struct = program.struct_at(variant.payload_struct_index);
-                    if (!payload_struct || payload_struct->fields.size() != 1) continue;
-                    if (payload_struct->fields[0].type != ty) continue;
-                    match = &variant;
-                    match_names.push_back(variant.name);
+                    if (payload_struct && payload_struct->fields.size() == 1 && payload_struct->fields[0].type == ty) {
+                        match = &variant;
+                        match_names.push_back(variant.name);
+                    }
                 }
                 if (match_names.size() == 1) {
                     program.modules.at(module_path).expr_variant_coercions[get_expr_key(expr)] = VariantCoercion{

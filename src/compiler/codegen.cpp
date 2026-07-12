@@ -757,6 +757,15 @@ namespace codegen {
                 // the coercion match was exact, so no conversion is needed.
                 auto *field_val = emit_expr(expr);
 
+                // Whether the source expression's own (pre-coercion) type is already exactly the
+                // payload struct itself — e.g. an inline `struct{...}` or named-struct payload
+                // (layout_union reuses that struct's slot verbatim, no wrapping, see
+                // type_resolver.cpp) coerced from a value of that exact struct type. If not, sema
+                // matched via the single-field fallback (bare scalar/slice/etc. into a one-field
+                // payload struct), and the value still needs wrapping into field 0.
+                const auto from_ty = current_module_->expr_types.at(sema::get_expr_key(expr));
+                const bool is_struct_payload = from_ty.kind == sema::TypeKind::Struct && from_ty.struct_index == vc.payload_struct_index;
+
                 const sema::ResolvedType payload_ty{.kind = sema::TypeKind::Struct, .struct_index = vc.payload_struct_index};
                 const auto &payload_struct = sema_program_.structs.at(vc.payload_struct_index);
                 const auto &struct_module = payload_struct.module_path;
@@ -769,8 +778,14 @@ namespace codegen {
                 current_module_ = &module_for(struct_module);
 
                 auto *struct_ll_ty = llvm_type(struct_module, payload_ty);
-                llvm::Value *struct_agg = llvm::Constant::getNullValue(struct_ll_ty);
-                struct_agg = builder_.CreateInsertValue(struct_agg, field_val, {lowering.field_indices.at(0)});
+
+                llvm::Value *struct_agg;
+                if (is_struct_payload) {
+                    struct_agg = field_val;
+                } else {
+                    struct_agg = llvm::Constant::getNullValue(struct_ll_ty);
+                    struct_agg = builder_.CreateInsertValue(struct_agg, field_val, {lowering.field_indices.at(0)});
+                }
 
                 auto *payload_ptr = builder_.CreateConstInBoundsGEP1_64(
                     llvm::Type::getInt8Ty(*context_), slot, union_info.payload_offset);
