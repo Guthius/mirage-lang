@@ -13,6 +13,7 @@ struct SourceFile {
 class SourceManager {
   public:
     auto load(const std::string &canonical_path, DiagnosticEngine &diagnostics) -> SourceFile;
+    auto set_source(const std::string &canonical_path, std::string text) -> SourceFile;
     auto get_source_line(std::string_view filename, size_t line) -> std::string_view;
 
   private:

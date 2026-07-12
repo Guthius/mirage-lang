@@ -22,13 +22,13 @@ else ()
     )
 endif ()
 
-add_executable(mirage
+# Shared compiler core (lexer, parser, module resolver, sema) - LLVM-free,
+# reused by both the `mirage` compiler and the `mirage-lsp` language server.
+add_library(mirage_core OBJECT
         src/compiler/ast.cpp
         src/compiler/ast.hpp
         src/compiler/ast_parser.cpp
         src/compiler/ast_parser.hpp
-        src/compiler/codegen.cpp
-        src/compiler/codegen.hpp
         src/compiler/diagnostic_engine.cpp
         src/compiler/diagnostic_engine.hpp
         src/compiler/lexer.cpp
@@ -48,8 +48,15 @@ add_executable(mirage
         src/compiler/token.hpp
         src/compiler/type_resolver.cpp
         src/compiler/value_resolver.cpp
+)
 
+target_include_directories(mirage_core PUBLIC src)
+
+add_executable(mirage
+        src/compiler/codegen.cpp
+        src/compiler/codegen.hpp
         src/main.cpp
+        $<TARGET_OBJECTS:mirage_core>
 )
 
 target_include_directories(mirage
@@ -82,3 +89,35 @@ target_include_directories(lexer_asi_test
 
 enable_testing()
 add_test(NAME lexer_asi_test COMMAND lexer_asi_test)
+
+include(FetchContent)
+FetchContent_Declare(nlohmann_json
+        URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
+add_executable(mirage-lsp
+        src/lsp/main.cpp
+        src/lsp/server.hpp
+        src/lsp/server.cpp
+        src/lsp/transport.hpp
+        src/lsp/transport.cpp
+        src/lsp/uri.hpp
+        src/lsp/uri.cpp
+        src/lsp/analysis.hpp
+        src/lsp/analysis.cpp
+        src/lsp/handlers/diagnostics.hpp
+        src/lsp/handlers/diagnostics.cpp
+        src/lsp/type_printer.hpp
+        src/lsp/type_printer.cpp
+        src/lsp/handlers/common.hpp
+        src/lsp/handlers/common.cpp
+        src/lsp/handlers/hover.hpp
+        src/lsp/handlers/hover.cpp
+        src/lsp/handlers/definition.hpp
+        src/lsp/handlers/definition.cpp
+        $<TARGET_OBJECTS:mirage_core>
+)
+
+target_include_directories(mirage-lsp PRIVATE src)
+target_link_libraries(mirage-lsp PRIVATE nlohmann_json::nlohmann_json)

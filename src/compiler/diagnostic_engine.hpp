@@ -38,6 +38,7 @@ class DiagnosticEngine {
 
     [[nodiscard]] auto has_errors() const -> bool { return error_count_ > 0; }
     [[nodiscard]] auto has_reached_max_errors() const -> bool { return error_count_ >= MAX_ERRORS; }
+    [[nodiscard]] auto diagnostics() const -> const std::vector<Diagnostic> & { return diagnostics_; }
 
   private:
     void print_diagnostic(const Diagnostic &diagnostic) const;

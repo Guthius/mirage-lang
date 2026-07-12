@@ -8,3 +8,8 @@ compile_commands.json
 build/
 cmake-build-*
 *.out
+
+# VS Code extension
+editors/vscode/node_modules/
+editors/vscode/out/
+*.vsix

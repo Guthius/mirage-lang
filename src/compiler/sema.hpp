@@ -16,6 +16,7 @@ namespace sema {
         ResolvedType type;
         uint32_t offset = 0;
         const ast::Expr *init_expr = nullptr; // null if no field-level default initializer
+        SourceLocation location;
     };
 
     struct StructInfo {
@@ -52,6 +53,7 @@ namespace sema {
     struct UnionMember {
         std::string name;
         ResolvedType type;
+        SourceLocation location;
     };
 
     // One variant in a tagged union (union(enum))

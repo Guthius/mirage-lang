@@ -286,6 +286,7 @@ namespace sema {
                         .type = field_type,
                         .offset = offset,
                         .init_expr = field.init ? &field.init.value() : nullptr,
+                        .location = field.location,
                     });
                     offset += f_size;
                     max_align = std::max(max_align, f_align);
@@ -629,6 +630,7 @@ namespace sema {
                                         .type = payload_type,
                                         .offset = 0,
                                         .init_expr = nullptr,
+                                        .location = member.location,
                                     });
                                     payload_info.size = p_size;
                                     payload_info.align = p_align;
@@ -669,6 +671,7 @@ namespace sema {
                         info.members.push_back(UnionMember{
                             .name = member.name,
                             .type = member_type,
+                            .location = member.location,
                         });
                         max_size = std::max(max_size, m_size);
                         max_align = std::max(max_align, m_align);

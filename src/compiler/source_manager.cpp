@@ -27,6 +27,12 @@ auto SourceManager::load(const std::string &canonical_path, DiagnosticEngine &di
     return {it->first, it->second};
 }
 
+auto SourceManager::set_source(const std::string &canonical_path, std::string text) -> SourceFile {
+    auto [it, inserted] = sources_.insert_or_assign(canonical_path, std::move(text));
+
+    return {it->first, it->second};
+}
+
 auto SourceManager::get_source_line(std::string_view filename, size_t line) -> std::string_view {
     if (line == 0) {
         return {};

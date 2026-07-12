@@ -1,0 +1,7 @@
+const greet := import("greet")
+
+pub fn main() -> error {
+    const name: []u8 = "world"
+    mut count: usize = greet.hello(name)
+    return 0
+}

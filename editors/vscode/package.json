@@ -1,0 +1,41 @@
+{
+  "name": "mirage-lsp-client",
+  "displayName": "Mirage Language Support",
+  "description": "Diagnostics, go-to-definition, and hover for Mirage (.mir) files via mirage-lsp.",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:mirage"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "mirage",
+        "extensions": [".mir"]
+      }
+    ],
+    "configuration": {
+      "title": "Mirage",
+      "properties": {
+        "mirage.lspPath": {
+          "type": "string",
+          "default": "mirage-lsp",
+          "description": "Path to the mirage-lsp executable. Defaults to searching PATH."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  },
+  "scripts": {
+    "compile": "tsc -p ./"
+  }
+}

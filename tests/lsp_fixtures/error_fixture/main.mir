@@ -1,0 +1,4 @@
+pub fn main() -> error {
+    mut x: u32 = "oops"
+    return 0
+}
