@@ -2077,6 +2077,7 @@ namespace ast {
         }
 
         // Consume 'self' identifier
+        const auto self_location = parser.current_location();
         const auto self_name = parser.expect_identifier();
         if (self_name != "self") {
             parser.report_error(location, "first parameter of impl function must be 'self' or 'mut self'");
@@ -2124,6 +2125,7 @@ namespace ast {
             .return_types = std::move(return_types),
             .body = std::move(body),
             .location = location,
+            .self_location = self_location,
         };
     }
 

@@ -164,6 +164,93 @@ def main() -> int:
         value = result["contents"]["value"]
         check("u8" in value, f"hover shows local's slice-of-u8 type, got {value!r}")
 
+    # --- regression fixture: pointer-receiver methods, `self`, and
+    # struct-literal field designators (hover/definition gaps found while
+    # investigating "hover only works for some things") ---
+    reg_main = FIXTURES / "regression_fixture" / "main.mir"
+    reg_uri = uri_for(reg_main)
+    reg_text = reg_main.read_text()
+    reg_lines = reg_text.splitlines()
+    client.notify("textDocument/didOpen", {
+        "textDocument": {"uri": reg_uri, "languageId": "mirage", "version": 1, "text": reg_text},
+    })
+    diag_msg = client.read()
+    check(diag_msg["params"]["diagnostics"] == [], "regression fixture compiles with no diagnostics")
+
+    def reg_pos_of(line_1based: int, substr: str) -> tuple[int, int]:
+        line = reg_lines[line_1based - 1]
+        return line_1based - 1, line.index(substr)
+
+    def reg_hover(line_1based: int, substr: str) -> dict | None:
+        l, c = reg_pos_of(line_1based, substr)
+        resp = client.request("textDocument/hover", {"textDocument": {"uri": reg_uri}, "position": {"line": l, "character": c}})
+        return resp["result"]
+
+    def reg_definition(line_1based: int, substr: str) -> dict | None:
+        l, c = reg_pos_of(line_1based, substr)
+        resp = client.request("textDocument/definition", {"textDocument": {"uri": reg_uri}, "position": {"line": l, "character": c}})
+        return resp["result"]
+
+    # Bug 1: method call through a pointer receiver (`p: *Parser`).
+    result = reg_hover(35, "current_location")
+    check(result is not None, "hover resolves a method called through a pointer receiver")
+    if result:
+        value = result["contents"]["value"]
+        check("current_location" in value, f"hover shows the method's signature, got {value!r}")
+    result = reg_definition(35, "current_location")
+    check(result is not None, "definition resolves a method called through a pointer receiver")
+    if result:
+        check(result["range"]["start"]["line"] == 16, f"definition points at the method's decl line, got {result['range']['start']['line']}")
+
+    # Bug 2: `self` itself, and a `self.field` chain.
+    result = reg_hover(17, "self")
+    check(result is not None, "hover resolves the `self` parameter itself")
+    if result:
+        check("Parser" in result["contents"]["value"], f"hover shows self's type, got {result['contents']['value']!r}")
+    result = reg_hover(18, "self")
+    check(result is not None, "hover resolves `self` used in `self.pos`")
+    result = reg_hover(18, "pos")
+    check(result is not None, "hover resolves the field in `self.pos`")
+    result = reg_definition(18, "pos")
+    check(result is not None, "definition resolves the field in `self.pos`")
+    if result:
+        check(result["range"]["start"]["line"] == 12, f"definition points at Parser.pos's decl line, got {result['range']['start']['line']}")
+
+    # Bug 3: struct-literal field designators, including one that collides
+    # with an in-scope local of the same name (`name`, declared line 36) -
+    # must resolve to the struct field, not the shadowing local.
+    result = reg_hover(45, "member")
+    check(result is not None, "hover resolves a struct-literal field designator with no name collision")
+    result = reg_definition(44, "name")
+    check(result is not None, "definition resolves a struct-literal field designator that collides with a local")
+    if result:
+        check(result["uri"] == reg_uri, "shadowed field designator definition stays in the same file")
+        check(result["range"]["start"]["line"] == 1, f"shadowed field designator resolves to NamedType.name's decl line (1), not the local's (35), got {result['range']['start']['line']}")
+
+    # Sanity: local variable hover away from its declaration site still works.
+    result = reg_hover(41, "member_slot")
+    check(result is not None, "hover resolves a local variable used away from its declaration")
+
+    client.notify("textDocument/didClose", {"textDocument": {"uri": reg_uri}})
+    client.read()  # publishDiagnostics
+
+    # --- bad_import fixture: a failed import(...) must not cascade into
+    # "unknown identifier" for every downstream qualified-name use ---
+    bad_import_main = FIXTURES / "bad_import_fixture" / "main.mir"
+    bad_import_uri = uri_for(bad_import_main)
+    client.notify("textDocument/didOpen", {
+        "textDocument": {"uri": bad_import_uri, "languageId": "mirage", "version": 1, "text": bad_import_main.read_text()},
+    })
+    diag_msg = client.read()
+    diags = diag_msg["params"]["diagnostics"]
+    messages = [d["message"] for d in diags]
+    check(sum("unknown identifier" in m for m in messages) == 0, f"failed import does not cascade into 'unknown identifier', got {messages}")
+    check(any("cannot resolve import" in m for m in messages), f"the import itself is still diagnosed, got {messages}")
+    check(any("Decl" in m for m in messages), f"downstream usage 'ast.Decl' gets its own diagnostic, got {messages}")
+    check(any("NamedType" in m for m in messages), f"downstream usage 'ast.NamedType' gets its own diagnostic, got {messages}")
+    client.notify("textDocument/didClose", {"textDocument": {"uri": bad_import_uri}})
+    client.read()  # publishDiagnostics
+
     # --- rapid/malformed edits: server must stay alive and keep answering ---
     for i in range(5):
         garbled = text[: max(0, len(text) - i * 3)] + "{{{ garbage )))" * i

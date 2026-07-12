@@ -64,13 +64,27 @@ namespace sema {
             }
         }
 
-        void declare_global(const ast::VarDecl &decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, DiagnosticEngine &diag) {
+        void declare_global(const ast::VarDecl &decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
             if (decl.init && std::holds_alternative<ast::ImportExpr>(*decl.init)) {
                 const auto &import_expr = std::get<ast::ImportExpr>(*decl.init);
 
                 if (const auto resolved_path = resolve_import(program, module_path, import_expr.module_name); resolved_path.empty()) {
                     // No diagnostic here: module_resolver.cpp already reported this
                     // failure with a real location when it walked the import graph.
+                    // Still register the symbol, pointing at a sentinel, empty
+                    // module, so downstream `name.X` references get a clean,
+                    // per-use "unknown type/member 'X'" diagnostic instead of
+                    // cascading "unknown identifier" everywhere the import is used.
+                    const std::string sentinel_path = "<unresolved:" + import_expr.module_name + ">";
+                    declare_symbol(
+                        module.symbols, decl.name,
+                        ImportSymbol{
+                            .expr = &import_expr,
+                            .module_path = sentinel_path,
+                            .is_pub = decl.is_pub,
+                        },
+                        decl.location, diag);
+                    sema_program.modules[sentinel_path]; // default-constructs an empty ProgramModule if absent
                 } else {
                     declare_symbol(
                         module.symbols, decl.name,
@@ -108,7 +122,7 @@ namespace sema {
                     } else if constexpr (std::is_same_v<V, ast::ExtFunctionDecl>) {
                         declare_symbol(module.symbols, v.name, ExtFunctionSymbol{.decl = &v, .is_pub = v.is_pub}, v.location, diag);
                     } else if constexpr (std::is_same_v<V, ast::VarDecl>) {
-                        declare_global(v, program, module_path, module, diag);
+                        declare_global(v, program, module_path, module, sema_program, diag);
                     } else if constexpr (std::is_same_v<V, ast::MacroDecl>) {
                         declare_symbol(module.symbols, v.name, MacroSymbol{.decl = &v, .is_pub = v.is_pub, .is_resolved = false}, v.location, diag);
                     } else if constexpr (std::is_same_v<V, ast::TypeDecl>) {

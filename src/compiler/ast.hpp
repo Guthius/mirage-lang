@@ -625,7 +625,8 @@ namespace ast {
             std::vector<Param> params; // non-self params
             std::vector<Type> return_types;
             Stmt body;
-            SourceLocation location;
+            SourceLocation location;      // 'fn' keyword
+            SourceLocation self_location; // the 'self' token itself
         };
 
         NamedType target;

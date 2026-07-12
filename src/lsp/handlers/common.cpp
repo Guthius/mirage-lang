@@ -53,6 +53,46 @@ namespace lsp::handlers {
                 symbol);
         }
 
+        // Matches `member` against a struct's or union's fields by name.
+        // Returns a Resolution with Kind::None if `type` isn't Struct/Union
+        // or has no such member. Shared by step()'s Type-container walk and
+        // by struct-literal field-designator resolution (`.field = value`),
+        // which needs field lookup without the rest of step()'s chaining
+        // machinery (enum/method lookup, Container production).
+        auto match_struct_or_union_field(const sema::ResolvedType &type, const std::string &member,
+                                          const sema::Program &program) -> Resolution {
+            if (type.kind == sema::TypeKind::Struct && type.struct_index >= 0 &&
+                static_cast<size_t>(type.struct_index) < program.structs.size()) {
+                const auto &info = program.structs[type.struct_index];
+                for (const auto &field : info.fields) {
+                    if (field.name == member) {
+                        return Resolution{
+                            .kind = Resolution::Kind::StructField,
+                            .name = member,
+                            .location = field.location,
+                            .type = field.type,
+                            .struct_field = &field,
+                        };
+                    }
+                }
+            } else if (type.kind == sema::TypeKind::Union && type.union_index >= 0 &&
+                       static_cast<size_t>(type.union_index) < program.unions.size()) {
+                const auto &info = program.unions[type.union_index];
+                for (const auto &member_info : info.members) {
+                    if (member_info.name == member) {
+                        return Resolution{
+                            .kind = Resolution::Kind::UnionMember,
+                            .name = member,
+                            .location = member_info.location,
+                            .type = member_info.type,
+                            .union_member = &member_info,
+                        };
+                    }
+                }
+            }
+            return {};
+        }
+
         // One step of a dotted-chain walk: resolves `member` within
         // `container`, returning both the Resolution describing it and the
         // Container to keep chaining from (Kind::None if `member` is a dead
@@ -75,40 +115,20 @@ namespace lsp::handlers {
             }
 
             if (container.kind == Container::Kind::Type) {
-                const auto &type = container.type;
+                auto type = container.type;
+                if (type.kind == sema::TypeKind::Pointer) {
+                    const auto *pointee = program.pointee_at(type.pointee_index);
+                    if (!pointee) return {};
+                    type = *pointee;
+                }
 
-                if (type.kind == sema::TypeKind::Struct && type.struct_index >= 0 &&
-                    static_cast<size_t>(type.struct_index) < program.structs.size()) {
-                    const auto &info = program.structs[type.struct_index];
-                    for (const auto &field : info.fields) {
-                        if (field.name == member) {
-                            Resolution res{
-                                .kind = Resolution::Kind::StructField,
-                                .name = member,
-                                .location = field.location,
-                                .type = field.type,
-                                .struct_field = &field,
-                            };
-                            return {res, Container{.kind = Container::Kind::Type, .module_path = "", .type = field.type}};
-                        }
-                    }
-                } else if (type.kind == sema::TypeKind::Union && type.union_index >= 0 &&
-                           static_cast<size_t>(type.union_index) < program.unions.size()) {
-                    const auto &info = program.unions[type.union_index];
-                    for (const auto &member_info : info.members) {
-                        if (member_info.name == member) {
-                            Resolution res{
-                                .kind = Resolution::Kind::UnionMember,
-                                .name = member,
-                                .location = member_info.location,
-                                .type = member_info.type,
-                                .union_member = &member_info,
-                            };
-                            return {res, Container{.kind = Container::Kind::Type, .module_path = "", .type = member_info.type}};
-                        }
-                    }
-                } else if (type.kind == sema::TypeKind::Enum && type.enum_index >= 0 &&
-                           static_cast<size_t>(type.enum_index) < program.enums.size()) {
+                if (auto field_res = match_struct_or_union_field(type, member, program);
+                    field_res.kind != Resolution::Kind::None) {
+                    return {field_res, Container{.kind = Container::Kind::Type, .module_path = "", .type = field_res.type}};
+                }
+
+                if (type.kind == sema::TypeKind::Enum && type.enum_index >= 0 &&
+                    static_cast<size_t>(type.enum_index) < program.enums.size()) {
                     const auto &info = program.enums[type.enum_index];
                     for (const auto &field : info.fields) {
                         if (field.name == member) {
@@ -273,6 +293,7 @@ namespace lsp::handlers {
                             }
                         }
                         std::vector<ParamInfo> params;
+                        if (sym) params.push_back({"self", sym->self_type, fn.self_location});
                         for (size_t i = 0; i < fn.params.size(); ++i) {
                             sema::ResolvedType type{};
                             if (sym && i < sym->param_types.size()) type = sym->param_types[i];
@@ -284,6 +305,224 @@ namespace lsp::handlers {
             }
 
             return best;
+        }
+
+        // If tokens[index] is a struct-literal field designator - preceded by
+        // '.' whose own predecessor, found by walking backward over balanced
+        // ()/[]/{} pairs and skipping top-level commas, is an unmatched '{' -
+        // returns that '{' token's location (which is exactly how
+        // ast::StructExpr::location is captured by the parser, see
+        // parse_braced_initializer). Returns nullopt otherwise: dotted chains
+        // are already handled by chain_prefix before this is ever called, so
+        // by construction tokens[index-2] is never an Identifier here - the
+        // only remaining shapes are field designators (preceded by '{'/',')
+        // or something else entirely (call args, index/array contexts,
+        // preceded by ')'/']'/other punctuation), which this correctly
+        // rejects by requiring the immediate predecessor to be '{' or ','.
+        auto enclosing_struct_literal_brace(const std::vector<Token> &tokens, const size_t index) -> std::optional<SourceLocation> {
+            if (index < 2 || tokens[index - 1].kind != TokenKind::Dot) return std::nullopt;
+            const auto prev_kind = tokens[index - 2].kind;
+            if (prev_kind != TokenKind::LBrace && prev_kind != TokenKind::Comma) return std::nullopt;
+
+            int depth = 0;
+            for (size_t j = index - 2;; --j) {
+                switch (tokens[j].kind) {
+                    case TokenKind::RBrace:
+                    case TokenKind::RParen:
+                    case TokenKind::RBracket:
+                        ++depth;
+                        break;
+                    case TokenKind::LBrace:
+                        if (depth == 0) return tokens[j].location;
+                        --depth;
+                        break;
+                    case TokenKind::LParen:
+                    case TokenKind::LBracket:
+                        if (depth == 0) return std::nullopt;
+                        --depth;
+                        break;
+                    default:
+                        break;
+                }
+                if (j == 0) break;
+            }
+            return std::nullopt;
+        }
+
+        auto location_matches(const SourceLocation &a, const SourceLocation &b) -> bool {
+            return a.line == b.line && a.column == b.column;
+        }
+
+        auto find_struct_literal_expr(const ast::Stmt &stmt, const SourceLocation &target) -> const ast::Expr *;
+
+        // Recursively searches `expr` (and everything nested inside it) for
+        // the exact ast::Expr slot holding a BracedInitializerExpr whose
+        // alternative is StructExpr and whose StructExpr::location equals
+        // `target`. Returns nullptr if none found. Source locations are
+        // unique per position, so at most one node in the whole tree can
+        // match - no separate innermost/outermost disambiguation is needed
+        // beyond exact equality (enclosing_struct_literal_brace already found
+        // the innermost enclosing '{' via token-stream scanning).
+        //
+        // Mirrors the dispatch shape of check_expr/check_stmt in
+        // sema_check.cpp (which already exhaustively enumerate every
+        // Expr/Stmt alternative and their nested Expr/Stmt fields), just
+        // recursing instead of type-checking.
+        //
+        // Known gap: TaggedVariantExpr::payload is a bare
+        // std::optional<StructExpr>, not wrapped in an ast::Expr, so it has
+        // no corresponding get_expr_key() slot - field designators inside a
+        // tagged-union-variant literal payload (`.Foo{ .x = 1 }`) are out of
+        // scope for this helper.
+        auto find_struct_literal_expr(const ast::Expr &expr, const SourceLocation &target) -> const ast::Expr * {
+            return std::visit(
+                [&]<typename T>(const T &node) -> const ast::Expr * {
+                    using U = std::decay_t<T>;
+                    if constexpr (std::is_same_v<U, std::unique_ptr<ast::UnaryExpr>>) {
+                        return find_struct_literal_expr(node->operand, target);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::BinaryExpr>>) {
+                        if (const auto *r = find_struct_literal_expr(node->lhs, target)) return r;
+                        return find_struct_literal_expr(node->rhs, target);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TernaryExpr>>) {
+                        if (const auto *r = find_struct_literal_expr(node->condition, target)) return r;
+                        if (const auto *r = find_struct_literal_expr(node->then_expr, target)) return r;
+                        return find_struct_literal_expr(node->else_expr, target);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::AssignExpr>>) {
+                        if (const auto *r = find_struct_literal_expr(node->target, target)) return r;
+                        return find_struct_literal_expr(node->value, target);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::CallExpr>>) {
+                        if (const auto *r = find_struct_literal_expr(node->callee, target)) return r;
+                        for (const auto &arg : node->args) {
+                            if (const auto *r = find_struct_literal_expr(arg, target)) return r;
+                        }
+                        return nullptr;
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IncrDecrExpr>>) {
+                        return find_struct_literal_expr(node->operand, target);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SizeOfExpr>>) {
+                        return find_struct_literal_expr(node->operand, target);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::LenExpr>>) {
+                        return find_struct_literal_expr(node->operand, target);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::CastExpr>>) {
+                        if (const auto *r = find_struct_literal_expr(node->value, target)) return r;
+                        if (node->len_expr) return find_struct_literal_expr(*node->len_expr, target);
+                        return nullptr;
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IndexExpr>>) {
+                        if (const auto *r = find_struct_literal_expr(node->operand, target)) return r;
+                        return find_struct_literal_expr(node->index, target);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SliceExpr>>) {
+                        if (const auto *r = find_struct_literal_expr(node->operand, target)) return r;
+                        if (const auto *r = find_struct_literal_expr(node->start, target)) return r;
+                        return find_struct_literal_expr(node->end, target);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::MemberExpr>>) {
+                        return find_struct_literal_expr(node->object, target);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::MatchExpr>>) {
+                        if (const auto *r = find_struct_literal_expr(node->operand, target)) return r;
+                        for (const auto &arm : node->arms) {
+                            if (const auto *lit = std::get_if<ast::MatchExpr::LiteralPattern>(&arm.pattern)) {
+                                if (lit->expr) {
+                                    if (const auto *r = find_struct_literal_expr(*lit->expr, target)) return r;
+                                }
+                            }
+                            if (const auto *r = find_struct_literal_expr(arm.value, target)) return r;
+                        }
+                        return nullptr;
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::BracedInitializerExpr>>) {
+                        return std::visit(
+                            [&]<typename V>(const V &alt) -> const ast::Expr * {
+                                using W = std::decay_t<V>;
+                                if constexpr (std::is_same_v<W, ast::StructExpr>) {
+                                    for (const auto &field : alt.fields) {
+                                        if (const auto *r = find_struct_literal_expr(field.expr, target)) return r;
+                                    }
+                                    if (location_matches(alt.location, target)) return &expr;
+                                    return nullptr;
+                                } else if constexpr (std::is_same_v<W, ast::ArrayExpr>) {
+                                    for (const auto &v : alt.values) {
+                                        if (const auto *r = find_struct_literal_expr(v, target)) return r;
+                                    }
+                                    return nullptr;
+                                } else {
+                                    return nullptr; // EmptyExpr
+                                }
+                            },
+                            *node);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TryExpr>>) {
+                        return find_struct_literal_expr(node->call, target);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::RangeExpr>>) {
+                        if (node->lower) {
+                            if (const auto *r = find_struct_literal_expr(*node->lower, target)) return r;
+                        }
+                        return find_struct_literal_expr(node->upper, target);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SpreadExpr>>) {
+                        return find_struct_literal_expr(node->operand, target);
+                    } else {
+                        // Literals, IdentExpr, ImportExpr, IotaExpr, DotIdentExpr,
+                        // TaggedVariantExpr (payload out of scope, see above),
+                        // DefaultExpr, UndefinedExpr - none contain a nested Expr.
+                        return nullptr;
+                    }
+                },
+                expr);
+        }
+
+        auto find_struct_literal_expr(const ast::Stmt &stmt, const SourceLocation &target) -> const ast::Expr * {
+            return std::visit(
+                [&]<typename T>(const T &node) -> const ast::Expr * {
+                    using U = std::decay_t<T>;
+                    if constexpr (std::is_same_v<U, std::unique_ptr<ast::BlockStmt>>) {
+                        for (const auto &s : node->stmts) {
+                            if (const auto *r = find_struct_literal_expr(s, target)) return r;
+                        }
+                        return nullptr;
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IfStmt>>) {
+                        if (const auto *r = find_struct_literal_expr(node->condition, target)) return r;
+                        if (const auto *r = find_struct_literal_expr(node->then_stmt, target)) return r;
+                        if (node->else_stmt) return find_struct_literal_expr(*node->else_stmt, target);
+                        return nullptr;
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::WhileStmt>>) {
+                        if (const auto *r = find_struct_literal_expr(node->condition, target)) return r;
+                        return find_struct_literal_expr(node->body, target);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::ForInStmt>>) {
+                        if (const auto *r = find_struct_literal_expr(node->iterable, target)) return r;
+                        return find_struct_literal_expr(node->body, target);
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SwitchStmt>>) {
+                        if (const auto *r = find_struct_literal_expr(node->operand, target)) return r;
+                        for (const auto &arm : node->arms) {
+                            if (const auto *lit = std::get_if<ast::MatchExpr::LiteralPattern>(&arm.pattern)) {
+                                if (lit->expr) {
+                                    if (const auto *r = find_struct_literal_expr(*lit->expr, target)) return r;
+                                }
+                            }
+                            if (const auto *r = find_struct_literal_expr(arm.body, target)) return r;
+                        }
+                        return nullptr;
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::DeferStmt>>) {
+                        return find_struct_literal_expr(node->body, target);
+                    } else if constexpr (std::is_same_v<U, ast::ExprStmt>) {
+                        return find_struct_literal_expr(node.expr, target);
+                    } else if constexpr (std::is_same_v<U, ast::VarDeclStmt>) {
+                        if (node.init) return find_struct_literal_expr(*node.init, target);
+                        return nullptr;
+                    } else if constexpr (std::is_same_v<U, ast::VarDeclGroupStmt>) {
+                        return find_struct_literal_expr(node.init, target);
+                    } else if constexpr (std::is_same_v<U, ast::ReturnStmt>) {
+                        for (const auto &e : node.return_values) {
+                            if (const auto *r = find_struct_literal_expr(e, target)) return r;
+                        }
+                        return nullptr;
+                    } else if constexpr (std::is_same_v<U, ast::ReturnErrStmt>) {
+                        return find_struct_literal_expr(node.error_value, target);
+                    } else if constexpr (std::is_same_v<U, ast::ReturnOkStmt>) {
+                        for (const auto &e : node.return_values) {
+                            if (const auto *r = find_struct_literal_expr(e, target)) return r;
+                        }
+                        return nullptr;
+                    } else {
+                        // ContinueStmt, BreakStmt declare no expressions.
+                        return nullptr;
+                    }
+                },
+                stmt);
         }
     }
 
@@ -362,6 +601,24 @@ namespace lsp::handlers {
         const auto prefix = chain_prefix(tokens, idx);
 
         if (prefix.empty()) {
+            // Struct-literal field designator (`.field = value`), e.g. inside
+            // `{ .name = name, .member = member_slot }` - resolve against the
+            // literal's contextual struct type before falling back to plain
+            // identifier lookup, so a same-named local/param in scope can't
+            // silently hijack the answer.
+            if (enclosing.body) {
+                if (const auto brace_loc = enclosing_struct_literal_brace(tokens, idx)) {
+                    if (const auto *literal_expr = find_struct_literal_expr(*enclosing.body, *brace_loc)) {
+                        if (const auto ty_it = ctx.sema_module.expr_types.find(sema::get_expr_key(*literal_expr));
+                            ty_it != ctx.sema_module.expr_types.end()) {
+                            if (auto field_res = match_struct_or_union_field(ty_it->second, tokens[idx].lexeme, result.sema_program);
+                                field_res.kind != Resolution::Kind::None) {
+                                return field_res;
+                            }
+                        }
+                    }
+                }
+            }
             return resolve_base_name(tokens[idx].lexeme).value_or(Resolution{});
         }
 

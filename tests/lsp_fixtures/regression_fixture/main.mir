@@ -1,0 +1,59 @@
+type NamedType = struct {
+    name: []u8
+    member: *NamedType
+    location: u32
+}
+
+type Arena = struct {
+    x: u32
+}
+
+type Parser = struct {
+    data: Arena
+    pos: u32
+}
+
+impl Parser {
+    fn current_location(self) -> u32 {
+        return self.pos
+    }
+
+    fn match_kind(self) -> bool {
+        return true
+    }
+
+    fn expect_identifier(self) -> []u8 {
+        return "x"
+    }
+}
+
+fn alloc_named_type(a: *Arena) -> (*NamedType, error) {
+    return_ok nil
+}
+
+fn parse_named_type(p: *Parser) -> (NamedType, error) {
+    const location := p.current_location()
+    const name := p.expect_identifier()
+
+    if p.match_kind() {
+        const member_slot: *NamedType = try alloc_named_type(&p.data)
+
+        member_slot.* = try parse_named_type(p)
+
+        return_ok {
+            .name = name,
+            .member = member_slot,
+            .location = location,
+        }
+    }
+
+    return_ok {
+        .name = name,
+        .member = nil,
+        .location = location,
+    }
+}
+
+pub fn main() -> i32 {
+    return 0
+}
