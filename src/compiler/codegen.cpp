@@ -1963,7 +1963,7 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
                             return emit_binary_expr(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
-                            return emit_ternary(*v);
+                            return emit_ternary(*v, ty);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AssignExpr>>) {
                             return emit_assign(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
@@ -2276,7 +2276,7 @@ namespace codegen {
                         sw->addCase(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), static_cast<uint64_t>(tag_val), false), arm_bb);
                         builder_.SetInsertPoint(arm_bb);
                         if (matched_variant) emit_variant_capture(fn, union_slot, union_info, *matched_variant, vp);
-                        auto *arm_val = emit_expr(arm.value);
+                        auto *arm_val = emit_value_as(arm.value, result_type, *current_module_path_);
                         auto *arm_done = builder_.GetInsertBlock();
                         builder_.CreateBr(merge_bb);
                         arm_results.emplace_back(arm_done, arm_val);
@@ -2285,7 +2285,7 @@ namespace codegen {
                     // Emit default arm or unreachable
                     builder_.SetInsertPoint(default_bb);
                     if (default_arm) {
-                        auto *arm_val = emit_expr(default_arm->value);
+                        auto *arm_val = emit_value_as(default_arm->value, result_type, *current_module_path_);
                         auto *arm_done = builder_.GetInsertBlock();
                         builder_.CreateBr(merge_bb);
                         arm_results.emplace_back(arm_done, arm_val);
@@ -2318,14 +2318,14 @@ namespace codegen {
                         auto *arm_bb = llvm::BasicBlock::Create(*context_, std::format("match.arm.{}", vp.name), fn);
                         sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(underlying_llvm_ty, static_cast<uint64_t>(field_val), enum_info.underlying_type.is_signed())), arm_bb);
                         builder_.SetInsertPoint(arm_bb);
-                        auto *arm_val = emit_expr(arm.value);
+                        auto *arm_val = emit_value_as(arm.value, result_type, *current_module_path_);
                         auto *arm_done = builder_.GetInsertBlock();
                         builder_.CreateBr(merge_bb);
                         arm_results.emplace_back(arm_done, arm_val);
                     }
                     builder_.SetInsertPoint(default_bb);
                     if (default_arm) {
-                        auto *arm_val = emit_expr(default_arm->value);
+                        auto *arm_val = emit_value_as(default_arm->value, result_type, *current_module_path_);
                         auto *arm_done = builder_.GetInsertBlock();
                         builder_.CreateBr(merge_bb);
                         arm_results.emplace_back(arm_done, arm_val);
@@ -2355,14 +2355,14 @@ namespace codegen {
                     auto *arm_bb = llvm::BasicBlock::Create(*context_, "match.arm", fn);
                     sw->addCase(llvm::cast<llvm::ConstantInt>(case_ci), arm_bb);
                     builder_.SetInsertPoint(arm_bb);
-                    auto *arm_val = emit_expr(arm.value);
+                    auto *arm_val = emit_value_as(arm.value, result_type, *current_module_path_);
                     auto *arm_done = builder_.GetInsertBlock();
                     builder_.CreateBr(merge_bb);
                     arm_results.emplace_back(arm_done, arm_val);
                 }
                 builder_.SetInsertPoint(default_bb);
                 if (default_arm) {
-                    auto *arm_val = emit_expr(default_arm->value);
+                    auto *arm_val = emit_value_as(default_arm->value, result_type, *current_module_path_);
                     auto *arm_done = builder_.GetInsertBlock();
                     builder_.CreateBr(merge_bb);
                     arm_results.emplace_back(arm_done, arm_val);
@@ -2503,7 +2503,7 @@ namespace codegen {
                 builder_.SetInsertPoint(after_bb);
             }
 
-            auto emit_ternary(const ast::TernaryExpr &expr) -> llvm::Value * {
+            auto emit_ternary(const ast::TernaryExpr &expr, const sema::ResolvedType &result_type) -> llvm::Value * {
                 auto *fn = builder_.GetInsertBlock()->getParent();
                 auto *then_bb = llvm::BasicBlock::Create(*context_, "ternary.then", fn);
                 auto *else_bb = llvm::BasicBlock::Create(*context_, "ternary.else", fn);
@@ -2513,18 +2513,17 @@ namespace codegen {
                 builder_.CreateCondBr(cond, then_bb, else_bb);
 
                 builder_.SetInsertPoint(then_bb);
-                auto *then_value = emit_expr(expr.then_expr);
+                auto *then_value = emit_value_as(expr.then_expr, result_type, *current_module_path_);
                 auto *then_done = builder_.GetInsertBlock();
                 builder_.CreateBr(merge_bb);
 
                 builder_.SetInsertPoint(else_bb);
-                auto *else_value = emit_expr(expr.else_expr);
+                auto *else_value = emit_value_as(expr.else_expr, result_type, *current_module_path_);
                 auto *else_done = builder_.GetInsertBlock();
                 builder_.CreateBr(merge_bb);
 
                 builder_.SetInsertPoint(merge_bb);
-                auto result_ty = current_module_->expr_types.at(sema::get_expr_key(expr.then_expr));
-                auto *phi = builder_.CreatePHI(llvm_type(*current_module_path_, result_ty), 2);
+                auto *phi = builder_.CreatePHI(llvm_type(*current_module_path_, result_type), 2);
                 phi->addIncoming(then_value, then_done);
                 phi->addIncoming(else_value, else_done);
                 return phi;
