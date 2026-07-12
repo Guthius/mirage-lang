@@ -1,0 +1,185 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Mirage",
+  "scopeName": "source.mirage",
+  "fileTypes": ["mir"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#chars" },
+    { "include": "#fn-declaration" },
+    { "include": "#type-declaration" },
+    { "include": "#impl-declaration" },
+    { "include": "#keywords" },
+    { "include": "#support-types" },
+    { "include": "#ext-modifier" },
+    { "include": "#numbers" },
+    { "include": "#dot-variant" },
+    { "include": "#dot-property" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "match": "#.*$",
+          "name": "comment.line.number-sign.mirage"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "begin": "\"",
+          "end": "\"",
+          "name": "string.quoted.double.mirage",
+          "patterns": [{ "include": "#string-escape" }]
+        }
+      ]
+    },
+    "chars": {
+      "patterns": [
+        {
+          "begin": "'",
+          "end": "'",
+          "name": "string.quoted.single.mirage",
+          "patterns": [{ "include": "#string-escape" }]
+        }
+      ]
+    },
+    "string-escape": {
+      "patterns": [
+        {
+          "match": "\\\\(x[0-9A-Fa-f]{2}|[0-7]{1,3}|[\\\\\"'ntr])",
+          "name": "constant.character.escape.mirage"
+        },
+        {
+          "match": "\\\\.",
+          "name": "invalid.illegal.unknown-escape.mirage"
+        }
+      ]
+    },
+    "fn-declaration": {
+      "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "storage.type.mirage" },
+        "2": { "name": "entity.name.function.mirage" }
+      }
+    },
+    "type-declaration": {
+      "match": "\\b(type)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "storage.modifier.mirage" },
+        "2": { "name": "entity.name.type.mirage" }
+      }
+    },
+    "impl-declaration": {
+      "match": "\\b(impl)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "storage.type.mirage" },
+        "2": { "name": "entity.name.type.mirage" }
+      }
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "match": "\\b(true|false|nil|default|undefined|iota)\\b",
+          "name": "constant.language.mirage"
+        },
+        {
+          "match": "\\b(for|while|if|else|match|switch|defer|break|continue|return|return_err|return_ok|in|when|try)\\b",
+          "name": "keyword.control.mirage"
+        },
+        {
+          "match": "\\b(const|mut|pub|namespace)\\b",
+          "name": "storage.modifier.mirage"
+        },
+        {
+          "match": "\\b(fn|type|trait|struct|impl|enum|union)\\b",
+          "name": "storage.type.mirage"
+        },
+        {
+          "match": "\\b(import|asm|macro|sizeof|offsetof|cast|len)\\b",
+          "name": "keyword.other.mirage"
+        }
+      ]
+    },
+    "support-types": {
+      "patterns": [
+        {
+          "match": "\\b(u8|u16|u32|u64|i8|i16|i32|i64|f32|f64|usize|bool|byte|error|anyptr)\\b",
+          "name": "support.type.primitive.mirage"
+        }
+      ]
+    },
+    "ext-modifier": {
+      "patterns": [
+        {
+          "match": "\\bext\\b(?=\\s+fn\\b)",
+          "name": "storage.modifier.mirage"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "match": "\\b0[xX][0-9A-Fa-f_]+\\b",
+          "name": "constant.numeric.hex.mirage"
+        },
+        {
+          "match": "\\b0[bB][01_]+\\b",
+          "name": "constant.numeric.binary.mirage"
+        },
+        {
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9]+)?\\b",
+          "name": "constant.numeric.float.mirage"
+        },
+        {
+          "match": "\\b[0-9][0-9_]*[eE][+-]?[0-9]+\\b",
+          "name": "constant.numeric.float.mirage"
+        },
+        {
+          "match": "\\b[0-9][0-9_]*\\b",
+          "name": "constant.numeric.decimal.mirage"
+        }
+      ]
+    },
+    "dot-variant": {
+      "patterns": [
+        {
+          "match": "(?<![A-Za-z0-9_)\\]])\\.[A-Za-z_][A-Za-z0-9_]*",
+          "name": "variable.other.enummember.mirage"
+        }
+      ]
+    },
+    "dot-property": {
+      "patterns": [
+        {
+          "match": "\\.[A-Za-z_][A-Za-z0-9_]*",
+          "name": "variable.other.property.mirage"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "match": "<<=|>>=|==|!=|<=|>=|&&|\\|\\||\\+\\+|--|:=|->|\\.\\.\\.|\\.\\.|\\+=|-=|\\*=|/=|&=|\\|=|\\^=|<<|>>|[+\\-*/%&|^~!=<>?:.]",
+          "name": "keyword.operator.mirage"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "match": "[(){}\\[\\]]",
+          "name": "punctuation.brackets.mirage"
+        },
+        {
+          "match": "[,;]",
+          "name": "punctuation.separator.mirage"
+        }
+      ]
+    }
+  }
+}

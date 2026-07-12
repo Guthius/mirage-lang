@@ -14,7 +14,15 @@
     "languages": [
       {
         "id": "mirage",
-        "extensions": [".mir"]
+        "extensions": [".mir"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "mirage",
+        "scopeName": "source.mirage",
+        "path": "./syntaxes/mirage.tmLanguage.json"
       }
     ],
     "configuration": {
