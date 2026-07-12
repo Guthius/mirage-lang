@@ -140,6 +140,37 @@ namespace sema {
         std::vector<SliceInfo> slices;             // global; slice_index is unique across all modules
         ResolveState resolve_state;
         bool ok = false;
+
+        // Bounds-checked table lookups, returning nullptr for an out-of-range
+        // index instead of the undefined behavior of raw operator[]. Under
+        // normal compilation every *_index on a ResolvedType is guaranteed
+        // valid by construction (declare_type() in sema_declare.cpp always
+        // allocates the slot synchronously before the index is ever handed
+        // out), but the LSP intentionally runs check_program() on ASTs with
+        // unresolved imports and lex/parse errors that the CLI would never
+        // let reach sema - callers touching a *_index that came from such a
+        // program should use these instead of indexing the vectors directly.
+        [[nodiscard]] auto struct_at(int index) const -> const StructInfo * {
+            return index >= 0 && static_cast<size_t>(index) < structs.size() ? &structs[index] : nullptr;
+        }
+        [[nodiscard]] auto enum_at(int index) const -> const EnumInfo * {
+            return index >= 0 && static_cast<size_t>(index) < enums.size() ? &enums[index] : nullptr;
+        }
+        [[nodiscard]] auto union_at(int index) const -> const UnionInfo * {
+            return index >= 0 && static_cast<size_t>(index) < unions.size() ? &unions[index] : nullptr;
+        }
+        [[nodiscard]] auto fn_signature_at(int index) const -> const FunctionTypeInfo * {
+            return index >= 0 && static_cast<size_t>(index) < fn_signatures.size() ? &fn_signatures[index] : nullptr;
+        }
+        [[nodiscard]] auto pointee_at(int index) const -> const ResolvedType * {
+            return index >= 0 && static_cast<size_t>(index) < pointer_pointees.size() ? &pointer_pointees[index] : nullptr;
+        }
+        [[nodiscard]] auto array_at(int index) const -> const ArrayInfo * {
+            return index >= 0 && static_cast<size_t>(index) < arrays.size() ? &arrays[index] : nullptr;
+        }
+        [[nodiscard]] auto slice_at(int index) const -> const SliceInfo * {
+            return index >= 0 && static_cast<size_t>(index) < slices.size() ? &slices[index] : nullptr;
+        }
     };
 
     struct LocalBinding {

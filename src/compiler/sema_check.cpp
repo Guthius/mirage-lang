@@ -141,17 +141,23 @@ namespace sema {
             return from.is_scalar() && to.is_scalar();
         }
 
-        // Returns the FunctionTypeInfo for a function-kind ResolvedType.
+        // Returns the FunctionTypeInfo for a function-kind ResolvedType. Falls
+        // back to a static empty signature for a stale/out-of-range index
+        // rather than throwing - see Program::fn_signature_at().
         auto fn_sig(const ResolvedType &ty, const Program &program) -> const FunctionTypeInfo & {
-            return program.fn_signatures.at(ty.fn_index);
+            static const FunctionTypeInfo empty{};
+            const auto *sig = program.fn_signature_at(ty.fn_index);
+            return sig ? *sig : empty;
         }
 
         auto slice_element_type(const ResolvedType &slice, [[maybe_unused]] const std::string &module_path, Program &program) -> ResolvedType {
-            return program.slices.at(slice.slice_index).element_type;
+            const auto *info = program.slice_at(slice.slice_index);
+            return info ? info->element_type : ResolvedType{.kind = TypeKind::Invalid};
         }
 
         auto array_element_type(const ResolvedType &array, [[maybe_unused]] const std::string &module_path, Program &program) -> ResolvedType {
-            return program.arrays.at(array.array_index).element_type;
+            const auto *info = program.array_at(array.array_index);
+            return info ? info->element_type : ResolvedType{.kind = TypeKind::Invalid};
         }
 
         auto assignable_in_module(const ResolvedType &from, const ResolvedType &to, const std::string &module_path, Program &program) -> bool {
@@ -162,7 +168,8 @@ namespace sema {
                 return slice_element_type(from, module_path, program) == array_element_type(to, module_path, program);
             }
             if (from.kind == TypeKind::Array && to.kind == TypeKind::Pointer) {
-                return array_element_type(from, module_path, program) == program.pointer_pointees.at(to.pointee_index);
+                const auto *pointee = program.pointee_at(to.pointee_index);
+                return pointee && array_element_type(from, module_path, program) == *pointee;
             }
             return is_assignable(from, to);
         }
@@ -203,17 +210,23 @@ namespace sema {
                     // Method call on a value
                     auto receiver_type = check_expr((*member)->object, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
                     if (receiver_type.kind == TypeKind::Pointer) {
-                        receiver_type = program.pointer_pointees[receiver_type.pointee_index];
+                        if (const auto *pointee = program.pointee_at(receiver_type.pointee_index)) {
+                            receiver_type = *pointee;
+                        } else {
+                            receiver_type = ResolvedType{.kind = TypeKind::Invalid};
+                        }
                     }
                     const auto *method = find_method(receiver_type, (*member)->member, program);
                     if (!method) {
                         // Struct field with function type
                         if (receiver_type.kind == TypeKind::Struct) {
-                            for (const auto &field : program.structs[receiver_type.struct_index].fields) {
-                                if (field.name == (*member)->member && field.type.kind == TypeKind::Function) {
-                                    const auto &sig = fn_sig(field.type, program);
-                                    check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, (*member)->member, loop_depth, defer_loop_base);
-                                    return sig.return_types;
+                            if (const auto *struct_info = program.struct_at(receiver_type.struct_index)) {
+                                for (const auto &field : struct_info->fields) {
+                                    if (field.name == (*member)->member && field.type.kind == TypeKind::Function) {
+                                        const auto &sig = fn_sig(field.type, program);
+                                        check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, (*member)->member, loop_depth, defer_loop_base);
+                                        return sig.return_types;
+                                    }
                                 }
                             }
                         }
@@ -491,10 +504,11 @@ namespace sema {
             // Handle fully-qualified enum field: e.g. EnumType.field or module.EnumType.field
             if (const auto type_ref = try_resolve_type_chain(m.object, module_path, locals, program)) {
                 if (type_ref->kind == TypeKind::Enum) {
-                    const auto &enum_info = program.enums[type_ref->enum_index];
-                    for (const auto &field : enum_info.fields) {
-                        if (field.name == m.member) {
-                            return {*type_ref, false};
+                    if (const auto *enum_info = program.enum_at(type_ref->enum_index)) {
+                        for (const auto &field : enum_info->fields) {
+                            if (field.name == m.member) {
+                                return {*type_ref, false};
+                            }
                         }
                     }
                     error(diag, m.location, std::format("no enum field named '{}'", m.member));
@@ -508,7 +522,12 @@ namespace sema {
             bool writable;
 
             if (object_type.kind == TypeKind::Pointer) {
-                effective_type = program.pointer_pointees[object_type.pointee_index];
+                const auto *pointee = program.pointee_at(object_type.pointee_index);
+                if (!pointee) {
+                    error(diag, m.location, "internal error: invalid pointer index");
+                    return {ResolvedType{.kind = TypeKind::Invalid}, false};
+                }
+                effective_type = *pointee;
                 writable = true;
             } else if (object_type.kind == TypeKind::Struct || object_type.kind == TypeKind::Union) {
                 effective_type = object_type;
@@ -522,9 +541,11 @@ namespace sema {
             }
 
             if (effective_type.kind == TypeKind::Struct) {
-                for (const auto &info = program.structs[effective_type.struct_index]; auto &field : info.fields) {
-                    if (field.name == m.member) {
-                        return {field.type, writable};
+                if (const auto *info = program.struct_at(effective_type.struct_index)) {
+                    for (auto &field : info->fields) {
+                        if (field.name == m.member) {
+                            return {field.type, writable};
+                        }
                     }
                 }
                 error(diag, m.location, std::format("no field named '{}'", m.member));
@@ -533,12 +554,16 @@ namespace sema {
 
             // TypeKind::Union
             {
-                const auto &info = program.unions[effective_type.union_index];
-                if (info.is_tagged) {
+                const auto *info = program.union_at(effective_type.union_index);
+                if (!info) {
+                    error(diag, m.location, "internal error: invalid union index");
+                    return {ResolvedType{.kind = TypeKind::Invalid}, false};
+                }
+                if (info->is_tagged) {
                     error(diag, m.location, "cannot access tagged union variants directly; use 'match' to destructure");
                     return {ResolvedType{.kind = TypeKind::Invalid}, false};
                 }
-                for (auto &member : info.members) {
+                for (auto &member : info->members) {
                     if (member.name == m.member) {
                         return {member.type, writable};
                     }
@@ -582,7 +607,12 @@ namespace sema {
                             error(diag, v->location, "cannot dereference a non-pointer value");
                             return {ResolvedType{.kind = TypeKind::Invalid}, false};
                         }
-                        return {program.pointer_pointees[ptr_ty.pointee_index], true};
+                        const auto *pointee = program.pointee_at(ptr_ty.pointee_index);
+                        if (!pointee) {
+                            error(diag, v->location, "internal error: invalid pointer index");
+                            return {ResolvedType{.kind = TypeKind::Invalid}, false};
+                        }
+                        return {*pointee, true};
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                         return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base);
@@ -594,7 +624,8 @@ namespace sema {
                             error(diag, v->location, "index must be an integer expression");
                         }
                         if (operand.kind == TypeKind::Pointer) {
-                            return {program.pointer_pointees.at(operand.pointee_index), true};
+                            const auto *pointee = program.pointee_at(operand.pointee_index);
+                            return {pointee ? *pointee : ResolvedType{.kind = TypeKind::Invalid}, true};
                         }
                         if (operand.kind == TypeKind::Array) {
                             auto owner = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base);
@@ -729,7 +760,9 @@ namespace sema {
                         {
                             const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
                             if (operand.kind != TypeKind::Pointer) return error(diag, v->location, "cannot dereference a non-pointer value");
-                            return program.pointer_pointees[operand.pointee_index];
+                            const auto *pointee = program.pointee_at(operand.pointee_index);
+                            if (!pointee) return error(diag, v->location, "internal error: invalid pointer index");
+                            return *pointee;
                         }
                     }
                     return ResolvedType{.kind = TypeKind::Invalid};
@@ -837,13 +870,17 @@ namespace sema {
                         // Method call on a value
                         auto receiver_type = check_expr((*member_callee)->object, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);
                         if (receiver_type.kind == TypeKind::Pointer) {
-                            receiver_type = program.pointer_pointees[receiver_type.pointee_index];
+                            if (const auto *pointee = program.pointee_at(receiver_type.pointee_index)) {
+                                receiver_type = *pointee;
+                            } else {
+                                receiver_type = ResolvedType{.kind = TypeKind::Invalid};
+                            }
                         }
                         const auto *method = find_method(receiver_type, (*member_callee)->member, program);
                         if (!method) {
                             // Maybe it's a struct field with function type
-                            if (receiver_type.kind == TypeKind::Struct) {
-                                for (const auto &field : program.structs[receiver_type.struct_index].fields) {
+                            if (receiver_type.kind == TypeKind::Struct && program.struct_at(receiver_type.struct_index)) {
+                                for (const auto &field : program.struct_at(receiver_type.struct_index)->fields) {
                                     if (field.name == (*member_callee)->member) {
                                         if (field.type.kind == TypeKind::Function) {
                                             const auto &sig = fn_sig(field.type, program);
@@ -1044,7 +1081,8 @@ namespace sema {
                         error(diag, v->location, "index must be an integer expression");
                     }
                     if (operand.kind == TypeKind::Pointer) {
-                        return program.pointer_pointees.at(operand.pointee_index);
+                        const auto *pointee = program.pointee_at(operand.pointee_index);
+                        return pointee ? *pointee : ResolvedType{.kind = TypeKind::Invalid};
                     }
                     if (operand.kind == TypeKind::Array) {
                         return array_element_type(operand, module_path, program);
@@ -1077,8 +1115,9 @@ namespace sema {
                     // Dot-prefixed enum field literal: .field_name
                     // Requires an expected enum or tagged union type
                     if (expected && expected->kind == TypeKind::Enum) {
-                        const auto &enum_info = program.enums[expected->enum_index];
-                        for (const auto &field : enum_info.fields) {
+                        const auto *enum_info = program.enum_at(expected->enum_index);
+                        if (!enum_info) return error(diag, v.location, "internal error: invalid enum index");
+                        for (const auto &field : enum_info->fields) {
                             if (field.name == v.name) {
                                 return *expected;
                             }
@@ -1086,10 +1125,10 @@ namespace sema {
                         return error(diag, v.location, std::format("no enum field named '{}'", v.name));
                     }
                     if (expected && expected->kind == TypeKind::Union) {
-                        const auto &union_info = program.unions.at(expected->union_index);
-                        if (union_info.is_tagged) {
-                            const auto it = std::ranges::find(union_info.variants, v.name, &TaggedUnionVariant::name);
-                            if (it == union_info.variants.end()) {
+                        const auto *union_info = program.union_at(expected->union_index);
+                        if (union_info && union_info->is_tagged) {
+                            const auto it = std::ranges::find(union_info->variants, v.name, &TaggedUnionVariant::name);
+                            if (it == union_info->variants.end()) {
                                 return error(diag, v.location, std::format("no variant '{}' on tagged union", v.name));
                             }
                             if (it->payload_struct_index >= 0) {
@@ -1202,7 +1241,11 @@ namespace sema {
 
                     // ---- Tagged union match ----
                     if (operand_type.kind == TypeKind::Union) {
-                        const auto &union_info = program.unions[operand_type.union_index];
+                        const auto *union_info_ptr = program.union_at(operand_type.union_index);
+                        if (!union_info_ptr) {
+                            return error(diag, v->location, "internal error: invalid union index");
+                        }
+                        const auto &union_info = *union_info_ptr;
                         if (!union_info.is_tagged) {
                             return error(diag, v->location, "match operand must be an enum or tagged union type");
                         }
@@ -1305,7 +1348,11 @@ namespace sema {
                         return error(diag, v->location, "match operand must be an enum, tagged union, integer, or bool type");
                     }
 
-                    const auto &enum_info = program.enums[operand_type.enum_index];
+                    const auto *enum_info_ptr = program.enum_at(operand_type.enum_index);
+                    if (!enum_info_ptr) {
+                        return error(diag, v->location, "internal error: invalid enum index");
+                    }
+                    const auto &enum_info = *enum_info_ptr;
 
                     ResolvedType arm_type{.kind = TypeKind::Invalid};
                     bool first_arm = true;
@@ -1377,7 +1424,8 @@ namespace sema {
                     if (!expected) {
                         return error(diag, v.location, "'undefined' requires a known target type");
                     }
-                    if (expected->kind == TypeKind::Union && program.unions.at(expected->union_index).is_tagged) {
+                    if (const auto *union_info = expected->kind == TypeKind::Union ? program.union_at(expected->union_index) : nullptr;
+                        union_info && union_info->is_tagged) {
                         return error(diag, v.location, "tagged unions have no 'undefined' form; use an explicit variant initializer");
                     }
                     return *expected;
@@ -1422,7 +1470,11 @@ namespace sema {
                     if (union_ty.kind != TypeKind::Union) {
                         return error(diag, v->location, std::format("'{}' is not a union type", format_named_type(*v->type_path)));
                     }
-                    const auto &union_info = program.unions.at(union_ty.union_index);
+                    const auto *union_info_ptr = program.union_at(union_ty.union_index);
+                    if (!union_info_ptr) {
+                        return error(diag, v->location, "internal error: invalid union index");
+                    }
+                    const auto &union_info = *union_info_ptr;
                     if (!union_info.is_tagged) {
                         return error(diag, v->location, "use '{member = val}' syntax for untagged unions");
                     }
@@ -1439,7 +1491,11 @@ namespace sema {
                             return error(diag, v->location, std::format("variant '{}' requires a payload initializer; use '.{}{{field = val}}'", v->variant_name, v->variant_name));
                         }
                         const auto &bv = *v->payload;
-                        const auto &struct_info = program.structs.at(variant_it->payload_struct_index);
+                        const auto *struct_info_ptr = program.struct_at(variant_it->payload_struct_index);
+                        if (!struct_info_ptr) {
+                            return error(diag, v->location, "internal error: invalid payload struct index");
+                        }
+                        const auto &struct_info = *struct_info_ptr;
                         std::unordered_set<std::string> seen;
                         for (const auto &sf : bv.fields) {
                             if (!seen.insert(sf.name).second) {
@@ -1485,7 +1541,11 @@ namespace sema {
                                     return error(diag, bv.location, "struct initializer used where array type is expected");
                                 }
                                 if (expected->kind == TypeKind::Union) {
-                                    const auto &union_info = program.unions.at(expected->union_index);
+                                    const auto *union_info_ptr = program.union_at(expected->union_index);
+                                    if (!union_info_ptr) {
+                                        return error(diag, bv.location, "internal error: invalid union index");
+                                    }
+                                    const auto &union_info = *union_info_ptr;
                                     if (bv.fields.size() != 1) {
                                         return error(diag, bv.location, std::format("a union initializer must set exactly one member, got {}", bv.fields.size()));
                                     }
@@ -1504,7 +1564,11 @@ namespace sema {
                                 if (expected->kind != TypeKind::Struct) {
                                     return error(diag, bv.location, "struct initializer requires a struct type");
                                 }
-                                const auto &info = program.structs.at(expected->struct_index);
+                                const auto *info_ptr = program.struct_at(expected->struct_index);
+                                if (!info_ptr) {
+                                    return error(diag, bv.location, "internal error: invalid struct index");
+                                }
+                                const auto &info = *info_ptr;
                                 // Check for unknown and duplicate field names
                                 std::unordered_set<std::string> seen;
                                 for (const auto &sf : bv.fields) {
@@ -1539,7 +1603,11 @@ namespace sema {
                                     if (bv.has_fill) {
                                         return error(diag, bv.location, "fill '...' is not allowed in a positional struct initializer");
                                     }
-                                    const auto &info = program.structs.at(expected->struct_index);
+                                    const auto *info_ptr = program.struct_at(expected->struct_index);
+                                    if (!info_ptr) {
+                                        return error(diag, bv.location, "internal error: invalid struct index");
+                                    }
+                                    const auto &info = *info_ptr;
                                     if (bv.values.size() > info.fields.size()) {
                                         return error(diag, bv.location, std::format("too many values in struct initializer: struct has {} field(s), got {}", info.fields.size(), bv.values.size()));
                                     }
@@ -1560,7 +1628,11 @@ namespace sema {
                                 if (expected->kind != TypeKind::Array) {
                                     return error(diag, bv.location, "array initializer requires an array type");
                                 }
-                                const auto &array_info = program.arrays.at(expected->array_index);
+                                const auto *array_info_ptr = program.array_at(expected->array_index);
+                                if (!array_info_ptr) {
+                                    return error(diag, bv.location, "internal error: invalid array index");
+                                }
+                                const auto &array_info = *array_info_ptr;
                                 if (bv.values.size() > array_info.count) {
                                     return error(diag, bv.location, std::format("too many elements in array initializer: array has {} element(s), got {}", array_info.count, bv.values.size()));
                                 }
@@ -1602,16 +1674,19 @@ namespace sema {
         // struct/array/union field init) — not special-cased to variadics, even though that's
         // the primary motivating use case. See VariantCoercion's doc comment in sema.hpp for why
         // this is recorded in a side table rather than overwriting expr_types for this node.
-        if (expected && ty.kind != TypeKind::Invalid && ty != *expected && expected->kind == TypeKind::Union) {
-            const auto &union_info = program.unions.at(expected->union_index);
-            if (union_info.is_tagged) {
+        if (const auto *union_info_ptr = expected && ty.kind != TypeKind::Invalid && ty != *expected && expected->kind == TypeKind::Union
+                                              ? program.union_at(expected->union_index)
+                                              : nullptr;
+            union_info_ptr && union_info_ptr->is_tagged) {
+            const auto &union_info = *union_info_ptr;
+            {
                 const TaggedUnionVariant *match = nullptr;
                 std::vector<std::string> match_names;
                 for (const auto &variant : union_info.variants) {
                     if (variant.payload_struct_index < 0) continue;
-                    const auto &payload_struct = program.structs.at(variant.payload_struct_index);
-                    if (payload_struct.fields.size() != 1) continue;
-                    if (payload_struct.fields[0].type != ty) continue;
+                    const auto *payload_struct = program.struct_at(variant.payload_struct_index);
+                    if (!payload_struct || payload_struct->fields.size() != 1) continue;
+                    if (payload_struct->fields[0].type != ty) continue;
                     match = &variant;
                     match_names.push_back(variant.name);
                 }
@@ -1881,7 +1956,12 @@ namespace sema {
 
                     // Tagged union switch
                     if (operand_type.kind == TypeKind::Union) {
-                        const auto &union_info = program.unions[operand_type.union_index];
+                        const auto *union_info_ptr = program.union_at(operand_type.union_index);
+                        if (!union_info_ptr) {
+                            diag.report_error(DiagnosticStage::Sema, v->location, "internal error: invalid union index");
+                            return;
+                        }
+                        const auto &union_info = *union_info_ptr;
                         if (!union_info.is_tagged) {
                             diag.report_error(DiagnosticStage::Sema, v->location, "switch operand must be an enum, tagged union, integer, or bool type");
                             return;
@@ -1953,7 +2033,12 @@ namespace sema {
                         diag.report_error(DiagnosticStage::Sema, v->location, "switch operand must be an enum, tagged union, integer, or bool type");
                         return;
                     }
-                    const auto &enum_info = program.enums[operand_type.enum_index];
+                    const auto *enum_info_ptr = program.enum_at(operand_type.enum_index);
+                    if (!enum_info_ptr) {
+                        diag.report_error(DiagnosticStage::Sema, v->location, "internal error: invalid enum index");
+                        return;
+                    }
+                    const auto &enum_info = *enum_info_ptr;
                     std::vector<bool> covered(enum_info.fields.size(), false);
                     for (const auto &arm : v->arms) {
                         if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {

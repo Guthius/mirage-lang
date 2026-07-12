@@ -37,8 +37,8 @@ namespace sema {
                             diag.report_error(DiagnosticStage::Sema, p.location, "union types are not yet supported in extern function signatures");
                         }
                         if (pt.kind == TypeKind::Function) {
-                            const auto &sig = program.fn_signatures.at(pt.fn_index);
-                            if (sig.return_types.size() > 1) {
+                            const auto *sig = program.fn_signature_at(pt.fn_index);
+                            if (sig && sig->return_types.size() > 1) {
                                 diag.report_error(DiagnosticStage::Sema, p.location, "multi-return function types cannot be used in extern function signatures (no C ABI representation)");
                             }
                         }
@@ -51,8 +51,8 @@ namespace sema {
                             diag.report_error(DiagnosticStage::Sema, ef->decl->location, "union types are not yet supported in extern function signatures");
                         }
                         if (rt.kind == TypeKind::Function) {
-                            const auto &sig = program.fn_signatures.at(rt.fn_index);
-                            if (sig.return_types.size() > 1) {
+                            const auto *sig = program.fn_signature_at(rt.fn_index);
+                            if (sig && sig->return_types.size() > 1) {
                                 diag.report_error(DiagnosticStage::Sema, ef->decl->location, "multi-return function types cannot be used in extern function signatures (no C ABI representation)");
                             }
                         }
@@ -113,7 +113,9 @@ namespace sema {
                 const auto *struct_decl = std::get_if<std::unique_ptr<ast::StructType>>(&ts->decl->type);
                 if (!struct_decl) continue;
 
-                const auto &struct_info = program.structs.at(ts->resolved->struct_index);
+                const auto *struct_info_ptr = program.struct_at(ts->resolved->struct_index);
+                if (!struct_info_ptr) continue;
+                const auto &struct_info = *struct_info_ptr;
                 LocalScope empty;
 
                 for (size_t i = 0; i < (*struct_decl)->fields.size() && i < struct_info.fields.size(); ++i) {
@@ -224,10 +226,11 @@ namespace sema {
         // Use it to avoid accidentally matching a type alias in an importing module that
         // resolves to the same ResolvedType.
         const std::string *defining_module = nullptr;
-        if (ty.kind == TypeKind::Struct && ty.struct_index >= 0)
-            defining_module = &program.structs[ty.struct_index].module_path;
-        else if (ty.kind == TypeKind::Union && ty.union_index >= 0)
-            defining_module = &program.unions[ty.union_index].module_path;
+        if (ty.kind == TypeKind::Struct) {
+            if (const auto *info = program.struct_at(ty.struct_index)) defining_module = &info->module_path;
+        } else if (ty.kind == TypeKind::Union) {
+            if (const auto *info = program.union_at(ty.union_index)) defining_module = &info->module_path;
+        }
 
         if (defining_module && !defining_module->empty()) {
             if (const auto mod_it = program.modules.find(*defining_module);

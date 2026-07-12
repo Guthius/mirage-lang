@@ -220,7 +220,9 @@ namespace sema {
 
                 if (ts->resolved && ts->resolved->kind == TypeKind::Struct) {
                     const int slot = ts->resolved->struct_index;
-                    if (program.structs[slot].layout_done) return *ts->resolved;
+                    const auto *info = program.struct_at(slot);
+                    if (!info) return error(diag, loc, std::format("internal error: invalid struct index for '{}'", name));
+                    if (info->layout_done) return *ts->resolved;
 
                     const auto key = std::make_pair(module_path, name);
                     if (program.resolve_state.struct_resolving.contains(key)) {
@@ -237,7 +239,9 @@ namespace sema {
 
                 if (ts->resolved && ts->resolved->kind == TypeKind::Enum) {
                     const int slot = ts->resolved->enum_index;
-                    if (program.enums[slot].layout_done) return *ts->resolved;
+                    const auto *info = program.enum_at(slot);
+                    if (!info) return error(diag, loc, std::format("internal error: invalid enum index for '{}'", name));
+                    if (info->layout_done) return *ts->resolved;
 
                     Resolver inner{program, diag};
                     inner.layout_enum(module_path, slot, std::get<std::unique_ptr<ast::EnumType>>(ts->decl->type));
@@ -246,7 +250,9 @@ namespace sema {
 
                 if (ts->resolved && ts->resolved->kind == TypeKind::Union) {
                     const int slot = ts->resolved->union_index;
-                    if (program.unions[slot].layout_done) return *ts->resolved;
+                    const auto *info = program.union_at(slot);
+                    if (!info) return error(diag, loc, std::format("internal error: invalid union index for '{}'", name));
+                    if (info->layout_done) return *ts->resolved;
 
                     const auto key = std::make_pair(module_path, name);
                     if (program.resolve_state.union_resolving.contains(key)) {
@@ -311,20 +317,20 @@ namespace sema {
             }
 
             [[nodiscard]] auto size_of(const std::string &module_path, const ResolvedType &t) const -> uint32_t {
-                if (t.kind == TypeKind::Struct) return program.structs[t.struct_index].size;
-                if (t.kind == TypeKind::Array) return program.arrays[t.array_index].size;
+                if (t.kind == TypeKind::Struct) { const auto *info = program.struct_at(t.struct_index); return info ? info->size : 0; }
+                if (t.kind == TypeKind::Array) { const auto *info = program.array_at(t.array_index); return info ? info->size : 0; }
                 if (t.kind == TypeKind::Slice) return 16;
-                if (t.kind == TypeKind::Enum) return primitive_size(program.enums[t.enum_index].underlying_type.kind);
-                if (t.kind == TypeKind::Union) return program.unions[t.union_index].size;
+                if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_size(info->underlying_type.kind) : 0; }
+                if (t.kind == TypeKind::Union) { const auto *info = program.union_at(t.union_index); return info ? info->size : 0; }
                 return primitive_size(t.kind);
             }
 
             [[nodiscard]] auto align_of(const std::string &module_path, const ResolvedType &t) const -> uint32_t {
-                if (t.kind == TypeKind::Struct) return program.structs[t.struct_index].align;
-                if (t.kind == TypeKind::Array) return program.arrays[t.array_index].align;
+                if (t.kind == TypeKind::Struct) { const auto *info = program.struct_at(t.struct_index); return info ? info->align : 1; }
+                if (t.kind == TypeKind::Array) { const auto *info = program.array_at(t.array_index); return info ? info->align : 1; }
                 if (t.kind == TypeKind::Slice) return 8;
-                if (t.kind == TypeKind::Enum) return primitive_align(program.enums[t.enum_index].underlying_type.kind);
-                if (t.kind == TypeKind::Union) return program.unions[t.union_index].align;
+                if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_align(info->underlying_type.kind) : 1; }
+                if (t.kind == TypeKind::Union) { const auto *info = program.union_at(t.union_index); return info ? info->align : 1; }
                 return primitive_align(t.kind);
             }
 
@@ -641,9 +647,13 @@ namespace sema {
                             }
 
                             variant.payload_struct_index = struct_slot;
-                            const auto &payload_struct = program.structs[struct_slot];
-                            max_payload_size = std::max(max_payload_size, payload_struct.size);
-                            max_payload_align = std::max(max_payload_align, payload_struct.align);
+                            if (const auto *payload_struct = program.struct_at(struct_slot)) {
+                                max_payload_size = std::max(max_payload_size, payload_struct->size);
+                                max_payload_align = std::max(max_payload_align, payload_struct->align);
+                            } else {
+                                diag.report_error(DiagnosticStage::Sema, member.location,
+                                    std::format("internal error: invalid payload struct index for variant '{}'", member.name));
+                            }
                         }
 
                         info.variants.push_back(std::move(variant));

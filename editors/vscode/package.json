@@ -24,6 +24,11 @@
           "type": "string",
           "default": "mirage-lsp",
           "description": "Path to the mirage-lsp executable. Defaults to searching PATH."
+        },
+        "mirage.libraryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Value for the MIRAGE_PATH environment variable passed to mirage-lsp, used to resolve standard-library imports (e.g. \"std/...\"). Leave empty to inherit MIRAGE_PATH from VS Code's own environment - VS Code launched from a desktop/app-menu shortcut often does not have shell-rc-exported variables like MIRAGE_PATH set, so if standard-library imports fail to resolve only in the editor (but work from a terminal), set this explicitly."
         }
       }
     }

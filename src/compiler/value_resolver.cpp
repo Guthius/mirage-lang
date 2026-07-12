@@ -109,10 +109,10 @@ namespace sema {
                                         // (array<->slice, array/slice->pointer) that only emit_value_as
                                         // can perform; the constant codegen path can't do this.
                                         const auto field_ty_it = mod_it->second.expr_types.find(get_expr_key(sf.expr));
-                                        if (ty.kind == TypeKind::Struct && field_ty_it != mod_it->second.expr_types.end()) {
-                                            const auto &info = program.structs.at(ty.struct_index);
-                                            const auto field_it = std::ranges::find(info.fields, sf.name, &StructField::name);
-                                            if (field_it != info.fields.end()) {
+                                        if (const auto *info = ty.kind == TypeKind::Struct ? program.struct_at(ty.struct_index) : nullptr;
+                                            info && field_ty_it != mod_it->second.expr_types.end()) {
+                                            const auto field_it = std::ranges::find(info->fields, sf.name, &StructField::name);
+                                            if (field_it != info->fields.end()) {
                                                 const auto &from = field_ty_it->second;
                                                 const auto &target = field_it->type;
                                                 const bool needs_runtime_coercion =
@@ -129,9 +129,8 @@ namespace sema {
                                         provided.insert(sf.name);
                                     }
 
-                                    if (ty.kind == TypeKind::Struct) {
-                                        const auto &info = program.structs.at(ty.struct_index);
-                                        for (const auto &field : info.fields) {
+                                    if (const auto *info = ty.kind == TypeKind::Struct ? program.struct_at(ty.struct_index) : nullptr) {
+                                        for (const auto &field : info->fields) {
                                             if (provided.contains(field.name) || !field.init_expr) {
                                                 continue;
                                             }
