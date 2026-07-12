@@ -69,7 +69,8 @@ namespace sema {
                 const auto &import_expr = std::get<ast::ImportExpr>(*decl.init);
 
                 if (const auto resolved_path = resolve_import(program, module_path, import_expr.module_name); resolved_path.empty()) {
-                    diag.report_error(DiagnosticStage::Sema, import_expr.location, std::format("import '{}' was not resolved", import_expr.module_name));
+                    // No diagnostic here: module_resolver.cpp already reported this
+                    // failure with a real location when it walked the import graph.
                 } else {
                     declare_symbol(
                         module.symbols, decl.name,

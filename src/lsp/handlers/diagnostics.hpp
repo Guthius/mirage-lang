@@ -11,10 +11,9 @@
 namespace lsp::handlers {
     // Converts one compiler Diagnostic into an LSP Diagnostic JSON object:
     // 0-based line/character (SourceLocation is 1-based), severity (1=Error,
-    // 2=Warning). Diagnostic carries no token/length, so there's no real end
-    // position to recover - the range is widened to one character
-    // (character+1) rather than left zero-width, so editors reliably render
-    // a visible squiggle.
+    // 2=Warning). The range end is start + SourceLocation::length (the
+    // originating token's lexeme length, at minimum 1), so the squiggle
+    // spans the whole token rather than a single character.
     auto to_lsp_diagnostic(const Diagnostic &diagnostic) -> nlohmann::json;
 
     // Groups `diagnostics` by location.filename into ready-to-publish LSP

@@ -41,13 +41,13 @@ namespace ast {
             return combined;
         }
 
-        auto find_import_strings(const Module &module) -> std::vector<std::string> {
-            std::vector<std::string> found;
+        auto find_import_strings(const Module &module) -> std::vector<std::pair<std::string, SourceLocation>> {
+            std::vector<std::pair<std::string, SourceLocation>> found;
 
             for (auto &decl : module) {
                 if (auto *var_decl = std::get_if<VarDecl>(&decl); var_decl && var_decl->init) {
                     if (auto *import_stmt = std::get_if<ImportExpr>(&*var_decl->init)) {
-                        found.push_back(import_stmt->module_name);
+                        found.emplace_back(import_stmt->module_name, import_stmt->location);
                     }
                 }
             }
@@ -105,11 +105,11 @@ namespace ast {
 
             it->second = load_and_parse(it->first, source_manager, diagnostics, program);
 
-            for (auto &import_str : find_import_strings(program.modules[path])) {
+            for (auto &[import_str, import_location] : find_import_strings(program.modules[path])) {
                 auto resolved_path = resolve_import_path(path, import_str, mirage_path);
                 if (resolved_path.empty()) {
                     diagnostics.report_error(
-                        DiagnosticStage::Parser, {},
+                        DiagnosticStage::Parser, import_location,
                         std::format("cannot resolve import path '{}' from '{}'", import_str, path));
 
                     continue;

@@ -2,6 +2,7 @@
 
 #include "source_manager.hpp"
 
+#include <algorithm>
 #include <iostream>
 
 void DiagnosticEngine::report(const DiagnosticLevel level, const DiagnosticStage stage, const SourceLocation &location, std::string message) {
@@ -60,6 +61,15 @@ void DiagnosticEngine::print_diagnostic(const Diagnostic &diagnostic) const {
             out << (source_line[i - 1] == '\t' ? '\t' : ' ');
         }
 
-        out << "\033[1;32m^\033[0m\n";
+        const auto max_length = diagnostic.location.column <= source_line.size()
+            ? source_line.size() - diagnostic.location.column + 1
+            : 1;
+        const auto caret_count = std::max<size_t>(std::min<size_t>(diagnostic.location.length, max_length), 1);
+
+        out << "\033[1;32m";
+        for (size_t i = 0; i < caret_count; ++i) {
+            out << '^';
+        }
+        out << "\033[0m\n";
     }
 }

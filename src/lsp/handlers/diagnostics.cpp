@@ -1,5 +1,7 @@
 #include "diagnostics.hpp"
 
+#include <algorithm>
+
 namespace lsp::handlers {
     namespace {
         auto to_zero_based(const size_t one_based) -> size_t {
@@ -10,11 +12,12 @@ namespace lsp::handlers {
     auto to_lsp_diagnostic(const Diagnostic &diagnostic) -> nlohmann::json {
         const auto line = to_zero_based(diagnostic.location.line);
         const auto character = to_zero_based(diagnostic.location.column);
+        const auto length = std::max<size_t>(diagnostic.location.length, 1);
 
         return {
             {"range", {
                 {"start", {{"line", line}, {"character", character}}},
-                {"end", {{"line", line}, {"character", character + 1}}},
+                {"end", {{"line", line}, {"character", character + length}}},
             }},
             {"severity", diagnostic.level == DiagnosticLevel::Error ? 1 : 2},
             {"source", "mirage"},

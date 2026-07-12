@@ -177,10 +177,12 @@ namespace lexer {
             }
 
             [[nodiscard]] auto make_token(const TokenKind kind, const size_t start) const -> Token {
+                auto location = make_location_from_offset(start);
+                location.length = pos_ - start;
                 return Token{
                     .kind = kind,
                     .lexeme = std::string(source_.substr(start, pos_ - start)),
-                    .location = make_location_from_offset(start),
+                    .location = location,
                 };
             }
 
