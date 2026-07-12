@@ -33,13 +33,6 @@ namespace lsp::analysis {
     // so hover/definition/diagnostics stay useful on a broken-but-partial
     // file, matching the rest of the compiler's "partial results are better
     // than none" tolerance for LSP use.
-    //
-    // Known limitation (not fixed here - see plan): module_resolver aborts
-    // loading further files in a directory the moment any error has been
-    // recorded anywhere in the whole resolve() call, so a syntax error in one
-    // file of a multi-file module can cause sibling files in that directory
-    // to be skipped, producing spurious "undefined symbol" diagnostics for
-    // things those siblings define.
     auto analyse(const std::string &root_module_path,
                  const std::unordered_map<std::string, std::string> &open_buffers) -> ProgramResult;
 

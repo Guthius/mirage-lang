@@ -31,8 +31,9 @@ namespace ast {
             for (const auto &file : files) {
                 const auto source_file = source_manager.load(file.string(), diagnostics);
                 if (source_file.text.empty()) continue;
+                const auto errors_before = diagnostics.error_count();
                 auto tokens = lexer::tokenize(source_file.text, source_file.filename, diagnostics);
-                if (diagnostics.has_errors()) return {};
+                if (diagnostics.error_count() > errors_before) continue;
                 program.file_count += 1;
                 program.token_count += tokens.size();
                 auto decls = parse(tokens, diagnostics);

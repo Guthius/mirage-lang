@@ -37,6 +37,7 @@ class DiagnosticEngine {
     void warn(DiagnosticStage stage, const SourceLocation &location, std::string message);
 
     [[nodiscard]] auto has_errors() const -> bool { return error_count_ > 0; }
+    [[nodiscard]] auto error_count() const -> size_t { return error_count_; }
     [[nodiscard]] auto has_reached_max_errors() const -> bool { return error_count_ >= MAX_ERRORS; }
     [[nodiscard]] auto diagnostics() const -> const std::vector<Diagnostic> & { return diagnostics_; }
 

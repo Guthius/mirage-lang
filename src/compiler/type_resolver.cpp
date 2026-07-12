@@ -111,6 +111,7 @@ namespace sema {
             std::string module_path;
             std::string name;
             bool crossed_boundary;
+            SourceLocation location;
         };
 
         auto walk_namespace_chain(const std::string &start_module, const ast::NamedType &named, Program &program, DiagnosticEngine &diag) -> std::optional<ChainTarget> {
@@ -147,7 +148,7 @@ namespace sema {
                 crossed = true;
             }
 
-            return ChainTarget{current_module, current->name, crossed};
+            return ChainTarget{current_module, current->name, crossed, current->location};
         }
 
         struct Resolver {
@@ -311,7 +312,7 @@ namespace sema {
                     if (!target) {
                         return ResolvedType{.kind = TypeKind::Invalid};
                     }
-                    return resolve_final_full(target->module_path, target->name, target->crossed_boundary, loc);
+                    return resolve_final_full(target->module_path, target->name, target->crossed_boundary, target->location);
                 }
                 return resolve_type_impl(field_type, module_path);
             }
@@ -712,7 +713,7 @@ namespace sema {
                             if (auto *named = std::get_if<ast::NamedType>(&v->pointee)) {
                                 auto target = walk_namespace_chain(module_path, *named, program, diag);
                                 pointee = target
-                                              ? resolve_final_shallow(target->module_path, target->name, target->crossed_boundary, v->location)
+                                              ? resolve_final_shallow(target->module_path, target->name, target->crossed_boundary, target->location)
                                               : ResolvedType{.kind = TypeKind::Invalid};
                             } else {
                                 pointee = resolve_type_impl(v->pointee, module_path);
@@ -722,7 +723,7 @@ namespace sema {
                         } else if constexpr (std::is_same_v<V, ast::NamedType>) {
                             auto target = walk_namespace_chain(module_path, v, program, diag);
                             if (!target) return ResolvedType{.kind = TypeKind::Invalid};
-                            return resolve_final_shallow(target->module_path, target->name, target->crossed_boundary, v.location);
+                            return resolve_final_shallow(target->module_path, target->name, target->crossed_boundary, target->location);
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StructType>>) {
                             int slot = static_cast<int>(program.structs.size());
