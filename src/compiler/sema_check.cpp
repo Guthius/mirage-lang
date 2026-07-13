@@ -506,7 +506,17 @@ namespace sema {
 
         auto resolve_lvalue(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, int loop_depth, int defer_loop_base = -1) -> LvalueInfo;
 
-        auto resolve_member(const ast::MemberExpr &m, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base = -1) -> LvalueInfo {
+        // `need_writable` controls whether a struct/union-valued `m.object` gets speculatively
+        // probed for writability via resolve_lvalue(). That probe is only meaningful when the
+        // caller is actually going to use the resulting .writable flag (assignment targets,
+        // address-of, etc. - reached via resolve_lvalue()'s own MemberExpr case, which doesn't
+        // pass this and keeps the default true). A plain read of `m` (check_expr's MemberExpr
+        // case) never looks at .writable, so it passes false: resolve_lvalue's fallback for any
+        // object shape it doesn't recognize as inherently addressable (e.g. a CallExpr, as in
+        // `f().field`) reports "not an assignable expression" - correct when something is
+        // actually being assigned to or addressed, but a spurious compile error for an ordinary
+        // read of a field on a temporary struct/union value, which is always legal.
+        auto resolve_member(const ast::MemberExpr &m, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base = -1, const bool need_writable = true) -> LvalueInfo {
             if (const auto target_module = try_resolve_namespace_chain(m.object, module_path, locals, program)) {
                 return check_member_cross_module(m, *target_module, program, diag);
             }
@@ -541,8 +551,12 @@ namespace sema {
                 writable = true;
             } else if (object_type.kind == TypeKind::Struct || object_type.kind == TypeKind::Union) {
                 effective_type = object_type;
-                const auto object_lvalue = resolve_lvalue(m.object, locals, module_path, program, diag, loop_depth, defer_loop_base);
-                writable = object_lvalue.type == object_type && object_lvalue.writable;
+                if (need_writable) {
+                    const auto object_lvalue = resolve_lvalue(m.object, locals, module_path, program, diag, loop_depth, defer_loop_base);
+                    writable = object_lvalue.type == object_type && object_lvalue.writable;
+                } else {
+                    writable = false;
+                }
             } else if (object_type.kind == TypeKind::Invalid) {
                 return {ResolvedType{.kind = TypeKind::Invalid}, false};
             } else {
@@ -648,7 +662,12 @@ namespace sema {
                         return {ResolvedType{.kind = TypeKind::Invalid}, false};
 
                     } else {
-                        error(diag, SourceLocation{}, "not an assignable expression");
+                        // get_expr_location(), not a zero-valued SourceLocation{}: an empty
+                        // location's filename doesn't match any open document, so the LSP's
+                        // diagnostics publisher (see diagnostics.cpp) silently drops it - the
+                        // CLI would still print it, but editors would report success on a
+                        // build that actually fails.
+                        error(diag, get_expr_location(expr), "not an assignable expression");
                         return {ResolvedType{.kind = TypeKind::Invalid}, false};
                     }
                 },
@@ -1082,7 +1101,7 @@ namespace sema {
                             }
                         }
                     }
-                    return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base).type;
+                    return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base, /*need_writable=*/false).type;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
                     const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base);

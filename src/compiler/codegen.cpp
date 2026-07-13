@@ -1423,6 +1423,32 @@ namespace codegen {
                     expr);
             }
 
+            // Whether `expr` has a memory address emit_lvalue() can compute directly (a local/
+            // global, a pointer deref, or a chain of member/index access rooted in one of
+            // those) as opposed to a temporary value with no address of its own (e.g. a call's
+            // return value). Field access on the latter is still legal - sema permits reading
+            // (but not writing/addressing) a field of a temporary struct/union - so
+            // emit_member_lvalue() spills such objects to a stack slot rather than routing them
+            // through emit_lvalue(), which has no case for them.
+            auto is_addressable_expr(const ast::Expr &expr) -> bool {
+                return std::visit(
+                    [&]<typename T>(const T &v) -> bool {
+                        using V = std::decay_t<T>;
+                        if constexpr (std::is_same_v<V, ast::IdentExpr>) {
+                            return true;
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
+                            return v->op == ast::UnaryOp::Deref;
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                            return true;
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                            return true;
+                        } else {
+                            return false;
+                        }
+                    },
+                    expr);
+            }
+
             auto emit_lvalue(const ast::Expr &expr) -> LValue {
                 return std::visit(
                     [&]<typename T>(const T &v) -> LValue {
@@ -1484,11 +1510,20 @@ namespace codegen {
                     struct_type = sema_program_.pointer_pointees.at(object_type.pointee_index);
                     struct_module = expr_type_module_hint(member.object);
                     base = emit_expr(member.object);
-                } else {
+                } else if (is_addressable_expr(member.object)) {
                     auto lv = emit_lvalue(member.object);
                     struct_type = lv.type;
                     struct_module = lv.type_module;
                     base = lv.ptr;
+                } else {
+                    // A temporary struct/union value (e.g. a call's return value) with no
+                    // address of its own - spill it to a stack slot so the field GEP below has
+                    // something to index into. Read-only: nothing writes back through `base`.
+                    struct_type = object_type;
+                    struct_module = expr_type_module_hint(member.object);
+                    auto *value = emit_expr(member.object);
+                    base = builder_.CreateAlloca(llvm_type(struct_module, struct_type));
+                    builder_.CreateStore(value, base);
                 }
 
                 if (struct_type.kind == sema::TypeKind::Union) {
