@@ -520,6 +520,8 @@ namespace lsp::handlers {
                         return location_matches(node.location, target) ? &expr : nullptr;
                     } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TaggedVariantExpr>>) {
                         return location_matches(node->location, target) ? &expr : nullptr;
+                    } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TypeExpr>>) {
+                        return location_matches(node->location, target) ? &expr : nullptr;
                     } else {
                         // Literals, IdentExpr, ImportExpr, IotaExpr,
                         // DefaultExpr, UndefinedExpr - none contain a nested Expr.

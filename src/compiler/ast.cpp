@@ -48,6 +48,42 @@ namespace ast {
             }
         }
 
+        // True for tokens that can only ever begin a Type in this grammar, never an Expr -
+        // lets sizeof's operand disambiguate a type from a value with a single token of
+        // lookahead instead of backtracking. Prefix '*' always means pointer-type (dereference
+        // is postfix '.*', see parse_postfix); '[' only starts array/slice type syntax (array
+        // literals use '{...}'); struct/enum/union/fn only appear in type/decl position, never
+        // as expression-starters; builtin type keywords never lex as Identifier.
+        auto starts_type_only(const Parser &parser) -> bool {
+            switch (parser.current().kind) {
+            case TokenKind::Star:
+            case TokenKind::LBracket:
+            case TokenKind::KwStruct:
+            case TokenKind::KwEnum:
+            case TokenKind::KwUnion:
+            case TokenKind::KwFn:
+            case TokenKind::KwU8:
+            case TokenKind::KwU16:
+            case TokenKind::KwU32:
+            case TokenKind::KwU64:
+            case TokenKind::KwI8:
+            case TokenKind::KwI16:
+            case TokenKind::KwI32:
+            case TokenKind::KwI64:
+            case TokenKind::KwF32:
+            case TokenKind::KwF64:
+            case TokenKind::KwUSize:
+            case TokenKind::KwBool:
+            case TokenKind::KwByte:
+            case TokenKind::KwError:
+            case TokenKind::KwAnyptr:
+            case TokenKind::KwType:
+                return true;
+            default:
+                return false;
+            }
+        }
+
         auto parse_struct_type(Parser &parser) -> Type {
             const auto location = parser.current_location();
 
@@ -574,7 +610,17 @@ namespace ast {
             if (parser.check(TokenKind::KwSizeOf)) {
                 parser.advance();
                 parser.expect(TokenKind::LParen, "'('");
-                auto operand = parse_expr(parser);
+
+                auto operand = starts_type_only(parser)
+                    ? [&]() -> Expr {
+                          const auto type_location = parser.current_location();
+                          return std::make_unique<TypeExpr>(TypeExpr{
+                              .type = parse_type(parser),
+                              .location = type_location,
+                          });
+                      }()
+                    : parse_expr(parser);
+
                 parser.expect(TokenKind::RParen, "')'");
 
                 return std::make_unique<SizeOfExpr>(SizeOfExpr{

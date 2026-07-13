@@ -1010,11 +1010,12 @@ namespace sema {
                     // resolves through arbitrarily many namespace hops, same
                     // as any other qualified type reference. Falls back to
                     // evaluating the operand as an ordinary value expression
-                    // (runtime sizeof) if it isn't a type-name shape. Cannot
-                    // represent a BUILTIN type keyword as the operand (e.g.
-                    // sizeof(u64)) - SizeOfExpr's operand is Expr-only and
-                    // builtin-type keywords never lex as Identifier - a
-                    // pre-existing AST-level gap, not something fixable here.
+                    // (runtime sizeof) if it isn't a type-name shape. Operand
+                    // shapes the parser can't spell as an IdentExpr/MemberExpr
+                    // (pointer/array/slice/fn-ptr types, builtin type keywords)
+                    // arrive as a TypeExpr instead and fall through to the
+                    // generic check_expr call below, which resolves them via
+                    // the TypeExpr case further down in this dispatch.
                     if (auto *ident = std::get_if<ast::IdentExpr>(&v->operand)) {
                         const auto mod_it = program.modules.find(module_path);
                         if (mod_it != program.modules.end()) {
@@ -1034,6 +1035,15 @@ namespace sema {
                     }
                     check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
                     return ResolvedType{.kind = TypeKind::USize};
+
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeExpr>>) {
+                    // A Type wrapped in an Expr slot (currently only produced by the parser for
+                    // sizeof operands that can't be spelled as an ordinary expression - see
+                    // starts_type_only in ast.cpp). Resolves like any other type reference; the
+                    // result is cached into expr_types by the generic caching below, which is
+                    // how codegen's sizeof_operand and type_resolver's sizeof_expr_operand read
+                    // it back without needing to know about TypeExpr themselves.
+                    return resolve_type(v->type, module_path, program, diag);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) {
                     const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);

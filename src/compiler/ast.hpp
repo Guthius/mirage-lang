@@ -132,6 +132,7 @@ namespace ast {
     };
 
     struct SizeOfExpr;
+    struct TypeExpr;
     struct LenExpr;
     struct CastExpr;
     struct IndexExpr;
@@ -189,6 +190,7 @@ namespace ast {
         std::unique_ptr<IncrDecrExpr>,
         ImportExpr,
         std::unique_ptr<SizeOfExpr>,
+        std::unique_ptr<TypeExpr>,
         std::unique_ptr<LenExpr>,
         std::unique_ptr<CastExpr>,
         std::unique_ptr<IndexExpr>,
@@ -332,6 +334,13 @@ namespace ast {
 
     struct SizeOfExpr {
         Expr operand;
+        SourceLocation location;
+    };
+
+    // Wraps a Type in an Expr slot, for contexts that can't syntactically tell whether an
+    // operand names a type or a value until a type-only-start token is seen (e.g. sizeof).
+    struct TypeExpr {
+        Type type;
         SourceLocation location;
     };
 
