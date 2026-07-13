@@ -330,7 +330,18 @@ namespace sema {
             macro_scope[m->decl->params[i].name] = LocalBinding{.type = m->params[i], .is_mut = false};
         }
 
-        m->result_type = check_expr(m->decl->expr_template, macro_scope, module_path, program, diag, std::nullopt, 0);
+        if (m->decl->result_type) {
+            const auto declared_ty = resolve_type(*m->decl->result_type, module_path, program, diag);
+            const auto actual_ty = check_expr(m->decl->expr_template, macro_scope, module_path, program, diag, declared_ty, 0);
+            if (!is_assignable(actual_ty, declared_ty)) {
+                diag.report_error(DiagnosticStage::Sema, m->decl->location,
+                    "macro body type does not match declared result type");
+            }
+            m->result_type = declared_ty;
+            m->has_declared_result_type = true;
+        } else {
+            m->result_type = check_expr(m->decl->expr_template, macro_scope, module_path, program, diag, std::nullopt, 0);
+        }
         m->is_resolved = true;
 
         program.resolve_state.value_resolving.erase(key);

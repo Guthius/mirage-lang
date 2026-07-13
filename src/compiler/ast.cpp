@@ -1831,12 +1831,18 @@ namespace ast {
             const auto name = parser.expect_identifier();
             auto params = parse_macro_params(parser);
 
+            std::optional<Type> result_type;
+            if (parser.match(TokenKind::Colon)) {
+                result_type = parse_type(parser);
+            }
+
             parser.expect(TokenKind::Arrow, "'->'");
 
             return MacroDecl{
                 .is_pub = is_pub,
                 .name = name,
                 .params = std::move(params),
+                .result_type = std::move(result_type),
                 .expr_template = parse_expr(parser),
                 .location = location,
             };

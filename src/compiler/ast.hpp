@@ -598,6 +598,7 @@ namespace ast {
         bool is_pub;
         std::string name;
         std::vector<Param> params;
+        std::optional<Type> result_type;
         Expr expr_template;
         SourceLocation location;
     };

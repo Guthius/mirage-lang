@@ -65,7 +65,7 @@ A `const` requires an initializer. A top-level `const` initializer may use `impo
 ### Macro Declaration
 
 ```ebnf
-macro_decl    ::= 'macro' IDENT '(' [ macro_param { ',' macro_param } ] ')' '->' expr
+macro_decl    ::= 'macro' IDENT '(' [ macro_param { ',' macro_param } ] ')' [ ':' type ] '->' expr
 
 macro_param   ::= IDENT ':' type
 ```

@@ -786,10 +786,14 @@ See [Function Pointer Types](#function-pointer-types) for the type syntax.
 
 ```mirage
 macro name(param1: Type1, param2: Type2) -> expr
+macro name(param1: Type1): ReturnType -> expr
 pub macro align_up(n: usize) -> (n + (alignment - 1)) & ~(alignment - 1)
+pub macro new_vector(element_size: usize): Vector -> { .element_size = element_size }
 ```
 
 Macros are expression-level compile-time substitutions. They are called with the same syntax as functions. Parameters are typed. The body is an expression template.
+
+An optional `: Type` annotation between the parameter list and `->` declares the macro's result type explicitly. It's required when the body's type can't be inferred without context — for example a struct-literal body, which needs an expected type the same way a `const`/`mut` initializer does. When present, the body is checked against the declared type and a mismatch is reported on the macro declaration. When absent, the result type is inferred from the body, as before.
 
 ---
 

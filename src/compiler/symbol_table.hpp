@@ -35,6 +35,7 @@ namespace sema {
         const ast::MacroDecl *decl = nullptr;
         std::vector<ResolvedType> params;
         ResolvedType result_type;
+        bool has_declared_result_type = false;
         bool is_pub = false;
         bool is_resolved = false;
     };
