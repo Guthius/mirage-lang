@@ -194,6 +194,53 @@ namespace sema {
         auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, int loop_depth, int defer_loop_base, bool fn_returns_error, bool native_variadic = false) -> bool;
         auto try_resolve_namespace_chain(const ast::Expr &expr, const std::string &module_path, LocalScope &locals, Program &program) -> std::optional<std::string>;
 
+        // Tier-3 method-call resolution: 'receiver_type' is an actual dyn-handle
+        // (TypeKind::Trait), which has no concrete MethodInfo/body to look up via
+        // find_method — dispatch is resolved against the trait's own method list
+        // instead. Returns std::nullopt (not an error) when receiver_type isn't a
+        // trait handle, so callers fall through to the existing find_method path
+        // unchanged. 'dispatch_key' is the address of the ast::CallExpr node itself
+        // (stable across check_expr / check_group_call_returns / codegen's emit_call
+        // and call_return_types, all of which take a 'const ast::CallExpr&' referring
+        // to the same heap-allocated node) — NOT sema::get_expr_key's variant-slot
+        // address, which check_group_call_returns has no way to reproduce since it
+        // only receives the unwrapped CallExpr, not the outer Expr variant.
+        auto try_trait_handle_dispatch(const ResolvedType &receiver_type, const std::string &method_name,
+                                        const std::vector<ast::Expr> &args, const void *dispatch_key,
+                                        LocalScope &locals, const std::string &module_path, Program &program,
+                                        DiagnosticEngine &diag, const SourceLocation &loc, const int loop_depth,
+                                        const int defer_loop_base, const bool fn_returns_error) -> std::optional<std::vector<ResolvedType>> {
+            if (receiver_type.kind != TypeKind::Trait) return std::nullopt;
+
+            const auto *trait_info = program.trait_at(receiver_type.trait_index);
+            const TraitMethodInfo *trait_method = nullptr;
+            int method_order_index = -1;
+            if (trait_info) {
+                for (size_t i = 0; i < trait_info->methods.size(); ++i) {
+                    if (trait_info->methods[i].name == method_name) {
+                        trait_method = &trait_info->methods[i];
+                        method_order_index = static_cast<int>(i);
+                        break;
+                    }
+                }
+            }
+
+            if (!trait_method) {
+                const auto [trait_module, trait_name] = find_type_module_and_name(receiver_type, program);
+                error(diag, loc, std::format("no method '{}' on trait '{}'", method_name, trait_name.empty() ? "?" : trait_name));
+                return std::vector<ResolvedType>{};
+            }
+
+            check_call_args(args, trait_method->params, false, locals, module_path, program, diag, loc, method_name, loop_depth, defer_loop_base, fn_returns_error);
+
+            program.modules.at(module_path).expr_trait_dispatch[dispatch_key] = TraitDispatchInfo{
+                .trait_index = receiver_type.trait_index,
+                .method_order_index = method_order_index,
+            };
+
+            return trait_method->return_types;
+        }
+
         auto check_group_call_returns(const ast::CallExpr &call, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base, const bool fn_returns_error) -> std::vector<ResolvedType> {
             std::string target_module = module_path;
             std::string name;
@@ -225,6 +272,9 @@ namespace sema {
                         } else {
                             receiver_type = ResolvedType{.kind = TypeKind::Invalid};
                         }
+                    }
+                    if (auto trait_returns = try_trait_handle_dispatch(receiver_type, (*member)->member, call.args, &call, locals, module_path, program, diag, call.location, loop_depth, defer_loop_base, fn_returns_error)) {
+                        return *trait_returns;
                     }
                     const auto *method = find_method(receiver_type, (*member)->member, program);
                     if (!method) {
@@ -557,6 +607,9 @@ namespace sema {
                 } else {
                     writable = false;
                 }
+            } else if (object_type.kind == TypeKind::Trait) {
+                error(diag, m.location, "cannot access fields on a trait handle; handles have no visible layout");
+                return {ResolvedType{.kind = TypeKind::Invalid}, false};
             } else if (object_type.kind == TypeKind::Invalid) {
                 return {ResolvedType{.kind = TypeKind::Invalid}, false};
             } else {
@@ -627,6 +680,10 @@ namespace sema {
                             return {ResolvedType{.kind = TypeKind::Invalid}, false};
                         }
                         const ResolvedType ptr_ty = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                        if (ptr_ty.kind == TypeKind::Trait) {
+                            error(diag, v->location, "cannot dereference a trait handle");
+                            return {ResolvedType{.kind = TypeKind::Invalid}, false};
+                        }
                         if (ptr_ty.kind != TypeKind::Pointer) {
                             error(diag, v->location, "cannot dereference a non-pointer value");
                             return {ResolvedType{.kind = TypeKind::Invalid}, false};
@@ -698,7 +755,7 @@ namespace sema {
                     return ResolvedType{.kind = TypeKind::Bool};
 
                 } else if constexpr (std::is_same_v<V, ast::LiteralNilExpr>) {
-                    if (expected && expected->kind == TypeKind::Slice) return *expected;
+                    if (expected && (expected->kind == TypeKind::Slice || expected->kind == TypeKind::Trait)) return *expected;
                     return ResolvedType{.kind = TypeKind::Anyptr};
 
                 } else if constexpr (std::is_same_v<V, ast::IdentExpr>) {
@@ -788,6 +845,7 @@ namespace sema {
                     case ast::UnaryOp::Deref:
                         {
                             const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                            if (operand.kind == TypeKind::Trait) return error(diag, v->location, "cannot dereference a trait handle");
                             if (operand.kind != TypeKind::Pointer) return error(diag, v->location, "cannot dereference a non-pointer value");
                             const auto *pointee = program.pointee_at(operand.pointee_index);
                             if (!pointee) return error(diag, v->location, "internal error: invalid pointer index");
@@ -805,6 +863,21 @@ namespace sema {
                         lhs = check_expr(v->lhs, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_returns_error);
                         rhs = check_expr(v->rhs, locals, module_path, program, diag, lhs, loop_depth, defer_loop_base, fn_returns_error);
                     }
+
+                    // Trait handles support no operator except '==' / '!=' against a literal
+                    // 'nil' operand (checked on the raw AST, not the resolved type, since a
+                    // nil literal coerced to the handle's trait type is otherwise structurally
+                    // indistinguishable from an actual handle value of that same trait).
+                    if (lhs.kind == TypeKind::Trait || rhs.kind == TypeKind::Trait) {
+                        const bool lhs_is_nil = std::holds_alternative<ast::LiteralNilExpr>(v->lhs);
+                        const bool rhs_is_nil = std::holds_alternative<ast::LiteralNilExpr>(v->rhs);
+                        const bool is_eq = v->op == ast::BinaryOp::Equal || v->op == ast::BinaryOp::NotEqual;
+                        if (is_eq && (lhs_is_nil || rhs_is_nil)) {
+                            return ResolvedType{.kind = TypeKind::Bool};
+                        }
+                        return error(diag, v->location, "trait handles only support '==' / '!=' comparison against 'nil'; no other operators are supported");
+                    }
+
                     return binary_op_result(v->op, lhs, rhs, diag, v->location);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
@@ -904,6 +977,12 @@ namespace sema {
                             } else {
                                 receiver_type = ResolvedType{.kind = TypeKind::Invalid};
                             }
+                        }
+                        if (auto trait_returns = try_trait_handle_dispatch(receiver_type, (*member_callee)->member, v->args, v.get(), locals, module_path, program, diag, v->location, loop_depth, defer_loop_base, fn_returns_error)) {
+                            if (trait_returns->size() > 1) {
+                                return error(diag, v->location, "multi-value capture is not yet supported here");
+                            }
+                            return trait_returns->empty() ? ResolvedType{.kind = TypeKind::Void} : trait_returns->front();
                         }
                         const auto *method = find_method(receiver_type, (*member_callee)->member, program);
                         if (!method) {
@@ -1763,6 +1842,46 @@ namespace sema {
                         union_name.empty() ? "<union>" : union_name, joined));
                 }
             }
+        }
+
+        // Implicit pointer-to-trait-handle coercion: applies through the same
+        // expected-type channel as the tagged-union coercion above (call args, return
+        // statements, var-decl initializers, struct/array/union field init). The source
+        // must be a pointer to a type that implements the trait; see TraitCoercion's doc
+        // comment in sema.hpp for why this is recorded in a side table rather than
+        // overwriting expr_types for this node.
+        if (expected && expected->kind == TypeKind::Trait && ty.kind != TypeKind::Invalid && ty != *expected) {
+            if (ty.kind != TypeKind::Pointer) {
+                const auto [trait_module, trait_name] = find_type_module_and_name(*expected, program);
+                return error(diag, get_expr_location(expr), std::format(
+                    "cannot coerce non-pointer value to trait handle '{}'; a pointer to a type implementing the trait is required",
+                    trait_name.empty() ? "<trait>" : trait_name));
+            }
+
+            const auto *pointee = program.pointee_at(ty.pointee_index);
+            const auto [pointee_module, pointee_name] = pointee ? find_type_module_and_name(*pointee, program) : std::pair<std::string, std::string>{};
+
+            bool implemented = false;
+            if (const auto it = program.trait_impls_by_type.find({pointee_module, pointee_name}); it != program.trait_impls_by_type.end()) {
+                for (const auto &impl_info : it->second) {
+                    if (impl_info.trait_index == expected->trait_index) {
+                        implemented = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!implemented) {
+                const auto [trait_module, trait_name] = find_type_module_and_name(*expected, program);
+                return error(diag, get_expr_location(expr), std::format(
+                    "type '{}' does not implement trait '{}'",
+                    pointee_name.empty() ? "<type>" : pointee_name, trait_name.empty() ? "<trait>" : trait_name));
+            }
+
+            program.modules.at(module_path).expr_trait_coercions[get_expr_key(expr)] = TraitCoercion{
+                .trait_index = expected->trait_index,
+            };
+            return *expected;
         }
 
         return ty;

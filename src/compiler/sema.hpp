@@ -6,8 +6,10 @@
 #include "resolved_type.hpp"
 #include "symbol_table.hpp"
 
+#include <map>
 #include <optional>
 #include <set>
+#include <tuple>
 #include <unordered_map>
 
 namespace sema {
@@ -99,6 +101,42 @@ namespace sema {
         bool is_resolved = false;
         bool is_variadic = false;             // true if the last param is native '...T'
         ResolvedType variadic_element_type{}; // T; only meaningful if is_variadic
+
+        // Set (to the trait's local name) only when this MethodInfo came from an
+        // 'impl TRAIT for TYPE' block, rather than a bare 'impl TYPE' block. Codegen
+        // uses this to route function lookups to the trait_functions_ table instead
+        // of functions_, since trait-impl methods are mangled/keyed distinctly to
+        // avoid colliding with a same-named inherent method (see Generator::run()).
+        std::optional<std::string> trait_name;
+        std::string trait_module; // only meaningful if trait_name has a value
+    };
+
+    // A single trait method's resolved signature (no body — trait methods are
+    // signature-only). Declaration order matches the source 'trait { ... }' body
+    // exactly; this order IS the vtable layout and must never be re-sorted or
+    // re-derived by codegen.
+    struct TraitMethodInfo {
+        std::string name;
+        bool is_mut_self = false;
+        std::vector<ResolvedType> params; // excludes self
+        std::vector<ResolvedType> return_types;
+        SourceLocation location;
+    };
+
+    struct TraitInfo {
+        std::string module_path;            // module where 'type Name = trait {...}' is declared
+        std::vector<TraitMethodInfo> methods; // declaration order — the vtable layout
+        bool layout_done = false;
+    };
+
+    // One successfully-declared 'impl TRAIT for TYPE' block.
+    struct TraitImplInfo {
+        std::string trait_module, trait_name;
+        int trait_index = -1;
+        std::string type_module, type_name;
+        std::string impl_module; // module where the 'impl ... for ...' block itself lives
+        std::unordered_map<std::string, MethodInfo> methods; // method_name -> MethodInfo
+        SourceLocation location;
     };
 
     // Records an implicit tagged-union coercion decided by check_expr for a given expression node
@@ -113,12 +151,32 @@ namespace sema {
         int32_t payload_struct_index = -1;
     };
 
+    // Records an implicit pointer-to-trait-handle coercion decided by check_expr's
+    // expected-type tail (mirrors VariantCoercion above). The pointer expression's
+    // own natural type is left untouched in expr_types; codegen consults this side
+    // table to know which trait handle to materialize, and looks up the (trait,
+    // pointee-type) vtable global via Program::trait_impls_by_type, never re-deriving
+    // trait membership itself.
+    struct TraitCoercion {
+        int trait_index = -1;
+    };
+
+    // Records where a '.method()' call was resolved against a trait's method list via
+    // an actual dyn-handle receiver (TypeKind::Trait), rather than a concrete MethodInfo.
+    // 'method_order_index' is the index into TraitInfo::methods — the vtable slot.
+    struct TraitDispatchInfo {
+        int trait_index = -1;
+        int method_order_index = -1;
+    };
+
     struct ProgramModule {
         SymbolTable symbols;
         // type_name -> method_name -> MethodInfo
         std::unordered_map<std::string, std::unordered_map<std::string, MethodInfo>> methods;
         std::unordered_map<const void *, ResolvedType> expr_types;
         std::unordered_map<const void *, VariantCoercion> expr_variant_coercions;
+        std::unordered_map<const void *, TraitCoercion> expr_trait_coercions;
+        std::unordered_map<const void *, TraitDispatchInfo> expr_trait_dispatch;
         bool ok = false;
     };
 
@@ -126,6 +184,7 @@ namespace sema {
         std::set<std::pair<std::string, std::string>> alias_resolving;
         std::set<std::pair<std::string, std::string>> struct_resolving;
         std::set<std::pair<std::string, std::string>> union_resolving;
+        std::set<std::pair<std::string, std::string>> trait_resolving;
         std::set<std::pair<std::string, std::string>> value_resolving;
     };
 
@@ -134,12 +193,26 @@ namespace sema {
         std::vector<StructInfo> structs;          // global; struct_index is unique across all modules
         std::vector<EnumInfo> enums;
         std::vector<UnionInfo> unions;            // global; union_index is unique across all modules
+        std::vector<TraitInfo> traits;            // global; trait_index is unique across all modules
         std::vector<FunctionTypeInfo> fn_signatures; // global; fn_index is unique across all modules
         std::vector<ResolvedType> pointer_pointees; // global; pointee_index is unique across all modules
         std::vector<ArrayInfo> arrays;             // global; array_index is unique across all modules
         std::vector<SliceInfo> slices;             // global; slice_index is unique across all modules
         ResolveState resolve_state;
         bool ok = false;
+
+        // Trait-impl registries. Kept separate from ProgramModule::methods (which has
+        // no trait dimension and would silently collide with same-named inherent
+        // methods) and Program-level (not per-module) because coherence/duplicate-impl
+        // checks must see across every module in the program, not just one.
+        //
+        // Keyed by (type_module, type_name) rather than a bare type-name string, since
+        // two unrelated modules may each declare a type with the same local name — a
+        // string-only key would incorrectly conflate them.
+        std::map<std::pair<std::string, std::string>, std::vector<TraitImplInfo>> trait_impls_by_type;
+        // Dedup key (trait_module, trait_name, type_module, type_name) -> first-seen
+        // location, used purely to detect and report duplicate impls.
+        std::map<std::tuple<std::string, std::string, std::string, std::string>, SourceLocation> trait_impl_registry;
 
         // Bounds-checked table lookups, returning nullptr for an out-of-range
         // index instead of the undefined behavior of raw operator[]. Under
@@ -158,6 +231,9 @@ namespace sema {
         }
         [[nodiscard]] auto union_at(int index) const -> const UnionInfo * {
             return index >= 0 && static_cast<size_t>(index) < unions.size() ? &unions[index] : nullptr;
+        }
+        [[nodiscard]] auto trait_at(int index) const -> const TraitInfo * {
+            return index >= 0 && static_cast<size_t>(index) < traits.size() ? &traits[index] : nullptr;
         }
         [[nodiscard]] auto fn_signature_at(int index) const -> const FunctionTypeInfo * {
             return index >= 0 && static_cast<size_t>(index) < fn_signatures.size() ? &fn_signatures[index] : nullptr;

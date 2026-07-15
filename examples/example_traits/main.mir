@@ -1,0 +1,48 @@
+pub type Drawable = trait {
+    fn draw(self)
+    fn bounding_box(self) -> (i32, i32, i32, i32)
+}
+
+pub type Circle = struct {
+    x: i32
+    y: i32
+    r: i32
+}
+
+impl Drawable for Circle {
+    fn draw(self) { }
+    fn bounding_box(self) -> (i32, i32, i32, i32) {
+        return self.x - self.r, self.y - self.r,
+               self.x + self.r, self.y + self.r
+    }
+}
+
+pub type Rect = struct {
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+}
+
+impl Drawable for Rect {
+    fn draw(self) { }
+    fn bounding_box(self) -> (i32, i32, i32, i32) {
+        return self.x, self.y, self.x + self.w, self.y + self.h
+    }
+}
+
+pub fn draw_all(shapes: []Drawable) {
+    for shape in shapes {
+        shape.draw()
+    }
+}
+
+pub fn main() -> error {
+    mut circle: Circle = { .x = 10, .y = 10, .r = 5 }
+    mut rect: Rect = { .x = 0, .y = 0, .w = 20, .h = 10 }
+
+    mut shapes: [2]Drawable = { &circle, &rect }
+    draw_all(cast(&shapes[0], []Drawable, 2))
+
+    return_ok
+}

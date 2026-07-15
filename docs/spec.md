@@ -459,7 +459,7 @@ mod.fn_name(arg)    # cross-module call
 ```
 
 **Spread argument:** `expr...` forwards an existing slice as the variadic argument of a call to a
-function with a native `...T` parameter (see [Variadic Arguments](#15-variadic-arguments)):
+function with a native `...T` parameter (see [Variadic Arguments](#16-variadic-arguments)):
 
 ```mirage
 fn sum(base: i32, nums: ...i32) -> i32 { ... }
@@ -744,7 +744,7 @@ The final parameter of a `fn` may be declared `name: ...T`, where `T` is any val
 Inside the function body, `name` behaves as an ordinary `[]i32` — a value of `[N]T` collected from
 the trailing call arguments, or the slice passed directly via [spread](#function-call). A call must
 supply zero or more trailing arguments assignable to `T` beyond the fixed parameters. This is
-distinct from `ext fn`'s untyped C `...` varargs (see [Variadic Arguments](#15-variadic-arguments))
+distinct from `ext fn`'s untyped C `...` varargs (see [Variadic Arguments](#16-variadic-arguments))
 — the address of a variadic function cannot be taken as a function pointer.
 
 ### Extern Functions
@@ -870,7 +870,141 @@ impl TypeName {
 
 ---
 
-## 10. Modules
+## 10. Traits and Dynamic Dispatch
+
+Mirage has no generics. Traits exist for exactly one purpose: dynamic
+dispatch through a uniform handle type — the same model as Go interfaces or
+Rust `dyn Trait`. There is no compile-time monomorphization and no type
+parameters.
+
+### Declaring a Trait
+
+```mirage
+type Drawable = trait {
+    fn draw(self)
+    fn bounding_box(self) -> (i32, i32, i32, i32)
+}
+```
+
+A trait is declared like any other named type: `type Name = trait { ... }`.
+Its body is a list of method signatures — `fn` declarations with `self` or
+`mut self` as the first parameter, optional further parameters, and optional
+return types, but **no body**. A trait must declare at least one method (an
+empty `trait { }` is an error). `pub` is not allowed on an individual trait
+method declaration — the trait's own `pub` (or lack of it) governs whether
+importing modules can use it at all. Native-variadic (`...T`) trait method
+parameters are rejected: there is no vtable-entry representation for a
+variadic call.
+
+**Using a trait name in type position denotes a HANDLE, not the trait
+definition.** A handle is a fat pointer — a data pointer plus a vtable
+pointer — always 16 bytes, 8-byte aligned, regardless of which trait it
+names.
+
+### Implementing a Trait
+
+```mirage
+type Circle = struct { x: i32, y: i32, r: i32 }
+
+impl Drawable for Circle {
+    fn draw(self) { # draw the circle }
+    fn bounding_box(self) -> (i32, i32, i32, i32) {
+        return self.x - self.r, self.y - self.r,
+               self.x + self.r, self.y + self.r
+    }
+}
+```
+
+`impl TRAIT for TYPE { ... }` implements a trait for a concrete type — TYPE
+must be a named type (struct, enum, union, or type alias), not a raw pointer
+type; `self` inside the impl is a pointer to TYPE, exactly like a bare
+`impl TYPE { ... }` block. `pub` is not allowed on individual methods inside
+a trait impl, for the same reason it's disallowed inside the trait
+declaration itself.
+
+**Conformance**: every method the trait declares must be implemented in the
+`impl TRAIT for TYPE` block, with an exactly matching signature (same name,
+same `self`/`mut self`, same parameter types, same return types). A trait
+impl may not contain methods beyond the trait's own surface — put those in a
+separate bare `impl TYPE { }` block instead.
+
+**Coherence**: an `impl TRAIT for TYPE` is only legal in the module that
+defines TRAIT or the module that defines TYPE. Implementing someone else's
+trait for someone else's type (an "orphan impl") is an error. A given
+`(TRAIT, TYPE)` pair may be implemented at most once anywhere in the
+program.
+
+**Method name collisions** are resolved at impl-declaration time, never at a
+call site: a trait-impl method with the same name as an existing bare-impl
+method on the same type is an error at the trait impl; two different trait
+impls on the same type supplying a method of the same name is an error at
+the second one. Every valid program is therefore statically unambiguous.
+
+### Static and Dynamic Dispatch
+
+Trait methods are callable directly on a concrete type or a pointer to one —
+this is **static dispatch**, resolved at compile time with no vtable
+involved:
+
+```mirage
+mut circle: Circle = { .x = 10, .y = 10, .r = 5 }
+circle.draw()          # static dispatch: calls Circle's implementation directly
+```
+
+Method-call resolution on a concrete receiver checks the type's own bare
+`impl` block first, then its trait impls.
+
+A pointer to a type that implements a trait **coerces to that trait's
+handle** wherever an expected type is known (variable initializers,
+assignment, return statements, call arguments, struct/array field
+initializers) — the same contextual mechanism used for `default`,
+`undefined`, and implicit tagged-union wrapping elsewhere in the language.
+The source must be a pointer; coercing a bare (non-pointer) value is an
+error, as is coercing a pointer to a type that doesn't implement the trait.
+
+```mirage
+mut shapes: [2]Drawable = { &circle, &rect }   # &circle, &rect coerce to Drawable handles
+
+for shape in shapes {
+    shape.draw()        # dynamic dispatch: resolved through the handle's vtable at runtime
+}
+```
+
+Calling a method through a handle is **dynamic dispatch**: it resolves
+against the trait's own method list and dispatches through the handle's
+vtable at runtime. Both static and dynamic dispatch ultimately call the
+exact same underlying function — the vtable exists only so the call site
+doesn't need to know the concrete type.
+
+`try` on a fallible trait method works identically whether the call is
+static or dynamic. A multi-return trait method can be captured with a group
+declaration through a handle just like any other multi-return call.
+
+### Handle Values
+
+`nil` is assignable to a handle (both the data pointer and the vtable
+pointer are zero). `default` for a handle type is `nil`. `undefined` is
+legal (uninitialized storage, no zeroing). **Calling through a nil handle is
+undefined behavior** — no runtime check is emitted; it will crash.
+
+A handle supports no field access, no dereference, and no arithmetic. The
+only comparisons allowed are `==` and `!=` against `nil` — comparing two
+non-nil handles for equality, or attempting any relational (`<`, `>`, etc.)
+or arithmetic operator, is an error.
+
+Handles round-trip like any other 16-byte value: they can be struct fields,
+function parameters, return values, and array/slice elements, with no
+special handling beyond their size and layout.
+
+**Handles cannot appear in `ext fn` signatures** — a handle has no C ABI
+representation.
+
+**There is no downcasting.** Once a concrete pointer is coerced to a handle,
+there is no way to recover the concrete type or pointer from the handle.
+
+---
+
+## 11. Modules
 
 ### Importing a Module
 
@@ -897,7 +1031,7 @@ Cross-module access uses dot notation. Only `pub` symbols are accessible from ou
 
 ---
 
-## 11. Type Declarations
+## 12. Type Declarations
 
 ```mirage
 type Name = TypeExpression
@@ -908,7 +1042,7 @@ Creates a named type alias. The named type is structural: two declarations with 
 
 ---
 
-## 12. Type Inference
+## 13. Type Inference
 
 - `mut x := expr` infers the type of `x` from `expr`.
 - `const x := expr` infers the type from `expr`.
@@ -918,7 +1052,7 @@ Creates a named type alias. The named type is structural: two declarations with 
 
 ---
 
-## 13. Type Compatibility and Assignability
+## 14. Type Compatibility and Assignability
 
 The following types are mutually assignable without explicit cast:
 
@@ -934,7 +1068,7 @@ Arithmetic, bitwise, and other binary operations require both operands to have t
 
 ---
 
-## 14. Error Handling
+## 15. Error Handling
 
 The `error` type is an unsigned 64-bit integer. By convention, `0` means "no error" and any non-zero value is an error code.
 
@@ -967,7 +1101,7 @@ Deferred statements registered at the time of `try` propagation run before the e
 
 ---
 
-## 15. Variadic Arguments
+## 16. Variadic Arguments
 
 There are two distinct kinds of variadic function, with different syntax and different rules.
 
@@ -998,10 +1132,10 @@ declared `...T`, dissolving to `[]T` inside the function body. Unlike C-style va
 
 ---
 
-## 16. Reserved Keywords
+## 17. Reserved Keywords
 
 The following identifiers are reserved by the language:
 
-`break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `iota` `len` `macro` `match` `mut` `nil` `return` `return_err` `return_ok` `sizeof` `struct` `switch` `true` `try` `type` `undefined` `union` `while`
+`break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `iota` `len` `macro` `match` `mut` `nil` `return` `return_err` `return_ok` `sizeof` `struct` `switch` `trait` `true` `try` `type` `undefined` `union` `while`
 
 `ext` is parsed as an identifier, not a keyword; it is used as the prefix for extern function declarations.

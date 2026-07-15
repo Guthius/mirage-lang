@@ -62,6 +62,7 @@ namespace ast {
             case TokenKind::KwEnum:
             case TokenKind::KwUnion:
             case TokenKind::KwFn:
+            case TokenKind::KwTrait:
             case TokenKind::KwU8:
             case TokenKind::KwU16:
             case TokenKind::KwU32:
@@ -1662,6 +1663,101 @@ namespace ast {
             return return_types;
         }
 
+        auto parse_trait_method_decl(Parser &parser) -> TraitType::Method {
+            const auto location = parser.current_location();
+
+            if (parser.check(TokenKind::KwPub)) {
+                parser.report_error(
+                    location,
+                    "'pub' is not allowed on trait method declarations; the trait's own visibility governs");
+                parser.advance();
+            }
+
+            parser.expect(TokenKind::KwFn, "'fn'");
+            auto name = parser.expect_identifier();
+
+            parser.expect(TokenKind::LParen, "'('");
+
+            bool is_mut_self = false;
+            if (parser.check(TokenKind::KwMut)) {
+                parser.advance();
+                is_mut_self = true;
+            }
+
+            const auto self_location = parser.current_location();
+            const auto self_name = parser.expect_identifier();
+            if (self_name != "self") {
+                parser.report_error(location, "first parameter of trait method must be 'self' or 'mut self'");
+            }
+
+            // Non-self params: 'IDENT : type' only — no 'mut' prefix, no variadics.
+            std::vector<TraitType::Param> params;
+            while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                parser.expect(TokenKind::Comma, "','");
+                const auto param_location = parser.current_location();
+                auto param_name = parser.expect_identifier();
+                parser.expect(TokenKind::Colon, "':'");
+
+                if (parser.check(TokenKind::DotDotDot)) {
+                    parser.report_error(param_location, "variadic parameters are not allowed in trait method declarations");
+                    parser.advance();
+                }
+
+                auto param_type = parse_type(parser);
+
+                params.push_back(TraitType::Param{
+                    .name = std::move(param_name),
+                    .type = std::move(param_type),
+                    .location = param_location,
+                });
+            }
+
+            parser.expect(TokenKind::RParen, "')'");
+            auto return_types = parse_function_return_types(parser);
+
+            if (parser.check(TokenKind::LBrace)) {
+                parser.report_error(parser.current_location(), "trait method declarations cannot have a body");
+                parse_stmt(parser); // consume and discard so parsing can continue
+            }
+
+            return TraitType::Method{
+                .name = std::move(name),
+                .is_mut_self = is_mut_self,
+                .params = std::move(params),
+                .return_types = std::move(return_types),
+                .location = location,
+                .self_location = self_location,
+            };
+        }
+
+        auto parse_trait_type(Parser &parser) -> Type {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwTrait, "'trait'");
+            parser.expect(TokenKind::LBrace, "'{'");
+
+            std::vector<TraitType::Method> methods;
+            while (true) {
+                skip_semicolons(parser);
+                if (parser.check(TokenKind::RBrace) || parser.at_end()) {
+                    break;
+                }
+
+                methods.push_back(parse_trait_method_decl(parser));
+            }
+
+            parser.expect(TokenKind::RBrace, "'}'");
+
+            if (methods.empty()) {
+                parser.report_error(location, "trait must declare at least one method");
+            }
+
+            return std::make_unique<TraitType>(TraitType{
+                .methods = std::move(methods),
+                .location = location,
+            });
+        }
+
         // fn(ParamType, ...) -> RetType  or  fn(ParamType, ...) -> (R1, R2)
         auto parse_function_type(Parser &parser) -> Type {
             const auto location = parser.current_location();
@@ -1972,6 +2068,10 @@ namespace ast {
             return parse_function_type(parser);
         }
 
+        if (parser.check(TokenKind::KwTrait)) {
+            return parse_trait_type(parser);
+        }
+
         if (parser.check(TokenKind::Identifier)) {
             return parse_named_type(parser);
         }
@@ -2123,9 +2223,14 @@ namespace ast {
         return parse_expr_stmt(parser);
     }
 
-    auto parse_impl_method(Parser &parser) -> ImplDecl::Function {
+    auto parse_impl_method(Parser &parser, const bool allow_pub) -> ImplDecl::Function {
         const auto location = parser.current_location();
         const bool is_pub = parser.match(TokenKind::KwPub);
+        if (is_pub && !allow_pub) {
+            parser.report_error(
+                location,
+                "'pub' is not allowed on methods inside 'impl TRAIT for TYPE'; the trait's own visibility governs");
+        }
 
         parser.expect(TokenKind::KwFn, "'fn'");
         auto name = parser.expect_identifier();
@@ -2192,10 +2297,38 @@ namespace ast {
         };
     }
 
-    auto parse_impl_decl(Parser &parser) -> ImplDecl {
+    auto parse_impl_decl(Parser &parser) -> Decl {
         const auto location = parser.current_location();
         parser.expect(TokenKind::KwImpl, "'impl'");
         auto target = parse_named_type(parser);
+
+        if (parser.match(TokenKind::KwFor)) {
+            // 'impl TRAIT for TYPE { ... }' — 'target' parsed above was actually the trait name.
+            auto trait_name = std::move(target);
+            auto type_name = parse_named_type(parser);
+
+            parser.expect(TokenKind::LBrace, "'{'");
+
+            std::vector<ImplDecl::Function> functions;
+            while (true) {
+                skip_semicolons(parser);
+                if (parser.check(TokenKind::RBrace) || parser.at_end()) {
+                    break;
+                }
+
+                functions.push_back(parse_impl_method(parser, /*allow_pub=*/false));
+            }
+
+            parser.expect(TokenKind::RBrace, "'}'");
+
+            return TraitImplDecl{
+                .trait_name = std::move(trait_name),
+                .type_name = std::move(type_name),
+                .functions = std::move(functions),
+                .location = location,
+            };
+        }
+
         parser.expect(TokenKind::LBrace, "'{'");
 
         std::vector<ImplDecl::Function> functions;
@@ -2205,7 +2338,7 @@ namespace ast {
                 break;
             }
 
-            functions.push_back(parse_impl_method(parser));
+            functions.push_back(parse_impl_method(parser, /*allow_pub=*/true));
         }
 
         parser.expect(TokenKind::RBrace, "'}'");

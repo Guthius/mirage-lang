@@ -15,9 +15,11 @@
 #include <algorithm>
 #include <cctype>
 #include <format>
+#include <map>
 #include <memory>
 #include <ranges>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -133,6 +135,7 @@ namespace codegen {
             case sema::TypeKind::Function:
                 return 8;
             case sema::TypeKind::Slice:
+            case sema::TypeKind::Trait: // fat pointer: {data: anyptr, vtable: *const VTable}, 16 bytes
                 return 16;
             default:
                 return 0;
@@ -158,11 +161,29 @@ namespace codegen {
                 return type_name + "::" + method_name;
             }
 
+            // Distinct mangling scheme for trait-impl methods, so a trait-impl method and an
+            // inherent (bare-impl) method of the same name on the same type never collide in
+            // functions_/FunctionKey — method_fn_key() alone (just "Type::method") cannot tell
+            // them apart.
+            static auto trait_method_fn_key(const std::string &type_name, const std::string &trait_name, const std::string &method_name) -> std::string {
+                return type_name + "::" + trait_name + "::" + method_name;
+            }
+
+            // The correct functions_ key for any MethodInfo, whether it came from a bare
+            // 'impl TYPE {}' block or an 'impl TRAIT for TYPE {}' block — see MethodInfo::trait_name's
+            // doc comment in sema.hpp.
+            static auto method_fn_key_for(const sema::MethodInfo &info) -> std::string {
+                return info.trait_name ? trait_method_fn_key(info.type_name, *info.trait_name, info.decl->name)
+                                        : method_fn_key(info.type_name, info.decl->name);
+            }
+
             auto run() -> std::unique_ptr<llvm::Module> {
                 declare_unions();
                 declare_structs();
                 declare_globals_and_functions();
                 declare_methods();
+                declare_trait_methods();
+                declare_vtables();
                 const sema::FunctionSymbol *entry_main = nullptr;
                 if (!options_.freestanding) {
                     entry_main = validate_hosted_main();
@@ -170,6 +191,7 @@ namespace codegen {
                 emit_global_initializers();
                 emit_functions();
                 emit_methods();
+                emit_trait_methods();
                 if (!options_.freestanding && entry_main) {
                     emit_start(*entry_main);
                 }
@@ -218,7 +240,11 @@ namespace codegen {
             std::unordered_map<std::string, llvm::Function *> ext_functions_;
             std::unordered_map<int, StructLowering> structs_;
             std::unordered_map<int, llvm::Type *> unions_; // union_index -> [N x i8] ArrayType
+            // (trait_module, trait_name, type_module, type_name) -> the impl's vtable global,
+            // a constant array of function pointers in TraitInfo::methods declaration order.
+            std::map<std::tuple<std::string, std::string, std::string, std::string>, llvm::GlobalVariable *> vtables_;
             size_t string_counter_ = 0;
+            size_t vtable_counter_ = 0;
 
             auto module_for(const std::string &path) const -> const sema::ProgramModule & {
                 return sema_program_.modules.at(path);
@@ -273,7 +299,7 @@ namespace codegen {
                 return llvm_type(
                     type.kind == sema::TypeKind::Struct || type.kind == sema::TypeKind::Array ||
                             type.kind == sema::TypeKind::Slice || type.kind == sema::TypeKind::Enum ||
-                            type.kind == sema::TypeKind::Union
+                            type.kind == sema::TypeKind::Union || type.kind == sema::TypeKind::Trait
                         ? type_module
                         : *current_module_path_,
                     type);
@@ -295,6 +321,9 @@ namespace codegen {
                     return sema_program_.arrays.at(type.array_index).size;
                 }
                 if (type.kind == sema::TypeKind::Slice) {
+                    return 16;
+                }
+                if (type.kind == sema::TypeKind::Trait) {
                     return 16;
                 }
                 if (type.kind == sema::TypeKind::Enum) {
@@ -332,6 +361,11 @@ namespace codegen {
                     }
                 case sema::TypeKind::Slice:
                     return llvm::StructType::get(*context_, {llvm::PointerType::getUnqual(*context_), llvm::Type::getInt64Ty(*context_)});
+                case sema::TypeKind::Trait:
+                    // Fat pointer handle: {data: anyptr, vtable: *const VTable}. Same "literal
+                    // anonymous struct, no forward-declare needed" pattern as Slice above — only
+                    // the vtable globals/impl functions need declare passes, not the handle type.
+                    return llvm::StructType::get(*context_, {llvm::PointerType::getUnqual(*context_), llvm::PointerType::getUnqual(*context_)});
                 case sema::TypeKind::Enum:
                     {
                         const auto &enum_info = sema_program_.enums.at(type.enum_index);
@@ -353,6 +387,46 @@ namespace codegen {
                 }
                 auto *ret = return_type(*current_module_path_, sig.return_types);
                 return llvm::FunctionType::get(ret, params, sig.is_variadic);
+            }
+
+            // Dispatch a '.method()' call through an actual dyn-handle receiver (TypeKind::Trait),
+            // using the (trait_index, method_order_index) sema already decided in
+            // expr_trait_dispatch — never re-derived here. Not built on llvm_function_type()/
+            // emit_indirect_call(), since those don't prepend a self param (they're for plain
+            // fn-pointer values with no implicit self); this prepends 'ptr' manually, mirroring
+            // declare_methods()'s self-param handling.
+            auto emit_trait_handle_dispatch(const ast::CallExpr &call, const ast::Expr &receiver_expr, const sema::TraitDispatchInfo &dispatch) -> llvm::Value * {
+                const auto *trait_info = sema_program_.trait_at(dispatch.trait_index);
+                if (!trait_info || dispatch.method_order_index < 0 ||
+                    static_cast<size_t>(dispatch.method_order_index) >= trait_info->methods.size()) {
+                    report_codegen_error(diag_, call.location, "internal error: invalid trait dispatch info");
+                    return nullptr;
+                }
+                const auto &trait_method = trait_info->methods[dispatch.method_order_index];
+
+                auto *handle = emit_expr(receiver_expr);
+                auto *data_ptr = builder_.CreateExtractValue(handle, {0});
+                auto *vtable_ptr = builder_.CreateExtractValue(handle, {1});
+
+                std::vector<llvm::Type *> param_types;
+                param_types.push_back(llvm::PointerType::getUnqual(*context_)); // self
+                for (const auto &pt : trait_method.params) {
+                    param_types.push_back(llvm_type(*current_module_path_, pt));
+                }
+                auto *fn_type = llvm::FunctionType::get(return_type(*current_module_path_, trait_method.return_types), param_types, false);
+
+                // Nil-handle call is UB with no runtime check emitted (per spec) — a nil handle's
+                // vtable word is null, so this load/call simply crashes; that's intentional.
+                auto *slot_ptr = builder_.CreateInBoundsGEP(llvm::PointerType::getUnqual(*context_), vtable_ptr, {builder_.getInt32(dispatch.method_order_index)});
+                auto *fn_ptr = builder_.CreateLoad(llvm::PointerType::getUnqual(*context_), slot_ptr);
+
+                std::vector<llvm::Value *> args;
+                args.push_back(data_ptr);
+                for (size_t i = 0; i < call.args.size() && i < trait_method.params.size(); ++i) {
+                    args.push_back(emit_value_as(call.args[i], trait_method.params[i], *current_module_path_));
+                }
+
+                return builder_.CreateCall(fn_type, fn_ptr, args);
             }
 
             // Emit an indirect function-pointer call.
@@ -797,6 +871,31 @@ namespace codegen {
                 return builder_.CreateLoad(ll_ty, slot);
             }
 
+            // Materializes a pointer-to-trait-handle coercion sema already decided (see
+            // TraitCoercion's doc comment in sema.hpp): word 0 = the source pointer (already
+            // an opaque 'ptr' — pointer-like casts are no-ops at the IR level, see
+            // is_pointer_like's callers — so no cast instruction is needed), word 1 = the
+            // (trait, pointee-type) vtable global's address, looked up by vtables_ (built by
+            // declare_vtables(), never re-derived here).
+            auto emit_trait_coercion(const ast::Expr &expr, const sema::TraitCoercion &tc) -> llvm::Value * {
+                auto *data_ptr = emit_expr(expr);
+
+                const auto from = current_module_->expr_types.at(sema::get_expr_key(expr));
+                const auto &pointee_ty = sema_program_.pointer_pointees.at(from.pointee_index);
+                const auto [pointee_module, pointee_name] = sema::find_type_module_and_name(pointee_ty, sema_program_);
+
+                const sema::ResolvedType trait_ty{.kind = sema::TypeKind::Trait, .trait_index = tc.trait_index};
+                const auto [trait_module, trait_name] = sema::find_type_module_and_name(trait_ty, sema_program_);
+
+                const auto it = vtables_.find({trait_module, trait_name, pointee_module, pointee_name});
+                if (it == vtables_.end()) {
+                    report_codegen_error(diag_, {}, "internal error: missing vtable for trait coercion");
+                    return llvm::UndefValue::get(llvm_type(*current_module_path_, trait_ty));
+                }
+
+                return build_trait_handle_value(data_ptr, it->second, trait_ty, *current_module_path_);
+            }
+
             auto validate_hosted_main() const -> const sema::FunctionSymbol * {
                 const auto root_it = sema_program_.modules.find(ast_program_.root_module_path);
                 if (root_it == sema_program_.modules.end()) {
@@ -893,6 +992,76 @@ namespace codegen {
                 }
             }
 
+            // Same shape as declare_methods() above, but sourced from the Program-level
+            // trait-impl registry instead of ProgramModule::methods, and keyed via
+            // method_fn_key_for() (Type::Trait::method) so a trait-impl method never
+            // collides with a same-named inherent method in functions_/FunctionKey.
+            void declare_trait_methods() {
+                for (const auto &impls : sema_program_.trait_impls_by_type | std::views::values) {
+                    for (const auto &impl_info : impls) {
+                        for (const auto &info : impl_info.methods | std::views::values) {
+                            if (!info.is_resolved) continue;
+
+                            // First param: opaque pointer (self) — identical shape to declare_methods().
+                            std::vector<llvm::Type *> param_types;
+                            param_types.push_back(llvm::PointerType::getUnqual(*context_));
+                            for (const auto &p : info.param_types) {
+                                param_types.push_back(llvm_type(impl_info.impl_module, p));
+                            }
+
+                            auto *fn_type = llvm::FunctionType::get(return_type(impl_info.impl_module, info.return_types), param_types, false);
+                            const auto key = method_fn_key_for(info);
+                            const auto fname = symbol_name(impl_info.impl_module, key);
+                            auto *llvm_fn = llvm::Function::Create(
+                                fn_type, llvm::GlobalValue::InternalLinkage, fname, *module_);
+                            functions_[FunctionKey{impl_info.impl_module, key}] = llvm_fn;
+                        }
+                    }
+                }
+            }
+
+            // One constant global per (trait, type) impl: an array of function pointers in
+            // the TRAIT's method declaration order (TraitInfo::methods — read, never
+            // re-derived). Each entry is the SAME llvm::Function* that static dispatch calls
+            // (declared just above by declare_trait_methods()) — no wrapper, no duplication.
+            // Must run after declare_trait_methods() so those Function*s already exist; may
+            // run before any body is emitted, since a vtable's constant array only needs
+            // stable function addresses, not defined bodies (mirrors emit_string_literal's
+            // data global).
+            void declare_vtables() {
+                for (const auto &impls : sema_program_.trait_impls_by_type | std::views::values) {
+                    for (const auto &impl_info : impls) {
+                        const auto *trait_info = sema_program_.trait_at(impl_info.trait_index);
+                        if (!trait_info) continue;
+
+                        std::vector<llvm::Constant *> elements;
+                        elements.reserve(trait_info->methods.size());
+                        for (const auto &trait_method : trait_info->methods) {
+                            llvm::Constant *entry = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
+                            if (const auto method_it = impl_info.methods.find(trait_method.name); method_it != impl_info.methods.end()) {
+                                const auto key = method_fn_key_for(method_it->second);
+                                if (const auto fn_it = functions_.find(FunctionKey{impl_info.impl_module, key}); fn_it != functions_.end()) {
+                                    entry = fn_it->second;
+                                }
+                            }
+                            // A missing entry here means sema already reported a conformance
+                            // error for this impl (missing method / signature mismatch) — the
+                            // null placeholder just keeps the vtable's shape well-formed so
+                            // codegen doesn't crash; diag_.has_errors() aborts the compile
+                            // before this module is ever handed back to the caller.
+                            elements.push_back(entry);
+                        }
+
+                        auto *array_ty = llvm::ArrayType::get(llvm::PointerType::getUnqual(*context_), elements.size());
+                        auto *init = llvm::ConstantArray::get(array_ty, elements);
+                        auto *global = new llvm::GlobalVariable(
+                            *module_, array_ty, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage, init,
+                            std::format(".vtable.{}", vtable_counter_++));
+                        vtables_[{impl_info.trait_module, impl_info.trait_name, impl_info.type_module, impl_info.type_name}] = global;
+                    }
+                }
+            }
+
             // Find the pointer ResolvedType for self_type in the current module's pointees.
             auto find_self_ptr_type(const sema::ResolvedType &self_type) const -> sema::ResolvedType {
                 for (size_t i = 0; i < sema_program_.pointer_pointees.size(); ++i) {
@@ -904,7 +1073,7 @@ namespace codegen {
             }
 
             void emit_method(const std::string &module_path, const std::string &type_name, const sema::MethodInfo &info) {
-                const auto key = method_fn_key(type_name, info.decl->name);
+                const auto key = method_fn_key_for(info);
                 current_function_ = functions_.at(FunctionKey{module_path, key});
                 current_returns_ = info.return_types;
                 locals_.clear();
@@ -963,6 +1132,22 @@ namespace codegen {
                         for (const auto &info : method_map | std::views::values) {
                             if (!info.is_resolved) continue;
                             emit_method(path, type_name, info);
+                        }
+                    }
+                }
+            }
+
+            // Fills trait-impl method bodies via emit_method() verbatim — it's already
+            // generic over (module_path, type_name, MethodInfo) and picks the right
+            // functions_ key on its own via method_fn_key_for().
+            void emit_trait_methods() {
+                for (const auto &impls : sema_program_.trait_impls_by_type | std::views::values) {
+                    for (const auto &impl_info : impls) {
+                        current_module_path_ = &impl_info.impl_module;
+                        current_module_ = &module_for(impl_info.impl_module);
+                        for (const auto &info : impl_info.methods | std::views::values) {
+                            if (!info.is_resolved) continue;
+                            emit_method(impl_info.impl_module, impl_info.type_name, info);
                         }
                     }
                 }
@@ -1252,6 +1437,17 @@ namespace codegen {
                     return emit_pointer_offset(rhs, lhs, rhs_type, false);
                 }
 
+                if (lhs_type.kind == sema::TypeKind::Trait || rhs_type.kind == sema::TypeKind::Trait) {
+                    // Sema only allows '==' / '!=' against 'nil' here. A trait handle is a
+                    // {data, vtable} aggregate, not a scalar/pointer — ICmp can't compare it
+                    // directly. Any handle built via the pointer-to-handle coercion always sets
+                    // both words together, so comparing just the vtable-pointer word (word 1)
+                    // against the other side's vtable word is sufficient to detect nil.
+                    auto *lhs_vtable = builder_.CreateExtractValue(lhs, {1});
+                    auto *rhs_vtable = builder_.CreateExtractValue(rhs, {1});
+                    return emit_compare(expr.op, lhs_vtable, rhs_vtable, sema::ResolvedType{.kind = sema::TypeKind::Anyptr});
+                }
+
                 if (expr.op == ast::BinaryOp::Equal || expr.op == ast::BinaryOp::NotEqual ||
                     expr.op == ast::BinaryOp::Less || expr.op == ast::BinaryOp::Greater ||
                     expr.op == ast::BinaryOp::LessEqual || expr.op == ast::BinaryOp::GreaterEqual) {
@@ -1340,6 +1536,9 @@ namespace codegen {
             auto emit_value_as(const ast::Expr &expr, const sema::ResolvedType &target, const std::string &target_module) -> llvm::Value * {
                 if (const auto it = current_module_->expr_variant_coercions.find(sema::get_expr_key(expr)); it != current_module_->expr_variant_coercions.end()) {
                     return emit_variant_coercion(expr, it->second);
+                }
+                if (const auto it = current_module_->expr_trait_coercions.find(sema::get_expr_key(expr)); it != current_module_->expr_trait_coercions.end()) {
+                    return emit_trait_coercion(expr, it->second);
                 }
                 const auto from = current_module_->expr_types.at(sema::get_expr_key(expr));
                 if (from.kind == sema::TypeKind::Array && target.kind == sema::TypeKind::Slice) {
@@ -1670,6 +1869,9 @@ namespace codegen {
                         if (obj_type.kind == sema::TypeKind::Pointer) {
                             receiver_type = sema_program_.pointer_pointees.at(obj_type.pointee_index);
                         }
+                        if (const auto dispatch_it = current_module_->expr_trait_dispatch.find(&call); dispatch_it != current_module_->expr_trait_dispatch.end()) {
+                            return emit_trait_handle_dispatch(call, (*member)->object, dispatch_it->second);
+                        }
                         const auto *method = sema::find_method(receiver_type, (*member)->member, sema_program_);
                         if (!method) {
                             // Struct field with function type → indirect call through field
@@ -1707,20 +1909,20 @@ namespace codegen {
                                 if (const auto *spread = std::get_if<std::unique_ptr<ast::SpreadExpr>>(&call.args[fixed_count])) {
                                     args.push_back(emit_value_as((*spread)->operand, slice_ty, method->impl_module));
                                     return builder_.CreateCall(
-                                        functions_.at(FunctionKey{method->impl_module, method_fn_key(method->type_name, method->decl->name)}),
+                                        functions_.at(FunctionKey{method->impl_module, method_fn_key_for(*method)}),
                                         args);
                                 }
                             }
                             args.push_back(emit_variadic_tail_slice(call.args, fixed_count, slice_ty, method->impl_module));
                             return builder_.CreateCall(
-                                functions_.at(FunctionKey{method->impl_module, method_fn_key(method->type_name, method->decl->name)}),
+                                functions_.at(FunctionKey{method->impl_module, method_fn_key_for(*method)}),
                                 args);
                         }
                         for (size_t i = 0; i < call.args.size(); ++i) {
                             args.push_back(emit_value_as(call.args[i], method->param_types[i], *current_module_path_));
                         }
                         return builder_.CreateCall(
-                            functions_.at(FunctionKey{method->impl_module, method_fn_key(method->type_name, method->decl->name)}),
+                            functions_.at(FunctionKey{method->impl_module, method_fn_key_for(*method)}),
                             args);
                     }
                 } else {
@@ -1817,6 +2019,13 @@ namespace codegen {
                         name = (*member)->member;
                     } else {
                         // Method call or struct-field fn-ptr
+                        if (const auto dispatch_it = current_module_->expr_trait_dispatch.find(&call); dispatch_it != current_module_->expr_trait_dispatch.end()) {
+                            const auto *trait_info = sema_program_.trait_at(dispatch_it->second.trait_index);
+                            if (trait_info && dispatch_it->second.method_order_index >= 0 &&
+                                static_cast<size_t>(dispatch_it->second.method_order_index) < trait_info->methods.size()) {
+                                return {*current_module_path_, trait_info->methods[dispatch_it->second.method_order_index].return_types};
+                            }
+                        }
                         const auto obj_type = current_module_->expr_types.at(sema::get_expr_key((*member)->object));
                         sema::ResolvedType receiver_type = obj_type;
                         if (obj_type.kind == sema::TypeKind::Pointer) {
@@ -1958,7 +2167,7 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, ast::LiteralBoolExpr>) {
                             return builder_.getInt1(v.value);
                         } else if constexpr (std::is_same_v<V, ast::LiteralNilExpr>) {
-                            if (ty.kind == sema::TypeKind::Slice)
+                            if (ty.kind == sema::TypeKind::Slice || ty.kind == sema::TypeKind::Trait)
                                 return llvm::ConstantAggregateZero::get(llvm_type(*current_module_path_, ty));
                             return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
                         } else if constexpr (std::is_same_v<V, ast::IdentExpr>) {
@@ -2172,6 +2381,17 @@ namespace codegen {
                 slice = builder_.CreateInsertValue(slice, ptr, {0});
                 slice = builder_.CreateInsertValue(slice, count, {1});
                 return slice;
+            }
+
+            // Builds a trait handle's two-word value: word 0 = data pointer (the source *T,
+            // already an opaque 'ptr' — no cast instruction needed, see is_pointer_like's
+            // callers), word 1 = the (trait, type) vtable global's address. Mirrors
+            // build_slice_value above exactly.
+            auto build_trait_handle_value(llvm::Value *data_ptr, llvm::Value *vtable_ptr, const sema::ResolvedType &trait_type, const std::string &type_module) -> llvm::Value * {
+                llvm::Value *handle = llvm::UndefValue::get(llvm_type(type_module, trait_type));
+                handle = builder_.CreateInsertValue(handle, data_ptr, {0});
+                handle = builder_.CreateInsertValue(handle, vtable_ptr, {1});
+                return handle;
             }
 
             // Builds the slice passed for the trailing loose arguments of a native '...T' variadic
@@ -2664,7 +2884,7 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, ast::LiteralBoolExpr>) {
                             return builder_.getInt1(v.value);
                         } else if constexpr (std::is_same_v<V, ast::LiteralNilExpr>) {
-                            if (ty.kind == sema::TypeKind::Slice)
+                            if (ty.kind == sema::TypeKind::Slice || ty.kind == sema::TypeKind::Trait)
                                 return llvm::ConstantAggregateZero::get(llvm_type(*current_module_path_, ty));
                             return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
                         } else if constexpr (std::is_same_v<V, ast::IdentExpr>) {

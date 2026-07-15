@@ -73,15 +73,25 @@ macro_param   ::= IDENT ':' type
 ### Impl Block
 
 ```ebnf
-impl_decl     ::= 'impl' named_type '{' { method_decl } '}'
+impl_decl     ::= 'impl' named_type '{' { method_decl } '}'                    (* bare impl *)
+               | 'impl' named_type 'for' named_type '{' { method_decl } '}'  (* trait impl *)
 
 method_decl   ::= [ 'pub' ] 'fn' IDENT
                   '(' ( 'self' | 'mut' 'self' )
-                      { ',' IDENT ':' type }
+                      { ',' [ 'mut' ] IDENT ':' type }
                   ')'
                   [ return_types ]
                   stmt
 ```
+
+In the trait-impl form (`impl TRAIT for TYPE { ... }`), `pub` on an individual
+`method_decl` is rejected — the trait's own visibility governs which methods
+are externally callable, not the impl block. See spec.md's "Traits and
+Dynamic Dispatch" section for the full semantics.
+
+Note: `method_decl`'s non-self params accept an optional `mut` prefix in the
+implementation (this differs from `trait_method_decl`'s params below, which do
+not accept `mut` at all).
 
 ---
 
@@ -104,6 +114,7 @@ type          ::= '*' type                              (* pointer *)
                | 'union' '(' 'enum' ')' '{'             (* tagged union *)
                    { IDENT [ ':' type ] }
                  '}'
+               | 'trait' '{' { trait_method_decl } '}'  (* trait handle; see Traits below *)
                | fn_type
                | named_type
                | builtin_type
@@ -119,7 +130,19 @@ builtin_type  ::= 'u8' | 'u16' | 'u32' | 'u64'
                | 'i8' | 'i16' | 'i32' | 'i64'
                | 'f32' | 'f64'
                | 'usize' | 'bool' | 'byte' | 'error' | 'anyptr'
+
+trait_method_decl ::= 'fn' IDENT
+                      '(' ( 'self' | 'mut' 'self' ) { ',' IDENT ':' type } ')'
+                      [ return_types ]
 ```
+
+A trait must declare at least one method (an empty `trait { }` is a parse
+error). `trait_method_decl` is signature-only (no body — a body is a parse
+error) and does not accept `pub` (a parse error — the trait's own visibility
+governs) or a native-variadic (`...T`) parameter (a parse error — variadic
+trait methods have no vtable entry representation). Unlike `method_decl`
+above, `trait_method_decl`'s non-self params do **not** accept a `mut`
+prefix.
 
 Note: Struct and enum fields in type definitions are newline-separated (not comma-separated).
 

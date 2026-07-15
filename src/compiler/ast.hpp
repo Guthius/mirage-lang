@@ -51,6 +51,7 @@ namespace ast {
     struct SliceType;
     struct EnumType;
     struct UnionType;
+    struct TraitType;
 
     using Type = std::variant<
         std::monostate,
@@ -62,7 +63,8 @@ namespace ast {
         std::unique_ptr<SliceType>,
         std::unique_ptr<EnumType>,
         std::unique_ptr<UnionType>,
-        std::unique_ptr<FunctionType>>;
+        std::unique_ptr<FunctionType>,
+        std::unique_ptr<TraitType>>;
 
     struct PointerType {
         Type pointee;
@@ -247,6 +249,29 @@ namespace ast {
 
         std::optional<Type> underlying_type;
         std::vector<Field> fields;
+        SourceLocation location;
+    };
+
+    // 'trait { fn method(self) -> T ... }' — a signature-only dispatch surface.
+    // Using a trait name in type position denotes a fat-pointer HANDLE, not the
+    // trait definition itself; see sema::TraitInfo / TypeKind::Trait.
+    struct TraitType {
+        struct Param {
+            std::string name;
+            Type type;
+            SourceLocation location;
+        };
+
+        struct Method {
+            std::string name;
+            bool is_mut_self;
+            std::vector<Param> params; // non-self params; no 'mut', no variadics (rejected by parser)
+            std::vector<Type> return_types;
+            SourceLocation location;      // 'fn' keyword
+            SourceLocation self_location; // the 'self' token itself
+        };
+
+        std::vector<Method> methods;
         SourceLocation location;
     };
 
@@ -644,7 +669,16 @@ namespace ast {
         SourceLocation location;
     };
 
-    using Decl = std::variant<FunctionDecl, ExtFunctionDecl, VarDecl, MacroDecl, TypeDecl, ImplDecl>;
+    // 'impl TRAIT for TYPE { ... }' — a trait implementation. Distinct from the bare
+    // 'impl TYPE { ... }' form (ImplDecl) above, which is left untouched.
+    struct TraitImplDecl {
+        NamedType trait_name;
+        NamedType type_name;
+        std::vector<ImplDecl::Function> functions;
+        SourceLocation location;
+    };
+
+    using Decl = std::variant<FunctionDecl, ExtFunctionDecl, VarDecl, MacroDecl, TypeDecl, ImplDecl, TraitImplDecl>;
 
     auto parse(std::span<Token> tokens, DiagnosticEngine &diagnostics) -> std::vector<Decl>;
 

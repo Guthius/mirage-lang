@@ -11,6 +11,9 @@ namespace sema {
                 if (mod_it->second.expr_variant_coercions.contains(get_expr_key(expr))) {
                     return false; // implicit tagged-union coercion has runtime stores
                 }
+                if (mod_it->second.expr_trait_coercions.contains(get_expr_key(expr))) {
+                    return false; // implicit pointer-to-trait-handle coercion has runtime stores
+                }
             }
 
             return std::visit(

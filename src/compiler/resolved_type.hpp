@@ -28,6 +28,7 @@ namespace sema {
         Enum,
         Union,
         Function,
+        Trait,
     };
 
     struct ResolvedType {
@@ -39,6 +40,7 @@ namespace sema {
         int enum_index = -1;
         int union_index = -1;   // global index into Program::unions
         int fn_index = -1;      // global index into Program::fn_signatures
+        int trait_index = -1;   // global index into Program::traits
 
         auto is_integer() const -> bool {
             switch (kind) {
@@ -91,7 +93,8 @@ namespace sema {
                    other.slice_index == slice_index &&
                    other.enum_index == enum_index &&
                    other.union_index == union_index &&
-                   other.fn_index == fn_index;
+                   other.fn_index == fn_index &&
+                   other.trait_index == trait_index;
         }
 
         auto operator!=(const ResolvedType &other) const -> bool {

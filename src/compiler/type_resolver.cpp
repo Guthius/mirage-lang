@@ -76,6 +76,7 @@ namespace sema {
                 return 8;
 
             case TypeKind::Slice:
+            case TypeKind::Trait: // fat pointer: {data: anyptr, vtable: *const VTable}, 16 bytes
                 return 16;
 
             default:
@@ -268,6 +269,25 @@ namespace sema {
                     return *ts->resolved;
                 }
 
+                if (ts->resolved && ts->resolved->kind == TypeKind::Trait) {
+                    const int slot = ts->resolved->trait_index;
+                    const auto *info = program.trait_at(slot);
+                    if (!info) return error(diag, loc, std::format("internal error: invalid trait index for '{}'", name));
+                    if (info->layout_done) return *ts->resolved;
+
+                    const auto key = std::make_pair(module_path, name);
+                    if (program.resolve_state.trait_resolving.contains(key)) {
+                        return error(diag, loc, std::format("trait cycle detected at '{}'", name));
+                    }
+
+                    program.resolve_state.trait_resolving.insert(key);
+                    Resolver inner{program, diag};
+                    inner.layout_trait(module_path, slot, std::get<std::unique_ptr<ast::TraitType>>(ts->decl->type));
+                    program.resolve_state.trait_resolving.erase(key);
+
+                    return *ts->resolved;
+                }
+
                 return resolve_final_shallow(module_path, name, check_pub, loc);
             }
 
@@ -330,6 +350,7 @@ namespace sema {
                 if (t.kind == TypeKind::Struct) { const auto *info = program.struct_at(t.struct_index); return info ? info->align : 1; }
                 if (t.kind == TypeKind::Array) { const auto *info = program.array_at(t.array_index); return info ? info->align : 1; }
                 if (t.kind == TypeKind::Slice) return 8;
+                if (t.kind == TypeKind::Trait) return 8; // primitive_align would wrongly forward to primitive_size's 16
                 if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_align(info->underlying_type.kind) : 1; }
                 if (t.kind == TypeKind::Union) { const auto *info = program.union_at(t.union_index); return info ? info->align : 1; }
                 return primitive_align(t.kind);
@@ -697,6 +718,31 @@ namespace sema {
                 program.unions[slot] = std::move(info);
             }
 
+            // Resolves each trait method's non-self param/return types, in declaration
+            // order. That order IS the vtable layout and is recorded here once, in
+            // TraitInfo::methods — codegen must read it, never re-derive it.
+            void layout_trait(const std::string &module_path, const int slot, const std::unique_ptr<ast::TraitType> &decl) {
+                TraitInfo info;
+                info.module_path = module_path;
+
+                for (auto &method : decl->methods) {
+                    TraitMethodInfo m;
+                    m.name = method.name;
+                    m.is_mut_self = method.is_mut_self;
+                    m.location = method.location;
+                    for (auto &p : method.params) {
+                        m.params.push_back(resolve_field_type(module_path, p.type, p.location));
+                    }
+                    for (auto &rt : method.return_types) {
+                        m.return_types.push_back(resolve_field_type(module_path, rt, method.location));
+                    }
+                    info.methods.push_back(std::move(m));
+                }
+
+                info.layout_done = true;
+                program.traits[slot] = std::move(info);
+            }
+
             auto resolve_type_impl(const ast::Type &type, const std::string &module_path) -> ResolvedType {
                 return std::visit(
                     [&]<typename T>(const T &v) -> ResolvedType {
@@ -764,6 +810,10 @@ namespace sema {
                                 sig.return_types.push_back(resolve_type_impl(rt, module_path));
                             }
                             return intern_function_type(program, std::move(sig));
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TraitType>>) {
+                            // Anonymous trait types have no name to 'impl', making them useless as
+                            // handle targets — traits only exist for named, impl-able dispatch surfaces.
+                            return error(diag, v->location, "trait types must be declared via 'type Name = trait { ... }'; anonymous trait types are not supported");
                         } else {
                             return ResolvedType{.kind = TypeKind::Invalid};
                         }
