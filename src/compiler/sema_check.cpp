@@ -226,9 +226,12 @@ namespace sema {
             }
 
             if (!trait_method) {
-                const auto [trait_module, trait_name] = find_type_module_and_name(receiver_type, program);
-                error(diag, loc, std::format("no method '{}' on trait '{}'", method_name, trait_name.empty() ? "?" : trait_name));
-                return std::vector<ResolvedType>{};
+                // Not one of the trait's own (dynamically-dispatched) methods — it may still be
+                // an inherent method from a bare 'impl Control { ... }' block (e.g. a default
+                // method implemented in terms of the trait's dynamic methods). Let the caller
+                // fall through to find_method() for that lookup; only find_method's own failure
+                // is a real "no such method" error.
+                return std::nullopt;
             }
 
             check_call_args(args, trait_method->params, false, locals, module_path, program, diag, loc, method_name, loop_depth, defer_loop_base, fn_returns_error);
