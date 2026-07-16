@@ -404,7 +404,19 @@ namespace codegen {
                 }
                 const auto &trait_method = trait_info->methods[dispatch.method_order_index];
 
-                auto *handle = emit_expr(receiver_expr);
+                // receiver_expr may be a *Trait (e.g. a '&child' loop variable, or a pointer
+                // field) rather than the trait handle value itself — sema's dispatch decision
+                // auto-derefs one pointer level (see try_trait_handle_dispatch), so codegen must
+                // mirror that: load the fat-pointer struct through the pointer before extracting.
+                const auto receiver_static_type = current_module_->expr_types.at(sema::get_expr_key(receiver_expr));
+                llvm::Value *handle;
+                if (receiver_static_type.kind == sema::TypeKind::Pointer) {
+                    auto *handle_ptr = emit_expr(receiver_expr);
+                    auto *handle_ty = llvm::StructType::get(*context_, {llvm::PointerType::getUnqual(*context_), llvm::PointerType::getUnqual(*context_)});
+                    handle = builder_.CreateLoad(handle_ty, handle_ptr);
+                } else {
+                    handle = emit_expr(receiver_expr);
+                }
                 auto *data_ptr = builder_.CreateExtractValue(handle, {0});
                 auto *vtable_ptr = builder_.CreateExtractValue(handle, {1});
 
