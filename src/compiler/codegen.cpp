@@ -1,6 +1,7 @@
 #include "codegen.hpp"
 
 #include <llvm/ADT/APFloat.h>
+#include <llvm/IR/Attributes.h>
 #include <llvm/IR/ConstantFold.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
@@ -53,6 +54,27 @@ namespace codegen {
         struct StructLowering {
             llvm::StructType *type = nullptr;
             std::vector<unsigned> field_indices;
+        };
+
+        // A scalar leaf field within a struct, used only for System V x86-64 eightbyte
+        // classification (see classify_struct_eightbytes) — offset is relative to the
+        // classified struct's own start, not any enclosing type.
+        struct AbiLeaf {
+            uint32_t offset = 0;
+            uint32_t size = 0;
+            bool is_float = false;
+        };
+
+        // Result of classifying a struct type for passing/returning by value across an
+        // 'ext fn' boundary, per the System V x86-64 ABI: either it must be passed
+        // indirectly via a hidden pointer (MEMORY class - struct larger than 16 bytes, or
+        // containing a union we don't attempt to merge-classify), or it fits in one or two
+        // coerced scalar/vector registers ('parts').
+        struct AbiClassification {
+            bool indirect = false;
+            llvm::StructType *raw_type = nullptr; // the existing packed Mirage struct type
+            uint32_t raw_align = 1;
+            std::vector<llvm::Type *> parts; // 1-2 entries when !indirect
         };
 
         struct FunctionKey {
@@ -504,6 +526,124 @@ namespace codegen {
                 }
             }
 
+            // Recursively flattens 'type' (placed at 'base_offset' bytes into whatever it's
+            // nested inside) into scalar leaves for System V x86-64 eightbyte classification.
+            // Unions aren't merge-classified (SysV's real rule for them is more involved than
+            // any struct in these bindings needs) - encountering one just sets 'saw_union' so
+            // the caller falls back to passing the whole aggregate indirectly, which is always
+            // ABI-legal, just occasionally more conservative than necessary.
+            void collect_abi_leaves(const sema::ResolvedType &type, uint32_t base_offset, std::vector<AbiLeaf> &out, bool &saw_union) {
+                switch (type.kind) {
+                case sema::TypeKind::Struct:
+                    for (const auto &field : sema_program_.structs.at(type.struct_index).fields) {
+                        collect_abi_leaves(field.type, base_offset + field.offset, out, saw_union);
+                    }
+                    return;
+                case sema::TypeKind::Array:
+                    {
+                        const auto &array = sema_program_.arrays.at(type.array_index);
+                        const uint32_t elem_size = size_of(*current_module_path_, array.element_type);
+                        for (uint64_t i = 0; i < array.count; ++i) {
+                            collect_abi_leaves(array.element_type, base_offset + static_cast<uint32_t>(i) * elem_size, out, saw_union);
+                        }
+                    }
+                    return;
+                case sema::TypeKind::Union:
+                    saw_union = true;
+                    return;
+                case sema::TypeKind::Slice:
+                case sema::TypeKind::Trait:
+                    // Fat pointer: {data: anyptr, vtable/len: i64}, two non-float eightbytes.
+                    out.push_back({.offset = base_offset, .size = 8, .is_float = false});
+                    out.push_back({.offset = base_offset + 8, .size = 8, .is_float = false});
+                    return;
+                case sema::TypeKind::Enum:
+                    collect_abi_leaves(sema_program_.enums.at(type.enum_index).underlying_type, base_offset, out, saw_union);
+                    return;
+                default:
+                    {
+                        const uint32_t size = primitive_size(type.kind);
+                        if (size == 0) {
+                            return;
+                        }
+                        out.push_back({.offset = base_offset, .size = size, .is_float = type.kind == sema::TypeKind::F32 || type.kind == sema::TypeKind::F64});
+                    }
+                    return;
+                }
+            }
+
+            // Classifies a struct type per the System V x86-64 ABI's eightbyte rules, for
+            // passing/returning it by value across an 'ext fn' boundary. Real C functions
+            // (raylib, libc, ...) expect small structs to arrive coerced into packed
+            // integer/SSE registers rather than as a raw LLVM aggregate - without this, LLVM's
+            // default lowering of a directly-passed aggregate splits it into one leaf register
+            // per field, which doesn't match what the real callee reads. See the plan doc for
+            // the worked Color/Vector3/Rectangle examples this produces.
+            auto classify_struct_eightbytes(int struct_index) -> AbiClassification {
+                const auto &info = sema_program_.structs.at(struct_index);
+
+                AbiClassification cls;
+                cls.raw_type = struct_lowering(struct_index).type;
+                cls.raw_align = std::max<uint32_t>(1, info.align);
+
+                if (info.size == 0 || info.size > 16) {
+                    cls.indirect = true;
+                    return cls;
+                }
+
+                std::vector<AbiLeaf> leaves;
+                bool saw_union = false;
+                for (const auto &field : info.fields) {
+                    collect_abi_leaves(field.type, field.offset, leaves, saw_union);
+                }
+                if (saw_union) {
+                    cls.indirect = true;
+                    return cls;
+                }
+
+                const uint32_t num_slots = (info.size + 7) / 8;
+                for (uint32_t slot = 0; slot < num_slots; ++slot) {
+                    const uint32_t slot_start = slot * 8;
+                    const uint32_t slot_end = std::min(slot_start + 8, info.size);
+                    const uint32_t n = slot_end - slot_start;
+
+                    bool any_leaf = false;
+                    bool all_float = true;
+                    uint32_t float_bytes = 0;
+                    bool has_eightbyte_float_leaf = false;
+                    for (const auto &leaf : leaves) {
+                        const uint32_t overlap_start = std::max(leaf.offset, slot_start);
+                        const uint32_t overlap_end = std::min(leaf.offset + leaf.size, slot_end);
+                        if (overlap_start >= overlap_end) {
+                            continue;
+                        }
+                        any_leaf = true;
+                        if (!leaf.is_float) {
+                            all_float = false;
+                        } else {
+                            float_bytes += overlap_end - overlap_start;
+                            if (leaf.size == 8) {
+                                has_eightbyte_float_leaf = true;
+                            }
+                        }
+                    }
+
+                    if (any_leaf && all_float && n == 8 && float_bytes == 8) {
+                        cls.parts.push_back(has_eightbyte_float_leaf
+                                                 ? static_cast<llvm::Type *>(llvm::Type::getDoubleTy(*context_))
+                                                 : static_cast<llvm::Type *>(llvm::FixedVectorType::get(llvm::Type::getFloatTy(*context_), 2)));
+                    } else if (any_leaf && all_float && n == 4 && float_bytes == 4) {
+                        cls.parts.push_back(llvm::Type::getFloatTy(*context_));
+                    } else {
+                        // INTEGER class (or a mixed/odd-shaped slot we don't try to represent
+                        // as float) - coerce to the exact-width integer covering this slot.
+                        cls.parts.push_back(llvm::IntegerType::get(*context_, n * 8));
+                    }
+                }
+
+                return cls;
+            }
+
             void declare_unions() {
                 for (size_t i = 0; i < sema_program_.unions.size(); ++i) {
                     const auto &info = sema_program_.unions[i];
@@ -517,6 +657,57 @@ namespace codegen {
                     param_types.push_back(llvm_type(module_path, param));
                 }
                 return llvm::FunctionType::get(return_type(module_path, returns), param_types, is_vararg);
+            }
+
+            // Like llvm_type(), but for a struct crossing an 'ext fn' boundary: returns the
+            // System V x86-64 ABI-coerced representation instead of the raw Mirage struct
+            // type (a real C callee never sees the latter directly). Non-struct types are
+            // unaffected.
+            auto ext_abi_param_type(const sema::ResolvedType &type, const std::string &module_path) -> llvm::Type * {
+                if (type.kind != sema::TypeKind::Struct) {
+                    return llvm_type(module_path, type);
+                }
+                const auto cls = classify_struct_eightbytes(type.struct_index);
+                if (cls.indirect) {
+                    return llvm::PointerType::getUnqual(*context_);
+                }
+                if (cls.parts.size() == 1) {
+                    return cls.parts[0];
+                }
+                return llvm::StructType::get(*context_, cls.parts, false);
+            }
+
+            // Builds the llvm::FunctionType for an 'ext fn' declaration, ABI-coercing any
+            // struct-by-value parameter or return type. Mirror this file's function_type()
+            // for everything else - kept separate (rather than adding a flag to
+            // function_type()) since internal Mirage-to-Mirage calls must keep passing raw
+            // aggregates: the compiler controls both sides of those calls, so they're
+            // self-consistent regardless of real C ABI rules, and coercing them would only
+            // add risk with no benefit.
+            auto ext_function_type(const std::string &module_path, const std::vector<sema::ResolvedType> &params, const std::optional<sema::ResolvedType> &ret, const bool is_vararg) -> llvm::FunctionType * {
+                std::vector<llvm::Type *> param_types;
+                llvm::Type *ret_type = llvm::Type::getVoidTy(*context_);
+
+                if (ret) {
+                    if (ret->kind == sema::TypeKind::Struct) {
+                        const auto cls = classify_struct_eightbytes(ret->struct_index);
+                        if (cls.indirect) {
+                            param_types.push_back(llvm::PointerType::getUnqual(*context_)); // sret
+                        } else if (cls.parts.size() == 1) {
+                            ret_type = cls.parts[0];
+                        } else {
+                            ret_type = llvm::StructType::get(*context_, cls.parts, false);
+                        }
+                    } else {
+                        ret_type = llvm_type(module_path, *ret);
+                    }
+                }
+
+                for (const auto &param : params) {
+                    param_types.push_back(ext_abi_param_type(param, module_path));
+                }
+
+                return llvm::FunctionType::get(ret_type, param_types, is_vararg);
             }
 
             void declare_globals_and_functions() {
@@ -537,10 +728,6 @@ namespace codegen {
                                 fname, *module_);
                             functions_[FunctionKey{path, name}] = llvm_fn;
                         } else if (const auto *ef = std::get_if<sema::ExtFunctionSymbol>(&sym)) {
-                            std::vector<sema::ResolvedType> returns;
-                            if (ef->return_type) {
-                                returns.push_back(*ef->return_type);
-                            }
                             // External C symbols are process-global, not module-scoped: if another
                             // module already declared the same name, reuse that declaration instead
                             // of creating a second one (LLVM would otherwise rename it to `name.N`,
@@ -548,9 +735,29 @@ namespace codegen {
                             auto *llvm_fn = module_->getFunction(name);
                             if (!llvm_fn) {
                                 llvm_fn = llvm::Function::Create(
-                                    function_type(path, ef->params, returns, ef->is_variadic),
+                                    ext_function_type(path, ef->params, ef->return_type, ef->is_variadic),
                                     llvm::GlobalValue::ExternalLinkage,
                                     name, *module_);
+
+                                unsigned param_idx = 0;
+                                if (ef->return_type && ef->return_type->kind == sema::TypeKind::Struct) {
+                                    const auto cls = classify_struct_eightbytes(ef->return_type->struct_index);
+                                    if (cls.indirect) {
+                                        llvm_fn->addParamAttr(0, llvm::Attribute::getWithStructRetType(*context_, cls.raw_type));
+                                        llvm_fn->addParamAttr(0, llvm::Attribute::getWithAlignment(*context_, llvm::Align(cls.raw_align)));
+                                        param_idx = 1;
+                                    }
+                                }
+                                for (const auto &param : ef->params) {
+                                    if (param.kind == sema::TypeKind::Struct) {
+                                        const auto cls = classify_struct_eightbytes(param.struct_index);
+                                        if (cls.indirect) {
+                                            llvm_fn->addParamAttr(param_idx, llvm::Attribute::getWithByValType(*context_, cls.raw_type));
+                                            llvm_fn->addParamAttr(param_idx, llvm::Attribute::getWithAlignment(*context_, llvm::Align(cls.raw_align)));
+                                        }
+                                    }
+                                    ++param_idx;
+                                }
                             }
                             ext_functions_[path + "\n" + name] = llvm_fn;
                         }
@@ -1574,6 +1781,52 @@ namespace codegen {
                 return emit_expr(expr);
             }
 
+            // Like emit_value_as(), but for 'ext fn' call arguments: struct-typed arguments
+            // are coerced to their System V x86-64 ABI representation (see
+            // classify_struct_eightbytes) instead of being passed as a raw aggregate, which is
+            // what a real C callee (raylib, libc, ...) actually expects. Non-struct arguments
+            // are unaffected. When the argument is a struct, its classification is written to
+            // '*out_cls' so the caller can attach matching byval/sret attributes to the actual
+            // CallInst - LLVM requires those on the call site itself, not just the callee
+            // declaration.
+            auto emit_ext_call_arg(const ast::Expr &expr, const sema::ResolvedType &param_type, const std::string &param_module, AbiClassification *out_cls = nullptr) -> llvm::Value * {
+                if (param_type.kind != sema::TypeKind::Struct) {
+                    return emit_value_as(expr, param_type, param_module);
+                }
+
+                const auto cls = classify_struct_eightbytes(param_type.struct_index);
+                if (out_cls) {
+                    *out_cls = cls;
+                }
+
+                llvm::Value *ptr;
+                if (is_addressable_expr(expr)) {
+                    ptr = emit_lvalue(expr).ptr;
+                } else {
+                    // A temporary struct value with no address of its own (e.g. a call's
+                    // return value) - spill it so the coercion below has memory to read from.
+                    auto *value = emit_expr(expr);
+                    auto *slot = create_entry_alloca(current_function_, cls.raw_type, "ext.arg");
+                    builder_.CreateStore(value, slot);
+                    ptr = slot;
+                }
+
+                if (cls.indirect) {
+                    return ptr;
+                }
+                if (cls.parts.size() == 1) {
+                    return builder_.CreateLoad(cls.parts[0], ptr);
+                }
+
+                auto *low = builder_.CreateLoad(cls.parts[0], ptr);
+                auto *high_ptr = builder_.CreateConstGEP1_32(llvm::Type::getInt8Ty(*context_), ptr, 8);
+                auto *high = builder_.CreateLoad(cls.parts[1], high_ptr);
+                llvm::Value *agg = llvm::UndefValue::get(llvm::StructType::get(*context_, cls.parts, false));
+                agg = builder_.CreateInsertValue(agg, low, {0});
+                agg = builder_.CreateInsertValue(agg, high, {1});
+                return agg;
+            }
+
             auto emit_macro_arg(const MacroArg &arg) -> llvm::Value * {
                 const auto *saved_path = current_module_path_;
                 const auto *saved_module = current_module_;
@@ -2001,14 +2254,60 @@ namespace codegen {
                     return builder_.CreateCall(functions_.at(FunctionKey{target_module, name}), args);
                 }
                 if (const auto *ef = std::get_if<sema::ExtFunctionSymbol>(&sym_it->second)) {
+                    // Struct-by-value args/return crossing into real C code need System V
+                    // x86-64 ABI coercion (see classify_struct_eightbytes) - LLVM's default
+                    // lowering of a raw aggregate argument doesn't match what a real C callee
+                    // (raylib, libc, ...) reads. byval/sret attributes must be attached to the
+                    // CallInst itself, not just the callee's declaration, so track which
+                    // argument positions need them as they're built.
+                    std::vector<std::pair<unsigned, AbiClassification>> byval_args;
                     for (size_t i = 0; i < call.args.size(); ++i) {
                         if (i < ef->params.size()) {
-                            args.push_back(emit_value_as(call.args[i], ef->params[i], *current_module_path_));
+                            AbiClassification cls;
+                            auto *value = emit_ext_call_arg(call.args[i], ef->params[i], *current_module_path_, &cls);
+                            if (ef->params[i].kind == sema::TypeKind::Struct && cls.indirect) {
+                                byval_args.emplace_back(static_cast<unsigned>(args.size()), cls);
+                            }
+                            args.push_back(value);
                         } else {
                             args.push_back(emit_expr(call.args[i]));
                         }
                     }
-                    return builder_.CreateCall(ext_functions_.at(global_key(target_module, name)), args);
+
+                    auto *callee = ext_functions_.at(global_key(target_module, name));
+                    const auto apply_byval_attrs = [&](llvm::CallInst *call_inst, const unsigned index_offset) {
+                        for (const auto &[index, cls] : byval_args) {
+                            call_inst->addParamAttr(index + index_offset, llvm::Attribute::getWithByValType(*context_, cls.raw_type));
+                            call_inst->addParamAttr(index + index_offset, llvm::Attribute::getWithAlignment(*context_, llvm::Align(cls.raw_align)));
+                        }
+                    };
+
+                    if (ef->return_type && ef->return_type->kind == sema::TypeKind::Struct) {
+                        const auto ret_cls = classify_struct_eightbytes(ef->return_type->struct_index);
+                        if (ret_cls.indirect) {
+                            auto *ret_slot = create_entry_alloca(current_function_, ret_cls.raw_type, "ext.ret");
+                            std::vector<llvm::Value *> full_args;
+                            full_args.push_back(ret_slot);
+                            full_args.insert(full_args.end(), args.begin(), args.end());
+                            auto *call_inst = builder_.CreateCall(callee, full_args);
+                            call_inst->addParamAttr(0, llvm::Attribute::getWithStructRetType(*context_, ret_cls.raw_type));
+                            call_inst->addParamAttr(0, llvm::Attribute::getWithAlignment(*context_, llvm::Align(ret_cls.raw_align)));
+                            apply_byval_attrs(call_inst, 1);
+                            return builder_.CreateLoad(ret_cls.raw_type, ret_slot);
+                        }
+
+                        auto *call_inst = builder_.CreateCall(callee, args);
+                        apply_byval_attrs(call_inst, 0);
+                        // Round-trip the coerced return value through memory to reinterpret its
+                        // bytes back into the raw Mirage struct representation.
+                        auto *coerced_slot = create_entry_alloca(current_function_, call_inst->getType(), "ext.ret.coerced");
+                        builder_.CreateStore(call_inst, coerced_slot);
+                        return builder_.CreateLoad(ret_cls.raw_type, coerced_slot);
+                    }
+
+                    auto *call_inst = builder_.CreateCall(callee, args);
+                    apply_byval_attrs(call_inst, 0);
+                    return call_inst;
                 }
                 return nullptr;
             }
