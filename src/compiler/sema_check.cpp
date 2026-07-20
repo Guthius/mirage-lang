@@ -26,6 +26,15 @@ namespace sema {
             return fallback;
         }
 
+        // Struct/array/union/slice types lower to LLVM aggregate values (StructType/ArrayType),
+        // which ICmp cannot operate on directly (unlike Trait handles, which are unwrapped to
+        // their data pointer before comparison). Comparing them must be rejected in sema rather
+        // than left to crash codegen's ICmp emission.
+        auto is_aggregate_no_cmp(const ResolvedType &t) -> bool {
+            return t.kind == TypeKind::Struct || t.kind == TypeKind::Array ||
+                   t.kind == TypeKind::Union || t.kind == TypeKind::Slice;
+        }
+
         auto format_named_type(const ast::NamedType &named) -> std::string {
             std::string result = named.name;
             for (const ast::NamedType *m = named.member.get(); m; m = m->member.get()) {
@@ -80,6 +89,9 @@ namespace sema {
             case ast::BinaryOp::Greater:
             case ast::BinaryOp::LessEqual:
             case ast::BinaryOp::GreaterEqual:
+                if (is_aggregate_no_cmp(lhs) || is_aggregate_no_cmp(rhs)) {
+                    return error(diag, loc, "struct, array, union, and slice types do not support comparison operators");
+                }
                 if (!is_assignable(lhs, rhs) && !is_assignable(rhs, lhs)) {
                     return error(diag, loc, "operand type mismatch in comparison");
                 }
