@@ -28,6 +28,7 @@ namespace lexer {
             {"while",     TokenKind::KwWhile    },
             {"in",        TokenKind::KwIn       },
             {"import",    TokenKind::KwImport   },
+            {"import_bin",TokenKind::KwImportBin},
             {"namespace", TokenKind::KwNamespace},
             {"asm",       TokenKind::KwAsm      },
             {"macro",     TokenKind::KwMacro    },

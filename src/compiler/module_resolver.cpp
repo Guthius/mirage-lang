@@ -123,6 +123,22 @@ namespace ast {
         }
     }
 
+    auto resolve_contained_path(const std::string &base_dir, const std::string &relative_path) -> std::string {
+        const std::filesystem::path rel(relative_path);
+        if (rel.is_absolute()) {
+            return {};
+        }
+
+        std::error_code ec;
+        const auto candidate = std::filesystem::path(base_dir) / rel;
+        const auto canonical_candidate = std::filesystem::weakly_canonical(candidate, ec);
+        if (ec || !is_contained_in(std::filesystem::path(base_dir), canonical_candidate)) {
+            return {};
+        }
+
+        return canonical_candidate.string();
+    }
+
     auto canonicalize(const std::string &path) -> std::string {
         std::error_code error;
 

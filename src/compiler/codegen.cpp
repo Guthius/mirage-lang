@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cctype>
 #include <format>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <ranges>
@@ -2539,6 +2540,8 @@ namespace codegen {
                             return emit_incr_decr(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                             return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), sizeof_operand(*v));
+                        } else if constexpr (std::is_same_v<V, ast::ImportBinExpr>) {
+                            return emit_import_bin(v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) {
                             const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(v->operand));
                             if (operand_type.kind == sema::TypeKind::Array) {
@@ -3184,6 +3187,22 @@ namespace codegen {
                 return size_of(*current_module_path_, current_module_->expr_types.at(sema::get_expr_key(expr.operand)));
             }
 
+            // Sema has already validated the path (containment, existence) by the time codegen
+            // runs, so this just re-reads the bytes — no error reporting needed here, same trust
+            // relationship sizeof_operand has with its sema-side counterpart.
+            auto emit_import_bin(const ast::ImportBinExpr &expr) const -> llvm::Constant * {
+                const auto resolved = ast::resolve_contained_path(*current_module_path_, expr.path);
+                std::ifstream file(resolved, std::ios::binary);
+                const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
+                if (bytes.empty()) {
+                    // ConstantDataArray can't represent a zero-length array.
+                    return llvm::ConstantAggregateZero::get(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), 0));
+                }
+
+                return llvm::ConstantDataArray::get(*context_, bytes);
+            }
+
             auto emit_constant_expr(const ast::Expr &expr) -> llvm::Constant * {
                 return llvm::dyn_cast<llvm::Constant>(emit_const_or_runtime(expr, true));
             }
@@ -3249,6 +3268,8 @@ namespace codegen {
                             // alloca/store, which can't be constant-folded — falls through below.
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                             return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), sizeof_operand(*v));
+                        } else if constexpr (std::is_same_v<V, ast::ImportBinExpr>) {
+                            return emit_import_bin(v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                             auto *value = llvm::cast<llvm::Constant>(emit_const_or_runtime(v->value, true));
                             const auto from = current_module_->expr_types.at(sema::get_expr_key(v->value));

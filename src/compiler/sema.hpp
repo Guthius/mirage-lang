@@ -287,6 +287,8 @@ namespace sema {
     auto resolve_declared_type(const std::optional<ast::Type> &type, const std::optional<ast::Expr> &init,
                                 const std::string &module_path, Program &program, DiagnosticEngine &diag,
                                 const SourceLocation &decl_loc) -> std::optional<ResolvedType>;
+    auto resolve_import_bin_type(const std::string &module_path, const std::string &path, const SourceLocation &loc,
+                                  Program &program, DiagnosticEngine &diag) -> ResolvedType;
     auto is_assignable(const ResolvedType &from, const ResolvedType &to) -> bool;
     auto function_params_compatible(const std::vector<ResolvedType> &actual, const std::vector<ResolvedType> &expected) -> bool;
     auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType;

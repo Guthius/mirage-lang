@@ -33,6 +33,7 @@ enum class TokenKind : uint8_t {
     KwWhile,
     KwIn,
     KwImport,
+    KwImportBin,
     KwNamespace,
     KwAsm,
     KwMacro,

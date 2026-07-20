@@ -1,6 +1,8 @@
 #include "sema.hpp"
+#include "module_resolver.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <format>
 #include <unordered_map>
 
@@ -909,6 +911,30 @@ namespace sema {
         return intern_array(program, element, count,
                              resolver.size_of(module_path, element) * static_cast<uint32_t>(count),
                              resolver.align_of(module_path, element));
+    }
+
+    auto resolve_import_bin_type(const std::string &module_path, const std::string &path, const SourceLocation &loc,
+                                  Program &program, DiagnosticEngine &diag) -> ResolvedType {
+        const auto resolved = ast::resolve_contained_path(module_path, path);
+        if (resolved.empty()) {
+            return error(diag, loc, std::format("import_bin path '{}' escapes the module directory", path));
+        }
+
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(resolved, ec) || ec) {
+            return error(diag, loc, std::format("import_bin: file not found: '{}'", path));
+        }
+
+        const auto size = std::filesystem::file_size(resolved, ec);
+        if (ec) {
+            return error(diag, loc, std::format("import_bin: cannot read file: '{}'", path));
+        }
+
+        if (size > 1024 * 1024) {
+            diag.warn(DiagnosticStage::Sema, loc, std::format("import_bin: '{}' is {} bytes, exceeding 1 MiB", path, size));
+        }
+
+        return intern_array(program, ResolvedType{.kind = TypeKind::U8}, size, static_cast<uint32_t>(size), 1);
     }
 
     auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType {

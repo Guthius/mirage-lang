@@ -55,6 +55,10 @@ namespace sema {
                         return true;
                     }
 
+                    if constexpr (std::is_same_v<V, ast::ImportBinExpr>) {
+                        return true;
+                    }
+
                     if constexpr (std::is_same_v<V, ast::IotaExpr>) {
                         return true;
                     }

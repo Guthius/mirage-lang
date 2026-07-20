@@ -136,6 +136,11 @@ namespace ast {
         SourceLocation location;
     };
 
+    struct ImportBinExpr {
+        std::string path;
+        SourceLocation location;
+    };
+
     struct SizeOfExpr;
     struct TypeExpr;
     struct LenExpr;
@@ -194,6 +199,7 @@ namespace ast {
         std::unique_ptr<CallExpr>,
         std::unique_ptr<IncrDecrExpr>,
         ImportExpr,
+        ImportBinExpr,
         std::unique_ptr<SizeOfExpr>,
         std::unique_ptr<TypeExpr>,
         std::unique_ptr<LenExpr>,

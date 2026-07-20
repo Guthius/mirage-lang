@@ -276,6 +276,7 @@ namespace ast {
             case TokenKind::KwCast:
             case TokenKind::KwSizeOf:
             case TokenKind::KwLen:
+            case TokenKind::KwImportBin:
             case TokenKind::KwDefault:
             case TokenKind::KwUndefined:
             case TokenKind::KwMatch:
@@ -640,6 +641,20 @@ namespace ast {
                     .operand = std::move(operand),
                     .location = location,
                 });
+            }
+
+            if (parser.check(TokenKind::KwImportBin)) {
+                parser.advance();
+                parser.expect(TokenKind::LParen, "'('");
+
+                const auto path = parse_string_literal(parser);
+
+                parser.expect(TokenKind::RParen, "')'");
+
+                return ImportBinExpr{
+                    .path = path.value,
+                    .location = location,
+                };
             }
 
             if (parser.check(TokenKind::KwCast)) {

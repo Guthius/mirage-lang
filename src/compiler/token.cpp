@@ -26,6 +26,7 @@ auto token_kind_name(const TokenKind kind) -> const char * {
     case TokenKind::KwWhile:         return "KW_WHILE";
     case TokenKind::KwIn:            return "KW_IN";
     case TokenKind::KwImport:        return "KW_IMPORT";
+    case TokenKind::KwImportBin:     return "KW_IMPORT_BIN";
     case TokenKind::KwNamespace:     return "KW_NAMESPACE";
     case TokenKind::KwAsm:           return "KW_ASM";
     case TokenKind::KwMacro:         return "KW_MACRO";

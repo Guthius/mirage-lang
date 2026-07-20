@@ -1101,6 +1101,9 @@ namespace sema {
                 } else if constexpr (std::is_same_v<V, ast::ImportExpr>) {
                     return ResolvedType{.kind = TypeKind::Namespace};
 
+                } else if constexpr (std::is_same_v<V, ast::ImportBinExpr>) {
+                    return resolve_import_bin_type(module_path, v.path, v.location, program, diag);
+
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                     // sizeof on a (possibly qualified) TYPE name - checked
                     // first via try_resolve_namespace_chain so `sizeof(a.b.T)`
