@@ -293,6 +293,10 @@ namespace lexer {
                         return lex_identifier_or_keyword(start);
                     }
 
+                    if (ch == '.' && is_digit(peek())) {
+                        return lex_fractional_number(start);
+                    }
+
                     if (ch == '"') {
                         return lex_string(start);
                     }
@@ -351,6 +355,26 @@ namespace lexer {
                 }
 
                 return make_token(is_float ? TokenKind::FloatLiteral : TokenKind::IntLiteral, start);
+            }
+
+            // Called with 'start' at the leading '.' of a number with no integer part
+            // (e.g. '.35'); the caller has already confirmed a digit follows.
+            auto lex_fractional_number(const size_t start) -> Token {
+                skip_digits();
+
+                if (!at_end() && (peek() == 'e' || peek() == 'E')) {
+                    advance();
+
+                    if (!at_end() && (peek() == '+' || peek() == '-')) {
+                        advance();
+                    }
+
+                    while (!at_end() && is_digit(peek())) {
+                        advance();
+                    }
+                }
+
+                return make_token(TokenKind::FloatLiteral, start);
             }
 
             auto lex_hex_number(const size_t start) -> Token {
