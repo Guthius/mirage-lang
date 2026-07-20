@@ -160,6 +160,9 @@ namespace sema {
             // Function pointers can be cast to/from anyptr (C callback interop)
             if (from.kind == TypeKind::Function && to.kind == TypeKind::Anyptr) return true;
             if (from.kind == TypeKind::Anyptr && to.kind == TypeKind::Function) return true;
+            // Enums are represented as their underlying integer type - allow casting to/from it
+            if (from.kind == TypeKind::Enum && to.is_integer()) return true;
+            if (from.is_integer() && to.kind == TypeKind::Enum) return true;
             return from.is_scalar() && to.is_scalar();
         }
 

@@ -1532,6 +1532,16 @@ namespace codegen {
                     return value;
                 }
 
+                // Enums have no distinct LLVM representation - they're their underlying
+                // integer type (see llvm_type's TypeKind::Enum case) - so unwrap and
+                // reuse the existing integer/float/bool cast paths below.
+                if (from.kind == sema::TypeKind::Enum) {
+                    return emit_cast(value, sema_program_.enums.at(from.enum_index).underlying_type, to);
+                }
+                if (to.kind == sema::TypeKind::Enum) {
+                    return emit_cast(value, from, sema_program_.enums.at(to.enum_index).underlying_type);
+                }
+
                 if (from.kind == sema::TypeKind::Bool && to.kind != sema::TypeKind::Bool && to.is_integer()) {
                     return builder_.CreateZExt(value, to_ty);
                 }
