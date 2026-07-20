@@ -754,6 +754,7 @@ namespace sema {
 
                 if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr>) {
                     if (expected && expected->is_integer()) return *expected;
+                    if (expected && expected->is_float()) return *expected;
                     return ResolvedType{.kind = TypeKind::I32};
 
                 } else if constexpr (std::is_same_v<V, ast::LiteralFloatExpr>) {

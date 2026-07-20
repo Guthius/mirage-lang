@@ -2477,6 +2477,9 @@ namespace codegen {
                         const auto ty = expr_type(expr);
 
                         if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr>) {
+                            if (ty.is_float()) {
+                                return llvm::ConstantFP::get(llvm_type(*current_module_path_, ty), static_cast<double>(v.value));
+                            }
                             return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty), v.value, ty.is_signed());
                         } else if constexpr (std::is_same_v<V, ast::LiteralFloatExpr>) {
                             return llvm::ConstantFP::get(llvm_type(*current_module_path_, ty), v.value);
@@ -3194,6 +3197,9 @@ namespace codegen {
                         using V = std::decay_t<T>;
                         const auto ty = expr_type(expr);
                         if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr>) {
+                            if (ty.is_float()) {
+                                return llvm::ConstantFP::get(llvm_type(*current_module_path_, ty), static_cast<double>(v.value));
+                            }
                             return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty), v.value, ty.is_signed());
                         } else if constexpr (std::is_same_v<V, ast::LiteralFloatExpr>) {
                             return llvm::ConstantFP::get(llvm_type(*current_module_path_, ty), v.value);
