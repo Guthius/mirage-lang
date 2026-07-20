@@ -82,6 +82,9 @@ namespace ast {
     // fn(ParamType, ..., ...)                — variadic (last param is ...)
     struct FunctionType {
         std::vector<Type> param_types;
+        std::vector<std::string> param_names; // parallel to param_types; "" = unnamed.
+                                               // Cosmetic only (e.g. LSP hover) — never used
+                                               // for matching, identity, or interning.
         std::vector<Type> return_types; // empty = void, 1 = single, 2+ = multi
         bool is_variadic = false;
         SourceLocation location;

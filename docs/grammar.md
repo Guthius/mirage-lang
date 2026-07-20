@@ -121,8 +121,10 @@ type          ::= '*' type                              (* pointer *)
 
 fn_type       ::= 'fn' '(' [ fn_type_params ] ')' [ '->' type | '->' '(' type { ',' type } ')' ]
 
-fn_type_params ::= type { ',' type } [ ',' '...' ]
+fn_type_params ::= fn_type_param { ',' fn_type_param } [ ',' '...' ]
                 | '...'
+
+fn_type_param ::= [ IDENT ':' ] type
 
 named_type    ::= IDENT { '.' IDENT }
 

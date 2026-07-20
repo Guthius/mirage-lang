@@ -85,6 +85,12 @@ namespace sema {
     // Signature stored for a function-pointer type: fn(ParamTypes) -> ReturnTypes
     struct FunctionTypeInfo {
         std::vector<ResolvedType> param_types;
+        std::vector<std::string> param_names; // parallel to param_types; "" = unnamed.
+                                               // Cosmetic only (LSP hover) — deliberately
+                                               // excluded from intern_function_type's equality
+                                               // check, so differing names for the same
+                                               // structural signature don't cause duplicate
+                                               // interning; first-parsed name set wins.
         std::vector<ResolvedType> return_types; // empty=void, 1=single, 2+=multi
         bool is_variadic = false;
     };

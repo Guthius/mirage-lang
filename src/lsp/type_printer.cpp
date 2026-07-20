@@ -161,7 +161,15 @@ namespace lsp {
                 return "fn(...) -> <unknown>";
             }
             const auto &info = program.fn_signatures[type.fn_index];
-            std::string result = "fn(" + join_types(info.param_types, program, current_module_path) + (info.is_variadic ? ", ..." : "") + ")";
+            std::string params;
+            for (size_t i = 0; i < info.param_types.size(); ++i) {
+                if (i > 0) params += ", ";
+                if (i < info.param_names.size() && !info.param_names[i].empty()) {
+                    params += info.param_names[i] + ": ";
+                }
+                params += type_to_string(info.param_types[i], program, current_module_path);
+            }
+            std::string result = "fn(" + params + (info.is_variadic ? ", ..." : "") + ")";
             if (!info.return_types.empty()) {
                 result += " -> ";
                 result += info.return_types.size() == 1

@@ -231,6 +231,14 @@ def main() -> int:
     result = reg_hover(41, "member_slot")
     check(result is not None, "hover resolves a local variable used away from its declaration")
 
+    # Bug 4: optional argument names in function-pointer types (fn(item: *T) -> bool)
+    # must appear in hover text.
+    result = reg_hover(64, "visit")
+    check(result is not None, "hover resolves a local of a named function-pointer type")
+    if result:
+        value = result["contents"]["value"]
+        check("item: *NamedType" in value, f"hover shows the fn-pointer-type's argument name, got {value!r}")
+
     client.notify("textDocument/didClose", {"textDocument": {"uri": reg_uri}})
     client.read()  # publishDiagnostics
 

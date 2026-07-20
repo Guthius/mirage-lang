@@ -1766,6 +1766,7 @@ namespace ast {
             parser.expect(TokenKind::LParen, "'('");
 
             std::vector<Type> param_types;
+            std::vector<std::string> param_names; // parallel to param_types; "" = unnamed
             bool is_variadic = false;
 
             while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
@@ -1774,6 +1775,17 @@ namespace ast {
                     is_variadic = true;
                     break;
                 }
+                // Optional 'name:' prefix, purely for documentation (e.g. LSP hover);
+                // never used for matching or type identity. Safe with 1 token of
+                // lookahead because parse_named_type always starts with an Identifier
+                // and never itself contains a top-level ':' immediately following the
+                // leading identifier (qualified names use '.', not ':').
+                std::string param_name;
+                if (parser.check(TokenKind::Identifier) && parser.check_next(TokenKind::Colon)) {
+                    param_name = parser.expect_identifier();
+                    parser.expect(TokenKind::Colon, "':'");
+                }
+                param_names.push_back(std::move(param_name));
                 param_types.push_back(parse_type(parser));
                 skip_semicolons(parser);
                 if (!parser.check(TokenKind::RParen)) {
@@ -1802,6 +1814,7 @@ namespace ast {
 
             return std::make_unique<FunctionType>(FunctionType{
                 .param_types = std::move(param_types),
+                .param_names = std::move(param_names),
                 .return_types = std::move(return_types),
                 .is_variadic = is_variadic,
                 .location = location,

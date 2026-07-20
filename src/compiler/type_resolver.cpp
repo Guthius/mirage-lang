@@ -803,6 +803,7 @@ namespace sema {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::FunctionType>>) {
                             FunctionTypeInfo sig;
                             sig.is_variadic = v->is_variadic;
+                            sig.param_names = v->param_names; // cosmetic only; NOT compared in intern_function_type
                             for (const auto &pt : v->param_types) {
                                 sig.param_types.push_back(resolve_type_impl(pt, module_path));
                             }
