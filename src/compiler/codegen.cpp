@@ -36,6 +36,12 @@ namespace codegen {
             const ast::Expr *expr = nullptr;
             const std::string *module_path = nullptr;
             const sema::ProgramModule *module = nullptr;
+            // The macro parameter's declared type/module, so a reference to this argument
+            // inside the macro body can go through emit_value_as() and pick up whatever
+            // coercion (e.g. concrete pointer -> trait handle) sema recorded for the
+            // call-site expression against the declared parameter type.
+            const sema::ResolvedType *param_type = nullptr;
+            const std::string *param_module = nullptr;
             // The macro_args_ substitution map as it existed at the call site, before this
             // macro's own parameters were bound. Restored while evaluating 'expr' so that an
             // argument expression referencing an identifier with the same name as this macro's
@@ -1657,14 +1663,17 @@ namespace codegen {
                 }
 
                 if (lhs_type.kind == sema::TypeKind::Trait || rhs_type.kind == sema::TypeKind::Trait) {
-                    // Sema only allows '==' / '!=' against 'nil' here. A trait handle is a
-                    // {data, vtable} aggregate, not a scalar/pointer — ICmp can't compare it
-                    // directly. Any handle built via the pointer-to-handle coercion always sets
-                    // both words together, so comparing just the vtable-pointer word (word 1)
-                    // against the other side's vtable word is sufficient to detect nil.
-                    auto *lhs_vtable = builder_.CreateExtractValue(lhs, {1});
-                    auto *rhs_vtable = builder_.CreateExtractValue(rhs, {1});
-                    return emit_compare(expr.op, lhs_vtable, rhs_vtable, sema::ResolvedType{.kind = sema::TypeKind::Anyptr});
+                    // Sema allows '==' / '!=' against 'nil' or another handle of the same
+                    // trait type. A trait handle is a {data, vtable} aggregate, not a
+                    // scalar/pointer — ICmp can't compare it directly. Comparing the
+                    // data-pointer word (word 0) checks object identity directly, and also
+                    // correctly detects nil since a nil handle lowers to an all-zero
+                    // aggregate (both words null). Comparing the vtable word instead would be
+                    // wrong here: two different objects of the same concrete type share the
+                    // same vtable pointer, so they'd falsely compare equal.
+                    auto *lhs_data = builder_.CreateExtractValue(lhs, {0});
+                    auto *rhs_data = builder_.CreateExtractValue(rhs, {0});
+                    return emit_compare(expr.op, lhs_data, rhs_data, sema::ResolvedType{.kind = sema::TypeKind::Anyptr});
                 }
 
                 if (expr.op == ast::BinaryOp::Equal || expr.op == ast::BinaryOp::NotEqual ||
@@ -1834,7 +1843,7 @@ namespace codegen {
                 current_module_path_ = arg.module_path;
                 current_module_ = arg.module;
                 macro_args_ = arg.outer_args ? *arg.outer_args : std::unordered_map<std::string, MacroArg>{};
-                auto *value = emit_expr(*arg.expr);
+                auto *value = emit_value_as(*arg.expr, *arg.param_type, *arg.param_module);
                 macro_args_ = std::move(saved_macro_args);
                 current_module_path_ = saved_path;
                 current_module_ = saved_module;
@@ -2218,7 +2227,7 @@ namespace codegen {
                     auto saved = macro_args_;
                     auto outer = std::make_shared<const std::unordered_map<std::string, MacroArg>>(saved);
                     for (size_t i = 0; i < macro->decl->params.size(); ++i) {
-                        macro_args_[macro->decl->params[i].name] = MacroArg{.expr = &call.args[i], .module_path = current_module_path_, .module = current_module_, .outer_args = outer};
+                        macro_args_[macro->decl->params[i].name] = MacroArg{.expr = &call.args[i], .module_path = current_module_path_, .module = current_module_, .param_type = &macro->params[i], .param_module = &target_module, .outer_args = outer};
                     }
                     const auto *saved_path = current_module_path_;
                     const auto *saved_module = current_module_;
@@ -3278,7 +3287,7 @@ namespace codegen {
                                         auto saved_args = macro_args_;
                                         auto outer = std::make_shared<const std::unordered_map<std::string, MacroArg>>(saved_args);
                                         for (size_t i = 0; i < macro->decl->params.size(); ++i) {
-                                            macro_args_[macro->decl->params[i].name] = MacroArg{.expr = &v->args[i], .module_path = current_module_path_, .module = current_module_, .outer_args = outer};
+                                            macro_args_[macro->decl->params[i].name] = MacroArg{.expr = &v->args[i], .module_path = current_module_path_, .module = current_module_, .param_type = &macro->params[i], .param_module = &target_module, .outer_args = outer};
                                         }
                                         const auto *saved_path = current_module_path_;
                                         const auto *saved_module = current_module_;

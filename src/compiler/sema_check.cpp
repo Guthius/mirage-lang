@@ -870,15 +870,17 @@ namespace sema {
                     // Trait handles support no operator except '==' / '!=' against a literal
                     // 'nil' operand (checked on the raw AST, not the resolved type, since a
                     // nil literal coerced to the handle's trait type is otherwise structurally
-                    // indistinguishable from an actual handle value of that same trait).
+                    // indistinguishable from an actual handle value of that same trait), or
+                    // against another handle of the same trait type (compares object identity).
                     if (lhs.kind == TypeKind::Trait || rhs.kind == TypeKind::Trait) {
                         const bool lhs_is_nil = std::holds_alternative<ast::LiteralNilExpr>(v->lhs);
                         const bool rhs_is_nil = std::holds_alternative<ast::LiteralNilExpr>(v->rhs);
                         const bool is_eq = v->op == ast::BinaryOp::Equal || v->op == ast::BinaryOp::NotEqual;
-                        if (is_eq && (lhs_is_nil || rhs_is_nil)) {
+                        const bool same_trait_handles = lhs.kind == TypeKind::Trait && rhs.kind == TypeKind::Trait && lhs.trait_index == rhs.trait_index;
+                        if (is_eq && (lhs_is_nil || rhs_is_nil || same_trait_handles)) {
                             return ResolvedType{.kind = TypeKind::Bool};
                         }
-                        return error(diag, v->location, "trait handles only support '==' / '!=' comparison against 'nil'; no other operators are supported");
+                        return error(diag, v->location, "trait handles only support '==' / '!=' comparison against 'nil' or a handle of the same trait type; no other operators are supported");
                     }
 
                     return binary_op_result(v->op, lhs, rhs, diag, v->location);
