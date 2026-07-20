@@ -788,7 +788,7 @@ namespace sema {
                                 // Allow taking address when expected type is a matching function type
                                 if (expected && expected->kind == TypeKind::Function) {
                                     const auto &exp_sig = fn_sig(*expected, program);
-                                    if (sym.params == exp_sig.param_types &&
+                                    if (function_params_compatible(sym.params, exp_sig.param_types) &&
                                         sym.return_types == exp_sig.return_types &&
                                         !exp_sig.is_variadic) {
                                         return *expected;
@@ -802,7 +802,7 @@ namespace sema {
                                     const auto &exp_sig = fn_sig(*expected, program);
                                     std::vector<ResolvedType> ext_returns;
                                     if (sym.return_type) ext_returns.push_back(*sym.return_type);
-                                    if (sym.params == exp_sig.param_types &&
+                                    if (function_params_compatible(sym.params, exp_sig.param_types) &&
                                         ext_returns == exp_sig.return_types &&
                                         sym.is_variadic == exp_sig.is_variadic) {
                                         return *expected;
@@ -1173,7 +1173,7 @@ namespace sema {
                                         if (fn->is_variadic) {
                                             return error(diag, v->location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v->member));
                                         }
-                                        if (fn->params == exp_sig.param_types &&
+                                        if (function_params_compatible(fn->params, exp_sig.param_types) &&
                                             fn->return_types == exp_sig.return_types &&
                                             !exp_sig.is_variadic) {
                                             return *expected;
@@ -1184,7 +1184,7 @@ namespace sema {
                                         if (!ef->is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
                                         std::vector<ResolvedType> ext_returns;
                                         if (ef->return_type) ext_returns.push_back(*ef->return_type);
-                                        if (ef->params == exp_sig.param_types &&
+                                        if (function_params_compatible(ef->params, exp_sig.param_types) &&
                                             ext_returns == exp_sig.return_types &&
                                             ef->is_variadic == exp_sig.is_variadic) {
                                             return *expected;

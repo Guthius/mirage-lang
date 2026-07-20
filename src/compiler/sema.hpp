@@ -282,6 +282,7 @@ namespace sema {
                                 const std::string &module_path, Program &program, DiagnosticEngine &diag,
                                 const SourceLocation &decl_loc) -> std::optional<ResolvedType>;
     auto is_assignable(const ResolvedType &from, const ResolvedType &to) -> bool;
+    auto function_params_compatible(const std::vector<ResolvedType> &actual, const std::vector<ResolvedType> &expected) -> bool;
     auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType;
     auto intern_slice(Program &program, const ResolvedType &element) -> ResolvedType;
     auto intern_function_type(Program &program, FunctionTypeInfo sig) -> ResolvedType;

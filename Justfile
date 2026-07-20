@@ -37,6 +37,9 @@ install prefix="/usr/local": build
 install-lsp prefix="/usr/local": build
     install -Dm755 {{ build_dir }}/mirage-lsp {{ prefix }}/bin/mirage-lsp
 
+# Install all binaries
+install-all: install install-lsp
+
 # Package the VS Code extension into a .vsix installable via `code --install-extension`
 package-vscode:
     cd {{ vscode_dir }} && npm install && npm run package

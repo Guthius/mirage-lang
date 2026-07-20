@@ -861,6 +861,19 @@ namespace sema {
         return false;
     }
 
+    auto function_params_compatible(const std::vector<ResolvedType> &actual, const std::vector<ResolvedType> &expected) -> bool {
+        if (actual.size() != expected.size()) return false;
+        for (size_t i = 0; i < actual.size(); ++i) {
+            if (actual[i] == expected[i]) continue;
+            // A typed pointer parameter may decay to an `anyptr` parameter in the
+            // target function type (C-style void* callback pattern) — both lower
+            // to the same opaque `ptr` at the ABI level.
+            if (actual[i].kind == TypeKind::Pointer && expected[i].kind == TypeKind::Anyptr) continue;
+            return false;
+        }
+        return true;
+    }
+
     auto resolve_type(const ast::Type &type, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType {
         Resolver resolver{program, diag};
         return resolver.resolve_type_impl(type, module_path);
