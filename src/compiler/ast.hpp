@@ -144,6 +144,7 @@ namespace ast {
     struct SizeOfExpr;
     struct TypeExpr;
     struct LenExpr;
+    struct StackAllocExpr;
     struct CastExpr;
     struct IndexExpr;
     struct SliceExpr;
@@ -203,6 +204,7 @@ namespace ast {
         std::unique_ptr<SizeOfExpr>,
         std::unique_ptr<TypeExpr>,
         std::unique_ptr<LenExpr>,
+        std::unique_ptr<StackAllocExpr>,
         std::unique_ptr<CastExpr>,
         std::unique_ptr<IndexExpr>,
         std::unique_ptr<SliceExpr>,
@@ -380,6 +382,11 @@ namespace ast {
 
     struct LenExpr {
         Expr operand;
+        SourceLocation location;
+    };
+
+    struct StackAllocExpr {
+        Expr size;
         SourceLocation location;
     };
 

@@ -39,6 +39,7 @@ namespace lexer {
             {"false",     TokenKind::KwFalse    },
             {"sizeof",    TokenKind::KwSizeOf   },
             {"offsetof",  TokenKind::KwOffsetOf },
+            {"stackalloc",TokenKind::KwStackAlloc},
             {"cast",      TokenKind::KwCast     },
             {"enum",      TokenKind::KwEnum     },
             {"iota",      TokenKind::KwIota     },

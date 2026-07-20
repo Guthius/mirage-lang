@@ -1155,6 +1155,13 @@ namespace sema {
                     }
                     return ResolvedType{.kind = TypeKind::USize};
 
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StackAllocExpr>>) {
+                    const auto size_ty = check_expr(v->size, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::USize}, loop_depth, defer_loop_base, fn_returns_error);
+                    if (!size_ty.is_integer()) {
+                        return error(diag, v->location, "stackalloc() requires an integer size expression");
+                    }
+                    return ResolvedType{.kind = TypeKind::Anyptr};
+
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                     // cast(expr, Type) - value first, target type second.
                     const ResolvedType from = check_expr(v->value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);

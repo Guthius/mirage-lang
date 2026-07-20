@@ -275,6 +275,7 @@ namespace ast {
             case TokenKind::Ampersand:
             case TokenKind::KwCast:
             case TokenKind::KwSizeOf:
+            case TokenKind::KwStackAlloc:
             case TokenKind::KwLen:
             case TokenKind::KwImportBin:
             case TokenKind::KwDefault:
@@ -639,6 +640,18 @@ namespace ast {
 
                 return std::make_unique<LenExpr>(LenExpr{
                     .operand = std::move(operand),
+                    .location = location,
+                });
+            }
+
+            if (parser.check(TokenKind::KwStackAlloc)) {
+                parser.advance();
+                parser.expect(TokenKind::LParen, "'('");
+                auto size = parse_expr(parser);
+                parser.expect(TokenKind::RParen, "')'");
+
+                return std::make_unique<StackAllocExpr>(StackAllocExpr{
+                    .size = std::move(size),
                     .location = location,
                 });
             }

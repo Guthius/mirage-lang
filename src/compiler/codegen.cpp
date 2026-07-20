@@ -2559,6 +2559,12 @@ namespace codegen {
                             }
                             auto *slice = emit_expr(v->operand);
                             return builder_.CreateExtractValue(slice, {1});
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StackAllocExpr>>) {
+                            const auto size_from = current_module_->expr_types.at(sema::get_expr_key(v->size));
+                            auto *size = emit_cast(emit_expr(v->size), size_from, sema::ResolvedType{.kind = sema::TypeKind::USize});
+                            auto *alloc = builder_.CreateAlloca(llvm::Type::getInt8Ty(*context_), size, "stackalloc");
+                            alloc->setAlignment(llvm::Align(16));
+                            return alloc;
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                             const auto from = current_module_->expr_types.at(sema::get_expr_key(v->value));
                             if (ty.kind == sema::TypeKind::Slice) {
