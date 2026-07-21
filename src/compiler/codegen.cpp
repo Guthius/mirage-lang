@@ -3344,6 +3344,8 @@ namespace codegen {
                                     }
                                 }
                             }
+                        } else if constexpr (std::is_same_v<V, ast::DefaultExpr>) {
+                            return emit_const_default_value(*current_module_path_, ty);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
                             return std::visit(
                                 [&]<typename BV>(const BV &bv) -> llvm::Value * {
