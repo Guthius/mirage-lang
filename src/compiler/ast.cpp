@@ -291,6 +291,16 @@ namespace ast {
             }
         }
 
+        // True when the current token is a synthesized (ASI-inserted) semicolon immediately
+        // followed by a token that could plausibly start an expression. This flags the classic
+        // 'return'/'return_ok' ASI gotcha: a bare keyword on its own line, followed by a
+        // continuation expression the user likely intended to return, on the next line.
+        auto is_asi_gotcha_candidate(const Parser &parser) -> bool {
+            return parser.current().kind == TokenKind::Semicolon &&
+                   parser.current_lexeme().empty() &&
+                   can_start_expr(parser.peek().kind);
+        }
+
         auto parse_literal_integer_expr(Parser &parser) -> Expr {
             const auto ToInt = [](const char ch) -> uint64_t {
                 if (std::isdigit(ch)) {
@@ -1559,17 +1569,21 @@ namespace ast {
             parser.expect(TokenKind::KwReturn, "'return'");
 
             std::vector<Expr> values;
+            bool possible_asi_gotcha = false;
             if (can_start_expr(parser.current().kind)) {
                 values.push_back(parse_expr(parser));
 
                 while (parser.match(TokenKind::Comma)) {
                     values.push_back(parse_expr(parser));
                 }
+            } else {
+                possible_asi_gotcha = is_asi_gotcha_candidate(parser);
             }
 
             return ReturnStmt{
                 .return_values = std::move(values),
                 .location = location,
+                .possible_asi_gotcha = possible_asi_gotcha,
             };
         }
 
@@ -1592,17 +1606,21 @@ namespace ast {
             parser.expect(TokenKind::KwReturnOk, "'return_ok'");
 
             std::vector<Expr> values;
+            bool possible_asi_gotcha = false;
             if (can_start_expr(parser.current().kind)) {
                 values.push_back(parse_expr(parser));
 
                 while (parser.match(TokenKind::Comma)) {
                     values.push_back(parse_expr(parser));
                 }
+            } else {
+                possible_asi_gotcha = is_asi_gotcha_candidate(parser);
             }
 
             return ReturnOkStmt{
                 .return_values = std::move(values),
                 .location = location,
+                .possible_asi_gotcha = possible_asi_gotcha,
             };
         }
 

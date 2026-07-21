@@ -519,6 +519,7 @@ namespace ast {
     struct ReturnStmt {
         std::vector<Expr> return_values;
         SourceLocation location;
+        bool possible_asi_gotcha = false;
     };
 
     struct ReturnErrStmt {
@@ -529,6 +530,7 @@ namespace ast {
     struct ReturnOkStmt {
         std::vector<Expr> return_values;
         SourceLocation location;
+        bool possible_asi_gotcha = false;
     };
 
     struct DeferStmt;

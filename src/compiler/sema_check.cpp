@@ -2308,7 +2308,10 @@ namespace sema {
                     }
                     if (v.return_values.size() != expected_returns.size()) {
                         diag.report_error(DiagnosticStage::Sema, v.location,
-                                          std::format("expected {} return value(s), got {}", expected_returns.size(), v.return_values.size()));
+                                          std::format("expected {} return value(s), got {}{}", expected_returns.size(), v.return_values.size(),
+                                                      v.possible_asi_gotcha
+                                                          ? " (note: 'return' on its own line ends the statement immediately; move the value onto the same line as 'return')"
+                                                          : ""));
                         for (auto &val : v.return_values)
                             check_expr(val, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
                         return;
@@ -2357,7 +2360,10 @@ namespace sema {
                     const size_t expected_count = expected_returns.size() - 1;
                     if (v.return_values.size() != expected_count) {
                         diag.report_error(DiagnosticStage::Sema, v.location,
-                                          std::format("expected {} return value(s), got {}", expected_count, v.return_values.size()));
+                                          std::format("expected {} return value(s), got {}{}", expected_count, v.return_values.size(),
+                                                      v.possible_asi_gotcha
+                                                          ? " (note: 'return_ok' on its own line ends the statement immediately; move the value onto the same line as 'return_ok')"
+                                                          : ""));
                         for (auto &val : v.return_values)
                             check_expr(val, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
                         return;
