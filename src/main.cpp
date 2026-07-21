@@ -235,30 +235,39 @@ auto main(const int argc, char *argv[]) -> int {
     }
 
     const auto object_path = std::filesystem::temp_directory_path() / std::format("mirage-{}.o", std::rand());
+    const auto object_start = std::chrono::steady_clock::now();
     if (!emit_object_file(*llvm_module, object_path)) {
         return 1;
     }
+    const auto object_elapsed = std::chrono::steady_clock::now() - object_start;
 
     const auto exe_path = options.action == Action::Run
         ? std::filesystem::temp_directory_path() / std::format("mirage-{}", std::rand())
         : std::filesystem::path(options.output);
 
+    const auto link_start = std::chrono::steady_clock::now();
     if (!link_executable(object_path, exe_path, options)) {
         std::error_code remove_error;
         std::filesystem::remove(object_path, remove_error);
         llvm::errs() << "mirage: linker failed\n";
         return 1;
     }
+    const auto link_elapsed = std::chrono::steady_clock::now() - link_start;
 
     std::error_code remove_error;
     std::filesystem::remove(object_path, remove_error);
 
+    llvm::outs() << std::format(
+        "  object:  {}ms\n"
+        "  link:    {}ms\n",
+        to_ms(object_elapsed), to_ms(link_elapsed));
+
     const auto elapsed = std::chrono::steady_clock::now() - start_time;
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    const auto secs = std::chrono::duration<double>(elapsed).count();
     if (options.action == Action::Run) {
-        llvm::outs() << std::format("Compiled '{}' in {}ms\n", options.module_path, ms);
+        llvm::outs() << std::format("Compiled '{}' in {:.2f}s\n", options.module_path, secs);
     } else {
-        llvm::outs() << std::format("Compiled '{}' -> '{}' in {}ms\n", options.module_path, options.output, ms);
+        llvm::outs() << std::format("Compiled '{}' -> '{}' in {:.2f}s\n", options.module_path, options.output, secs);
     }
     llvm::outs().flush();
 
