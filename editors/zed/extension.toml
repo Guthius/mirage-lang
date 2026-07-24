@@ -1,0 +1,15 @@
+id = "mirage"
+name = "Mirage"
+version = "0.0.1"
+schema_version = 1
+authors = ["Guthius"]
+description = "Mirage language support: syntax highlighting and mirage-lsp integration (diagnostics, hover, go-to-definition, completion)."
+repository = "https://github.com/Guthius/mirage-lang"
+
+[grammars.mirage]
+repository = "https://github.com/Guthius/tree-sitter-mirage"
+rev = "3aabe5015b0c9ae8ee628b917789698eaa4c7057"
+
+[language_servers.mirage-lsp]
+name = "Mirage LSP"
+languages = ["Mirage"]

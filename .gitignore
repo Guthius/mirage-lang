@@ -13,3 +13,6 @@ cmake-build-*
 editors/vscode/node_modules/
 editors/vscode/out/
 *.vsix
+
+# Zed extension
+editors/zed/target/
