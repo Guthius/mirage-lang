@@ -1,0 +1,14 @@
+# example_when_nonconst_condition.mir — REJECTION CASE. A 'when' statement's condition
+# must be a compile-time constant expression; a runtime value (like a 'mut' local) is
+# rejected, pointing the user at 'if' instead.
+#
+# Expected: compilation fails with
+#   error: 'when' condition must be a compile-time constant expression.
+#          Use 'if' for runtime conditions.
+
+pub fn main() {
+    mut flag: bool = true
+    when flag {
+        const x := 1
+    }
+}

@@ -21,6 +21,15 @@ namespace sema {
         return true;
     }
 
+    // Ensures 'module_path' has been declared (build_symbol_table_for_module has run for
+    // it) — memoized + cycle-guarded. A module-scope 'when' condition referencing another
+    // module's const (e.g. 'opts.target_os') needs that module's symbol table (and, via
+    // resolve_global_symbol, that specific const's VALUE) to exist before the condition
+    // can be folded, regardless of Program::modules' unordered iteration order. Declared
+    // here (external linkage, before the anonymous namespace) so both this file's
+    // anonymous-namespace helpers and sema.cpp's check_program can call it.
+    void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag);
+
     namespace {
         void declare_type(const ast::TypeDecl &decl, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
             std::optional<ResolvedType> resolved = std::nullopt;
@@ -119,10 +128,235 @@ namespace sema {
                 },
                 decl.location, diag);
         }
-    }
 
-    void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, const ast::Module &decls, DiagnosticEngine &diag) {
-        for (auto &decl : decls) {
+        // Location of any Decl variant alternative — mirrors sema.hpp's get_expr_location
+        // for ast::Expr, needed here since only VarDecl/TypeDecl/etc's *own* diagnostics
+        // carry a location normally; the module-scope-'when' allow-list check below needs
+        // one for an arbitrary (possibly disallowed) decl kind.
+        auto decl_location(const ast::Decl &decl) -> SourceLocation {
+            return std::visit([](const auto &v) -> SourceLocation {
+                using V = std::decay_t<decltype(v)>;
+                if constexpr (requires { v->location; }) return v->location;
+                else return v.location;
+            }, decl);
+        }
+
+        // Only '@link', 'const' with a direct '@option(...)' initializer, 'type', and
+        // 'ext fn' declarations are permitted inside a module-scope 'when' block (spec).
+        // A nested 'when' is always structurally allowed here — its OWN contents are
+        // checked recursively against this same allow-list wherever they're processed.
+        auto decl_allowed_in_module_scope_when(const ast::Decl &decl) -> bool {
+            if (std::holds_alternative<ast::LinkDecl>(decl)) return true;
+            if (std::holds_alternative<ast::TypeDecl>(decl)) return true;
+            if (std::holds_alternative<ast::ExtFunctionDecl>(decl)) return true;
+            if (std::holds_alternative<std::unique_ptr<ast::WhenDecl>>(decl)) return true;
+            if (const auto *vd = std::get_if<ast::VarDecl>(&decl)) {
+                return !vd->is_mut && vd->init && std::holds_alternative<std::unique_ptr<ast::OptionExpr>>(*vd->init);
+            }
+            return false;
+        }
+
+        void declare_one_decl(const ast::Decl &decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag);
+        void declare_when_decl(const ast::WhenDecl &when_decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag);
+        void declare_link_decl(const ast::LinkDecl &link_decl, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, bool collect);
+        void check_decl_unreachable(const ast::Decl &decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag);
+        void check_when_decl_unreachable(const ast::WhenDecl &when_decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag);
+
+        // Declares (is_live=true, persists into the real symbol table / collects '@link'
+        // directives) or merely type-checks-and-discards (is_live=false — the module-scope
+        // 'when' spec requirement that BOTH branches are always type-checked, even though
+        // only the live one has any lasting effect) a list of decls found inside a
+        // module-scope 'when' block, after validating each against the allow-list.
+        void declare_decl_list(const std::vector<ast::Decl> &decls, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag, const bool is_live) {
+            for (const auto &decl : decls) {
+                if (!decl_allowed_in_module_scope_when(decl)) {
+                    diag.report_error(DiagnosticStage::Sema, decl_location(decl),
+                        "only '@link', 'const' with '@option', 'type', and 'ext fn' "
+                        "declarations are permitted inside a module-scope 'when' block.");
+                    continue;
+                }
+                if (is_live) {
+                    declare_one_decl(decl, program, module_path, module, sema_program, diag);
+                } else {
+                    check_decl_unreachable(decl, program, module_path, module, sema_program, diag);
+                }
+            }
+        }
+
+        // Type-checks (but never declares/collects) a single decl reached inside a dead
+        // module-scope 'when' branch — 'both branches are always type-checked' without
+        // giving the branch any real symbol-table presence.
+        void check_decl_unreachable(const ast::Decl &decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
+            std::visit(
+                [&]<typename T>(const T &v) {
+                    using V = std::decay_t<T>;
+                    LocalScope empty;
+
+                    if constexpr (std::is_same_v<V, ast::ExtFunctionDecl>) {
+                        for (auto &p : v.params) resolve_type(p.type, module_path, sema_program, diag);
+                        if (v.return_type) resolve_type(*v.return_type, module_path, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, ast::VarDecl>) {
+                        std::optional<ResolvedType> declared_ty;
+                        if (v.type) declared_ty = resolve_type(*v.type, module_path, sema_program, diag);
+                        if (v.init) {
+                            check_expr(*v.init, empty, module_path, sema_program, diag, declared_ty, 0, -1, nullptr, /*in_option_position=*/true);
+                        }
+                    } else if constexpr (std::is_same_v<V, ast::LinkDecl>) {
+                        declare_link_decl(v, module_path, sema_program, diag, /*collect=*/false);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenDecl>>) {
+                        check_when_decl_unreachable(*v, program, module_path, module, sema_program, diag);
+                    }
+                    // ast::TypeDecl: type layout resolution is lazy/on-demand throughout this
+                    // compiler (only forced by an actual reference elsewhere) — an unreferenced
+                    // dead-branch 'type' decl is left exactly as lazy as an unreferenced live one.
+                },
+                decl);
+        }
+
+        // Recursively type-checks (never declares/collects) an entire 'when' block already
+        // known to be unreachable (an ancestor 'when' condition selected the OTHER branch) —
+        // both of ITS branches are scratch-checked unconditionally, since neither will ever
+        // be declared for real regardless of how this nested condition itself would fold.
+        void check_when_decl_unreachable(const ast::WhenDecl &when_decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
+            LocalScope empty;
+            check_expr(when_decl.condition, empty, module_path, sema_program, diag, ResolvedType{.kind = TypeKind::Bool}, 0, -1, nullptr, /*in_option_position=*/true);
+            if (!is_constant_expr(when_decl.condition, module_path, sema_program)) {
+                diag.report_error(DiagnosticStage::Sema, when_decl.location,
+                    "'when' condition must be a compile-time constant expression. "
+                    "Use 'if' for runtime conditions.");
+            }
+
+            declare_decl_list(when_decl.then_decls, program, module_path, module, sema_program, diag, /*is_live=*/false);
+            if (when_decl.else_branch) {
+                std::visit(
+                    [&]<typename EV>(const EV &else_v) {
+                        using EVT = std::decay_t<EV>;
+                        if constexpr (std::is_same_v<EVT, std::vector<ast::Decl>>) {
+                            declare_decl_list(else_v, program, module_path, module, sema_program, diag, /*is_live=*/false);
+                        } else {
+                            check_when_decl_unreachable(*else_v, program, module_path, module, sema_program, diag);
+                        }
+                    },
+                    *when_decl.else_branch);
+            }
+        }
+
+        // Walks a 'when' condition expression to find cross-module member accesses (e.g.
+        // 'opts.target_os') and ensures the referenced module is declared before the
+        // condition is type-checked/folded — see ensure_module_declared above.
+        void ensure_condition_modules_declared(const ast::Expr &expr, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
+            std::visit(
+                [&]<typename T>(const T &v) {
+                    using V = std::decay_t<T>;
+                    if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                        ensure_condition_modules_declared(v->object, program, module_path, module, sema_program, diag);
+                        if (const auto *ident = std::get_if<ast::IdentExpr>(&v->object)) {
+                            if (const auto sym_it = module.symbols.find(ident->name); sym_it != module.symbols.end()) {
+                                if (const auto *imp = std::get_if<ImportSymbol>(&sym_it->second)) {
+                                    ensure_module_declared(program, imp->module_path, sema_program, diag);
+                                }
+                            }
+                        }
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
+                        ensure_condition_modules_declared(v->lhs, program, module_path, module, sema_program, diag);
+                        ensure_condition_modules_declared(v->rhs, program, module_path, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
+                        ensure_condition_modules_declared(v->operand, program, module_path, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
+                        ensure_condition_modules_declared(v->value, program, module_path, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
+                        ensure_condition_modules_declared(v->condition, program, module_path, module, sema_program, diag);
+                        ensure_condition_modules_declared(v->then_expr, program, module_path, module, sema_program, diag);
+                        ensure_condition_modules_declared(v->else_expr, program, module_path, module, sema_program, diag);
+                    }
+                    // literals, same-module IdentExpr, DotIdentExpr, etc: nothing to do.
+                },
+                expr);
+        }
+
+        // Type-checks '@link's 'data' argument as a compile-time-constant '[]u8' expression
+        // and, if 'collect' is true (a LIVE position), appends the resolved directive to
+        // Program::link_directives. A dead-branch '@link' is still fully type-checked here
+        // (per spec) — 'collect=false' just skips the final push_back.
+        void declare_link_decl(const ast::LinkDecl &link_decl, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const bool collect) {
+            LocalScope empty;
+            const auto u8_slice = intern_slice(sema_program, ResolvedType{.kind = TypeKind::U8});
+            const auto data_ty = check_expr(link_decl.data, empty, module_path, sema_program, diag, u8_slice, 0);
+            if (!is_assignable(data_ty, u8_slice)) {
+                diag.report_error(DiagnosticStage::Sema, link_decl.location,
+                    "'@link' data argument must be a compile-time constant '[]u8' expression");
+                return;
+            }
+            if (!is_constant_expr(link_decl.data, module_path, sema_program)) {
+                diag.report_error(DiagnosticStage::Sema, link_decl.location,
+                    "'@link' data argument must be a compile-time constant expression");
+                return;
+            }
+            if (!collect) return;
+
+            const auto folded = evaluate_const_value(link_decl.data, module_path, sema_program, diag);
+            const auto *str = folded ? std::get_if<std::string>(&*folded) : nullptr;
+            if (!str) {
+                diag.report_error(DiagnosticStage::Sema, link_decl.location,
+                    "internal error: could not resolve '@link' data to a constant string");
+                return;
+            }
+
+            const auto category = link_decl.category == ast::LinkCategory::Lib ? LinkCategory::Lib
+                                 : link_decl.category == ast::LinkCategory::System ? LinkCategory::System
+                                 : LinkCategory::Flag;
+
+            sema_program.link_directives.push_back(LinkDirective{
+                .category = category,
+                .data = *str,
+                .source_module = module_path,
+                .location = link_decl.location,
+            });
+        }
+
+        // Folds a module-scope 'when' declaration's condition and either declares its live
+        // branch for real (persisting symbols / collecting '@link') or scratch-checks it
+        // (dead branch — still fully type-checked, per spec, but never declared/collected).
+        void declare_when_decl(const ast::WhenDecl &when_decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
+            ensure_condition_modules_declared(when_decl.condition, program, module_path, module, sema_program, diag);
+
+            LocalScope empty;
+            check_expr(when_decl.condition, empty, module_path, sema_program, diag, ResolvedType{.kind = TypeKind::Bool}, 0, -1, nullptr, /*in_option_position=*/true);
+
+            bool selected = false;
+            if (!is_constant_expr(when_decl.condition, module_path, sema_program)) {
+                diag.report_error(DiagnosticStage::Sema, when_decl.location,
+                    "'when' condition must be a compile-time constant expression. "
+                    "Use 'if' for runtime conditions.");
+            } else if (const auto folded = evaluate_const_value(when_decl.condition, module_path, sema_program, diag)) {
+                if (const auto *iv = std::get_if<int64_t>(&*folded)) {
+                    selected = (*iv != 0);
+                }
+            }
+
+            module.when_decl_selected[&when_decl] = selected;
+
+            declare_decl_list(when_decl.then_decls, program, module_path, module, sema_program, diag, /*is_live=*/selected);
+
+            if (when_decl.else_branch) {
+                std::visit(
+                    [&]<typename EV>(const EV &else_v) {
+                        using EVT = std::decay_t<EV>;
+                        if constexpr (std::is_same_v<EVT, std::vector<ast::Decl>>) {
+                            declare_decl_list(else_v, program, module_path, module, sema_program, diag, /*is_live=*/!selected);
+                        } else if (!selected) {
+                            declare_when_decl(*else_v, program, module_path, module, sema_program, diag);
+                        } else {
+                            // Outer condition selected 'then_decls' already, so this entire
+                            // 'else when' chain is dead; still type-checked, never declared.
+                            check_when_decl_unreachable(*else_v, program, module_path, module, sema_program, diag);
+                        }
+                    },
+                    *when_decl.else_branch);
+            }
+        }
+
+        void declare_one_decl(const ast::Decl &decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
             std::visit(
                 [&]<typename T>(const T &v) {
                     using V = std::decay_t<T>;
@@ -151,10 +385,56 @@ namespace sema {
                                 .is_resolved = false,
                             };
                         }
+                    } else if constexpr (std::is_same_v<V, ast::LinkDecl>) {
+                        declare_link_decl(v, module_path, sema_program, diag, /*collect=*/true);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenDecl>>) {
+                        declare_when_decl(*v, program, module_path, module, sema_program, diag);
                     }
+                    // ast::TraitImplDecl: handled separately by register_trait_impls_for_program.
                 },
                 decl);
         }
+    }
+
+    void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, const ast::Module &decls, DiagnosticEngine &diag) {
+        for (auto &decl : decls) {
+            declare_one_decl(decl, program, module_path, module, sema_program, diag);
+        }
+    }
+
+    void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag) {
+        if (sema_program.modules_declared.contains(module_path)) return;
+        if (sema_program.resolve_state.when_module_declaring.contains(module_path)) {
+            diag.report_error(DiagnosticStage::Sema, {},
+                std::format("circular module-scope 'when' dependency involving '{}'", module_path));
+            return;
+        }
+        const auto ast_mod_it = program.modules.find(module_path);
+        if (ast_mod_it == program.modules.end()) return; // unresolved import sentinel, etc.
+
+        sema_program.resolve_state.when_module_declaring.insert(module_path);
+        auto &module = sema_program.modules[module_path];
+        build_symbol_table_for_module(program, module_path, module, sema_program, ast_mod_it->second, diag);
+
+        // Also force full type-symbol LAYOUT (not just declaration) for this module right
+        // away — mirrors resolve_signatures_for_module's type-forcing loop (normally run
+        // program-wide in check_program's step 3, well after every module's step 1). A
+        // module reached early via this reentrant path (a 'when' condition referencing one
+        // of its consts, e.g. 'opts.target_os') needs its enum/struct/union types FULLY
+        // laid out immediately: resolve_type_impl's NamedType case only ever calls
+        // resolve_final_SHALLOW (returns the pre-allocated handle without forcing layout),
+        // so without this, a cross-module 'when' condition would see a referenced enum's
+        // 'fields' still empty (layout_done=false) when '@option' tries to coerce a
+        // '--opt' string against it. Harmless to repeat later — layout_done guards make
+        // the eventual real step 3 pass a no-op for a module already resolved here.
+        for (auto &[name, sym] : module.symbols) {
+            if (std::holds_alternative<TypeSymbol>(sym)) {
+                resolve_type_symbol(module_path, name, sema_program, diag, std::get<TypeSymbol>(sym).decl->location);
+            }
+        }
+
+        sema_program.resolve_state.when_module_declaring.erase(module_path);
+        sema_program.modules_declared.insert(module_path);
     }
 
     namespace {

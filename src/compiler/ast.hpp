@@ -128,6 +128,7 @@ namespace ast {
     struct UnaryExpr;
     struct BinaryExpr;
     struct TernaryExpr;
+    struct WhenExpr;
     struct AssignExpr;
     struct CallExpr;
     struct IncrDecrExpr;
@@ -143,6 +144,7 @@ namespace ast {
     };
 
     struct SizeOfExpr;
+    struct OptionExpr;
     struct TypeExpr;
     struct LenExpr;
     struct StackAllocExpr;
@@ -197,12 +199,14 @@ namespace ast {
         std::unique_ptr<UnaryExpr>,
         std::unique_ptr<BinaryExpr>,
         std::unique_ptr<TernaryExpr>,
+        std::unique_ptr<WhenExpr>,
         std::unique_ptr<AssignExpr>,
         std::unique_ptr<CallExpr>,
         std::unique_ptr<IncrDecrExpr>,
         ImportExpr,
         ImportBinExpr,
         std::unique_ptr<SizeOfExpr>,
+        std::unique_ptr<OptionExpr>,
         std::unique_ptr<TypeExpr>,
         std::unique_ptr<LenExpr>,
         std::unique_ptr<StackAllocExpr>,
@@ -346,6 +350,17 @@ namespace ast {
         SourceLocation location;
     };
 
+    // 'then_val when cond else else_val' — a compile-time-evaluated (when 'cond' is a
+    // compile-time constant) or ternary-equivalent (when 'cond' is a runtime value)
+    // suffix expression. Field order (condition, then, else) matches TernaryExpr/IfStmt
+    // convention, despite 'then_expr' appearing FIRST in source.
+    struct WhenExpr {
+        Expr condition;
+        Expr then_expr;
+        Expr else_expr;
+        SourceLocation location;
+    };
+
     enum class AssignOp : uint8_t {
         Assign,
         AddAssign,
@@ -381,6 +396,16 @@ namespace ast {
 
     struct SizeOfExpr {
         Expr operand;
+        SourceLocation location;
+    };
+
+    // '@option(key)' / '@option(key, default)' — a compile-time expression that reads a
+    // value supplied by the compiler driver via '--opt key=value'. Legal only in const
+    // declaration initializers and 'when' conditions/operands; enforced in sema, not the
+    // parser (see check_expr's 'in_option_position' parameter).
+    struct OptionExpr {
+        std::string key;
+        std::optional<Expr> default_value;
         SourceLocation location;
     };
 
@@ -498,6 +523,19 @@ namespace ast {
     struct IfStmt;
     struct WhileStmt;
     struct SwitchStmt;
+    struct WhenStmt;
+
+    // '@link(category, data)' — a linker directive. Legal at module scope (or inside a
+    // module-scope 'when' block); parses successfully as a Stmt too (inside a function
+    // body) purely so sema can reject it there with a precise diagnostic instead of the
+    // parser silently failing to produce a node at all.
+    enum class LinkCategory : uint8_t { Lib, System, Flag };
+
+    struct LinkDecl {
+        LinkCategory category;
+        Expr data;
+        SourceLocation location;
+    };
 
     struct ExprStmt {
         Expr expr;
@@ -561,7 +599,9 @@ namespace ast {
         ReturnStmt,
         ReturnErrStmt,
         ReturnOkStmt,
-        std::unique_ptr<DeferStmt>>;
+        std::unique_ptr<DeferStmt>,
+        LinkDecl,
+        std::unique_ptr<WhenStmt>>;
 
     struct DeferStmt {
         Stmt body;
@@ -579,6 +619,18 @@ namespace ast {
 
     struct BlockStmt {
         std::vector<Stmt> stmts;
+        SourceLocation location;
+    };
+
+    // 'when cond { ... } [else (when ... | { ... })]' — a compile-time conditional
+    // statement. The condition must be a compile-time constant expression (sema-checked,
+    // not parser-checked); both branches are always type-checked, only the selected
+    // branch's statements are emitted by codegen. 'then_block' is forced to be a literal
+    // block (mirrors WhileStmt's body), unlike IfStmt's 'then_stmt' which accepts any stmt.
+    struct WhenStmt {
+        Expr condition;
+        BlockStmt then_block;
+        std::optional<std::variant<BlockStmt, std::unique_ptr<WhenStmt>>> else_branch;
         SourceLocation location;
     };
 
@@ -707,7 +759,24 @@ namespace ast {
         SourceLocation location;
     };
 
-    using Decl = std::variant<FunctionDecl, ExtFunctionDecl, VarDecl, MacroDecl, TypeDecl, ImplDecl, TraitImplDecl>;
+    // 'when cond { decl... } [else (when ... | { decl... })]' — a module-scope compile-time
+    // conditional declaration block. Parsed permissively (any Decl kind inside), restricted
+    // to '@link'/'const' with '@option'/'type'/'ext fn' by sema. Boxed via unique_ptr (not
+    // stored by value like Decl's other alternatives) because it holds a 'vector<Decl>' —
+    // Decl isn't a complete type until this very 'using Decl = ...' declaration finishes, so
+    // WhenDecl can only be fully DEFINED afterward; the variant itself only needs the
+    // forward-declared name via unique_ptr at this point.
+    struct WhenDecl;
+
+    using Decl = std::variant<FunctionDecl, ExtFunctionDecl, VarDecl, MacroDecl, TypeDecl, ImplDecl, TraitImplDecl,
+                               LinkDecl, std::unique_ptr<WhenDecl>>;
+
+    struct WhenDecl {
+        Expr condition;
+        std::vector<Decl> then_decls;
+        std::optional<std::variant<std::vector<Decl>, std::unique_ptr<WhenDecl>>> else_branch;
+        SourceLocation location;
+    };
 
     auto parse(std::span<Token> tokens, DiagnosticEngine &diagnostics) -> std::vector<Decl>;
 

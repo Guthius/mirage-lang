@@ -1,0 +1,35 @@
+# example_when_expr_precedence.mir — demonstrates 'when' expression precedence: it binds
+# looser than all binary operators (including the existing ternary '?:') but tighter than
+# assignment. Verify the exact parse shape with:
+#   ./build/mirage build examples/example_when_expr_precedence --dump-ast
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub fn main() -> i32 {
+    mut a: i32 = 1
+    mut b: i32 = 2
+    mut c: bool = true
+    mut d: i32 = 3
+
+    # parses as: (a + b) when (c) else (d)
+    const r := a + b when c else d
+    printf("r = %d (expect 3)\n", r)
+
+    # parses as: (a when (b) else d) -- 'b' used as the (nonzero -> truthy) condition here
+    # would be a type error since b is i32 not bool; use a real bool condition instead:
+    const s := a when c else d
+    printf("s = %d (expect 1)\n", s)
+
+    # parses as: z = (a when c else d) -- 'when' binds tighter than assignment, so this
+    # assigns the WHOLE when-expression's result to z, not '(z = a) when c else d'.
+    mut z: i32 = 0
+    z = a when c else d
+    printf("z = %d (expect 1)\n", z)
+
+    # a runtime condition composed with '&&': parses as 'x when (a && b_is_nonzero) else y'
+    const b_is_nonzero := b != 0
+    const x := 10 when c && b_is_nonzero else 20
+    printf("x = %d (expect 10)\n", x)
+
+    return 0
+}

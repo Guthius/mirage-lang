@@ -612,6 +612,82 @@ namespace ast {
             });
         }
 
+        // '@option(key)' / '@option(key, default)'. 'option' is parsed as a plain
+        // identifier after the '@' sigil (not a keyword) — mirrors 'ext fn's precedent of
+        // dispatching on a bare identifier lexeme rather than reserving a new keyword.
+        auto parse_option_expr(Parser &parser) -> Expr {
+            const auto location = parser.current_location();
+            parser.expect(TokenKind::At, "'@'");
+
+            if (!parser.check(TokenKind::Identifier) || parser.current_lexeme() != "option") {
+                parser.report_error(location, std::format("expected 'option' after '@', got '{}'", parser.current_lexeme()));
+
+                return LiteralIntegerExpr{.value = 0, .location = location};
+            }
+            parser.advance(); // consume 'option'
+
+            parser.expect(TokenKind::LParen, "'('");
+            const auto key = parse_string_literal(parser);
+
+            std::optional<Expr> default_value;
+            if (parser.match(TokenKind::Comma)) {
+                default_value = parse_expr(parser);
+            }
+
+            parser.expect(TokenKind::RParen, "')'");
+
+            return std::make_unique<OptionExpr>(OptionExpr{
+                .key = key.value,
+                .default_value = std::move(default_value),
+                .location = location,
+            });
+        }
+
+        // '@link(category, data)' — a linker directive. 'link' (like 'option' above) is a
+        // plain identifier after '@', not a keyword. Callable from both module-scope
+        // declaration parsing and (permissively) statement parsing — see parse_stmt's
+        // dispatch, which peeks past '@' to distinguish '@link' from '@option' before
+        // deciding whether to consume it here or fall through to an ordinary expr-stmt.
+        auto parse_link_decl(Parser &parser) -> LinkDecl {
+            const auto location = parser.current_location();
+            parser.expect(TokenKind::At, "'@'");
+
+            if (!parser.check(TokenKind::Identifier) || parser.current_lexeme() != "link") {
+                parser.report_error(location, std::format("expected 'link' after '@', got '{}'", parser.current_lexeme()));
+
+                return LinkDecl{
+                    .category = LinkCategory::Lib,
+                    .data = LiteralIntegerExpr{.value = 0, .location = location},
+                    .location = location,
+                };
+            }
+            parser.advance(); // consume 'link'
+
+            parser.expect(TokenKind::LParen, "'('");
+
+            auto category = LinkCategory::Lib;
+            if (parser.check(TokenKind::Identifier)) {
+                const auto category_name = parser.current_lexeme();
+                if (category_name == "lib") category = LinkCategory::Lib;
+                else if (category_name == "system") category = LinkCategory::System;
+                else if (category_name == "flag") category = LinkCategory::Flag;
+                else parser.report_error(parser.current_location(), std::format("expected 'lib', 'system', or 'flag', got '{}'", category_name));
+                parser.advance();
+            } else {
+                parser.report_error(parser.current_location(), "expected link category ('lib', 'system', or 'flag')");
+            }
+
+            parser.expect(TokenKind::Comma, "','");
+            auto data = parse_expr(parser);
+            parser.expect(TokenKind::RParen, "')'");
+
+            return LinkDecl{
+                .category = category,
+                .data = std::move(data),
+                .location = location,
+            };
+        }
+
         auto parse_primary(Parser &parser) -> Expr {
             const auto location = parser.current_location();
 
@@ -715,6 +791,10 @@ namespace ast {
                     .size = std::move(size),
                     .location = location,
                 });
+            }
+
+            if (parser.check(TokenKind::At)) {
+                return parse_option_expr(parser);
             }
 
             if (parser.check(TokenKind::KwImportBin)) {
@@ -1390,8 +1470,38 @@ namespace ast {
             return expr;
         }
 
-        auto parse_assign_expr(Parser &parser) -> Expr {
+        // 'then_val when cond else else_val' — binds looser than all binary operators
+        // (including ternary '?:') but tighter than assignment; sits between
+        // parse_assign_expr and parse_ternary_expr in the precedence chain. 'then_expr'
+        // and 'condition' parse at the ternary tier; 'else_expr' is a full parse_expr
+        // (right-recursive), mirroring TernaryExpr's own else-branch convention so
+        // 'z = a when b else c' parses as 'z = (a when b else c)' and
+        // 'a when b else c when d else e' parses as 'a when b else (c when d else e)'.
+        // A bare, unparenthesized nested 'when...else' in condition position does not
+        // parse (needs parens) — deliberate, avoids ambiguity with the outer 'when'.
+        auto parse_when_expr(Parser &parser) -> Expr {
             auto expr = parse_ternary_expr(parser);
+
+            if (parser.match(TokenKind::KwWhen)) {
+                const auto location = parser.current_location();
+
+                auto condition = parse_ternary_expr(parser);
+                parser.expect(TokenKind::KwElse, "'else'");
+                auto else_expr = parse_expr(parser);
+
+                return make_expr(WhenExpr{
+                    .condition = std::move(condition),
+                    .then_expr = std::move(expr),
+                    .else_expr = std::move(else_expr),
+                    .location = location,
+                });
+            }
+
+            return expr;
+        }
+
+        auto parse_assign_expr(Parser &parser) -> Expr {
+            auto expr = parse_when_expr(parser);
 
             auto MatchAssignOp = [](const TokenKind kind) -> std::optional<AssignOp> {
                 switch (kind) {
@@ -1538,6 +1648,36 @@ namespace ast {
                 .init = std::move(init_expr),
                 .location = location,
             };
+        }
+
+        // 'when cond { ... } [else (when ... | { ... })]' — a compile-time conditional
+        // statement. The then-branch (and each block in the else-chain) is forced to be a
+        // literal block (mirrors WhileStmt forcing parse_block_stmt for its body), unlike
+        // IfStmt's 'then_stmt' which accepts any statement. Legality/foldability of
+        // 'condition' as a compile-time constant is enforced in sema, not here.
+        auto parse_when_stmt(Parser &parser) -> std::unique_ptr<WhenStmt> {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwWhen, "'when'");
+
+            auto condition = parse_expr(parser);
+            auto then_block = std::move(*std::get<std::unique_ptr<BlockStmt>>(parse_block_stmt(parser)));
+
+            std::optional<std::variant<BlockStmt, std::unique_ptr<WhenStmt>>> else_branch = std::nullopt;
+            if (parser.match(TokenKind::KwElse)) {
+                if (parser.check(TokenKind::KwWhen)) {
+                    else_branch = parse_when_stmt(parser);
+                } else {
+                    else_branch = std::move(*std::get<std::unique_ptr<BlockStmt>>(parse_block_stmt(parser)));
+                }
+            }
+
+            return std::make_unique<WhenStmt>(WhenStmt{
+                .condition = std::move(condition),
+                .then_block = std::move(then_block),
+                .else_branch = std::move(else_branch),
+                .location = location,
+            });
         }
 
         auto parse_if_stmt(Parser &parser) -> std::unique_ptr<IfStmt> {
@@ -2346,6 +2486,19 @@ namespace ast {
             return parse_while_stmt(parser);
         }
 
+        if (parser.check(TokenKind::KwWhen)) {
+            return parse_when_stmt(parser);
+        }
+
+        // '@link(...)' parses successfully here (unlike anywhere else a runtime
+        // statement is illegal) purely so sema can reject it with a precise
+        // "module scope only" diagnostic. '@option(...)' is NOT special-cased here —
+        // it falls through to parse_expr_stmt below, which reaches parse_primary's
+        // own '@' handling for the option-expression form.
+        if (parser.check(TokenKind::At) && parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "link") {
+            return parse_link_decl(parser);
+        }
+
         if (parser.check(TokenKind::KwFor)) {
             return parse_for_in_stmt(parser);
         }
@@ -2519,6 +2672,57 @@ namespace ast {
         };
     }
 
+    auto parse_when_decl_body(Parser &parser) -> std::vector<Decl> {
+        parser.expect(TokenKind::LBrace, "'{'");
+
+        std::vector<Decl> decls;
+        while (true) {
+            skip_semicolons(parser);
+            if (parser.check(TokenKind::RBrace) || parser.at_end() || parser.has_reached_max_errors()) {
+                break;
+            }
+
+            const LoopProgressGuard progress_guard(parser);
+
+            if (auto d = parse_decl(parser, /*top_level=*/true)) {
+                decls.push_back(std::move(*d));
+            }
+        }
+
+        parser.expect(TokenKind::RBrace, "'}'");
+
+        return decls;
+    }
+
+    // 'when cond { decl... } [else (when ... | { decl... })]' — a module-scope
+    // compile-time conditional declaration block. Parsed permissively (any Decl kind, via
+    // the ordinary parse_decl dispatcher) — the allow-list restriction to '@link'/'const'
+    // with '@option'/'type'/'ext fn' is a SEMA error (see spec), not a parse error, so
+    // parsing here must succeed for any decl kind and let sema reject the disallowed ones.
+    auto parse_when_decl(Parser &parser) -> std::unique_ptr<WhenDecl> {
+        const auto location = parser.current_location();
+        parser.expect(TokenKind::KwWhen, "'when'");
+
+        auto condition = parse_expr(parser);
+        auto then_decls = parse_when_decl_body(parser);
+
+        std::optional<std::variant<std::vector<Decl>, std::unique_ptr<WhenDecl>>> else_branch = std::nullopt;
+        if (parser.match(TokenKind::KwElse)) {
+            if (parser.check(TokenKind::KwWhen)) {
+                else_branch = parse_when_decl(parser);
+            } else {
+                else_branch = parse_when_decl_body(parser);
+            }
+        }
+
+        return std::make_unique<WhenDecl>(WhenDecl{
+            .condition = std::move(condition),
+            .then_decls = std::move(then_decls),
+            .else_branch = std::move(else_branch),
+            .location = location,
+        });
+    }
+
     auto parse_decl(Parser &parser, const bool top_level) -> std::optional<Decl> {
         const auto is_pub = !top_level || parser.match(TokenKind::KwPub);
 
@@ -2549,6 +2753,20 @@ namespace ast {
                 parser.report_error(parser.current_location(), "'impl' blocks cannot be 'pub'");
             }
             return parse_impl_decl(parser);
+        }
+
+        if (parser.check(TokenKind::KwWhen)) {
+            if (is_pub) {
+                parser.report_error(parser.current_location(), "'when' blocks cannot be 'pub'");
+            }
+            return Decl{parse_when_decl(parser)};
+        }
+
+        if (parser.check(TokenKind::At) && parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "link") {
+            if (is_pub) {
+                parser.report_error(parser.current_location(), "'@link' directives cannot be 'pub'");
+            }
+            return Decl{parse_link_decl(parser)};
         }
 
         parser.report_error(

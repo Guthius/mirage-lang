@@ -1,0 +1,9 @@
+# example_when_expr_type_mismatch.mir — REJECTION CASE. Both branches of a 'when'
+# expression must have the same type, exactly like the existing ternary '?:'.
+#
+# Expected: compilation fails with
+#   error: 'when' expression branches have different types
+
+pub fn main() {
+    const x := 1 when true else "str"
+}

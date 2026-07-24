@@ -1,6 +1,7 @@
 #include "sema.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <format>
 #include <unordered_set>
 
@@ -49,6 +50,29 @@ namespace sema {
                         }
 
                         return false;
+                    }
+
+                    // Cross-module qualified const access, e.g. 'opts.target_os' — the
+                    // direct-object-is-an-IdentExpr shape mirrors evaluate_const_value's
+                    // MemberExpr case, which is what actually folds this expression's value;
+                    // this only decides whether it's ELIGIBLE to be folded at all.
+                    if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                        const auto *obj_ident = std::get_if<ast::IdentExpr>(&v->object);
+                        if (!obj_ident) return false;
+
+                        const auto mod_it = program.modules.find(module_path);
+                        if (mod_it == program.modules.end()) return false;
+                        const auto sym_it = mod_it->second.symbols.find(obj_ident->name);
+                        if (sym_it == mod_it->second.symbols.end()) return false;
+                        const auto *imp = std::get_if<ImportSymbol>(&sym_it->second);
+                        if (!imp) return false;
+
+                        const auto other_mod_it = program.modules.find(imp->module_path);
+                        if (other_mod_it == program.modules.end()) return false;
+                        const auto other_sym_it = other_mod_it->second.symbols.find(v->member);
+                        if (other_sym_it == other_mod_it->second.symbols.end()) return false;
+                        const auto *g = std::get_if<GlobalSymbol>(&other_sym_it->second);
+                        return g && !g->is_mut && g->is_resolved;
                     }
 
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
@@ -176,6 +200,18 @@ namespace sema {
                                is_constant_expr_impl(v->else_expr, module_path, program, treated_as_const);
                     }
 
+                    if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
+                        return is_constant_expr_impl(v->condition, module_path, program, treated_as_const) &&
+                               is_constant_expr_impl(v->then_expr, module_path, program, treated_as_const) &&
+                               is_constant_expr_impl(v->else_expr, module_path, program, treated_as_const);
+                    }
+
+                    // Always compile-time evaluable (like SizeOfExpr/ImportBinExpr above) — its
+                    // value comes from '--opt' or a constant default, never a runtime store.
+                    if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
+                        return true;
+                    }
+
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                         return is_constant_expr_impl(v->value, module_path, program, treated_as_const);
                     }
@@ -265,7 +301,7 @@ namespace sema {
 
         if (g->decl->init) {
             LocalScope no_locals;
-            const auto init_ty = check_expr(*g->decl->init, no_locals, module_path, program, diag, has_declared_ty ? std::optional(declared_ty) : std::nullopt, 0);
+            const auto init_ty = check_expr(*g->decl->init, no_locals, module_path, program, diag, has_declared_ty ? std::optional(declared_ty) : std::nullopt, 0, -1, nullptr, /*in_option_position=*/!g->is_mut);
             if (has_declared_ty) {
                 if (!is_assignable(init_ty, declared_ty)) {
                     diag.report_error(DiagnosticStage::Sema, g->decl->location, "type mismatch in variable declaration");
@@ -419,6 +455,275 @@ namespace sema {
 
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                     return evaluate_integer_constant(v->value, module_path, program);
+                }
+
+                return std::nullopt;
+            },
+            expr);
+    }
+
+    auto find_enum_field_by_name(const EnumInfo &info, const std::string_view name) -> const EnumFieldInfo * {
+        const auto it = std::ranges::find(info.fields, name, &EnumFieldInfo::name);
+        return it != info.fields.end() ? &*it : nullptr;
+    }
+
+    auto find_enum_field_by_value(const EnumInfo &info, const int64_t value) -> const EnumFieldInfo * {
+        const auto it = std::ranges::find(info.fields, value, &EnumFieldInfo::value);
+        return it != info.fields.end() ? &*it : nullptr;
+    }
+
+    namespace {
+        // Coerces a raw '--opt key=value' string against @option's resolved target type.
+        // Reports its own diagnostic (naming 'key') and returns nullopt on failure.
+        auto coerce_option_string(const std::string &raw, const ResolvedType &target, const Program &program,
+                                   DiagnosticEngine &diag, const SourceLocation &loc, const std::string &key) -> std::optional<ConstFoldValue> {
+            switch (target.kind) {
+            case TypeKind::Bool: {
+                std::string lower = raw;
+                std::ranges::transform(lower, lower.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (lower == "true" || lower == "1") return int64_t{1};
+                if (lower == "false" || lower == "0") return int64_t{0};
+                diag.report_error(DiagnosticStage::Sema, loc,
+                    std::format("option '{}' expects a boolean value ('true'/'false'/'1'/'0'), got '{}'", key, raw));
+                return std::nullopt;
+            }
+            case TypeKind::I8: case TypeKind::I16: case TypeKind::I32: case TypeKind::I64:
+            case TypeKind::U8: case TypeKind::U16: case TypeKind::U32: case TypeKind::U64:
+            case TypeKind::USize: {
+                try {
+                    size_t pos = 0;
+                    const long long parsed = std::stoll(raw, &pos, 10);
+                    if (pos != raw.size()) throw std::invalid_argument("trailing characters");
+                    return static_cast<int64_t>(parsed);
+                } catch (...) {
+                    diag.report_error(DiagnosticStage::Sema, loc,
+                        std::format("option '{}' expects an integer value, got '{}'", key, raw));
+                    return std::nullopt;
+                }
+            }
+            case TypeKind::Slice: {
+                if (const auto *slice_info = program.slice_at(target.slice_index); slice_info && slice_info->element_type.kind == TypeKind::U8) {
+                    return raw;
+                }
+                diag.report_error(DiagnosticStage::Sema, loc,
+                    std::format("'@option' does not support this target type for option '{}'", key));
+                return std::nullopt;
+            }
+            case TypeKind::Enum: {
+                const auto *einfo = program.enum_at(target.enum_index);
+                if (!einfo) return std::nullopt;
+
+                if (const auto *by_name = find_enum_field_by_name(*einfo, raw)) {
+                    return by_name->value;
+                }
+
+                try {
+                    size_t pos = 0;
+                    const long long parsed = std::stoll(raw, &pos, 10);
+                    if (pos == raw.size()) {
+                        if (const auto *by_value = find_enum_field_by_value(*einfo, parsed)) {
+                            return by_value->value;
+                        }
+                    }
+                } catch (...) {}
+
+                std::string valid_names;
+                for (const auto &field : einfo->fields) {
+                    if (!valid_names.empty()) valid_names += ", ";
+                    valid_names += field.name;
+                }
+                diag.report_error(DiagnosticStage::Sema, loc,
+                    std::format("option '{}' value '{}' does not match any variant of this enum; valid values: {}", key, raw, valid_names));
+                return std::nullopt;
+            }
+            default:
+                diag.report_error(DiagnosticStage::Sema, loc,
+                    std::format("'@option' does not support this target type for option '{}'", key));
+                return std::nullopt;
+            }
+        }
+    }
+
+    auto resolve_option_expr(const void *expr_key, const ast::OptionExpr &opt, std::optional<ResolvedType> expected,
+                              const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType {
+        ResolvedType target;
+        if (expected) {
+            target = *expected;
+        } else if (opt.default_value) {
+            LocalScope empty;
+            target = check_expr(*opt.default_value, empty, module_path, program, diag, std::nullopt, 0);
+        } else {
+            target = intern_slice(program, ResolvedType{.kind = TypeKind::U8});
+        }
+
+        std::optional<ConstFoldValue> resolved_value;
+
+        const auto opt_it = program.options.opt_values.find(opt.key);
+        if (opt_it != program.options.opt_values.end()) {
+            resolved_value = coerce_option_string(opt_it->second, target, program, diag, opt.location, opt.key);
+        } else if (opt.default_value) {
+            resolved_value = evaluate_const_value(*opt.default_value, module_path, program, diag);
+            if (!resolved_value) {
+                diag.report_error(DiagnosticStage::Sema, opt.location,
+                    std::format("'@option' default value for '{}' is not a compile-time constant", opt.key));
+            }
+        } else {
+            diag.report_error(DiagnosticStage::Sema, opt.location,
+                std::format("required option '{}' was not provided.\n       Pass it with: --opt {}=<value>", opt.key, opt.key));
+        }
+
+        if (resolved_value) {
+            if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
+                mod_it->second.expr_option_values[expr_key] = *resolved_value;
+            }
+        }
+
+        return target;
+    }
+
+    auto evaluate_const_value(const ast::Expr &expr, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> std::optional<ConstFoldValue> {
+        return std::visit(
+            [&]<typename T>(const T &v) -> std::optional<ConstFoldValue> {
+                using V = std::decay_t<T>;
+
+                if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr>) {
+                    return static_cast<int64_t>(v.value);
+                }
+                if constexpr (std::is_same_v<V, ast::LiteralBoolExpr>) {
+                    return v.value ? int64_t{1} : int64_t{0};
+                }
+                if constexpr (std::is_same_v<V, ast::LiteralCharExpr>) {
+                    return static_cast<int64_t>(v.value);
+                }
+                if constexpr (std::is_same_v<V, ast::LiteralStringExpr>) {
+                    return v.value;
+                }
+
+                if constexpr (std::is_same_v<V, ast::IdentExpr>) {
+                    const auto mod_it = program.modules.find(module_path);
+                    if (mod_it == program.modules.end()) return std::nullopt;
+                    const auto sym_it = mod_it->second.symbols.find(v.name);
+                    if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
+                    const auto *g = std::get_if<GlobalSymbol>(&sym_it->second);
+                    if (!g || g->is_mut || !g->decl->init) return std::nullopt;
+                    resolve_global_symbol(module_path, v.name, program, diag, g->decl->location);
+                    return evaluate_const_value(*g->decl->init, module_path, program, diag);
+                }
+
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                    // Cross-module qualified const access, e.g. 'opts.target_os'.
+                    const auto *obj_ident = std::get_if<ast::IdentExpr>(&v->object);
+                    if (!obj_ident) return std::nullopt;
+
+                    const auto mod_it = program.modules.find(module_path);
+                    if (mod_it == program.modules.end()) return std::nullopt;
+                    const auto sym_it = mod_it->second.symbols.find(obj_ident->name);
+                    if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
+                    const auto *imp = std::get_if<ImportSymbol>(&sym_it->second);
+                    if (!imp) return std::nullopt;
+
+                    const auto other_mod_it = program.modules.find(imp->module_path);
+                    if (other_mod_it == program.modules.end()) return std::nullopt;
+                    const auto other_sym_it = other_mod_it->second.symbols.find(v->member);
+                    if (other_sym_it == other_mod_it->second.symbols.end()) return std::nullopt;
+                    const auto *g = std::get_if<GlobalSymbol>(&other_sym_it->second);
+                    if (!g || g->is_mut || !g->decl->init) return std::nullopt;
+                    resolve_global_symbol(imp->module_path, v->member, program, diag, g->decl->location);
+                    return evaluate_const_value(*g->decl->init, imp->module_path, program, diag);
+                }
+
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
+                    if (v->op == ast::UnaryOp::AddressOf || v->op == ast::UnaryOp::Deref) return std::nullopt;
+                    const auto inner = evaluate_const_value(v->operand, module_path, program, diag);
+                    const auto *iv = inner ? std::get_if<int64_t>(&*inner) : nullptr;
+                    if (!iv) return std::nullopt;
+                    switch (v->op) {
+                    case ast::UnaryOp::LogicalNot: return int64_t{*iv == 0 ? 1 : 0};
+                    case ast::UnaryOp::Negate:     return int64_t{-*iv};
+                    case ast::UnaryOp::BitwiseNot: return int64_t{~*iv};
+                    default:                       return std::nullopt;
+                    }
+                }
+
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
+                    if (v->op == ast::BinaryOp::LogicalAnd || v->op == ast::BinaryOp::LogicalOr) {
+                        const auto lhs = evaluate_const_value(v->lhs, module_path, program, diag);
+                        const auto rhs = evaluate_const_value(v->rhs, module_path, program, diag);
+                        const auto *li = lhs ? std::get_if<int64_t>(&*lhs) : nullptr;
+                        const auto *ri = rhs ? std::get_if<int64_t>(&*rhs) : nullptr;
+                        if (!li || !ri) return std::nullopt;
+                        const bool lb = *li != 0, rb = *ri != 0;
+                        return int64_t{(v->op == ast::BinaryOp::LogicalAnd ? (lb && rb) : (lb || rb)) ? 1 : 0};
+                    }
+
+                    if (v->op == ast::BinaryOp::Equal || v->op == ast::BinaryOp::NotEqual) {
+                        // Handles the common 'mod.CONST == .EnumVariant' shape: a bare '.Variant'
+                        // enum literal has no fixed value on its own (DotIdentExpr is contextual),
+                        // so its value is resolved via the OTHER side's already-check_expr'd type
+                        // (ProgramModule::expr_types), not by recursing into it directly.
+                        const auto resolve_side = [&](const ast::Expr &side, const ast::Expr &other) -> std::optional<int64_t> {
+                            if (const auto folded = evaluate_const_value(side, module_path, program, diag)) {
+                                if (const auto *iv = std::get_if<int64_t>(&*folded)) return *iv;
+                                return std::nullopt;
+                            }
+                            if (const auto *dot = std::get_if<ast::DotIdentExpr>(&side)) {
+                                const auto mod_it = program.modules.find(module_path);
+                                if (mod_it == program.modules.end()) return std::nullopt;
+                                const auto ty_it = mod_it->second.expr_types.find(get_expr_key(other));
+                                if (ty_it == mod_it->second.expr_types.end() || ty_it->second.kind != TypeKind::Enum) return std::nullopt;
+                                const auto *einfo = program.enum_at(ty_it->second.enum_index);
+                                if (!einfo) return std::nullopt;
+                                if (const auto *field = find_enum_field_by_name(*einfo, dot->name)) return field->value;
+                            }
+                            return std::nullopt;
+                        };
+                        const auto lhs = resolve_side(v->lhs, v->rhs);
+                        const auto rhs = resolve_side(v->rhs, v->lhs);
+                        if (!lhs || !rhs) return std::nullopt;
+                        return int64_t{(v->op == ast::BinaryOp::Equal ? (*lhs == *rhs) : (*lhs != *rhs)) ? 1 : 0};
+                    }
+
+                    const auto lhs = evaluate_const_value(v->lhs, module_path, program, diag);
+                    const auto rhs = evaluate_const_value(v->rhs, module_path, program, diag);
+                    const auto *li = lhs ? std::get_if<int64_t>(&*lhs) : nullptr;
+                    const auto *ri = rhs ? std::get_if<int64_t>(&*rhs) : nullptr;
+                    if (!li || !ri) return std::nullopt;
+                    switch (v->op) {
+                    case ast::BinaryOp::Add:          return *li + *ri;
+                    case ast::BinaryOp::Sub:          return *li - *ri;
+                    case ast::BinaryOp::Mul:          return *li * *ri;
+                    case ast::BinaryOp::Div:          return *ri != 0 ? std::optional<int64_t>{*li / *ri} : std::nullopt;
+                    case ast::BinaryOp::Mod:          return *ri != 0 ? std::optional<int64_t>{*li % *ri} : std::nullopt;
+                    case ast::BinaryOp::BitwiseAnd:   return *li & *ri;
+                    case ast::BinaryOp::BitwiseOr:    return *li | *ri;
+                    case ast::BinaryOp::BitwiseXor:   return *li ^ *ri;
+                    case ast::BinaryOp::ShiftLeft:    return *li << *ri;
+                    case ast::BinaryOp::ShiftRight:   return *li >> *ri;
+                    case ast::BinaryOp::Less:         return int64_t{*li < *ri ? 1 : 0};
+                    case ast::BinaryOp::Greater:      return int64_t{*li > *ri ? 1 : 0};
+                    case ast::BinaryOp::LessEqual:    return int64_t{*li <= *ri ? 1 : 0};
+                    case ast::BinaryOp::GreaterEqual: return int64_t{*li >= *ri ? 1 : 0};
+                    default:                          return std::nullopt;
+                    }
+                }
+
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
+                    return evaluate_const_value(v->value, module_path, program, diag);
+                }
+
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
+                    const auto mod_it = program.modules.find(module_path);
+                    if (mod_it == program.modules.end()) return std::nullopt;
+                    const auto it = mod_it->second.expr_option_values.find(get_expr_key(expr));
+                    if (it == mod_it->second.expr_option_values.end()) return std::nullopt;
+                    return it->second;
+                }
+
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
+                    const auto cond = evaluate_const_value(v->condition, module_path, program, diag);
+                    const auto *ci = cond ? std::get_if<int64_t>(&*cond) : nullptr;
+                    if (!ci) return std::nullopt;
+                    return evaluate_const_value(*ci != 0 ? v->then_expr : v->else_expr, module_path, program, diag);
                 }
 
                 return std::nullopt;

@@ -15,6 +15,8 @@ declaration   ::= [ 'pub' ] fn_decl
                | [ 'pub' ] var_decl
                | [ 'pub' ] macro_decl
                | impl_decl           (* impl cannot be pub *)
+               | link_decl           (* cannot be pub *)
+               | when_decl           (* cannot be pub *)
 ```
 
 ---
@@ -93,6 +95,36 @@ Note: `method_decl`'s non-self params accept an optional `mut` prefix in the
 implementation (this differs from `trait_method_decl`'s params below, which do
 not accept `mut` at all).
 
+### Link Declaration
+
+```ebnf
+link_decl     ::= '@link' '(' link_category ',' expr ')'
+
+link_category ::= 'lib' | 'system' | 'flag'
+```
+
+`@` is a sigil, not part of an identifier; `link` (like `ext` above) is parsed
+as a plain identifier immediately following it, not a reserved keyword. A
+module-scope linker directive: `lib` links a library file (path relative to
+the directory of the current module file), `system` links a system library by
+name, `flag` passes a raw linker flag verbatim. `data` must be a compile-time
+constant `[]u8` expression — the `when` expression form is legal here (see
+below). Legal at module scope or inside a module-scope `when` block; legal
+nowhere else (a sema error, not a parse error — see spec.md).
+
+### When Declaration
+
+```ebnf
+when_decl     ::= 'when' expr block_decl [ 'else' ( when_decl | block_decl ) ]
+
+block_decl    ::= '{' { declaration } '}'
+```
+
+A compile-time conditional declaration block. `expr` must be a compile-time
+constant expression. Parses any declaration kind inside `block_decl`; sema
+restricts the permitted kinds to `@link`, `const` with `@option`, `type`, and
+`ext fn` (see spec.md's "Compile-Time Configuration" section).
+
 ---
 
 ## Types
@@ -168,6 +200,9 @@ stmt          ::= block_stmt
                | return_err_stmt
                | return_ok_stmt
                | defer_stmt
+               | when_stmt
+               | link_decl          (* legal anywhere a stmt is, but always a SEMA error here —
+                                        see spec.md; parses so the diagnostic can name it precisely *)
                | expr_stmt
 
 block_stmt    ::= '{' { stmt } '}'
@@ -175,6 +210,8 @@ block_stmt    ::= '{' { stmt } '}'
 if_stmt       ::= 'if' expr stmt [ 'else' stmt ]
 
 while_stmt    ::= 'while' expr block_stmt
+
+when_stmt     ::= 'when' expr block_stmt [ 'else' ( when_stmt | block_stmt ) ]
 
 for_stmt      ::= 'for' for_binding 'in' for_iterable block_stmt
 
@@ -213,6 +250,12 @@ For group declarations, any name position may be `_` (written as an identifier) 
 mut val, _ := call()
 ```
 
+`when_stmt`'s `expr` must be a compile-time constant expression (a sema
+error otherwise — see spec.md). Both branches are always type-checked; only
+the selected branch's statements are emitted by codegen. The `then` branch
+(and each block in an `else`/`else when` chain) must be a literal
+`block_stmt`, unlike `if_stmt`'s `stmt` which accepts any statement.
+
 ---
 
 ## Expressions
@@ -225,10 +268,12 @@ expr          ::= assign_expr
 
 import_expr   ::= 'import' '(' STRING ')'
 
-assign_expr   ::= ternary_expr [ assign_op assign_expr ]
+assign_expr   ::= when_expr [ assign_op assign_expr ]
 
 assign_op     ::= '=' | '+=' | '-=' | '*=' | '/='
                | '&=' | '|=' | '^=' | '<<=' | '>>='
+
+when_expr     ::= ternary_expr [ 'when' ternary_expr 'else' expr ]
 
 ternary_expr  ::= logical_or_expr [ '?' expr ':' expr ]
 
@@ -277,6 +322,30 @@ arg           ::= expr '...'                      (* spread — expr must be a s
                | expr
 ```
 
+`when_expr` (`then_val when cond else else_val`) binds looser than every
+binary operator including ternary `?:`, but tighter than assignment — it sits
+between `assign_expr` and `ternary_expr`. `then_val` and `cond` each parse at
+the `ternary_expr` tier; `else_val` is a full `expr` (right-recursive, so
+`when` chains and composes with assignment the same way ternary's own `else`
+branch does). Composition examples:
+
+```mirage
+a + b when c else d        # parses as: (a + b) when (c) else (d)
+x when a && b else y       # parses as: x when (a && b) else y
+z = a when b else c        # parses as: z = (a when b else c)
+a when b else c when d else e   # parses as: a when b else (c when d else e)
+```
+
+A bare, unparenthesized nested `when...else` in `cond` position does not
+parse (it needs parens: `x when (a when b else c) else y`) — this is
+deliberate, not an oversight, and avoids any ambiguity with `?:`.
+
+When `cond` is a compile-time constant expression, only the selected
+branch is emitted by codegen (both branches are still type-checked). When
+`cond` is a runtime value, `when_expr` behaves exactly like `ternary_expr`
+(both branches type-checked AND emitted). See spec.md's "Compile-Time
+Configuration" section.
+
 ### Primary Expressions
 
 ```ebnf
@@ -301,6 +370,9 @@ primary_expr  ::= INT_LITERAL
                | braced_initializer
                | dot_ident_expr
                | contextual_tagged_variant
+               | option_expr
+
+option_expr   ::= '@option' '(' STRING [ ',' expr ] ')'
 
 sizeof_expr   ::= 'sizeof' '(' sizeof_operand ')'
 
@@ -335,6 +407,17 @@ braced_initializer ::= '{' '}'                                        (* empty *
                | '{' field_init { ',' field_init } '}'             (* struct fields *)
                | '{' expr { ',' expr } [ '...' ] '}'                  (* array values, optional trailing fill *)
 ```
+
+`@` is a sigil, not part of an identifier; `option` (like `link` in
+`link_decl` above) is parsed as a plain identifier immediately following it,
+not a reserved keyword. `option_expr` is a compile-time expression: legal
+only as a `const` declaration's initializer (module scope or inside a
+function body) or as a direct operand of a `when_expr`/`when_stmt` (its
+condition or either branch) — a sema error everywhere else, including nested
+inside another expression at one of those positions (e.g. `@option(...) + 1`
+in a `const` initializer is rejected; the `@option(...)` must be the whole
+initializer). See spec.md's "Compile-Time Configuration" section for the
+target-type resolution priority and `--opt` coercion rules.
 
 ---
 

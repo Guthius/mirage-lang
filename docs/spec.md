@@ -38,7 +38,7 @@ Mirage is a compiled, statically-typed systems language that targets native code
 | `anyptr` | Untyped pointer; interoperates with all typed pointers and `nil` |
 
 Note: `error` is not a scalar type — `error(T)` / `error(A \| B \| C)` is a
-type-former used only in function return-type position. See §15, "Error
+type-former used only in function return-type position. See §16, "Error
 Type System".
 
 ### The `anyptr` Type
@@ -379,20 +379,21 @@ pub const max_size: usize = 4096
 | Level | Operators                        | Associativity |
 |-------|----------------------------------|---------------|
 | 1     | `=` `+=` `-=` `*=` `/=` `&=` `\|=` `^=` `<<=` `>>=` | right |
-| 2     | `?:` (ternary)                  | right         |
-| 3     | `\|\|`                           | left          |
-| 4     | `&&`                             | left          |
-| 5     | `\|`                             | left          |
-| 6     | `^`                              | left          |
-| 7     | `&`                              | left          |
-| 8     | `==` `!=`                        | left          |
-| 9     | `<` `>` `<=` `>=`               | left          |
-| 10    | `<<` `>>`                       | left          |
-| 11    | `+` `-`                          | left          |
-| 12    | `*` `/` `%`                      | left          |
-| 13    | Unary: `-` `!` `~` `&` `*` `++` `--` `try`| right         |
-| 14    | Postfix: call `()` `.member` `[idx]` `++` `--` | left |
-| 15    | Primary                          |               |
+| 2     | `when ... else ...`             | right         |
+| 3     | `?:` (ternary)                  | right         |
+| 4     | `\|\|`                           | left          |
+| 5     | `&&`                             | left          |
+| 6     | `\|`                             | left          |
+| 7     | `^`                              | left          |
+| 8     | `&`                              | left          |
+| 9     | `==` `!=`                        | left          |
+| 10    | `<` `>` `<=` `>=`               | left          |
+| 11    | `<<` `>>`                       | left          |
+| 12    | `+` `-`                          | left          |
+| 13    | `*` `/` `%`                      | left          |
+| 14    | Unary: `-` `!` `~` `&` `*` `++` `--` `try`| right         |
+| 15    | Postfix: call `()` `.member` `[idx]` `++` `--` | left |
+| 16    | Primary                          |               |
 
 ### Arithmetic
 
@@ -457,6 +458,26 @@ condition ? then_expr : else_expr
 
 Both branches must have the same type.
 
+### `when` Expression
+
+```mirage
+then_val when condition else else_val
+```
+
+Binds looser than every binary operator (including ternary `?:`) but tighter
+than assignment. Both branches must have the same type (same rule as
+ternary). Semantics depend on whether `condition` is a compile-time constant:
+
+- **Compile-time constant**: both branches are still type-checked, but only
+  the selected branch's code is emitted — the other branch's value is never
+  computed at runtime.
+- **Runtime value**: behaves exactly like the ternary `?:` above — both
+  branches are type-checked and emitted, and the result is chosen at runtime.
+
+See [Compile-Time Configuration](#compile-time-configuration) for how this
+combines with `@option` and `@link`, and the `when` *statement* (a related
+but distinct construct — see [Statements](#6-statements)).
+
 ### Assignment
 
 ```mirage
@@ -510,7 +531,7 @@ mod.fn_name(arg)    # cross-module call
 ```
 
 **Spread argument:** `expr...` forwards an existing slice as the variadic argument of a call to a
-function with a native `...T` parameter (see [Variadic Arguments](#16-variadic-arguments)):
+function with a native `...T` parameter (see [Variadic Arguments](#17-variadic-arguments)):
 
 ```mirage
 fn sum(base: i32, nums: ...i32) -> i32 { ... }
@@ -593,7 +614,7 @@ try fallible_call(args)
 ```
 
 Calls a fallible function (one whose last return type is `error(...)`, see
-§15). If the call's error result is in the `Failed` state, propagates it by
+§16). If the call's error result is in the `Failed` state, propagates it by
 returning from the enclosing function; all deferred statements in scope run
 before the return. On success, evaluates to the non-error return values, and
 the callee's error result is discarded (there is nothing left to check — it
@@ -671,6 +692,27 @@ if condition {
 
 The `else` branch is optional. The condition must be `bool`. The body can be any statement (not necessarily a block).
 
+### `when` Statement
+
+```mirage
+when condition {
+    # then — must be a compile-time constant expression
+} else when other_condition {
+    ...
+} else {
+    ...
+}
+```
+
+A compile-time-only sibling of `if`: `condition` must be a compile-time
+constant (a sema error otherwise, pointing at `if` instead); the `then`
+branch (and each block in an `else`/`else when` chain) must be a literal
+block, unlike `if`'s. Both branches are always type-checked, but only the
+selected one is ever emitted. See
+[Compile-Time Configuration](#12-compile-time-configuration) for the full
+semantics, including the additional restrictions that apply at module
+scope.
+
 ### While Loop
 
 ```mirage
@@ -727,7 +769,7 @@ return_ok [value1, value2, ...]
 ```
 
 Sugar over `return` for fallible functions (functions whose last return type
-is `error(...)`, see §15). Both run deferred statements before returning,
+is `error(...)`, see §16). Both run deferred statements before returning,
 exactly like `return`.
 
 `return_err <expr>` returns from the current function with the error
@@ -883,7 +925,7 @@ The final parameter of a `fn` may be declared `name: ...T`, where `T` is any val
 Inside the function body, `name` behaves as an ordinary `[]i32` — a value of `[N]T` collected from
 the trailing call arguments, or the slice passed directly via [spread](#function-call). A call must
 supply zero or more trailing arguments assignable to `T` beyond the fixed parameters. This is
-distinct from `ext fn`'s untyped C `...` varargs (see [Variadic Arguments](#16-variadic-arguments))
+distinct from `ext fn`'s untyped C `...` varargs (see [Variadic Arguments](#17-variadic-arguments))
 — the address of a variadic function cannot be taken as a function pointer.
 
 ### Extern Functions
@@ -1186,7 +1228,171 @@ Cross-module access uses dot notation. Only `pub` symbols are accessible from ou
 
 ---
 
-## 12. Type Declarations
+## 12. Compile-Time Configuration
+
+Four coupled features let a module read compile-time-supplied configuration
+and conditionally compile declarations, statements, and linker inputs based
+on it: `@option`, `@link`, the `when` statement, and the `when` expression.
+
+### `@option`
+
+```mirage
+@option(key)
+@option(key, default)
+```
+
+A compile-time expression that reads a value supplied by the compiler
+driver via `--opt key=value` (repeatable). `key` is a string literal (by
+convention a `/`-separated path, e.g. `"build/target_os"`). If a second
+argument is given, it is used when `--opt key=...` was not passed; if no
+default is given and no `--opt` is passed, this is a sema error:
+
+```
+error: required option 'build/target_os' was not provided.
+       Pass it with: --opt build/target_os=<value>
+```
+
+**Legal positions** — `@option` may appear only:
+- As the (whole) initializer of a `const` declaration, at module scope or inside a function body.
+- As a direct operand of a `when` expression or `when` statement (its condition, or either branch).
+
+Anywhere else — as an argument to an ordinary function call, the RHS of a
+`mut` variable, nested inside arithmetic (`@option(...) + 1`), etc. — it is
+a sema error:
+
+```
+error: '@option' is a compile-time expression and may only appear in
+       const declarations or when conditions.
+```
+
+**Target-type resolution**, in priority order:
+1. The expected type from context (e.g. the declared type of a `const`).
+2. If no expected type is known but a default value is given, the default
+   value's own type (via the usual literal-defaulting rules).
+3. Otherwise, `[]u8` — the raw `--opt` string is used as-is.
+
+**`--opt` value coercion**, once the target type is known:
+- `bool`: `"true"`/`"1"` → `true`; `"false"`/`"0"` → `false` (case-insensitive). Anything else is a sema error.
+- Integer types (`i32`, `u32`, `usize`, ...): parsed as a decimal integer. Out-of-range or non-numeric is a sema error.
+- `[]u8`: the raw string, unconverted.
+- Enum types: matched first by variant name (case-sensitive), then by integer value (e.g. `--opt build/target_os=Windows` and `--opt build/target_os=1` can both select the same variant). Neither matching is a sema error naming the valid variant names.
+- Any other target type: a sema error — `@option` does not support it.
+
+### `@link`
+
+```mirage
+@link(category, data)
+```
+
+`category` is one of `lib`, `system`, or `flag` (bare identifiers, not
+string literals): `lib` links a library file (`data` is a path, relative to
+the directory of the current module file); `system` links a system library
+by name (searched in the linker's default paths); `flag` passes `data`
+verbatim as a raw linker flag. `data` must be a compile-time constant
+`[]u8` expression — a `when` expression is legal here:
+
+```mirage
+@link(lib, "raylibdll.lib" when raylib_shared else "raylib.lib")
+```
+
+`@link` is legal only at module scope, or inside a module-scope `when`
+block; anywhere else (a function body, an `if`, etc.) it is a sema error:
+
+```
+error: '@link' is a linker directive and may only appear at module scope
+       or inside a module-scope 'when' block.
+```
+
+The compiler collects every `@link` directive reachable from a *live*
+`when` branch (see below), across every compiled module, into a single
+list the driver can act on (the exact linking mechanism is driver-specific
+and out of the compiler's scope — collection only).
+
+### `when` Statement
+
+```mirage
+when condition {
+    ...
+} else when other_condition {
+    ...
+} else {
+    ...
+}
+```
+
+A compile-time conditional statement, legal anywhere an ordinary statement
+is legal (function bodies, module scope, nested inside other `when`/`if`/
+`while` blocks). `condition` must be a compile-time constant expression —
+a runtime value is a sema error pointing at `if` instead:
+
+```
+error: 'when' condition must be a compile-time constant expression.
+       Use 'if' for runtime conditions.
+```
+
+**Both branches are always type-checked** — a hard requirement, with no
+opt-out. This is deliberate: it prevents platform-specific code from
+silently rotting when developing on a different target than the one a
+given `when` branch targets. Only the *selected* branch's code is ever
+emitted by codegen; the other branch is never executed and never even
+visited by codegen (an `ext fn` declared only in an unselected module-scope
+branch, for instance, never needs an LLVM declaration synthesized for it).
+
+**At module scope**, a `when` block may contain only `@link` declarations,
+`const` declarations initialized directly with `@option`, `type`
+declarations, and `ext fn` declarations — anything else is a sema error:
+
+```
+error: only '@link', 'const' with '@option', 'type', and 'ext fn'
+       declarations are permitted inside a module-scope 'when' block.
+```
+
+This is what makes platform-specific `ext fn` declarations possible:
+
+```mirage
+when target_os == .Windows {
+    ext fn GetLastError() -> u32
+}
+```
+
+A name declared only inside a module-scope `when`'s selected branch is an
+ordinary symbol wherever it's visible; a name declared only in the
+*unselected* branch simply doesn't exist — referencing it (even from the
+other branch of the same `when`) is an ordinary "unknown identifier" error,
+not a special diagnostic. `@link` is collected only from the selected
+branch; the unselected branch's `@link` `data` expression is still fully
+type-checked (per the "both branches type-checked" rule above), just never
+collected.
+
+### `when` Expression
+
+See [`when` Expression](#when-expression) under Expressions — same
+construct, used here as `@link`'s `data` argument or an `@option`
+default/operand.
+
+### Example
+
+```mirage
+const opts := import("Core/Compiler/Options")   # OperatingSystem/Architecture enums + @option-backed consts
+
+const raylib_shared := @option("raylib_shared", false)
+
+when opts.target_os == .Windows {
+    @link(lib, "windows/raylibdll.lib" when raylib_shared else "windows/raylib.lib")
+    @link(system, "User32")
+} else when opts.target_os == .Linux {
+    @link(lib, "linux/libraylib.so.600" when raylib_shared else "linux/libraylib.a")
+    @link(system, "dl")
+} else {
+    @link(lib, "raylib")
+}
+
+ext fn InitWindow(width: i32, height: i32, title: *u8)
+```
+
+---
+
+## 13. Type Declarations
 
 ```mirage
 type Name = TypeExpression
@@ -1197,7 +1403,7 @@ Creates a named type alias. The named type is structural: two declarations with 
 
 ---
 
-## 13. Type Inference
+## 14. Type Inference
 
 - `mut x := expr` infers the type of `x` from `expr`.
 - `const x := expr` infers the type from `expr`.
@@ -1207,7 +1413,7 @@ Creates a named type alias. The named type is structural: two declarations with 
 
 ---
 
-## 14. Type Compatibility and Assignability
+## 15. Type Compatibility and Assignability
 
 The following types are mutually assignable without explicit cast:
 
@@ -1223,7 +1429,7 @@ Arithmetic, bitwise, and other binary operations require both operands to have t
 
 ---
 
-## 15. Error Type System
+## 16. Error Type System
 
 Errors are typed enum or tagged-union values, wrapped in a
 compiler-generated `Ok`/`Failed` tag. A fallible function declares its
@@ -1374,7 +1580,7 @@ the error.
 
 ---
 
-## 16. Variadic Arguments
+## 17. Variadic Arguments
 
 There are two distinct kinds of variadic function, with different syntax and different rules.
 
@@ -1407,13 +1613,18 @@ declared `...T`, dissolving to `[]T` inside the function body. Unlike C-style va
 
 ---
 
-## 17. Reserved Keywords
+## 18. Reserved Keywords
 
 The following identifiers are reserved by the language:
 
-`break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `import_bin` `in` `iota` `len` `macro` `match` `mut` `nil` `pub` `return` `return_err` `return_ok` `sizeof` `stackalloc` `struct` `switch` `trait` `true` `try` `type` `undefined` `union` `while`
+`break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `import_bin` `in` `iota` `len` `macro` `match` `mut` `nil` `pub` `return` `return_err` `return_ok` `sizeof` `stackalloc` `struct` `switch` `trait` `true` `try` `type` `undefined` `union` `when` `while`
 
-`ext` is parsed as an identifier, not a keyword; it is used as the prefix for extern function declarations.
+`ext` is parsed as an identifier, not a keyword; it is used as the prefix
+for extern function declarations. `option` and `link` are likewise parsed
+as plain identifiers, not keywords — they're only meaningful immediately
+after the `@` sigil (`@option(...)`, `@link(...)`, see
+[Compile-Time Configuration](#12-compile-time-configuration)); `option` and
+`link` remain ordinary, unreserved identifiers everywhere else.
 
 ### Reserved for Future Use
 
@@ -1421,5 +1632,4 @@ The lexer also reserves the following identifiers, but nothing in the language c
 
 - **`namespace`** — likely reserved for an explicit namespace-declaration feature; not implemented.
 - **`asm`** — the lexer already has special handling that scans a following `{ ... }` block as raw text, but the parser does not yet accept `asm` blocks anywhere. Inline assembly is not currently usable.
-- **`when`** — likely reserved for a future compile-time conditional; not implemented.
 - **`offsetof`** — likely reserved as a future sibling to `sizeof` for computing a struct field's byte offset; not implemented.

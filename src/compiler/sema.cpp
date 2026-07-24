@@ -7,6 +7,7 @@
 namespace sema {
     void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, const ast::Module &decls, DiagnosticEngine &diagnostics);
     void register_trait_impls_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag);
+    void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag);
 
     namespace {
         void resolve_signatures_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
@@ -376,15 +377,20 @@ namespace sema {
         }
     }
 
-    auto check_program(const ast::Program &program, DiagnosticEngine &diag) -> Program {
+    auto check_program(const ast::Program &program, DiagnosticEngine &diag, const Options &options) -> Program {
         if (!program.ok) {
             return {};
         }
 
         Program out;
+        out.options = options;
 
-        for (auto &[path, decls] : program.modules) {
-            build_symbol_table_for_module(program, path, out.modules[path], out, decls, diag);
+        // Reentrant/memoized rather than a flat loop: a module-scope 'when' condition may
+        // reference another module's const (e.g. 'opts.target_os'), which needs that
+        // module's symbol table built (and its value resolved) on demand, regardless of
+        // Program::modules' unordered iteration order — see ensure_module_declared.
+        for (const auto &path : program.modules | std::views::keys) {
+            ensure_module_declared(program, path, out, diag);
         }
 
         // Runs after every module's symbol table (types + bare-impl method names) is

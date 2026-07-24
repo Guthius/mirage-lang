@@ -199,6 +199,12 @@ namespace sema {
         ResolvedType effective_type;
     };
 
+    // A '--opt key=value' value coerced (per @option's target-type coercion rules) or
+    // folded from a default expression: an integer/bool/enum-underlying value, or a []u8
+    // string. Used both for '@option' itself and for constant-folding 'when' conditions
+    // and '@link' data expressions that reference an '@option'-backed const.
+    using ConstFoldValue = std::variant<int64_t, std::string>;
+
     struct ProgramModule {
         SymbolTable symbols;
         // type_name -> method_name -> MethodInfo
@@ -208,6 +214,19 @@ namespace sema {
         std::unordered_map<const void *, TraitCoercion> expr_trait_coercions;
         std::unordered_map<const void *, TraitDispatchInfo> expr_trait_dispatch;
         std::unordered_map<const void *, ErrorMatchUnwrap> expr_error_match_unwrap;
+        // '@option(...)' expression -> its resolved compile-time value, cached by
+        // check_expr's OptionExpr case so later constant-folding (when conditions, '@link'
+        // data) never re-runs coercion/diagnostics for the same node.
+        std::unordered_map<const void *, ConstFoldValue> expr_option_values;
+        // 'when' EXPRESSION -> which branch (true=then_expr, false=else_expr) a
+        // compile-time-constant condition folded to; absent if the condition is a runtime
+        // value (codegen emits a runtime branch/PHI in that case, like an ordinary ternary).
+        std::unordered_map<const void *, bool> expr_when_selected;
+        // 'when' STATEMENT -> which branch is live (always present; a when statement's
+        // condition is always required to be a compile-time constant).
+        std::unordered_map<const ast::WhenStmt *, bool> when_stmt_selected;
+        // module-scope 'when' DECLARATION -> which branch is live.
+        std::unordered_map<const ast::WhenDecl *, bool> when_decl_selected;
         bool ok = false;
     };
 
@@ -217,6 +236,31 @@ namespace sema {
         std::set<std::pair<std::string, std::string>> union_resolving;
         std::set<std::pair<std::string, std::string>> trait_resolving;
         std::set<std::pair<std::string, std::string>> value_resolving;
+        // Cycle guard for the reentrant module-scope-'when' symbol declaration helper
+        // (ensure_module_declared, sema_declare.cpp) — a 'when' condition that references
+        // another module's const can force that module's symbol table to be built
+        // on-demand, out of Program::modules' unordered iteration order; this detects a
+        // circular dependency between modules' 'when' conditions.
+        std::set<std::string> when_module_declaring;
+    };
+
+    // Compiler-driver-supplied configuration read by '@option' during sema. Threaded
+    // through check_program the same way codegen::Options is threaded through
+    // codegen::generate (see codegen.hpp) — a single defaulted struct parameter, copied
+    // once into Program::options at check_program's entry, then read via the
+    // already-universally-threaded Program& rather than adding a new parameter to every
+    // check_expr/check_stmt call site.
+    struct Options {
+        std::unordered_map<std::string, std::string> opt_values;
+    };
+
+    enum class LinkCategory : uint8_t { Lib, System, Flag };
+
+    struct LinkDirective {
+        LinkCategory category;
+        std::string data;
+        std::string source_module; // for diagnostics
+        SourceLocation location;
     };
 
     struct Program {
@@ -236,6 +280,17 @@ namespace sema {
         std::vector<std::pair<std::vector<ResolvedType>, int>> error_unions;
         ResolveState resolve_state;
         bool ok = false;
+
+        // '--opt key=value' values supplied by the driver, read by '@option'.
+        Options options;
+        // Linker directives collected from '@link' declarations in live 'when' branches
+        // (or unconditional module scope) across every module. Driver-specific consumption
+        // is out of scope for the compiler itself — this is collection only.
+        std::vector<LinkDirective> link_directives;
+        // Module paths whose symbol table (build_symbol_table_for_module) has already run —
+        // see ensure_module_declared (sema_declare.cpp) for why this must be reentrant
+        // rather than a single flat loop over Program::modules.
+        std::set<std::string> modules_declared;
 
         // Trait-impl registries. Kept separate from ProgramModule::methods (which has
         // no trait dimension and would silently collide with same-named inherent
@@ -321,7 +376,7 @@ namespace sema {
         }, expr);
     }
 
-    auto check_program(const ast::Program &program, DiagnosticEngine &diag) -> Program;
+    auto check_program(const ast::Program &program, DiagnosticEngine &diag, const Options &options = {}) -> Program;
     auto resolve_type(const ast::Type &type, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType;
     auto resolve_declared_type(const std::optional<ast::Type> &type, const std::optional<ast::Expr> &init,
                                 const std::string &module_path, Program &program, DiagnosticEngine &diag,
@@ -337,13 +392,38 @@ namespace sema {
     auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
     auto resolve_global_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
     auto resolve_macro_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> MacroSymbol &;
-    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, std::optional<ResolvedType> expected, int loop_depth, int defer_loop_base = -1, const ResolvedType *fn_error_type = nullptr) -> ResolvedType;
+    // 'in_option_position' gates '@option(...)' legality: true only at the handful of call
+    // sites the spec allows it (a const declaration's own initializer, and a 'when'
+    // statement/expression's condition/then/else) — NOT propagated into ordinary recursive
+    // sub-checks (binary operands, call arguments, etc.), so '@option' nested inside
+    // arithmetic or passed to a function is still rejected. See check_expr's OptionExpr case.
+    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, std::optional<ResolvedType> expected, int loop_depth, int defer_loop_base = -1, const ResolvedType *fn_error_type = nullptr, bool in_option_position = false) -> ResolvedType;
     auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth, int defer_loop_base = -1) -> void;
     auto is_constant_expr(const ast::Expr &expr, const std::string &module_path, const Program &program) -> bool;
     // Evaluate a compile-time integer or bool constant expression. Returns nullopt if the expression
     // cannot be statically evaluated (e.g. non-constant or unsupported form). Used by match/switch
     // for duplicate arm detection (sema) and case-value emission (codegen).
     auto evaluate_integer_constant(const ast::Expr &expr, const std::string &module_path, const Program &program) -> std::optional<int64_t>;
+
+    // A more general compile-time evaluator than evaluate_integer_constant above: also
+    // folds string literals, cross-module qualified const access ('mod.NAME'), '@option'
+    // (via the cached expr_option_values side table), 'when' expressions, and enum-literal
+    // (.Variant) equality comparisons (resolved via the sibling operand's expr_types entry,
+    // since a bare '.Variant' has no fixed value without that context). Used to fold 'when'
+    // statement/declaration conditions and '@link' data expressions. Takes Program by
+    // non-const reference (unlike evaluate_integer_constant) because it may need to force
+    // resolution of a referenced global's value (resolve_global_symbol) on demand.
+    auto evaluate_const_value(const ast::Expr &expr, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> std::optional<ConstFoldValue>;
+
+    auto find_enum_field_by_name(const EnumInfo &info, std::string_view name) -> const EnumFieldInfo *;
+    auto find_enum_field_by_value(const EnumInfo &info, int64_t value) -> const EnumFieldInfo *;
+
+    // Full '@option' resolution: target-type priority (expected > default's type > []u8),
+    // '--opt' string coercion or default-value folding, and the required/invalid-value
+    // diagnostics. 'expr_key' is get_expr_key(...) of the ENCLOSING ast::Expr (for caching
+    // into ProgramModule::expr_option_values) — see check_expr's OptionExpr case.
+    auto resolve_option_expr(const void *expr_key, const ast::OptionExpr &opt, std::optional<ResolvedType> expected,
+                              const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType;
 
     // Returns the module path and type name for a given resolved struct/enum type,
     // searching all modules. Returns {"", ""} if not found.

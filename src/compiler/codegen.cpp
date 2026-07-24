@@ -2840,6 +2840,10 @@ namespace codegen {
                                     }
                                 },
                                 *v);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
+                            return emit_option_value(expr, ty);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
+                            return emit_when_expr(*v, expr, ty);
                         } else {
                             report_codegen_error(diag_, {}, "unsupported expression in codegen");
                             return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
@@ -3281,7 +3285,35 @@ namespace codegen {
                 builder_.SetInsertPoint(after_bb);
             }
 
-            auto emit_ternary(const ast::TernaryExpr &expr, const sema::ResolvedType &result_type) -> llvm::Value * {
+            // Materializes an '@option(...)' expression's compile-time-resolved value
+            // (cached by sema in ProgramModule::expr_option_values — see
+            // sema::resolve_option_expr) as an LLVM constant of its resolved type 'ty'.
+            auto emit_option_value(const ast::Expr &expr, const sema::ResolvedType &ty) -> llvm::Value * {
+                const auto it = current_module_->expr_option_values.find(sema::get_expr_key(expr));
+                if (it == current_module_->expr_option_values.end()) {
+                    report_codegen_error(diag_, {}, "internal error: '@option' value was not resolved by sema");
+                    return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
+                }
+                return std::visit(
+                    [&]<typename VT>(const VT &val) -> llvm::Value * {
+                        using VTT = std::decay_t<VT>;
+                        if constexpr (std::is_same_v<VTT, int64_t>) {
+                            if (ty.is_float()) {
+                                return llvm::ConstantFP::get(llvm_type(*current_module_path_, ty), static_cast<double>(val));
+                            }
+                            return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty), static_cast<uint64_t>(val), ty.is_signed());
+                        } else { // std::string
+                            return emit_string_literal(val);
+                        }
+                    },
+                    it->second);
+            }
+
+            // Template so the identical then/else/PHI shape below serves both TernaryExpr
+            // and WhenExpr's runtime-condition path (their condition/then_expr/else_expr
+            // fields are structurally identical) without duplicating the emission logic.
+            template <typename TernaryLikeExpr>
+            auto emit_ternary(const TernaryLikeExpr &expr, const sema::ResolvedType &result_type) -> llvm::Value * {
                 auto *fn = builder_.GetInsertBlock()->getParent();
                 auto *then_bb = llvm::BasicBlock::Create(*context_, "ternary.then", fn);
                 auto *else_bb = llvm::BasicBlock::Create(*context_, "ternary.else", fn);
@@ -3305,6 +3337,21 @@ namespace codegen {
                 phi->addIncoming(then_value, then_done);
                 phi->addIncoming(else_value, else_done);
                 return phi;
+            }
+
+            // 'then_val when cond else else_val'. When sema recorded a compile-time-constant
+            // condition (ProgramModule::expr_when_selected), no branch/PHI is emitted at
+            // all — just the selected branch's value, coerced to the unified result type
+            // (mirrors emit_const_or_runtime's existing TernaryExpr const-fold arm, but
+            // generalized to a runtime-value context: only the CHOICE of branch is
+            // compile-time here, not necessarily the branch's own value). Otherwise this
+            // behaves exactly like an ordinary runtime ternary (shared emit_ternary).
+            auto emit_when_expr(const ast::WhenExpr &expr, const ast::Expr &self_expr, const sema::ResolvedType &result_type) -> llvm::Value * {
+                if (const auto it = current_module_->expr_when_selected.find(sema::get_expr_key(self_expr));
+                    it != current_module_->expr_when_selected.end()) {
+                    return emit_value_as(it->second ? expr.then_expr : expr.else_expr, result_type, *current_module_path_);
+                }
+                return emit_ternary(expr, result_type);
             }
 
             static auto compound_op(ast::AssignOp op) -> ast::BinaryOp {
@@ -3491,6 +3538,18 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
                             auto *cond = llvm::cast<llvm::ConstantInt>(emit_const_or_runtime(v->condition, true));
                             return emit_const_or_runtime(cond->isZero() ? v->else_expr : v->then_expr, true);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
+                            return llvm::cast<llvm::Constant>(emit_option_value(expr, ty));
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
+                            // Only reachable for a compile-time-constant condition — sema's
+                            // is_constant_expr_impl requires the condition (along with both
+                            // branches) to itself be constant for a WhenExpr to ever be
+                            // considered a constant expression in the first place, so
+                            // expr_when_selected is always populated here.
+                            if (const auto it = current_module_->expr_when_selected.find(sema::get_expr_key(expr));
+                                it != current_module_->expr_when_selected.end()) {
+                                return emit_const_or_runtime(it->second ? v->then_expr : v->else_expr, true);
+                            }
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
                             std::string target_module = *current_module_path_;
                             std::string name;
@@ -3796,9 +3855,60 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::DeferStmt>>) {
                             // Register defer in the current scope; emit at scope exit
                             defer_scopes_.back().defers.push_back(v.get());
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenStmt>>) {
+                            emit_when_stmt(*v);
                         }
+                        // ast::LinkDecl reaching here is a sema error (rejected in check_stmt) —
+                        // nothing to emit even in an already-erroring program.
                     },
                     stmt);
+            }
+
+            // Emits a 'when' statement's SELECTED branch's statements directly at the
+            // current insertion point — no new basic blocks, no CreateCondBr, since sema
+            // guarantees the condition is always a compile-time constant (see
+            // ProgramModule::when_stmt_selected). This is the first dead-branch-elision
+            // construct in this codegen: the unselected branch is never even visited here,
+            // which matters concretely for e.g. an 'ext fn' declared only in a dead
+            // module-scope 'when' branch — it was never registered as a symbol in the
+            // first place (see sema_declare.cpp's declare_when_decl), so nothing here
+            // needs a separate "is this decl dead" check for that case either.
+            void emit_when_block(const ast::BlockStmt &block) {
+                const auto saved = locals_;
+                const bool is_loop_body = next_block_is_loop_body_;
+                next_block_is_loop_body_ = false;
+                defer_scopes_.push_back(DeferScope{.is_loop_body = is_loop_body});
+                for (const auto &s : block.stmts) {
+                    if (builder_.GetInsertBlock()->getTerminator()) break;
+                    emit_stmt(s);
+                }
+                if (!builder_.GetInsertBlock()->getTerminator()) {
+                    emit_defers_in_scope(defer_scopes_.back());
+                }
+                defer_scopes_.pop_back();
+                locals_ = saved;
+            }
+
+            void emit_when_stmt(const ast::WhenStmt &stmt) {
+                const auto it = current_module_->when_stmt_selected.find(&stmt);
+                const bool selected = it != current_module_->when_stmt_selected.end() && it->second;
+
+                if (selected) {
+                    emit_when_block(stmt.then_block);
+                    return;
+                }
+                if (stmt.else_branch) {
+                    std::visit(
+                        [&]<typename EV>(const EV &else_v) {
+                            using EVT = std::decay_t<EV>;
+                            if constexpr (std::is_same_v<EVT, ast::BlockStmt>) {
+                                emit_when_block(else_v);
+                            } else { // std::unique_ptr<ast::WhenStmt>
+                                emit_when_stmt(*else_v);
+                            }
+                        },
+                        *stmt.else_branch);
+                }
             }
 
             void emit_if(const ast::IfStmt &stmt) {

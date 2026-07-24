@@ -484,6 +484,7 @@ namespace lexer {
                 case '~': return make_token(TokenKind::Tilde, start);
                 case '?': return make_token(TokenKind::Question, start);
                 case ';': return make_token(TokenKind::Semicolon, start);
+                case '@': return make_token(TokenKind::At, start);
 
                 case '.':
                     if (match('.')) {
