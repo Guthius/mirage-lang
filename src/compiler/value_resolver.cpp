@@ -549,6 +549,14 @@ namespace sema {
         ResolvedType target;
         if (expected) {
             target = *expected;
+            // Still check the default against the known target — needed both to catch a
+            // type mismatch and (for e.g. a bare '.Variant' enum literal default, which is
+            // otherwise contextless) to populate expr_types so evaluate_const_value below
+            // can resolve it.
+            if (opt.default_value) {
+                LocalScope empty;
+                check_expr(*opt.default_value, empty, module_path, program, diag, target, 0);
+            }
         } else if (opt.default_value) {
             LocalScope empty;
             target = check_expr(*opt.default_value, empty, module_path, program, diag, std::nullopt, 0);
@@ -630,6 +638,29 @@ namespace sema {
                     if (!g || g->is_mut || !g->decl->init) return std::nullopt;
                     resolve_global_symbol(imp->module_path, v->member, program, diag, g->decl->location);
                     return evaluate_const_value(*g->decl->init, imp->module_path, program, diag);
+                }
+
+                if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
+                    // A bare '.Variant' enum literal has no fixed value on its own — it only
+                    // means something once check_expr has resolved it against an expected
+                    // enum type, recorded in ITS OWN expr_types entry (populated whenever
+                    // check_expr visited this exact node, e.g. because it's a '@option'
+                    // default checked directly against the declared target type, or an
+                    // operand of '==' checked against the other side's type — see
+                    // resolve_option_expr and check_expr's BinaryExpr case respectively).
+                    // If nothing ever check_expr'd this exact node, this legitimately can't
+                    // be folded (the BinaryExpr Equal/NotEqual case below has its own
+                    // sibling-type fallback for the one shape that can still route around
+                    // that: a dot-ident used as the LHS of a comparison the outer context
+                    // didn't already give an enum-typed 'expected').
+                    const auto mod_it = program.modules.find(module_path);
+                    if (mod_it == program.modules.end()) return std::nullopt;
+                    const auto ty_it = mod_it->second.expr_types.find(get_expr_key(expr));
+                    if (ty_it == mod_it->second.expr_types.end() || ty_it->second.kind != TypeKind::Enum) return std::nullopt;
+                    const auto *einfo = program.enum_at(ty_it->second.enum_index);
+                    if (!einfo) return std::nullopt;
+                    if (const auto *field = find_enum_field_by_name(*einfo, v.name)) return field->value;
+                    return std::nullopt;
                 }
 
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
