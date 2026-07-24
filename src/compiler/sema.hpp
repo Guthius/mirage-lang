@@ -77,6 +77,18 @@ namespace sema {
         uint32_t size = 0;
         uint32_t align = 1;
         bool layout_done = false;
+
+        // Set on both the outer Ok/Failed wrapper synthesized for an 'error(...)'
+        // type and (when there are 2+ error member types) the inner member-dispatch
+        // union nested in its Failed variant. Never set on a user-declared union.
+        // 'error_member_types' holds the error(...) type's own member list (the
+        // enum/union Ts named between the parens) in the order they were declared
+        // in the ORIGINAL error(...) spelling that first synthesized this union
+        // (used for the inner union's own variant naming and for diagnostics that
+        // don't have the originating ast::ErrorType node in scope). Not meaningful
+        // (empty) unless is_error_union is true.
+        bool is_error_union = false;
+        std::vector<ResolvedType> error_member_types;
     };
 
     // The tag field of a tagged union is always u32.
@@ -175,6 +187,18 @@ namespace sema {
         int method_order_index = -1;
     };
 
+    // Records that a match/switch operand expression is an error(...) value being matched
+    // transparently on its inner representation — see check_expr's MatchExpr/SwitchStmt
+    // handling in sema_check.cpp. 'wrapper_type' is the operand's own (Ok/Failed) type;
+    // 'effective_type' is what sema actually dispatched the arms against (the single error
+    // member type, or the synthesized inner dispatch union for 2+ members). Codegen uses
+    // this to GEP through the Failed payload to 'effective_type''s bytes before emitting the
+    // ordinary (unmodified) tagged-union/enum match/switch code.
+    struct ErrorMatchUnwrap {
+        ResolvedType wrapper_type;
+        ResolvedType effective_type;
+    };
+
     struct ProgramModule {
         SymbolTable symbols;
         // type_name -> method_name -> MethodInfo
@@ -183,6 +207,7 @@ namespace sema {
         std::unordered_map<const void *, VariantCoercion> expr_variant_coercions;
         std::unordered_map<const void *, TraitCoercion> expr_trait_coercions;
         std::unordered_map<const void *, TraitDispatchInfo> expr_trait_dispatch;
+        std::unordered_map<const void *, ErrorMatchUnwrap> expr_error_match_unwrap;
         bool ok = false;
     };
 
@@ -204,6 +229,11 @@ namespace sema {
         std::vector<ResolvedType> pointer_pointees; // global; pointee_index is unique across all modules
         std::vector<ArrayInfo> arrays;             // global; array_index is unique across all modules
         std::vector<SliceInfo> slices;             // global; slice_index is unique across all modules
+        // Interning cache for synthesized 'error(...)' union types: sorted member-type
+        // list (canonical identity, order-independent — see intern_error_union) -> the
+        // union_index of the synthesized Ok/Failed wrapper. Two 'error(...)' spellings
+        // naming the same set of member types (in any order) intern to the same union.
+        std::vector<std::pair<std::vector<ResolvedType>, int>> error_unions;
         ResolveState resolve_state;
         bool ok = false;
 
@@ -255,9 +285,18 @@ namespace sema {
         }
     };
 
+    // Typestate for an error(...)-typed local: whether it's currently known to be in the
+    // Ok/Failed tag state. NotApplicable for every non-error-typed binding. Block-scoped —
+    // LocalScope's existing copy-on-block-entry semantics (see check_stmt's BlockStmt/
+    // ForInStmt/switch-arm handling) give this the reset-on-scope-exit behavior for free;
+    // IfStmt/WhileStmt additionally copy explicitly (a prerequisite fix — they used to pass
+    // 'locals' straight through by reference) so branch-local narrowing can't leak sideways.
+    enum class ErrorState : uint8_t { NotApplicable, Unknown, Failed, Ok };
+
     struct LocalBinding {
         ResolvedType type;
         bool is_mut = false;
+        ErrorState err_state = ErrorState::NotApplicable;
     };
 
     using LocalScope = std::unordered_map<std::string, LocalBinding>;
@@ -290,6 +329,7 @@ namespace sema {
     auto resolve_import_bin_type(const std::string &module_path, const std::string &path, const SourceLocation &loc,
                                   Program &program, DiagnosticEngine &diag) -> ResolvedType;
     auto is_assignable(const ResolvedType &from, const ResolvedType &to) -> bool;
+    auto error_union_is_subset(const ResolvedType &callee, const ResolvedType &caller, const Program &program) -> bool;
     auto function_params_compatible(const std::vector<ResolvedType> &actual, const std::vector<ResolvedType> &expected) -> bool;
     auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType;
     auto intern_slice(Program &program, const ResolvedType &element) -> ResolvedType;
@@ -297,7 +337,7 @@ namespace sema {
     auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
     auto resolve_global_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
     auto resolve_macro_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> MacroSymbol &;
-    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, std::optional<ResolvedType> expected, int loop_depth, int defer_loop_base = -1, bool fn_returns_error = false) -> ResolvedType;
+    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, std::optional<ResolvedType> expected, int loop_depth, int defer_loop_base = -1, const ResolvedType *fn_error_type = nullptr) -> ResolvedType;
     auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth, int defer_loop_base = -1) -> void;
     auto is_constant_expr(const ast::Expr &expr, const std::string &module_path, const Program &program) -> bool;
     // Evaluate a compile-time integer or bool constant expression. Returns nullopt if the expression

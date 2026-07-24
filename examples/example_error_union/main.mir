@@ -1,0 +1,98 @@
+# example_error_union.mir — error(A | B) multi-member unions: unqualified and
+# qualified return_err, try crossing between differently-shaped (but
+# subset-compatible) error unions, and two-level match/switch dispatch.
+
+pub type MemoryError = enum(i32) {
+    OutOfMemory = 1
+}
+
+pub type IoError = union(enum) {
+    NotFound: []u8
+    Closed
+}
+
+fn alloc(fail: bool) -> (i32, error(MemoryError)) {
+    if fail {
+        return_err .OutOfMemory
+    }
+    return_ok 42
+}
+
+fn open(path: []u8, fail: bool) -> error(IoError) {
+    if fail {
+        return_err .NotFound(path)
+    }
+    return_ok
+}
+
+# combo()'s error(MemoryError | IoError) is a strict superset of both
+# alloc()'s and open()'s own error types — 'try' must translate each
+# callee's Failed value into combo()'s own (differently tagged) union.
+fn combo(which: i32) -> error(MemoryError | IoError) {
+    if which == 1 {
+        const v := try alloc(true)
+    }
+    if which == 2 {
+        try open("missing.txt", true)
+    }
+    if which == 3 {
+        return_err .Closed
+    }
+    const v := try alloc(false)
+    try open("ok.txt", false)
+    return_ok
+}
+
+pub fn main() -> i32 {
+    # which=0: everything succeeds.
+    const ok_err := combo(0)
+    if ok_err {
+        return 1
+    }
+
+    # which=1: single-member callee (alloc) translated into the wider union.
+    const mem_err := combo(1)
+    if !mem_err {
+        return 2
+    }
+    switch mem_err {
+        .MemoryError(e): {
+            switch e {
+                .OutOfMemory: {}
+            }
+        },
+        .IoError(e): { return 3 }
+    }
+
+    # which=2: multi-member callee (open) translated into the wider union.
+    const io_err := combo(2)
+    if !io_err {
+        return 4
+    }
+    switch io_err {
+        .MemoryError(e): { return 5 },
+        .IoError(e): {
+            switch e {
+                .NotFound(path): {},
+                .Closed: { return 6 }
+            }
+        }
+    }
+
+    # which=3: return_err directly against the wider union (no translation).
+    const closed_err := combo(3)
+    if !closed_err {
+        return 7
+    }
+    switch closed_err {
+        .MemoryError(e): { return 8 },
+        .IoError(e): {
+            switch e {
+                .NotFound(path): { return 9 },
+                .Closed: {}
+            }
+        }
+    }
+
+    return 0
+}

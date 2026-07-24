@@ -71,7 +71,6 @@ namespace sema {
             case TypeKind::I64:
             case TypeKind::F64:
             case TypeKind::USize:
-            case TypeKind::Error:
             case TypeKind::Pointer:
             case TypeKind::Anyptr:
             case TypeKind::Function: // code pointer, 8 bytes
@@ -720,6 +719,189 @@ namespace sema {
                 program.unions[slot] = std::move(info);
             }
 
+            // Valid 'error(...)' member types: enum(i32) or any tagged union that is not
+            // itself an already-synthesized error union (error(...) types can't nest).
+            [[nodiscard]] auto is_valid_error_member(const ResolvedType &ty) const -> bool {
+                if (ty.kind == TypeKind::Enum) {
+                    const auto *info = program.enum_at(ty.enum_index);
+                    return info != nullptr && info->underlying_type.kind == TypeKind::I32;
+                }
+                if (ty.kind == TypeKind::Union) {
+                    const auto *info = program.union_at(ty.union_index);
+                    return info != nullptr && info->is_tagged && !info->is_error_union;
+                }
+                return false;
+            }
+
+            // Wraps a non-struct payload type in a synthetic one-field struct named "v",
+            // exactly like layout_union's non-struct-payload branch above — reusing that
+            // struct-payload convention keeps every existing payload-reading consumer
+            // (emit_variant_capture, TaggedVariantExpr construction) working unchanged for
+            // synthesized error-union payloads. A struct payload type is used verbatim
+            // (its own slot), no wrapping.
+            [[nodiscard]] auto wrap_payload_in_struct(const std::string &module_path, const ResolvedType &payload_type, const SourceLocation &location) -> int {
+                if (payload_type.kind == TypeKind::Struct) {
+                    return payload_type.struct_index;
+                }
+
+                const int struct_slot = static_cast<int>(program.structs.size());
+                program.structs.push_back(StructInfo{.module_path = module_path});
+
+                StructInfo payload_info;
+                payload_info.module_path = module_path;
+                payload_info.fields.push_back(StructField{
+                    .name = "v",
+                    .type = payload_type,
+                    .offset = 0,
+                    .init_expr = nullptr,
+                    .location = location,
+                });
+                payload_info.size = size_of(module_path, payload_type);
+                payload_info.align = align_of(module_path, payload_type);
+                payload_info.layout_done = true;
+                program.structs[struct_slot] = std::move(payload_info);
+                return struct_slot;
+            }
+
+            // Builds the compiler-synthesized Ok/Failed tagged union for a distinct
+            // 'error(...)' spelling. 'sorted_members' is already in canonical (interning)
+            // order. Single member: Failed's payload IS that member type directly (wrapped
+            // in the usual one-field struct convention) — no inner union at all. 2+
+            // members: Failed's payload is a second synthesized tagged union (one variant
+            // per member type, named after that member type, in the same canonical order)
+            // whose own payload is, in turn, that member type.
+            auto synthesize_error_union(const std::string &module_path, const std::vector<ResolvedType> &sorted_members, const SourceLocation &location) -> UnionInfo {
+                static constexpr uint32_t TAG_SIZE = 4;
+                static constexpr uint32_t TAG_ALIGN = 4;
+
+                ResolvedType failed_payload_source;
+                if (sorted_members.size() == 1) {
+                    failed_payload_source = sorted_members[0];
+                } else {
+                    UnionInfo inner;
+                    inner.module_path = module_path;
+                    inner.is_tagged = true;
+                    inner.is_error_union = true;
+                    inner.error_member_types = sorted_members;
+
+                    uint32_t max_payload_size = 0;
+                    uint32_t max_payload_align = 1;
+                    for (int32_t i = 0; i < static_cast<int32_t>(sorted_members.size()); ++i) {
+                        const auto &member = sorted_members[i];
+                        TaggedUnionVariant variant;
+                        variant.name = find_type_module_and_name(member, program).second;
+                        variant.tag_value = i;
+                        variant.payload_struct_index = wrap_payload_in_struct(module_path, member, location);
+                        variant.payload_type = member;
+                        if (const auto *payload_struct = program.struct_at(variant.payload_struct_index)) {
+                            max_payload_size = std::max(max_payload_size, payload_struct->size);
+                            max_payload_align = std::max(max_payload_align, payload_struct->align);
+                        }
+                        inner.variants.push_back(std::move(variant));
+                    }
+
+                    const uint32_t eff_align = std::max(max_payload_align, 1u);
+                    inner.payload_offset = (TAG_SIZE + eff_align - 1) / eff_align * eff_align;
+                    inner.align = std::max(TAG_ALIGN, max_payload_align);
+                    const uint32_t raw_size = inner.payload_offset + max_payload_size;
+                    inner.size = (raw_size + inner.align - 1) / inner.align * inner.align;
+                    if (inner.size == 0) inner.size = TAG_ALIGN;
+                    inner.layout_done = true;
+
+                    const int inner_slot = static_cast<int>(program.unions.size());
+                    program.unions.push_back(std::move(inner));
+                    failed_payload_source = ResolvedType{.kind = TypeKind::Union, .union_index = inner_slot};
+                }
+
+                UnionInfo outer;
+                outer.module_path = module_path;
+                outer.is_tagged = true;
+                outer.is_error_union = true;
+                outer.error_member_types = sorted_members;
+
+                TaggedUnionVariant ok_variant;
+                ok_variant.name = "Ok";
+                ok_variant.tag_value = 0;
+                ok_variant.payload_struct_index = -1;
+
+                TaggedUnionVariant failed_variant;
+                failed_variant.name = "Failed";
+                failed_variant.tag_value = 1;
+                failed_variant.payload_struct_index = wrap_payload_in_struct(module_path, failed_payload_source, location);
+                failed_variant.payload_type = failed_payload_source;
+
+                outer.variants.push_back(ok_variant);
+                outer.variants.push_back(failed_variant);
+
+                const auto *failed_struct = program.struct_at(failed_variant.payload_struct_index);
+                const uint32_t max_payload_size = failed_struct ? failed_struct->size : 0;
+                const uint32_t max_payload_align = failed_struct ? failed_struct->align : 1;
+                const uint32_t eff_align = std::max(max_payload_align, 1u);
+                outer.payload_offset = (TAG_SIZE + eff_align - 1) / eff_align * eff_align;
+                outer.align = std::max(TAG_ALIGN, max_payload_align);
+                const uint32_t raw_size = outer.payload_offset + max_payload_size;
+                outer.size = (raw_size + outer.align - 1) / outer.align * outer.align;
+                if (outer.size == 0) outer.size = TAG_ALIGN;
+                outer.layout_done = true;
+
+                return outer;
+            }
+
+            // Interns a (possibly newly-synthesized) error union by the SET of its member
+            // types — 'error(A|B)' and 'error(B|A)' intern to the same union. Duplicate
+            // members are rejected on the original, unsorted list so the diagnostic
+            // reflects the user's actual spelling.
+            auto intern_error_union(const std::string &module_path, const std::vector<ResolvedType> &members, const SourceLocation &location) -> ResolvedType {
+                for (size_t i = 0; i < members.size(); ++i) {
+                    for (size_t j = i + 1; j < members.size(); ++j) {
+                        if (members[i] == members[j]) {
+                            diag.report_error(DiagnosticStage::Sema, location, "error(...) member types must be distinct");
+                        }
+                    }
+                }
+
+                std::vector<ResolvedType> sorted_members = members;
+                std::ranges::sort(sorted_members, [](const ResolvedType &a, const ResolvedType &b) {
+                    if (a.kind != b.kind) return a.kind < b.kind;
+                    if (a.kind == TypeKind::Enum) return a.enum_index < b.enum_index;
+                    return a.union_index < b.union_index;
+                });
+
+                for (const auto &[key, index] : program.error_unions) {
+                    if (key == sorted_members) {
+                        return ResolvedType{.kind = TypeKind::Union, .union_index = index};
+                    }
+                }
+
+                const int slot = static_cast<int>(program.unions.size());
+                program.unions.push_back(UnionInfo{});
+                program.unions[slot] = synthesize_error_union(module_path, sorted_members, location);
+                program.error_unions.emplace_back(sorted_members, slot);
+                return ResolvedType{.kind = TypeKind::Union, .union_index = slot};
+            }
+
+            auto resolve_error_type(const ast::ErrorType &decl, const std::string &module_path) -> ResolvedType {
+                std::vector<ResolvedType> members;
+                members.reserve(decl.members.size());
+
+                for (const auto &named : decl.members) {
+                    const auto target = walk_namespace_chain(module_path, named, program, diag);
+                    if (!target) {
+                        members.push_back(ResolvedType{.kind = TypeKind::Invalid});
+                        continue;
+                    }
+
+                    auto resolved = resolve_final_full(target->module_path, target->name, target->crossed_boundary, target->location);
+                    if (!is_valid_error_member(resolved)) {
+                        diag.report_error(DiagnosticStage::Sema, named.location,
+                            std::format("'{}' is not a valid error member type; expected an 'enum(i32)' or 'union(enum)' type", named.name));
+                    }
+                    members.push_back(resolved);
+                }
+
+                return intern_error_union(module_path, members, decl.location);
+            }
+
             // Resolves each trait method's non-self param/return types, in declaration
             // order. That order IS the vtable layout and is recorded here once, in
             // TraitInfo::methods — codegen must read it, never re-derive it.
@@ -817,6 +999,8 @@ namespace sema {
                             // Anonymous trait types have no name to 'impl', making them useless as
                             // handle targets — traits only exist for named, impl-able dispatch surfaces.
                             return error(diag, v->location, "trait types must be declared via 'type Name = trait { ... }'; anonymous trait types are not supported");
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ErrorType>>) {
+                            return resolve_error_type(*v, module_path);
                         } else {
                             return ResolvedType{.kind = TypeKind::Invalid};
                         }
@@ -839,7 +1023,6 @@ namespace sema {
                 case ast::BuiltinTypeKind::Usize:  return ResolvedType{.kind = TypeKind::USize};
                 case ast::BuiltinTypeKind::Bool:   return ResolvedType{.kind = TypeKind::Bool};
                 case ast::BuiltinTypeKind::Byte:   return ResolvedType{.kind = TypeKind::U8};
-                case ast::BuiltinTypeKind::Error:  return ResolvedType{.kind = TypeKind::Error};
                 case ast::BuiltinTypeKind::Anyptr: return ResolvedType{.kind = TypeKind::Anyptr};
                 case ast::BuiltinTypeKind::Type:   return ResolvedType{.kind = TypeKind::Void};
                 }
@@ -862,6 +1045,25 @@ namespace sema {
         if (from.kind == TypeKind::Slice && to.kind == TypeKind::Pointer) return true;
         if (from.kind == TypeKind::Slice && to.kind == TypeKind::Anyptr) return true;
         return false;
+    }
+
+    // 'try' is legal when every error member type the callee can produce is also a
+    // member of the caller's declared error(...) union — i.e. callee's error set is a
+    // subset of (or equal to) caller's.
+    auto error_union_is_subset(const ResolvedType &callee, const ResolvedType &caller, const Program &program) -> bool {
+        if (callee == caller) return true;
+        if (callee.kind != TypeKind::Union || caller.kind != TypeKind::Union) return false;
+
+        const auto *callee_info = program.union_at(callee.union_index);
+        const auto *caller_info = program.union_at(caller.union_index);
+        if (!callee_info || !caller_info || !callee_info->is_error_union || !caller_info->is_error_union) return false;
+
+        for (const auto &member : callee_info->error_member_types) {
+            if (!std::ranges::any_of(caller_info->error_member_types, [&](const auto &m) { return m == member; })) {
+                return false;
+            }
+        }
+        return true;
     }
 
     auto function_params_compatible(const std::vector<ResolvedType> &actual, const std::vector<ResolvedType> &expected) -> bool {

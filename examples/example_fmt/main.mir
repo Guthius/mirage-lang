@@ -1,13 +1,13 @@
 const fmt := import("../fmt")
 
-pub fn some_func_a(args: []fmt.Arg) -> error {
-    const _, e := fmt.format("Hello: {}", args...)
-    return e
+pub fn some_func_a(args: []fmt.Arg) -> error(fmt.FormatError) {
+    try fmt.format("Hello: {}", args...)
+    return_ok
 }
 
-pub fn some_func_b(args: ...fmt.Arg) -> error {
-    const _, e := fmt.format("Hello: {}", args...)
-    return e
+pub fn some_func_b(args: ...fmt.Arg) -> error(fmt.FormatError) {
+    try fmt.format("Hello: {}", args...)
+    return_ok
 }
 
 pub fn main() -> i32 {
@@ -20,8 +20,8 @@ pub fn main() -> i32 {
     arr[0] = .i{.value = 1}
     arr[1] = .i{.value = 2}
 
-    if some_func_a(arr) != 0 { return 1 }               # []Arg spread-forwarded into ...Arg
-    if some_func_b(arr[0], arr[1]) != 0 { return 2 }     # loose args collected, then spread-forwarded
+    if some_func_a(arr) { return 1 }               # []Arg spread-forwarded into ...Arg
+    if some_func_b(arr[0], arr[1]) { return 2 }     # loose args collected, then spread-forwarded
 
     return 0
 }

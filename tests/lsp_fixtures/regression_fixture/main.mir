@@ -3,7 +3,7 @@ type NamedType = struct {
     member: *NamedType
     location: u32
 }
-
+pub type ParseError = enum(i32) { Failed = 1 }
 type Arena = struct {
     x: u32
 }
@@ -27,11 +27,11 @@ impl Parser {
     }
 }
 
-fn alloc_named_type(a: *Arena) -> (*NamedType, error) {
+fn alloc_named_type(a: *Arena) -> (*NamedType, error(ParseError)) {
     return_ok nil
 }
 
-fn parse_named_type(p: *Parser) -> (NamedType, error) {
+fn parse_named_type(p: *Parser) -> (NamedType, error(ParseError)) {
     const location := p.current_location()
     const name := p.expect_identifier()
 

@@ -27,7 +27,6 @@ namespace ast {
         Usize,
         Bool,
         Byte,
-        Error,
         Anyptr,
         Type,
     };
@@ -52,6 +51,7 @@ namespace ast {
     struct EnumType;
     struct UnionType;
     struct TraitType;
+    struct ErrorType;
 
     using Type = std::variant<
         std::monostate,
@@ -64,7 +64,8 @@ namespace ast {
         std::unique_ptr<EnumType>,
         std::unique_ptr<UnionType>,
         std::unique_ptr<FunctionType>,
-        std::unique_ptr<TraitType>>;
+        std::unique_ptr<TraitType>,
+        std::unique_ptr<ErrorType>>;
 
     struct PointerType {
         Type pointee;
@@ -260,6 +261,16 @@ namespace ast {
 
         std::optional<Type> underlying_type;
         std::vector<Field> fields;
+        SourceLocation location;
+    };
+
+    // 'error(A | B | C)' — a fallible-function return type. Each member must
+    // resolve (in sema) to an enum(i32) or union(enum) type; members are
+    // written in source order here, but the compiler treats them as a SET
+    // (order does not affect the type's identity — see sema's error-union
+    // interning).
+    struct ErrorType {
+        std::vector<NamedType> members;
         SourceLocation location;
     };
 

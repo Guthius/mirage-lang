@@ -1,4 +1,4 @@
-pub fn main() -> error {
+pub fn main() -> i32 {
     mut x: u32 = "oops"
     return 0
 }

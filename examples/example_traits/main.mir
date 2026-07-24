@@ -37,12 +37,12 @@ pub fn draw_all(shapes: []Drawable) {
     }
 }
 
-pub fn main() -> error {
+pub fn main() -> i32 {
     mut circle: Circle = { .x = 10, .y = 10, .r = 5 }
     mut rect: Rect = { .x = 0, .y = 0, .w = 20, .h = 10 }
 
     mut shapes: [2]Drawable = { &circle, &rect }
     draw_all(cast(&shapes[0], []Drawable, 2))
 
-    return_ok
+    return 0
 }

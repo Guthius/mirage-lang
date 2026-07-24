@@ -41,7 +41,6 @@ namespace ast {
             case TokenKind::KwUSize:  return BuiltinTypeKind::Usize;
             case TokenKind::KwBool:   return BuiltinTypeKind::Bool;
             case TokenKind::KwByte:   return BuiltinTypeKind::Byte;
-            case TokenKind::KwError:  return BuiltinTypeKind::Error;
             case TokenKind::KwAnyptr: return BuiltinTypeKind::Anyptr;
             case TokenKind::KwType:   return BuiltinTypeKind::Type;
             default:                  return std::nullopt;
@@ -250,6 +249,27 @@ namespace ast {
             return std::make_unique<EnumType>(EnumType{
                 .underlying_type = std::move(underlying_type),
                 .fields = std::move(fields),
+                .location = location,
+            });
+        }
+
+        // 'error(A | B | C)' — one or more named error member types, separated by '|'.
+        auto parse_error_type(Parser &parser) -> Type {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwError, "'error'");
+            parser.expect(TokenKind::LParen, "'('");
+
+            std::vector<NamedType> members;
+            members.push_back(parse_named_type(parser));
+            while (parser.match(TokenKind::Pipe)) {
+                members.push_back(parse_named_type(parser));
+            }
+
+            parser.expect(TokenKind::RParen, "')'");
+
+            return std::make_unique<ErrorType>(ErrorType{
+                .members = std::move(members),
                 .location = location,
             });
         }
@@ -750,6 +770,45 @@ namespace ast {
                         .type_path = std::nullopt,
                         .variant_name = name,
                         .payload = StructExpr{.fields = std::move(fields), .location = brace_loc},
+                        .location = span,
+                    });
+                }
+
+                // '.variant(expr)' — sugar for a single-value payload, equivalent to
+                // '.variant{.v = expr}'. Only meaningful for a variant whose payload struct
+                // has exactly one field named "v" (the convention used for every non-struct
+                // payload — scalar, enum, union, slice, pointer, array — see
+                // type_resolver.cpp's payload-wrapping in layout_union/synthesize_error_union);
+                // sema reports the ordinary "no field 'v'" error otherwise. Unambiguous with a
+                // real call expression: a bare '.name' can never resolve to a callable value
+                // (DotIdentExpr always requires an expected enum/tagged-union type), so this
+                // parse never collides with an actual function call.
+                if (parser.check(TokenKind::LParen)) {
+                    const auto paren_loc = parser.current_location();
+                    parser.advance(); // consume '('
+                    std::vector<StructExpr::Field> fields;
+                    if (!parser.check(TokenKind::RParen)) {
+                        const auto field_loc = parser.current_location();
+                        fields.push_back(StructExpr::Field{
+                            .name = "v",
+                            .expr = parse_expr(parser),
+                            .location = field_loc,
+                        });
+                        if (parser.check(TokenKind::Comma)) {
+                            parser.report_error(parser.current_location(), "tagged-variant payload construction takes exactly one value");
+                            while (parser.match(TokenKind::Comma)) {
+                                parse_expr(parser); // consume and discard extras
+                            }
+                        }
+                    }
+                    parser.expect(TokenKind::RParen, "')'");
+                    if (fields.empty()) {
+                        parser.report_error(paren_loc, "tagged-variant payload construction requires exactly one value; use '.name' for a payload-free variant");
+                    }
+                    return std::make_unique<TaggedVariantExpr>(TaggedVariantExpr{
+                        .type_path = std::nullopt,
+                        .variant_name = name,
+                        .payload = StructExpr{.fields = std::move(fields), .location = paren_loc},
                         .location = span,
                     });
                 }
@@ -2121,6 +2180,10 @@ namespace ast {
 
         if (parser.check(TokenKind::KwUnion)) {
             return parse_union_type(parser);
+        }
+
+        if (parser.check(TokenKind::KwError)) {
+            return parse_error_type(parser);
         }
 
         if (parser.check(TokenKind::KwFn)) {

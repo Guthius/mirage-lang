@@ -1,6 +1,6 @@
 const greet := import("greet")
 
-pub fn main() -> error {
+pub fn main() -> i32 {
     const name: []u8 = "world"
     mut count: usize = greet.hello(name)
     return 0

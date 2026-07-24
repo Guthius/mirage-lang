@@ -115,9 +115,12 @@ type          ::= '*' type                              (* pointer *)
                    { IDENT [ ':' type ] }
                  '}'
                | 'trait' '{' { trait_method_decl } '}'  (* trait handle; see Traits below *)
+               | error_type
                | fn_type
                | named_type
                | builtin_type
+
+error_type    ::= 'error' '(' named_type { '|' named_type } ')'
 
 fn_type       ::= 'fn' '(' [ fn_type_params ] ')' [ '->' type | '->' '(' type { ',' type } ')' ]
 
@@ -131,7 +134,7 @@ named_type    ::= IDENT { '.' IDENT }
 builtin_type  ::= 'u8' | 'u16' | 'u32' | 'u64'
                | 'i8' | 'i16' | 'i32' | 'i64'
                | 'f32' | 'f64'
-               | 'usize' | 'bool' | 'byte' | 'error' | 'anyptr'
+               | 'usize' | 'bool' | 'byte' | 'anyptr'
 
 trait_method_decl ::= 'fn' IDENT
                       '(' ( 'self' | 'mut' 'self' ) { ',' IDENT ':' type } ')'
@@ -307,6 +310,7 @@ arm_pattern   ::= '.' IDENT [ '(' [ '&' ] IDENT ')' ]    (* variant pattern *)
                | expr                                       (* literal pattern, must be constant *)
 
 dot_ident_expr ::= '.' IDENT   (* enum literal; valid where enum type is expected *)
+               | '.' IDENT '(' expr ')'   (* sugar for '.' IDENT '{.v = expr}' — see below *)
 
 contextual_tagged_variant ::= '.' IDENT '{.' field_init { ',' field_init } '}'
 

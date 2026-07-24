@@ -54,7 +54,25 @@ namespace sema {
             };
         }
 
-        auto binary_op_result(const ast::BinaryOp op, const ResolvedType &lhs, const ResolvedType &rhs, DiagnosticEngine &diag, SourceLocation loc) -> ResolvedType {
+        // True iff 'ty' is a compiler-synthesized 'error(...)' union (as opposed to some
+        // ordinary user-declared tagged union). Used everywhere a function's last return
+        // type must be recognized as marking it fallible, and to recognize error values in
+        // boolean context (&&/|| below; if/while/!/ternary coercion is handled in codegen's
+        // coerce_to_bool, since sema places no restriction on condition types generally).
+        auto is_error_union_type(const ResolvedType &ty, const Program &program) -> bool {
+            return ty.kind == TypeKind::Union && program.union_at(ty.union_index) != nullptr &&
+                   program.union_at(ty.union_index)->is_error_union;
+        }
+
+        // Returns the LocalBinding for 'name' iff it names a currently-in-scope error(...)-typed
+        // local (i.e. one with typestate tracking at all).
+        auto find_error_local(const std::string &name, LocalScope &locals, const Program &program) -> LocalBinding * {
+            const auto it = locals.find(name);
+            if (it == locals.end() || !is_error_union_type(it->second.type, program)) return nullptr;
+            return &it->second;
+        }
+
+        auto binary_op_result(const ast::BinaryOp op, const ResolvedType &lhs, const ResolvedType &rhs, DiagnosticEngine &diag, SourceLocation loc, const Program &program) -> ResolvedType {
             // Function pointers do not support arithmetic; only equality comparison is allowed
             const bool is_cmp = op == ast::BinaryOp::Equal || op == ast::BinaryOp::NotEqual ||
                                  op == ast::BinaryOp::Less || op == ast::BinaryOp::Greater ||
@@ -98,11 +116,18 @@ namespace sema {
                 return ResolvedType{.kind = TypeKind::Bool};
 
             case ast::BinaryOp::LogicalAnd:
-            case ast::BinaryOp::LogicalOr:
-                if (lhs.kind != TypeKind::Bool || rhs.kind != TypeKind::Bool) {
-                    return error(diag, loc, "&&/|| require bool operands");
+            case ast::BinaryOp::LogicalOr: {
+                // Error values coerce to bool here exactly like they do in if/while/!/ternary
+                // condition position (Failed = true, Ok = false) — see coerce_to_bool in
+                // codegen.cpp.
+                const auto is_bool_like = [&](const ResolvedType &t) {
+                    return t.kind == TypeKind::Bool || is_error_union_type(t, program);
+                };
+                if (!is_bool_like(lhs) || !is_bool_like(rhs)) {
+                    return error(diag, loc, "&&/|| require bool (or error) operands");
                 }
                 return ResolvedType{.kind = TypeKind::Bool};
+            }
             }
 
             return ResolvedType{.kind = TypeKind::Invalid};
@@ -206,7 +231,7 @@ namespace sema {
             return true;
         }
 
-        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, int loop_depth, int defer_loop_base, bool fn_returns_error, bool native_variadic = false) -> bool;
+        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, int loop_depth, int defer_loop_base, const ResolvedType *fn_error_type, bool native_variadic = false) -> bool;
         auto try_resolve_namespace_chain(const ast::Expr &expr, const std::string &module_path, LocalScope &locals, Program &program) -> std::optional<std::string>;
 
         // Tier-3 method-call resolution: 'receiver_type' is an actual dyn-handle
@@ -224,7 +249,7 @@ namespace sema {
                                         const std::vector<ast::Expr> &args, const void *dispatch_key,
                                         LocalScope &locals, const std::string &module_path, Program &program,
                                         DiagnosticEngine &diag, const SourceLocation &loc, const int loop_depth,
-                                        const int defer_loop_base, const bool fn_returns_error) -> std::optional<std::vector<ResolvedType>> {
+                                        const int defer_loop_base, const ResolvedType *fn_error_type) -> std::optional<std::vector<ResolvedType>> {
             if (receiver_type.kind != TypeKind::Trait) return std::nullopt;
 
             const auto *trait_info = program.trait_at(receiver_type.trait_index);
@@ -249,7 +274,7 @@ namespace sema {
                 return std::nullopt;
             }
 
-            check_call_args(args, trait_method->params, false, locals, module_path, program, diag, loc, method_name, loop_depth, defer_loop_base, fn_returns_error);
+            check_call_args(args, trait_method->params, false, locals, module_path, program, diag, loc, method_name, loop_depth, defer_loop_base, fn_error_type);
 
             program.modules.at(module_path).expr_trait_dispatch[dispatch_key] = TraitDispatchInfo{
                 .trait_index = receiver_type.trait_index,
@@ -259,7 +284,7 @@ namespace sema {
             return trait_method->return_types;
         }
 
-        auto check_group_call_returns(const ast::CallExpr &call, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base, const bool fn_returns_error) -> std::vector<ResolvedType> {
+        auto check_group_call_returns(const ast::CallExpr &call, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> std::vector<ResolvedType> {
             std::string target_module = module_path;
             std::string name;
             bool check_pub = false;
@@ -269,7 +294,7 @@ namespace sema {
                     const auto &local_ty = local_it->second.type;
                     if (local_ty.kind == TypeKind::Function) {
                         const auto &sig = fn_sig(local_ty, program);
-                        check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, callee_ident->name, loop_depth, defer_loop_base, fn_returns_error);
+                        check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
                         return sig.return_types;
                     }
                     error(diag, call.location, std::format("'{}' is not callable", callee_ident->name));
@@ -283,7 +308,7 @@ namespace sema {
                     check_pub = true;
                 } else {
                     // Method call on a value
-                    auto receiver_type = check_expr((*member)->object, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                    auto receiver_type = check_expr((*member)->object, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     if (receiver_type.kind == TypeKind::Pointer) {
                         if (const auto *pointee = program.pointee_at(receiver_type.pointee_index)) {
                             receiver_type = *pointee;
@@ -291,7 +316,7 @@ namespace sema {
                             receiver_type = ResolvedType{.kind = TypeKind::Invalid};
                         }
                     }
-                    if (auto trait_returns = try_trait_handle_dispatch(receiver_type, (*member)->member, call.args, &call, locals, module_path, program, diag, call.location, loop_depth, defer_loop_base, fn_returns_error)) {
+                    if (auto trait_returns = try_trait_handle_dispatch(receiver_type, (*member)->member, call.args, &call, locals, module_path, program, diag, call.location, loop_depth, defer_loop_base, fn_error_type)) {
                         return *trait_returns;
                     }
                     const auto *method = find_method(receiver_type, (*member)->member, program);
@@ -302,7 +327,7 @@ namespace sema {
                                 for (const auto &field : struct_info->fields) {
                                     if (field.name == (*member)->member && field.type.kind == TypeKind::Function) {
                                         const auto &sig = fn_sig(field.type, program);
-                                        check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, (*member)->member, loop_depth, defer_loop_base, fn_returns_error);
+                                        check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, (*member)->member, loop_depth, defer_loop_base, fn_error_type);
                                         return sig.return_types;
                                     }
                                 }
@@ -311,15 +336,15 @@ namespace sema {
                         error(diag, call.location, std::format("no method '{}' on type", (*member)->member));
                         return {};
                     }
-                    check_call_args(call.args, method->param_types, false, locals, module_path, program, diag, call.location, (*member)->member, loop_depth, defer_loop_base, fn_returns_error, method->is_variadic);
+                    check_call_args(call.args, method->param_types, false, locals, module_path, program, diag, call.location, (*member)->member, loop_depth, defer_loop_base, fn_error_type, method->is_variadic);
                     return method->return_types;
                 }
             } else {
                 // General expression callee (e.g. deref of fn ptr, indexed fn ptr array)
-                const auto callee_ty = check_expr(call.callee, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                const auto callee_ty = check_expr(call.callee, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                 if (callee_ty.kind == TypeKind::Function) {
                     const auto &sig = fn_sig(callee_ty, program);
-                    check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, "<fn ptr>", loop_depth, defer_loop_base, fn_returns_error);
+                    check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, "<fn ptr>", loop_depth, defer_loop_base, fn_error_type);
                     return sig.return_types;
                 }
                 error(diag, call.location, "unsupported call target");
@@ -346,14 +371,14 @@ namespace sema {
                             error(diag, call.location, std::format("'{}' is not pub", name));
                             return {};
                         }
-                        check_call_args(call.args, sym.params, false, locals, module_path, program, diag, call.location, name, loop_depth, defer_loop_base, fn_returns_error, sym.is_variadic);
+                        check_call_args(call.args, sym.params, false, locals, module_path, program, diag, call.location, name, loop_depth, defer_loop_base, fn_error_type, sym.is_variadic);
                         return sym.return_types;
                     } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
                         if (check_pub && !sym.is_pub) {
                             error(diag, call.location, std::format("'{}' is not pub", name));
                             return {};
                         }
-                        check_call_args(call.args, sym.params, sym.is_variadic, locals, module_path, program, diag, call.location, name, loop_depth, defer_loop_base, fn_returns_error);
+                        check_call_args(call.args, sym.params, sym.is_variadic, locals, module_path, program, diag, call.location, name, loop_depth, defer_loop_base, fn_error_type);
                         std::vector<ResolvedType> returns;
                         if (sym.return_type) returns.push_back(*sym.return_type);
                         return returns;
@@ -369,7 +394,7 @@ namespace sema {
             switch (ty.kind) {
             case TypeKind::I32: case TypeKind::U32:
             case TypeKind::I64: case TypeKind::U64:
-            case TypeKind::USize: case TypeKind::Error:
+            case TypeKind::USize:
             case TypeKind::F64:
             case TypeKind::Pointer: case TypeKind::Anyptr:
                 return true;
@@ -378,7 +403,7 @@ namespace sema {
             }
         }
 
-        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, const bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, const int loop_depth, const int defer_loop_base, const bool fn_returns_error, const bool native_variadic) -> bool {
+        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, const bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type, const bool native_variadic) -> bool {
             if (native_variadic) {
                 // Last entry of 'params' is the dissolved '[]T' slot for the native '...T' parameter.
                 const size_t fixed_count = params.size() - 1;
@@ -389,7 +414,7 @@ namespace sema {
 
                 bool ok = true;
                 for (size_t i = 0; i < fixed_count; ++i) {
-                    if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, params[i], loop_depth, defer_loop_base, fn_returns_error); !assignable_in_module(arg_ty, params[i], module_path, program)) {
+                    if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, params[i], loop_depth, defer_loop_base, fn_error_type); !assignable_in_module(arg_ty, params[i], module_path, program)) {
                         error(diag, loc, std::format("'{}' argument {} type mismatch", callee_desc, i + 1));
                         ok = false;
                     }
@@ -401,7 +426,7 @@ namespace sema {
 
                 if (tail_count == 1) {
                     if (const auto *spread = std::get_if<std::unique_ptr<ast::SpreadExpr>>(&args[fixed_count])) {
-                        const auto spread_ty = check_expr((*spread)->operand, locals, module_path, program, diag, slice_ty, loop_depth, defer_loop_base, fn_returns_error);
+                        const auto spread_ty = check_expr((*spread)->operand, locals, module_path, program, diag, slice_ty, loop_depth, defer_loop_base, fn_error_type);
                         if (!assignable_in_module(spread_ty, slice_ty, module_path, program)) {
                             error(diag, loc, std::format("'{}' spread argument type mismatch: expected a slice matching the variadic element type", callee_desc));
                             ok = false;
@@ -416,7 +441,7 @@ namespace sema {
                         ok = false;
                         continue;
                     }
-                    if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, element_ty, loop_depth, defer_loop_base, fn_returns_error); !assignable_in_module(arg_ty, element_ty, module_path, program)) {
+                    if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, element_ty, loop_depth, defer_loop_base, fn_error_type); !assignable_in_module(arg_ty, element_ty, module_path, program)) {
                         error(diag, loc, std::format("'{}' variadic argument {} type mismatch", callee_desc, i - fixed_count + 1));
                         ok = false;
                     }
@@ -438,14 +463,14 @@ namespace sema {
 
             bool ok = true;
             for (size_t i = 0; i < params.size(); ++i) {
-                if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, params[i], loop_depth, defer_loop_base, fn_returns_error); !assignable_in_module(arg_ty, params[i], module_path, program)) {
+                if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, params[i], loop_depth, defer_loop_base, fn_error_type); !assignable_in_module(arg_ty, params[i], module_path, program)) {
                     error(diag, loc, std::format("'{}' argument {} type mismatch", callee_desc, i + 1));
                     ok = false;
                 }
             }
             if (is_variadic) {
                 for (size_t i = params.size(); i < args.size(); ++i) {
-                    const auto arg_ty = check_expr(args[i], locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                    const auto arg_ty = check_expr(args[i], locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     if (!is_valid_variadic_arg(arg_ty)) {
                         error(diag, loc, std::format(
                             "'{}' variadic argument {} has a type that violates C default argument promotions: "
@@ -572,7 +597,7 @@ namespace sema {
                 sym_it->second);
         }
 
-        auto resolve_lvalue(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, int loop_depth, int defer_loop_base, bool fn_returns_error) -> LvalueInfo;
+        auto resolve_lvalue(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, int loop_depth, int defer_loop_base, const ResolvedType *fn_error_type) -> LvalueInfo;
 
         // `need_writable` controls whether a struct/union-valued `m.object` gets speculatively
         // probed for writability via resolve_lvalue(). That probe is only meaningful when the
@@ -584,7 +609,7 @@ namespace sema {
         // `f().field`) reports "not an assignable expression" - correct when something is
         // actually being assigned to or addressed, but a spurious compile error for an ordinary
         // read of a field on a temporary struct/union value, which is always legal.
-        auto resolve_member(const ast::MemberExpr &m, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base, const bool fn_returns_error, const bool need_writable = true) -> LvalueInfo {
+        auto resolve_member(const ast::MemberExpr &m, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type, const bool need_writable = true) -> LvalueInfo {
             if (const auto target_module = try_resolve_namespace_chain(m.object, module_path, locals, program)) {
                 return check_member_cross_module(m, *target_module, program, diag);
             }
@@ -604,7 +629,7 @@ namespace sema {
                 }
             }
 
-            const auto object_type = check_expr(m.object, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+            const auto object_type = check_expr(m.object, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
 
             ResolvedType effective_type;
             bool writable;
@@ -620,7 +645,7 @@ namespace sema {
             } else if (object_type.kind == TypeKind::Struct || object_type.kind == TypeKind::Union) {
                 effective_type = object_type;
                 if (need_writable) {
-                    const auto object_lvalue = resolve_lvalue(m.object, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_returns_error);
+                    const auto object_lvalue = resolve_lvalue(m.object, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
                     writable = object_lvalue.type == object_type && object_lvalue.writable;
                 } else {
                     writable = false;
@@ -669,7 +694,7 @@ namespace sema {
             return {ResolvedType{.kind = TypeKind::Invalid}, false};
         }
 
-        auto resolve_lvalue(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base, const bool fn_returns_error) -> LvalueInfo {
+        auto resolve_lvalue(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> LvalueInfo {
             return std::visit(
                 [&]<typename T>(const T &v) -> LvalueInfo {
                     using V = std::decay_t<T>;
@@ -697,7 +722,7 @@ namespace sema {
                             error(diag, v->location, "not an assignable expression");
                             return {ResolvedType{.kind = TypeKind::Invalid}, false};
                         }
-                        const ResolvedType ptr_ty = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                        const ResolvedType ptr_ty = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         if (ptr_ty.kind == TypeKind::Trait) {
                             error(diag, v->location, "cannot dereference a trait handle");
                             return {ResolvedType{.kind = TypeKind::Invalid}, false};
@@ -714,11 +739,11 @@ namespace sema {
                         return {*pointee, true};
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
-                        return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_returns_error);
+                        return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
-                        const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
-                        const auto index = check_expr(v->index, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                        const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                        const auto index = check_expr(v->index, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         if (!index.is_integer()) {
                             error(diag, v->location, "index must be an integer expression");
                         }
@@ -727,7 +752,7 @@ namespace sema {
                             return {pointee ? *pointee : ResolvedType{.kind = TypeKind::Invalid}, true};
                         }
                         if (operand.kind == TypeKind::Array) {
-                            auto owner = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_returns_error);
+                            auto owner = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
                             return {array_element_type(operand, module_path, program), owner.writable};
                         }
                         if (operand.kind == TypeKind::Slice) {
@@ -750,7 +775,7 @@ namespace sema {
         }
     }
 
-    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const bool fn_returns_error) -> ResolvedType {
+    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
         const auto ty = std::visit(
             [&]<typename T0>(const T0 &v) -> ResolvedType {
                 using V = std::decay_t<T0>;
@@ -841,29 +866,38 @@ namespace sema {
                     switch (v->op) {
                     case ast::UnaryOp::Negate:
                         {
-                            const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_returns_error);
+                            const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
                             if (!operand.is_integer() && !operand.is_float()) {
                                 return error(diag, v->location, "unary '-' requires a numeric operand");
                             }
                             return operand;
                         }
                     case ast::UnaryOp::LogicalNot:
-                        check_expr(v->operand, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_returns_error);
+                        check_expr(v->operand, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
                         return ResolvedType{.kind = TypeKind::Bool};
                     case ast::UnaryOp::BitwiseNot:
                         {
-                            const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                            const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                             if (!operand.is_integer()) return error(diag, v->location, "unary '~' requires an integer operand");
                             return operand;
                         }
                     case ast::UnaryOp::AddressOf:
                         {
-                            const LvalueInfo lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_returns_error);
+                            const LvalueInfo lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
+                            // Taking the address of an error-tracked local invalidates its
+                            // typestate to Unknown — spec only requires this when the pointer
+                            // then feeds a call argument, but unconditional invalidation on any
+                            // address-of is a safe, simpler over-approximation.
+                            if (const auto *ident = std::get_if<ast::IdentExpr>(&v->operand)) {
+                                if (const auto it = locals.find(ident->name); it != locals.end() && it->second.err_state != ErrorState::NotApplicable) {
+                                    it->second.err_state = ErrorState::Unknown;
+                                }
+                            }
                             return intern_pointer(program, lv.type);
                         }
                     case ast::UnaryOp::Deref:
                         {
-                            const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                            const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                             if (operand.kind == TypeKind::Trait) return error(diag, v->location, "cannot dereference a trait handle");
                             if (operand.kind != TypeKind::Pointer) return error(diag, v->location, "cannot dereference a non-pointer value");
                             const auto *pointee = program.pointee_at(operand.pointee_index);
@@ -876,11 +910,11 @@ namespace sema {
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
                     ResolvedType lhs, rhs;
                     if (is_coercible_literal(v->lhs) && !is_coercible_literal(v->rhs)) {
-                        rhs = check_expr(v->rhs, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
-                        lhs = check_expr(v->lhs, locals, module_path, program, diag, rhs, loop_depth, defer_loop_base, fn_returns_error);
+                        rhs = check_expr(v->rhs, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                        lhs = check_expr(v->lhs, locals, module_path, program, diag, rhs, loop_depth, defer_loop_base, fn_error_type);
                     } else {
-                        lhs = check_expr(v->lhs, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_returns_error);
-                        rhs = check_expr(v->rhs, locals, module_path, program, diag, lhs, loop_depth, defer_loop_base, fn_returns_error);
+                        lhs = check_expr(v->lhs, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+                        rhs = check_expr(v->rhs, locals, module_path, program, diag, lhs, loop_depth, defer_loop_base, fn_error_type);
                     }
 
                     // Trait handles support no operator except '==' / '!=' against a literal
@@ -899,24 +933,31 @@ namespace sema {
                         return error(diag, v->location, "trait handles only support '==' / '!=' comparison against 'nil' or a handle of the same trait type; no other operators are supported");
                     }
 
-                    return binary_op_result(v->op, lhs, rhs, diag, v->location);
+                    return binary_op_result(v->op, lhs, rhs, diag, v->location, program);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
-                    check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_returns_error);
-                    ResolvedType then_ty = check_expr(v->then_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_returns_error);
-                    const ResolvedType else_ty = check_expr(v->else_expr, locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_returns_error);
+                    check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
+                    ResolvedType then_ty = check_expr(v->then_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+                    const ResolvedType else_ty = check_expr(v->else_expr, locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
                     if (then_ty != else_ty) {
                         return error(diag, v->location, "ternary branches have different types");
                     }
                     return then_ty;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AssignExpr>>) {
-                    auto target = resolve_lvalue(v->target, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_returns_error);
+                    auto target = resolve_lvalue(v->target, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
                     if (target.type.kind != TypeKind::Invalid && !target.writable) {
                         error(diag, v->location, "left-hand side of assignment is not mutable");
                     }
+                    // Reassigning an error-tracked local invalidates its typestate to Unknown,
+                    // regardless of assignment operator.
+                    if (const auto *ident = std::get_if<ast::IdentExpr>(&v->target)) {
+                        if (const auto it = locals.find(ident->name); it != locals.end() && it->second.err_state != ErrorState::NotApplicable) {
+                            it->second.err_state = ErrorState::Unknown;
+                        }
+                    }
 
-                    const auto value_ty = check_expr(v->value, locals, module_path, program, diag, target.type, loop_depth, defer_loop_base, fn_returns_error);
+                    const auto value_ty = check_expr(v->value, locals, module_path, program, diag, target.type, loop_depth, defer_loop_base, fn_error_type);
                     if (v->op == ast::AssignOp::Assign) {
                         if (!assignable_in_module(value_ty, target.type, module_path, program)) {
                             error(diag, v->location, "type mismatch in assignment");
@@ -944,7 +985,7 @@ namespace sema {
                     case ast::AssignOp::Assign:    break;
                     }
 
-                    if (auto op_result_ty = binary_op_result(equivalent_op, target.type, value_ty, diag, v->location); op_result_ty.kind != TypeKind::Invalid && !assignable_in_module(op_result_ty, target.type, module_path, program)) {
+                    if (auto op_result_ty = binary_op_result(equivalent_op, target.type, value_ty, diag, v->location, program); op_result_ty.kind != TypeKind::Invalid && !assignable_in_module(op_result_ty, target.type, module_path, program)) {
                         error(diag, v->location, "compound assignment result type does not match the left-hand side's type");
                     }
 
@@ -970,19 +1011,19 @@ namespace sema {
                                     using S = std::decay_t<T1>;
                                     if constexpr (std::is_same_v<S, FunctionSymbol>) {
                                         if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
-                                        check_call_args(v->args, sym.params, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_returns_error, sym.is_variadic);
+                                        check_call_args(v->args, sym.params, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, sym.is_variadic);
                                         if (sym.return_types.size() > 1) {
                                             return error(diag, v->location, "multi-value capture is not yet supported here");
                                         }
                                         return sym.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sym.return_types.front();
                                     } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
                                         if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
-                                        check_call_args(v->args, sym.params, sym.is_variadic, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_returns_error);
+                                        check_call_args(v->args, sym.params, sym.is_variadic, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type);
                                         return sym.return_type.value_or(ResolvedType{.kind = TypeKind::Void});
                                     } else if constexpr (std::is_same_v<S, MacroSymbol>) {
                                         if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
                                         auto &resolved_macro = resolve_macro_symbol(*target_module, fn_name, program, diag, v->location);
-                                        check_call_args(v->args, resolved_macro.params, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_returns_error);
+                                        check_call_args(v->args, resolved_macro.params, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type);
                                         return resolved_macro.result_type;
                                     } else {
                                         return error(diag, v->location, std::format("'{}' is not callable", fn_name));
@@ -991,7 +1032,7 @@ namespace sema {
                                 sym_it->second);
                         }
                         // Method call on a value
-                        auto receiver_type = check_expr((*member_callee)->object, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                        auto receiver_type = check_expr((*member_callee)->object, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         if (receiver_type.kind == TypeKind::Pointer) {
                             if (const auto *pointee = program.pointee_at(receiver_type.pointee_index)) {
                                 receiver_type = *pointee;
@@ -999,7 +1040,7 @@ namespace sema {
                                 receiver_type = ResolvedType{.kind = TypeKind::Invalid};
                             }
                         }
-                        if (auto trait_returns = try_trait_handle_dispatch(receiver_type, (*member_callee)->member, v->args, v.get(), locals, module_path, program, diag, v->location, loop_depth, defer_loop_base, fn_returns_error)) {
+                        if (auto trait_returns = try_trait_handle_dispatch(receiver_type, (*member_callee)->member, v->args, v.get(), locals, module_path, program, diag, v->location, loop_depth, defer_loop_base, fn_error_type)) {
                             if (trait_returns->size() > 1) {
                                 return error(diag, v->location, "multi-value capture is not yet supported here");
                             }
@@ -1013,7 +1054,7 @@ namespace sema {
                                     if (field.name == (*member_callee)->member) {
                                         if (field.type.kind == TypeKind::Function) {
                                             const auto &sig = fn_sig(field.type, program);
-                                            check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_returns_error);
+                                            check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type);
                                             if (sig.return_types.size() > 1) {
                                                 return error(diag, v->location, "multi-value capture is not yet supported here");
                                             }
@@ -1025,7 +1066,7 @@ namespace sema {
                             }
                             return error(diag, v->location, std::format("no method '{}' on type", (*member_callee)->member));
                         }
-                        check_call_args(v->args, method->param_types, false, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_returns_error, method->is_variadic);
+                        check_call_args(v->args, method->param_types, false, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type, method->is_variadic);
                         if (method->return_types.size() > 1) {
                             return error(diag, v->location, "multi-value capture is not yet supported here");
                         }
@@ -1034,10 +1075,10 @@ namespace sema {
 
                     // General expression callee: evaluate, then call through if it's a function type
                     if (!std::holds_alternative<ast::IdentExpr>(v->callee)) {
-                        const auto callee_ty = check_expr(v->callee, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                        const auto callee_ty = check_expr(v->callee, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         if (callee_ty.kind == TypeKind::Function) {
                             const auto &sig = fn_sig(callee_ty, program);
-                            check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, "<fn ptr>", loop_depth, defer_loop_base, fn_returns_error);
+                            check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, "<fn ptr>", loop_depth, defer_loop_base, fn_error_type);
                             if (sig.return_types.size() > 1) {
                                 return error(diag, v->location, "multi-value capture is not yet supported here");
                             }
@@ -1052,7 +1093,7 @@ namespace sema {
                         const auto &local_ty = local_it->second.type;
                         if (local_ty.kind == TypeKind::Function) {
                             const auto &sig = fn_sig(local_ty, program);
-                            check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_returns_error);
+                            check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
                             if (sig.return_types.size() > 1) {
                                 return error(diag, v->location, "multi-value capture is not yet supported here");
                             }
@@ -1075,17 +1116,17 @@ namespace sema {
                         [&]<typename T1>(const T1 &sym) -> ResolvedType {
                             using S = std::decay_t<T1>;
                             if constexpr (std::is_same_v<S, FunctionSymbol>) {
-                                check_call_args(v->args, sym.params, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_returns_error, sym.is_variadic);
+                                check_call_args(v->args, sym.params, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, sym.is_variadic);
                                 if (sym.return_types.size() > 1) {
                                     return error(diag, v->location, "multi-value capture is not yet supported here");
                                 }
                                 return sym.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sym.return_types.front();
                             } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
-                                check_call_args(v->args, sym.params, sym.is_variadic, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_returns_error);
+                                check_call_args(v->args, sym.params, sym.is_variadic, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
                                 return sym.return_type.value_or(ResolvedType{.kind = TypeKind::Void});
                             } else if constexpr (std::is_same_v<S, MacroSymbol>) {
                                 auto &resolved_macro = resolve_macro_symbol(module_path, callee_ident->name, program, diag, v->location);
-                                check_call_args(v->args, resolved_macro.params, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_returns_error);
+                                check_call_args(v->args, resolved_macro.params, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
                                 return resolved_macro.result_type;
                             } else {
                                 return error(diag, v->location, std::format("'{}' is not callable", callee_ident->name));
@@ -1094,7 +1135,7 @@ namespace sema {
                         sym_it->second);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) {
-                    const LvalueInfo lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_returns_error);
+                    const LvalueInfo lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
                     if (lv.type.kind != TypeKind::Invalid) {
                         if (!lv.type.is_integer() && lv.type.kind != TypeKind::Pointer && lv.type.kind != TypeKind::Anyptr) error(diag, v->location, "++ / -- requires an integer operand");
                         if (!lv.writable) error(diag, v->location, "++ / -- requires a mutable operand");
@@ -1136,7 +1177,7 @@ namespace sema {
                             }
                         }
                     }
-                    check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                    check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     return ResolvedType{.kind = TypeKind::USize};
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeExpr>>) {
@@ -1149,14 +1190,14 @@ namespace sema {
                     return resolve_type(v->type, module_path, program, diag);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) {
-                    const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                    const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     if (operand.kind != TypeKind::Array && operand.kind != TypeKind::Slice) {
                         return error(diag, v->location, "len() requires an array or slice operand");
                     }
                     return ResolvedType{.kind = TypeKind::USize};
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StackAllocExpr>>) {
-                    const auto size_ty = check_expr(v->size, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::USize}, loop_depth, defer_loop_base, fn_returns_error);
+                    const auto size_ty = check_expr(v->size, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::USize}, loop_depth, defer_loop_base, fn_error_type);
                     if (!size_ty.is_integer()) {
                         return error(diag, v->location, "stackalloc() requires an integer size expression");
                     }
@@ -1164,7 +1205,7 @@ namespace sema {
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                     // cast(expr, Type) - value first, target type second.
-                    const ResolvedType from = check_expr(v->value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                    const ResolvedType from = check_expr(v->value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     const ResolvedType to = resolve_type(v->as_type, module_path, program, diag);
                     if (from.kind != TypeKind::Invalid && to.kind != TypeKind::Invalid && !is_cast_legal(from, to)) {
                         return error(diag, v->location, "illegal cast between these types");
@@ -1176,7 +1217,7 @@ namespace sema {
                         if (to.kind != TypeKind::Slice) {
                             error(diag, v->location, "cast length is only valid when casting to a slice type");
                         }
-                        const auto len_ty = check_expr(*v->len_expr, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::USize}, loop_depth, defer_loop_base, fn_returns_error);
+                        const auto len_ty = check_expr(*v->len_expr, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::USize}, loop_depth, defer_loop_base, fn_error_type);
                         if (!len_ty.is_integer()) {
                             error(diag, v->location, "cast length must be an integer expression");
                         }
@@ -1221,11 +1262,11 @@ namespace sema {
                             }
                         }
                     }
-                    return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_returns_error, /*need_writable=*/false).type;
+                    return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type, /*need_writable=*/false).type;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
-                    const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
-                    const auto index = check_expr(v->index, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                    const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    const auto index = check_expr(v->index, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     if (!index.is_integer()) {
                         error(diag, v->location, "index must be an integer expression");
                     }
@@ -1242,9 +1283,9 @@ namespace sema {
                     return error(diag, v->location, "indexing requires a pointer, array, or slice operand");
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
-                    const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
-                    const auto start = check_expr(v->start, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
-                    const auto end = check_expr(v->end, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                    const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    const auto start = check_expr(v->start, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    const auto end = check_expr(v->end, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     if (!start.is_integer() || !end.is_integer()) {
                         error(diag, v->location, "slice bounds must be integer expressions");
                     }
@@ -1289,7 +1330,32 @@ namespace sema {
                     return error(diag, v.location, std::format("cannot resolve '.{}' without an expected enum or tagged union type", v.name));
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) {
-                    const auto operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                    auto operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+
+                    // Transparent error-value matching: 'match err {...}' requires 'err' (a
+                    // plain identifier) to be known Failed here, then dispatches the arms on
+                    // the INNER representation — the member type directly (single error
+                    // member) or the synthesized inner dispatch union (2+ members) — never
+                    // the outer Ok/Failed wrapper, which has no user-visible fields.
+                    if (is_error_union_type(operand_type, program)) {
+                        const auto *ident = std::get_if<ast::IdentExpr>(&v->operand);
+                        const auto *binding = ident ? find_error_local(ident->name, locals, program) : nullptr;
+                        if (!binding || binding->err_state != ErrorState::Failed) {
+                            return error(diag, v->location,
+                                "cannot match on an error value of unknown state; check it first: "
+                                "'if err { match err { ... } }', or use an early return: 'if !err { return_ok ... } '");
+                        }
+                        const auto &wrapper = *program.union_at(operand_type.union_index);
+                        const auto &failed_variant = wrapper.variants[1];
+                        const auto effective_type = wrapper.error_member_types.size() == 1
+                            ? wrapper.error_member_types[0]
+                            : failed_variant.payload_type;
+                        program.modules.at(module_path).expr_error_match_unwrap[get_expr_key(v->operand)] = ErrorMatchUnwrap{
+                            .wrapper_type = operand_type,
+                            .effective_type = effective_type,
+                        };
+                        operand_type = effective_type;
+                    }
 
                     // ---- Pre-pass: validate '_' arm placement (shared for all operand types) ----
                     std::optional<size_t> default_arm_idx;
@@ -1333,7 +1399,7 @@ namespace sema {
                             if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
                                 // Default arm value
                                 const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
-                                    arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_returns_error);
+                                    arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
                                 if (first_arm) { arm_type = val_type; first_arm = false; }
                                 else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
                                     error(diag, arm_loc, "all match arms must have the same type");
@@ -1347,7 +1413,7 @@ namespace sema {
                                 error(diag, arm_loc, "match arm pattern must be a compile-time constant");
                             }
                             // Type-check the pattern against the operand type
-                            check_expr(*lp.expr, arm_locals, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_returns_error);
+                            check_expr(*lp.expr, arm_locals, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_error_type);
                             // Evaluate for duplicate detection
                             const auto val = evaluate_integer_constant(*lp.expr, module_path, program);
                             if (val) {
@@ -1363,7 +1429,7 @@ namespace sema {
                             }
                             // Check arm result value
                             const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
-                                arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_returns_error);
+                                arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
                             if (first_arm) { arm_type = val_type; first_arm = false; }
                             else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
                                 error(diag, arm_loc, "all match arms must have the same type");
@@ -1405,7 +1471,7 @@ namespace sema {
                             return vp && vp->capture_by_ref;
                         });
                         if (any_ref_capture) {
-                            const auto lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_returns_error);
+                            const auto lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
                             if (lv.type.kind == TypeKind::Invalid) {
                                 error(diag, v->location, "by-ref capture requires an lvalue match operand");
                             }
@@ -1418,7 +1484,7 @@ namespace sema {
                         for (const auto &arm : v->arms) {
                             if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
                                 const auto val_type = check_expr(arm.value, locals, module_path, program, diag,
-                                    arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_returns_error);
+                                    arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
                                 if (first_arm) { arm_type = val_type; first_arm = false; }
                                 else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
                                     error(diag, arm.location, "all match arms must have the same type");
@@ -1460,7 +1526,7 @@ namespace sema {
                                     }
 
                                     const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
-                                                                     arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_returns_error);
+                                                                     arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
                                     if (first_arm) {
                                         arm_type = val_type;
                                         first_arm = false;
@@ -1472,7 +1538,7 @@ namespace sema {
                             }
                             if (!found) {
                                 error(diag, arm.location, std::format("no variant '{}' on tagged union", vp.name));
-                                const auto val_type = check_expr(arm.value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                                const auto val_type = check_expr(arm.value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                                 if (first_arm) { arm_type = val_type; first_arm = false; }
                             }
                         }
@@ -1510,7 +1576,7 @@ namespace sema {
                     for (const auto &arm : v->arms) {
                         if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
                             const auto val_type = check_expr(arm.value, locals, module_path, program, diag,
-                                arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_returns_error);
+                                arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
                             if (first_arm) { arm_type = val_type; first_arm = false; }
                             else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
                                 error(diag, arm.location, "all match arms must have the same type");
@@ -1542,7 +1608,7 @@ namespace sema {
                         }
 
                         const auto val_type = check_expr(arm.value, locals, module_path, program, diag,
-                            arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_returns_error);
+                            arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
                         if (first_arm) { arm_type = val_type; first_arm = false; }
                         else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
                             error(diag, arm.location, "all match arms must have the same type");
@@ -1582,21 +1648,28 @@ namespace sema {
                     if (defer_loop_base >= 0) {
                         return error(diag, v->location, "'try' cannot propagate errors out of a 'defer' body");
                     }
-                    if (!fn_returns_error) {
-                        return error(diag, v->location, "enclosing function must return 'error' to use 'try'");
+                    if (!fn_error_type) {
+                        return error(diag, v->location, "enclosing function must return 'error(...)' to use 'try'");
                     }
                     // The operand must be a CallExpr
                     const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&v->call);
                     if (!call) {
                         return error(diag, v->location, "'try' operand must be a direct function call");
                     }
-                    const auto returns = check_group_call_returns(**call, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_returns_error);
+                    const auto returns = check_group_call_returns(**call, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
                     if (returns.empty()) {
                         return ResolvedType{.kind = TypeKind::Void};
                     }
-                    // Last return type must be error
-                    if (returns.back().kind != TypeKind::Error) {
-                        return error(diag, v->location, "'try' can only be used on a function that returns 'error' as its last return value");
+                    // Last return type must be a synthesized error(...) union
+                    if (!is_error_union_type(returns.back(), program)) {
+                        return error(diag, v->location, "'try' can only be used on a function that returns 'error(...)' as its last return value");
+                    }
+                    // ...and every error member the callee can produce must be a member of
+                    // the caller's own declared error(...) union.
+                    if (!error_union_is_subset(returns.back(), *fn_error_type, program)) {
+                        return error(diag, v->location,
+                            "callee's error type is not a subset of the enclosing function's error type; "
+                            "widen the enclosing function's 'error(...)' return type or handle the error explicitly");
                     }
                     // Returns: all return types except the error slot
                     if (returns.size() == 1) {
@@ -1658,7 +1731,7 @@ namespace sema {
                                 error(diag, sf.location, std::format("no field '{}' in variant '{}'", sf.name, v->variant_name));
                                 continue;
                             }
-                            const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth, defer_loop_base, fn_returns_error);
+                            const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth, defer_loop_base, fn_error_type);
                             if (!assignable_in_module(val_ty, it->type, module_path, program)) {
                                 error(diag, sf.location, std::format("type mismatch for field '{}'", sf.name));
                             }
@@ -1707,7 +1780,7 @@ namespace sema {
                                         error(diag, sf.location, std::format("no member '{}' on union", sf.name));
                                         return *expected;
                                     }
-                                    const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth, defer_loop_base, fn_returns_error);
+                                    const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth, defer_loop_base, fn_error_type);
                                     if (!assignable_in_module(val_ty, it->type, module_path, program)) {
                                         error(diag, sf.location, std::format("type mismatch for union member '{}'", sf.name));
                                     }
@@ -1732,7 +1805,7 @@ namespace sema {
                                         error(diag, sf.location, std::format("no field '{}' on struct", sf.name));
                                         continue;
                                     }
-                                    const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth, defer_loop_base, fn_returns_error);
+                                    const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth, defer_loop_base, fn_error_type);
                                     if (!assignable_in_module(val_ty, it->type, module_path, program)) {
                                         error(diag, sf.location, std::format("type mismatch for field '{}'", sf.name));
                                     }
@@ -1765,7 +1838,7 @@ namespace sema {
                                     }
                                     for (size_t i = 0; i < bv.values.size(); ++i) {
                                         const auto &field = info.fields[i];
-                                        const auto val_ty = check_expr(bv.values[i], locals, module_path, program, diag, field.type, loop_depth, defer_loop_base, fn_returns_error);
+                                        const auto val_ty = check_expr(bv.values[i], locals, module_path, program, diag, field.type, loop_depth, defer_loop_base, fn_error_type);
                                         if (!assignable_in_module(val_ty, field.type, module_path, program)) {
                                             error(diag, bv.location, std::format("type mismatch for field '{}'", field.name));
                                         }
@@ -1789,7 +1862,7 @@ namespace sema {
                                     return error(diag, bv.location, std::format("too many elements in array initializer: array has {} element(s), got {}", array_info.count, bv.values.size()));
                                 }
                                 for (const auto &val : bv.values) {
-                                    const auto val_ty = check_expr(val, locals, module_path, program, diag, array_info.element_type, loop_depth, defer_loop_base, fn_returns_error);
+                                    const auto val_ty = check_expr(val, locals, module_path, program, diag, array_info.element_type, loop_depth, defer_loop_base, fn_error_type);
                                     if (!assignable_in_module(val_ty, array_info.element_type, module_path, program)) {
                                         error(diag, bv.location, "type mismatch in array initializer element");
                                     }
@@ -1801,9 +1874,9 @@ namespace sema {
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::RangeExpr>>) {
                     // Range expressions are only valid as for-in operands; type-check bounds
                     // so expr_types is populated for codegen, then report the contextual error.
-                    const auto upper_type = check_expr(v->upper, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                    const auto upper_type = check_expr(v->upper, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     if (v->lower) {
-                        check_expr(*v->lower, locals, module_path, program, diag, upper_type, loop_depth, defer_loop_base, fn_returns_error);
+                        check_expr(*v->lower, locals, module_path, program, diag, upper_type, loop_depth, defer_loop_base, fn_error_type);
                     }
                     return error(diag, v->location, "range expression is only valid as a 'for-in' operand");
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SpreadExpr>>) {
@@ -1811,7 +1884,7 @@ namespace sema {
                     // handling *before* recursing into check_expr on the operand directly — this
                     // node is only ever visited here when the spread was in an illegal position
                     // (not the sole trailing argument of a native-variadic call).
-                    check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                    check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     return error(diag, v->location,
                         "'...' spread argument is only valid as the sole trailing argument in a call to a "
                         "function with a native '...T' variadic parameter");
@@ -1918,8 +1991,188 @@ namespace sema {
         return ty;
     }
 
+    // Resolves 'return_err <expr>' operand against the enclosing function's error(...) type,
+    // returning the concrete error MEMBER type (e.g. MemoryError) that <expr> denotes a variant
+    // of. The caller then passes this back into check_expr as 'expected' — DotIdentExpr and
+    // TaggedVariantExpr resolve '.Variant' / '.Variant(payload)' against it with no changes of
+    // their own, exactly as they would for an ordinary bare enum/tagged-union return.
+    auto resolve_return_err_member_type(const ast::Expr &error_value, const ResolvedType &fn_error_type,
+                                         const std::string &module_path, Program &program, DiagnosticEngine &diag,
+                                         const SourceLocation &loc) -> std::optional<ResolvedType> {
+        const auto *wrapper = program.union_at(fn_error_type.union_index);
+        if (!wrapper) return std::nullopt;
+        const auto &members = wrapper->error_member_types;
+
+        // Qualified form 'TypeName.variant{...}' already carries an explicit type_path from
+        // parsing; just validate it names one of this error type's members and defer entirely
+        // to the ordinary TaggedVariantExpr resolution path.
+        if (const auto *tv = std::get_if<std::unique_ptr<ast::TaggedVariantExpr>>(&error_value); tv && (*tv)->type_path) {
+            const auto qualified_ty = resolve_type(ast::Type{clone_named_type(*(*tv)->type_path)}, module_path, program, diag);
+            if (!std::ranges::any_of(members, [&](const auto &m) { return m == qualified_ty; })) {
+                diag.report_error(DiagnosticStage::Sema, loc,
+                    std::format("'{}' is not a member of this function's error type", format_named_type(*(*tv)->type_path)));
+                return std::nullopt;
+            }
+            return qualified_ty;
+        }
+
+        std::string variant_name;
+        if (const auto *di = std::get_if<ast::DotIdentExpr>(&error_value)) {
+            variant_name = di->name;
+        } else if (const auto *tv = std::get_if<std::unique_ptr<ast::TaggedVariantExpr>>(&error_value)) {
+            variant_name = (*tv)->variant_name;
+        } else {
+            diag.report_error(DiagnosticStage::Sema, loc, "'return_err' operand must be a '.Variant' or '.Variant(payload)' error value");
+            return std::nullopt;
+        }
+
+        std::vector<ResolvedType> matches;
+        for (const auto &member : members) {
+            if (member.kind == TypeKind::Enum) {
+                if (const auto *einfo = program.enum_at(member.enum_index)) {
+                    if (std::ranges::any_of(einfo->fields, [&](const auto &f) { return f.name == variant_name; })) {
+                        matches.push_back(member);
+                    }
+                }
+            } else if (member.kind == TypeKind::Union) {
+                if (const auto *uinfo = program.union_at(member.union_index)) {
+                    if (std::ranges::any_of(uinfo->variants, [&](const auto &variant) { return variant.name == variant_name; })) {
+                        matches.push_back(member);
+                    }
+                }
+            }
+        }
+
+        if (matches.empty()) {
+            diag.report_error(DiagnosticStage::Sema, loc, std::format("'{}' is not a variant of this function's error type", variant_name));
+            return std::nullopt;
+        }
+        if (matches.size() > 1) {
+            std::string joined;
+            for (size_t i = 0; i < matches.size(); ++i) {
+                if (i > 0) joined += ", ";
+                const auto [mod, name] = find_type_module_and_name(matches[i], program);
+                joined += name.empty() ? "<type>" : name;
+            }
+            // NOTE: payload-free (enum) variants have no qualified-reference grammar today
+            // ('TypeName.variant{...}' requires a tagged-union payload); an ambiguous
+            // payload-free variant name can only be resolved by renaming one of the members.
+            diag.report_error(DiagnosticStage::Sema, loc, std::format(
+                "'{}' is ambiguous across error member types {}; tagged-union variants can be qualified "
+                "as 'TypeName.{}{{...}}', payload-free enum variants must be renamed to disambiguate",
+                variant_name, joined, variant_name));
+            return std::nullopt;
+        }
+        return matches.front();
+    }
+
+    // What a recognized error-condition shape ('err', '!err', 'err && x', 'err || x',
+    // '!err && x', '!err || x') narrows its subject variable to in the then/else branches.
+    // 'is_exact_not_err' gates the early-return-narrowing rule below — per spec it applies
+    // ONLY to a condition that is exactly '!err', not any compound form.
+    struct ConditionNarrowing {
+        std::string var_name;
+        ErrorState then_state;
+        ErrorState else_state;
+        // Set only for the two SIMPLE (non-compound) shapes 'err' / '!err'. Gates both the
+        // early-return-narrowing rule and the redundant-check warning — per spec, neither
+        // applies to compound conditions like 'err && x'.
+        bool is_exact_err = false;
+        bool is_exact_not_err = false;
+    };
+
+    auto compute_condition_narrowing(const ast::Expr &condition, LocalScope &locals, const Program &program) -> std::optional<ConditionNarrowing> {
+        if (const auto *ident = std::get_if<ast::IdentExpr>(&condition)) {
+            if (find_error_local(ident->name, locals, program)) {
+                return ConditionNarrowing{ident->name, ErrorState::Failed, ErrorState::Ok, true, false};
+            }
+            return std::nullopt;
+        }
+        if (const auto *un = std::get_if<std::unique_ptr<ast::UnaryExpr>>(&condition)) {
+            if ((*un)->op != ast::UnaryOp::LogicalNot) return std::nullopt;
+            if (const auto *ident = std::get_if<ast::IdentExpr>(&(*un)->operand)) {
+                if (find_error_local(ident->name, locals, program)) {
+                    return ConditionNarrowing{ident->name, ErrorState::Ok, ErrorState::Failed, false, true};
+                }
+            }
+            return std::nullopt;
+        }
+        if (const auto *bin = std::get_if<std::unique_ptr<ast::BinaryExpr>>(&condition)) {
+            const auto &b = **bin;
+            if (b.op != ast::BinaryOp::LogicalAnd && b.op != ast::BinaryOp::LogicalOr) return std::nullopt;
+            const bool is_and = b.op == ast::BinaryOp::LogicalAnd;
+
+            if (const auto *ident = std::get_if<ast::IdentExpr>(&b.lhs)) {
+                if (find_error_local(ident->name, locals, program)) {
+                    // 'err && x' -> Failed in then; 'err || x' -> Unknown in then (spec).
+                    return ConditionNarrowing{ident->name, is_and ? ErrorState::Failed : ErrorState::Unknown, ErrorState::Unknown, false, false};
+                }
+            }
+            if (const auto *un = std::get_if<std::unique_ptr<ast::UnaryExpr>>(&b.lhs)) {
+                if ((*un)->op == ast::UnaryOp::LogicalNot) {
+                    if (const auto *ident = std::get_if<ast::IdentExpr>(&(*un)->operand)) {
+                        if (find_error_local(ident->name, locals, program)) {
+                            // '!err && x' -> Ok in then (no early-return narrowing); '!err || x' -> Unknown.
+                            return ConditionNarrowing{ident->name, is_and ? ErrorState::Ok : ErrorState::Unknown, ErrorState::Unknown, false, false};
+                        }
+                    }
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
+    // Merges two branch-end scopes into 'target' (the scope visible in code following the
+    // branch): a variable's error typestate carries over only if both branches agree;
+    // otherwise it degrades to Unknown. Non-error-tracked bindings (NotApplicable) are left
+    // alone. Used for if/else (a/b = then/else-or-original) and while (a/b = pre-loop/
+    // post-body, since the loop may run zero times).
+    auto merge_error_states(LocalScope &target, const LocalScope &a, const LocalScope &b) -> void {
+        for (auto &[name, binding] : target) {
+            if (binding.err_state == ErrorState::NotApplicable) continue;
+            const auto a_it = a.find(name);
+            const auto b_it = b.find(name);
+            const auto a_state = a_it != a.end() ? a_it->second.err_state : ErrorState::Unknown;
+            const auto b_state = b_it != b.end() ? b_it->second.err_state : ErrorState::Unknown;
+            binding.err_state = (a_state == b_state) ? a_state : ErrorState::Unknown;
+        }
+    }
+
+    // True iff every path through 'stmt' definitely exits the enclosing function/loop
+    // (return / return_ok / return_err / break / continue) — used by the early-return
+    // narrowing rule ("if !err { <body> }" where <body> never falls through). Conservative:
+    // an if/switch without a provably-exhaustive set of exiting arms counts as NOT
+    // always-exiting, even if a human could prove otherwise.
+    auto stmt_always_exits(const ast::Stmt &stmt) -> bool {
+        return std::visit(
+            [&]<typename T>(const T &v) -> bool {
+                using V = std::decay_t<T>;
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::BlockStmt>>) {
+                    if (v->stmts.empty()) return false;
+                    return stmt_always_exits(v->stmts.back());
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IfStmt>>) {
+                    return v->else_stmt.has_value() && stmt_always_exits(v->then_stmt) && stmt_always_exits(*v->else_stmt);
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SwitchStmt>>) {
+                    bool has_default = false;
+                    for (const auto &arm : v->arms) {
+                        if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) has_default = true;
+                        if (!stmt_always_exits(arm.body)) return false;
+                    }
+                    return has_default;
+                } else if constexpr (std::is_same_v<V, ast::ReturnStmt> || std::is_same_v<V, ast::ReturnErrStmt> ||
+                                      std::is_same_v<V, ast::ReturnOkStmt> || std::is_same_v<V, ast::BreakStmt> ||
+                                      std::is_same_v<V, ast::ContinueStmt>) {
+                    return true;
+                } else {
+                    return false;
+                }
+            },
+            stmt);
+    }
+
     auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth, int defer_loop_base) -> void {
-        const bool fn_returns_error = !expected_returns.empty() && expected_returns.back().kind == TypeKind::Error;
+        const ResolvedType *fn_error_type = (!expected_returns.empty() && is_error_union_type(expected_returns.back(), program))
+            ? &expected_returns.back() : nullptr;
         std::visit(
             [&]<typename T>(const T &v) {
                 using V = std::decay_t<T>;
@@ -1930,13 +2183,63 @@ namespace sema {
                         check_stmt(s, inner, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IfStmt>>) {
-                    check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_returns_error);
-                    check_stmt(v->then_stmt, locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
-                    if (v->else_stmt) check_stmt(*v->else_stmt, locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
+                    check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
+
+                    const auto narrowing = compute_condition_narrowing(v->condition, locals, program);
+
+                    if (narrowing) {
+                        if (const auto *binding = find_error_local(narrowing->var_name, locals, program)) {
+                            if (narrowing->is_exact_err && binding->err_state == ErrorState::Failed) {
+                                diag.warn(DiagnosticStage::Sema, v->location, std::format(
+                                    "redundant error check: '{}' is already known to be Failed here", narrowing->var_name));
+                            } else if (narrowing->is_exact_not_err && binding->err_state == ErrorState::Ok) {
+                                diag.warn(DiagnosticStage::Sema, v->location, std::format(
+                                    "redundant error check: '{}' is already known to be Ok here", narrowing->var_name));
+                            }
+                        }
+                    }
+
+                    // then/else each get their OWN copy of locals — isolation is explicit here
+                    // rather than relying on then_stmt/else_stmt happening to be BlockStmts
+                    // (a bare non-block then-stmt is grammar-legal and would otherwise leak
+                    // mutations into the other branch / the enclosing scope).
+                    auto then_locals = locals;
+                    if (narrowing) {
+                        if (auto *b = find_error_local(narrowing->var_name, then_locals, program)) b->err_state = narrowing->then_state;
+                    }
+                    check_stmt(v->then_stmt, then_locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
+
+                    auto else_locals = locals;
+                    if (narrowing) {
+                        if (auto *b = find_error_local(narrowing->var_name, else_locals, program)) b->err_state = narrowing->else_state;
+                    }
+                    if (v->else_stmt) check_stmt(*v->else_stmt, else_locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
+
+                    // Early-return narrowing: 'if !err { <body that always exits> }' with no
+                    // else strengthens the post-if state to Failed (the only path that
+                    // reaches here is the condition being false, i.e. err was Failed) — this
+                    // overrides what the general join below would otherwise conclude.
+                    if (narrowing && narrowing->is_exact_not_err && !v->else_stmt && stmt_always_exits(v->then_stmt)) {
+                        if (auto *b = find_error_local(narrowing->var_name, locals, program)) {
+                            b->err_state = ErrorState::Failed;
+                        }
+                    } else {
+                        merge_error_states(locals, then_locals, else_locals);
+                    }
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhileStmt>>) {
-                    check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_returns_error);
-                    check_stmt(v->body, locals, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
+                    check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
+
+                    const auto narrowing = compute_condition_narrowing(v->condition, locals, program);
+                    auto body_locals = locals;
+                    if (narrowing) {
+                        if (auto *b = find_error_local(narrowing->var_name, body_locals, program)) b->err_state = narrowing->then_state;
+                    }
+                    check_stmt(v->body, body_locals, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
+
+                    // The loop may run zero times, so code after it only knows what pre-loop
+                    // and post-body states agree on (single-pass — no fixed-point widening).
+                    merge_error_states(locals, locals, body_locals);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ForInStmt>>) {
                     if (const auto *rp = std::get_if<std::unique_ptr<ast::RangeExpr>>(&v->iterable)) {
@@ -1945,13 +2248,13 @@ namespace sema {
                             diag.report_error(DiagnosticStage::Sema, v->location, "range 'for-in' does not support '&' element binding");
                             return;
                         }
-                        const auto upper_type = check_expr(range.upper, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                        const auto upper_type = check_expr(range.upper, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         if (!upper_type.is_integer()) {
                             diag.report_error(DiagnosticStage::Sema, v->location, "range upper bound must be an integer type");
                             return;
                         }
                         if (range.lower) {
-                            const auto lower_type = check_expr(*range.lower, locals, module_path, program, diag, upper_type, loop_depth, defer_loop_base, fn_returns_error);
+                            const auto lower_type = check_expr(*range.lower, locals, module_path, program, diag, upper_type, loop_depth, defer_loop_base, fn_error_type);
                             if (lower_type != upper_type) {
                                 diag.report_error(DiagnosticStage::Sema, v->location, "range lower and upper bounds must have the same type");
                                 return;
@@ -1967,7 +2270,7 @@ namespace sema {
                         check_stmt(v->body, inner, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
                         return;
                     }
-                    const auto iterable_type = check_expr(v->iterable, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                    const auto iterable_type = check_expr(v->iterable, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     if (iterable_type.kind != TypeKind::Slice && iterable_type.kind != TypeKind::Array) {
                         diag.report_error(DiagnosticStage::Sema, v->location, "'for-in' requires a slice or array operand");
                         return;
@@ -1990,9 +2293,9 @@ namespace sema {
                     check_stmt(v->body, inner, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
 
                 } else if constexpr (std::is_same_v<V, ast::ExprStmt>) {
-                    const auto expr_ty = check_expr(v.expr, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                    const auto expr_ty = check_expr(v.expr, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     // Detect ignored errors from fallible calls
-                    if (expr_ty.kind == TypeKind::Error &&
+                    if (is_error_union_type(expr_ty, program) &&
                         !std::holds_alternative<std::unique_ptr<ast::TryExpr>>(v.expr)) {
                         diag.report_error(DiagnosticStage::Sema, v.location,
                             "error from fallible function call must be captured or propagated with 'try'");
@@ -2010,15 +2313,18 @@ namespace sema {
                             diag.report_error(DiagnosticStage::Sema, v.location, "'undefined' is not allowed in a 'const' declaration");
                         }
                         auto init_ty = check_expr(*v.init, locals, module_path, program, diag,
-                                                  has_declared_ty ? std::optional(declared_ty) : std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                                                  has_declared_ty ? std::optional(declared_ty) : std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         if (has_declared_ty && !assignable_in_module(init_ty, declared_ty, module_path, program)) {
                             diag.report_error(DiagnosticStage::Sema, v.location, "type mismatch in variable declaration");
                         }
-                        locals[v.name] = LocalBinding{.type = has_declared_ty ? declared_ty : init_ty, .is_mut = v.is_mut};
+                        const auto &bound_ty = has_declared_ty ? declared_ty : init_ty;
+                        locals[v.name] = LocalBinding{.type = bound_ty, .is_mut = v.is_mut,
+                            .err_state = is_error_union_type(bound_ty, program) ? ErrorState::Unknown : ErrorState::NotApplicable};
                     } else {
                         if (!v.is_mut) diag.report_error(DiagnosticStage::Sema, v.location, "'const' requires an initializer");
                         if (!has_declared_ty) diag.report_error(DiagnosticStage::Sema, v.location, "cannot infer type with no initializer and no type annotation");
-                        locals[v.name] = LocalBinding{.type = declared_ty, .is_mut = v.is_mut};
+                        locals[v.name] = LocalBinding{.type = declared_ty, .is_mut = v.is_mut,
+                            .err_state = is_error_union_type(declared_ty, program) ? ErrorState::Unknown : ErrorState::NotApplicable};
                     }
 
                 } else if constexpr (std::is_same_v<V, ast::VarDeclGroupStmt>) {
@@ -2039,27 +2345,32 @@ namespace sema {
 
                     if (!call) {
                         diag.report_error(DiagnosticStage::Sema, v.location, "group declaration initializer must be a function call or 'try' expression");
-                        check_expr(v.init, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                        check_expr(v.init, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         return;
                     }
 
-                    auto returns = check_group_call_returns(*call, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_returns_error);
+                    auto returns = check_group_call_returns(*call, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
                     if (returns.empty()) {
                         return;
                     }
 
                     if (is_try) {
                         // Check enclosing function is fallible
-                        if (expected_returns.empty() || expected_returns.back().kind != TypeKind::Error) {
+                        if (!fn_error_type) {
                             diag.report_error(DiagnosticStage::Sema, v.location,
-                                "enclosing function must return 'error' to use 'try'");
+                                "enclosing function must return 'error(...)' to use 'try'");
                         }
                         // Strip the error slot from returns
-                        if (returns.back().kind == TypeKind::Error) {
+                        if (is_error_union_type(returns.back(), program)) {
+                            if (fn_error_type && !error_union_is_subset(returns.back(), *fn_error_type, program)) {
+                                diag.report_error(DiagnosticStage::Sema, v.location,
+                                    "callee's error type is not a subset of the enclosing function's error type; "
+                                    "widen the enclosing function's 'error(...)' return type or handle the error explicitly");
+                            }
                             returns.pop_back();
                         } else {
                             diag.report_error(DiagnosticStage::Sema, v.location,
-                                "'try' can only be used on a function that returns 'error' as its last return value");
+                                "'try' can only be used on a function that returns 'error(...)' as its last return value");
                             return;
                         }
                         // Check that we are not inside a defer body
@@ -2075,12 +2386,36 @@ namespace sema {
 
                     for (size_t i = 0; i < v.names.size() && i < returns.size(); ++i) {
                         if (!v.names[i].empty() && v.names[i] != "_") {
-                            locals[v.names[i]] = LocalBinding{.type = returns[i], .is_mut = v.is_mut};
+                            locals[v.names[i]] = LocalBinding{.type = returns[i], .is_mut = v.is_mut,
+                                .err_state = is_error_union_type(returns[i], program) ? ErrorState::Unknown : ErrorState::NotApplicable};
                         }
                     }
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SwitchStmt>>) {
-                    const auto operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                    auto operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+
+                    // Transparent error-value matching — see the identical comment in
+                    // MatchExpr's handling above.
+                    if (is_error_union_type(operand_type, program)) {
+                        const auto *ident = std::get_if<ast::IdentExpr>(&v->operand);
+                        const auto *binding = ident ? find_error_local(ident->name, locals, program) : nullptr;
+                        if (!binding || binding->err_state != ErrorState::Failed) {
+                            diag.report_error(DiagnosticStage::Sema, v->location,
+                                "cannot switch on an error value of unknown state; check it first: "
+                                "'if err { switch err { ... } }', or use an early return: 'if !err { return_ok ... } '");
+                            return;
+                        }
+                        const auto &wrapper = *program.union_at(operand_type.union_index);
+                        const auto &failed_variant = wrapper.variants[1];
+                        const auto effective_type = wrapper.error_member_types.size() == 1
+                            ? wrapper.error_member_types[0]
+                            : failed_variant.payload_type;
+                        program.modules.at(module_path).expr_error_match_unwrap[get_expr_key(v->operand)] = ErrorMatchUnwrap{
+                            .wrapper_type = operand_type,
+                            .effective_type = effective_type,
+                        };
+                        operand_type = effective_type;
+                    }
 
                     // Validate '_' placement
                     std::optional<size_t> default_arm_idx;
@@ -2125,7 +2460,7 @@ namespace sema {
                             if (!is_constant_expr(*lp.expr, module_path, program)) {
                                 diag.report_error(DiagnosticStage::Sema, arm.location, "switch arm pattern must be a compile-time constant");
                             }
-                            check_expr(*lp.expr, locals, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_returns_error);
+                            check_expr(*lp.expr, locals, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_error_type);
                             const auto val = evaluate_integer_constant(*lp.expr, module_path, program);
                             if (val) {
                                 if (seen_values.count(*val)) {
@@ -2167,7 +2502,7 @@ namespace sema {
                             return vp && vp->capture_by_ref;
                         });
                         if (any_ref_capture) {
-                            const auto lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_returns_error);
+                            const auto lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
                             if (lv.type.kind == TypeKind::Invalid) {
                                 diag.report_error(DiagnosticStage::Sema, v->location, "by-ref capture requires an lvalue switch operand");
                             }
@@ -2292,7 +2627,7 @@ namespace sema {
                     }
                     if (v.return_values.size() == 1 && expected_returns.size() > 1) {
                         if (const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&v.return_values[0])) {
-                            const auto returns = check_group_call_returns(**call, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_returns_error);
+                            const auto returns = check_group_call_returns(**call, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
                             if (returns.size() != expected_returns.size()) {
                                 diag.report_error(DiagnosticStage::Sema, v.location,
                                                   std::format("expected {} return value(s), got {}", expected_returns.size(), returns.size()));
@@ -2313,11 +2648,11 @@ namespace sema {
                                                           ? " (note: 'return' on its own line ends the statement immediately; move the value onto the same line as 'return')"
                                                           : ""));
                         for (auto &val : v.return_values)
-                            check_expr(val, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                            check_expr(val, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         return;
                     }
                     for (size_t i = 0; i < v.return_values.size(); ++i) {
-                        auto ty = check_expr(v.return_values[i], locals, module_path, program, diag, expected_returns[i], loop_depth, defer_loop_base, fn_returns_error);
+                        auto ty = check_expr(v.return_values[i], locals, module_path, program, diag, expected_returns[i], loop_depth, defer_loop_base, fn_error_type);
                         if (!assignable_in_module(ty, expected_returns[i], module_path, program)) {
                             diag.report_error(DiagnosticStage::Sema, v.location, std::format("return value {} type mismatch", i + 1));
                         }
@@ -2328,20 +2663,16 @@ namespace sema {
                         diag.report_error(DiagnosticStage::Sema, v.location, "'return_err' cannot escape a 'defer' body");
                         return;
                     }
-                    if (expected_returns.empty() || expected_returns.back().kind != TypeKind::Error) {
+                    if (!fn_error_type) {
                         diag.report_error(DiagnosticStage::Sema, v.location,
-                                          "enclosing function must return 'error' to use 'return_err'");
-                        check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                                          "enclosing function must return 'error(...)' to use 'return_err'");
+                        check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         return;
                     }
-                    auto ty = check_expr(v.error_value, locals, module_path, program, diag,
-                                         ResolvedType{.kind = TypeKind::Error}, loop_depth, defer_loop_base, fn_returns_error);
-                    if (!assignable_in_module(ty, ResolvedType{.kind = TypeKind::Error}, module_path, program)) {
-                        diag.report_error(DiagnosticStage::Sema, v.location, "'return_err' operand must be of type 'error'");
-                    } else if (is_constant_expr(v.error_value, module_path, program)) {
-                        if (const auto val = evaluate_integer_constant(v.error_value, module_path, program); val && *val == 0) {
-                            diag.report_error(DiagnosticStage::Sema, v.location,
-                                              "returning E_OK via return_err is certainly a bug; use return_ok or return 0");
+                    if (const auto member_type = resolve_return_err_member_type(v.error_value, *fn_error_type, module_path, program, diag, v.location)) {
+                        auto ty = check_expr(v.error_value, locals, module_path, program, diag, *member_type, loop_depth, defer_loop_base, fn_error_type);
+                        if (!assignable_in_module(ty, *member_type, module_path, program)) {
+                            diag.report_error(DiagnosticStage::Sema, v.location, "'return_err' operand does not match the resolved error member type");
                         }
                     }
 
@@ -2350,11 +2681,11 @@ namespace sema {
                         diag.report_error(DiagnosticStage::Sema, v.location, "'return_ok' cannot escape a 'defer' body");
                         return;
                     }
-                    if (expected_returns.empty() || expected_returns.back().kind != TypeKind::Error) {
+                    if (!fn_error_type) {
                         diag.report_error(DiagnosticStage::Sema, v.location,
-                                          "enclosing function must return 'error' to use 'return_ok'");
+                                          "enclosing function must return 'error(...)' to use 'return_ok'");
                         for (auto &val : v.return_values)
-                            check_expr(val, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                            check_expr(val, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         return;
                     }
                     const size_t expected_count = expected_returns.size() - 1;
@@ -2365,11 +2696,11 @@ namespace sema {
                                                           ? " (note: 'return_ok' on its own line ends the statement immediately; move the value onto the same line as 'return_ok')"
                                                           : ""));
                         for (auto &val : v.return_values)
-                            check_expr(val, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_returns_error);
+                            check_expr(val, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         return;
                     }
                     for (size_t i = 0; i < v.return_values.size(); ++i) {
-                        auto ty = check_expr(v.return_values[i], locals, module_path, program, diag, expected_returns[i], loop_depth, defer_loop_base, fn_returns_error);
+                        auto ty = check_expr(v.return_values[i], locals, module_path, program, diag, expected_returns[i], loop_depth, defer_loop_base, fn_error_type);
                         if (!assignable_in_module(ty, expected_returns[i], module_path, program)) {
                             diag.report_error(DiagnosticStage::Sema, v.location, std::format("return value {} type mismatch", i + 1));
                         }

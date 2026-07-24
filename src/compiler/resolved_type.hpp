@@ -18,7 +18,6 @@ namespace sema {
         F64,
         USize,
         Bool,
-        Error,
         Anyptr,
         Pointer,
         Struct,
@@ -53,7 +52,6 @@ namespace sema {
             case TypeKind::I32:
             case TypeKind::I64:
             case TypeKind::USize:
-            case TypeKind::Error:
                 return true;
 
             default:

@@ -3,7 +3,7 @@ const io := import("io")
 
 ext fn free(ptr: anyptr)
 
-pub fn main() -> error {
+pub fn main() -> error(io.IoError) {
     const f_len, f_bytes := try io.load_file("Justfile")
     defer free(f_bytes)
 
@@ -16,5 +16,5 @@ pub fn main() -> error {
     hash_map.init(sizeof(x))
     hash_map.put("key_a", &x)
 
-    return 0
+    return_ok
 }

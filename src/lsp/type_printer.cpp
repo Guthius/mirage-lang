@@ -119,7 +119,6 @@ namespace lsp {
         case TypeKind::F64: return "f64";
         case TypeKind::USize: return "usize";
         case TypeKind::Bool: return "bool";
-        case TypeKind::Error: return "error";
         case TypeKind::Anyptr: return "anyptr";
 
         case TypeKind::Pointer:
@@ -143,9 +142,22 @@ namespace lsp {
             return "[]" + type_to_string(program.slices[type.slice_index].element_type, program, current_module_path);
         }
 
-        case TypeKind::Struct:
-        case TypeKind::Enum:
         case TypeKind::Union: {
+            // Compiler-synthesized error(...) unions have no TypeSymbol (they're never
+            // user-nameable) — render from their own member-type list instead of falling
+            // through to the <anonymous type> case below.
+            if (const auto *info = program.union_at(type.union_index); info && info->is_error_union) {
+                std::string out = "error(";
+                for (size_t i = 0; i < info->error_member_types.size(); ++i) {
+                    if (i > 0) out += " | ";
+                    out += type_to_string(info->error_member_types[i], program, current_module_path);
+                }
+                return out + ")";
+            }
+            [[fallthrough]];
+        }
+        case TypeKind::Struct:
+        case TypeKind::Enum: {
             const auto [module_path, name] = sema::find_type_module_and_name(type, program);
             if (name.empty()) {
                 return "<anonymous type>";

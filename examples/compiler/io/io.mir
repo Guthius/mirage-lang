@@ -13,37 +13,38 @@ const SEEK_SET: i32 = 0
 const SEEK_CUR: i32 = 1
 const SEEK_END: i32 = 2
 
-const E_OK: error = 0
-const E_FAILED: error = 1
+pub type IoError = enum(i32) {
+    Failed = 1
+}
 
-pub fn load_file(path: []u8) -> (usize, *u8, error) {
+pub fn load_file(path: []u8) -> (usize, *u8, error(IoError)) {
     const f := fopen(path, "rb")
     if f == nil {
-        return 0, nil, E_FAILED
+        return_err .Failed
     }
 
     defer fclose(f)
 
     if fseek(f, 0, SEEK_END) != 0 {
-        return 0, nil, E_FAILED
+        return_err .Failed
     }
 
     const count := ftell(f)
     if count < 0 {
-        return 0, nil, E_FAILED
+        return_err .Failed
     }
 
     rewind(f)
 
     const data := mem.malloc(cast(count, usize))
     if data == nil {
-        return 0, nil, E_FAILED
+        return_err .Failed
     }
 
     if fread(data, 1, cast(count, usize), f) != cast(count, usize) {
         mem.free(data)
-        return 0, nil, E_FAILED
+        return_err .Failed
     }
 
-    return cast(count, usize), data, E_OK
+    return_ok cast(count, usize), data
 }

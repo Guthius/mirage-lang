@@ -4,84 +4,83 @@ ext fn printf(fmt: *u8, ...) -> i32
 
 mut g_cleanup_ran: i32 = 0
 
-# A fallible function that returns error
-fn maybe_fail(should_fail: bool) -> error {
+pub type TestError = enum(i32) {
+    Failed = 1
+}
+
+# A fallible function that returns error(TestError)
+fn maybe_fail(should_fail: bool) -> error(TestError) {
     if should_fail {
-        return 42  # non-zero error code
+        return_err .Failed
     }
-    return 0
+    return_ok
 }
 
-# A fallible function returning a value and error
-fn divide(a: i32, b: i32) -> (i32, error) {
+# A fallible function returning a value and error(TestError)
+fn divide(a: i32, b: i32) -> (i32, error(TestError)) {
     if b == 0 {
-        return 0, 1  # error: division by zero
+        return_err .Failed
     }
-    return a / b, 0
+    return_ok a / b
 }
 
-# Test 1: try propagates non-zero error
-fn test_propagate() -> error {
+# Test 1: try propagates a Failed error
+fn test_propagate() -> error(TestError) {
     try maybe_fail(true)
     # Should not reach here
-    return 0
+    return_ok
 }
 
-# Test 2: try does NOT propagate when error is 0
-fn test_no_propagate() -> error {
+# Test 2: try does NOT propagate when the call succeeds
+fn test_no_propagate() -> error(TestError) {
     try maybe_fail(false)
-    return 0
+    return_ok
 }
 
 # Test 3: try with value capture
-fn test_value_try() -> (i32, error) {
-    mut result, err := divide(10, 2)
-    if err != 0 {
-        return 0, err
-    }
-    return result, 0
+fn test_value_try() -> (i32, error(TestError)) {
+    const result := try divide(10, 2)
+    return_ok result
 }
 
 # Test 4: defers run before try propagation
-fn test_defer_before_try() -> error {
+fn test_defer_before_try() -> error(TestError) {
     defer {
         g_cleanup_ran = g_cleanup_ran + 1
     }
     try maybe_fail(true)
     # Should not reach here; defer must have run before propagation
-    return 0
+    return_ok
 }
 
 # Test 5: try in a group declaration
-fn test_group_try() -> error {
-    mut q, e := divide(20, 4)
-    if e != 0 {
-        return e
+fn test_group_try() -> error(TestError) {
+    const q, e := divide(20, 4)
+    if e {
+        return_err .Failed
     }
     if q != 5 {
-        return 99
+        return_err .Failed
     }
-    return 0
+    return_ok
 }
 
 pub fn main() -> i32 {
     # Test 1: propagation
-    const e1: error = test_propagate()
-    if e1 != 42 {
+    const e1 := test_propagate()
+    if !e1 {
         return 1
     }
 
     # Test 2: no propagation
-    const e2: error = test_no_propagate()
-    if e2 != 0 {
+    const e2 := test_no_propagate()
+    if e2 {
         return 2
     }
 
     # Test 3: value try
-    mut val: i32 = 0
-    mut err: error = 0
-    mut res, err2 := divide(10, 2)
-    if err2 != 0 {
+    const res, err2 := divide(10, 2)
+    if err2 {
         return 3
     }
     if res != 5 {
@@ -90,8 +89,8 @@ pub fn main() -> i32 {
 
     # Test 4: defer runs before try propagation
     g_cleanup_ran = 0
-    const e4: error = test_defer_before_try()
-    if e4 != 42 {
+    const e4 := test_defer_before_try()
+    if !e4 {
         return 5
     }
     if g_cleanup_ran != 1 {
@@ -99,8 +98,8 @@ pub fn main() -> i32 {
     }
 
     # Test 5: group try
-    const e5: error = test_group_try()
-    if e5 != 0 {
+    const e5 := test_group_try()
+    if e5 {
         return 7
     }
 

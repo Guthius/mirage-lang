@@ -1,0 +1,76 @@
+# example_error_typestate.mir — sema-tracked error typestate: early-return
+# narrowing, mutation invalidation, and compound (&&/||) condition coercion.
+
+pub type MemoryError = enum(i32) {
+    OutOfMemory = 1
+}
+
+fn alloc(fail: bool) -> (i32, error(MemoryError)) {
+    if fail {
+        return_err .OutOfMemory
+    }
+    return_ok 42
+}
+
+# Early-return narrowing: after 'if !err { <always exits> }' with no else,
+# 'err' is known Failed in the following code — 'match' is legal there with
+# no further check.
+fn narrowed_match(fail: bool) -> i32 {
+    const v, err := alloc(fail)
+    if !err {
+        return v
+    }
+    return match err {
+        .OutOfMemory: 99
+    }
+}
+
+# Mutation invalidates typestate: taking the address of an error-tracked
+# local resets its sema-tracked state to Unknown (a conservative
+# over-approximation — the runtime value is untouched, so the re-check
+# below still observes the real Failed state, it's just no longer treated
+# as a "redundant" check by sema).
+fn mutation_invalidates() -> i32 {
+    const v, err := alloc(true)
+    if err {
+        const p := &err
+        if err {
+            return -1
+        }
+        return v
+    }
+    return -2
+}
+
+# Compound conditions: 'err && x' / '!err && x' boolean-coerce correctly.
+# (v is only read on the branch where err is known Ok — reading it on the
+# Failed path would read the spec's documented 'undefined' non-error slot.)
+fn compound_conditions(fail: bool) -> i32 {
+    const v, err := alloc(fail)
+    if err && true {
+        return 1
+    }
+    if !err && v == 42 {
+        return 2
+    }
+    return 0
+}
+
+pub fn main() -> i32 {
+    if narrowed_match(true) != 99 {
+        return 1
+    }
+    if narrowed_match(false) != 42 {
+        return 2
+    }
+    if mutation_invalidates() != -1 {
+        return 3
+    }
+    if compound_conditions(true) != 1 {
+        return 4
+    }
+    if compound_conditions(false) != 2 {
+        return 5
+    }
+    return 0
+}

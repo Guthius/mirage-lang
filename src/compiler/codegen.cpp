@@ -132,7 +132,6 @@ namespace codegen {
             case sema::TypeKind::U64:
             case sema::TypeKind::I64:
             case sema::TypeKind::USize:
-            case sema::TypeKind::Error:
             case sema::TypeKind::Pointer:
             case sema::TypeKind::Anyptr:
                 return 64;
@@ -158,7 +157,6 @@ namespace codegen {
             case sema::TypeKind::I64:
             case sema::TypeKind::F64:
             case sema::TypeKind::USize:
-            case sema::TypeKind::Error:
             case sema::TypeKind::Pointer:
             case sema::TypeKind::Anyptr:
             case sema::TypeKind::Function:
@@ -376,8 +374,7 @@ namespace codegen {
                 case sema::TypeKind::I32:     return llvm::Type::getInt32Ty(*context_);
                 case sema::TypeKind::U64:
                 case sema::TypeKind::I64:
-                case sema::TypeKind::USize:
-                case sema::TypeKind::Error:   return llvm::Type::getInt64Ty(*context_);
+                case sema::TypeKind::USize:   return llvm::Type::getInt64Ty(*context_);
                 case sema::TypeKind::F32:     return llvm::Type::getFloatTy(*context_);
                 case sema::TypeKind::F64:     return llvm::Type::getDoubleTy(*context_);
                 case sema::TypeKind::Pointer:
@@ -1154,7 +1151,8 @@ namespace codegen {
 
                 const bool returns_void = main_fn->return_types.empty();
                 const bool returns_i32 = main_fn->return_types.size() == 1 && main_fn->return_types.front().kind == sema::TypeKind::I32;
-                const bool returns_error = main_fn->return_types.size() == 1 && main_fn->return_types.front().kind == sema::TypeKind::Error;
+                const bool returns_error = main_fn->return_types.size() == 1 && main_fn->return_types.front().kind == sema::TypeKind::Union &&
+                    sema_program_.unions.at(main_fn->return_types.front().union_index).is_error_union;
                 if (!returns_void && !returns_i32 && !returns_error) {
                     report_codegen_error(diag_, decl.location, "hosted entry point must return either no value, i32, or error");
                     return nullptr;
@@ -1424,10 +1422,17 @@ namespace codegen {
                 if (main_fn.return_types.empty()) {
                     builder_.CreateCall(main);
                     exit_code_i32 = builder_.getInt32(0);
-                } else if (!main_fn.return_types.empty() && main_fn.return_types.front().kind == sema::TypeKind::Error) {
-                    // error is u64; truncate to i32 for exit code (0 = success, non-zero = error code)
-                    auto *error_val = builder_.CreateCall(main);
-                    exit_code_i32 = builder_.CreateTrunc(error_val, llvm::Type::getInt32Ty(*context_));
+                } else if (!main_fn.return_types.empty() && main_fn.return_types.front().kind == sema::TypeKind::Union &&
+                           sema_program_.unions.at(main_fn.return_types.front().union_index).is_error_union) {
+                    // error(...): the outer Ok/Failed tag is a u32 at byte offset 0 of the
+                    // returned tagged-union value. Exit 0 on Ok, 1 on Failed — a single
+                    // process exit code can't meaningfully recover which variant failed.
+                    auto *result_val = builder_.CreateCall(main);
+                    auto *slot = builder_.CreateAlloca(result_val->getType());
+                    builder_.CreateStore(result_val, slot);
+                    auto *tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), slot);
+                    auto *is_failed = builder_.CreateICmpNE(tag, builder_.getInt32(0));
+                    exit_code_i32 = builder_.CreateZExt(is_failed, llvm::Type::getInt32Ty(*context_));
                 } else {
                     exit_code_i32 = builder_.CreateCall(main);
                 }
@@ -1504,6 +1509,11 @@ namespace codegen {
             auto coerce_to_bool(llvm::Value *value, const sema::ResolvedType &type) -> llvm::Value * {
                 if (type.kind == sema::TypeKind::Bool) {
                     return value;
+                }
+                if (type.kind == sema::TypeKind::Union && sema_program_.union_at(type.union_index) &&
+                    sema_program_.union_at(type.union_index)->is_error_union) {
+                    // error(...): Failed (outer tag != 0) = true, Ok (0) = false.
+                    return builder_.CreateICmpNE(extract_error_tag(value), builder_.getInt32(0));
                 }
                 if (type.is_float()) {
                     return builder_.CreateFCmpONE(value, llvm::ConstantFP::get(llvm_type(*current_module_path_, type), 0.0));
@@ -2411,12 +2421,154 @@ namespace codegen {
                 return {target_module, {}};
             }
 
-            // Emit the error-propagation branch for a try expression or try group decl.
-            // err_val: the LLVM i64 error value extracted from the call result.
-            // Returns the ok_bb where execution continues if no error.
-            // Returns err_val as the enclosing function's error result (zero-valuing any
-            // non-error slots), running defers first. Shared by `try` propagation and
-            // `return_err` so both lower identically.
+            // Reads the outer Ok(0)/Failed(1) tag (a u32 at byte offset 0) out of an
+            // error(...) union value. The value arrives as a first-class LLVM aggregate
+            // (the union's [size x i8] representation), so it's spilled to a scratch
+            // alloca first — there's no way to GEP into a non-lvalue SSA value directly.
+            auto extract_error_tag(llvm::Value *err_val) -> llvm::Value * {
+                auto *slot = builder_.CreateAlloca(err_val->getType());
+                builder_.CreateStore(err_val, slot);
+                return builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), slot);
+            }
+
+            // Given an already-evaluated error(...) wrapper VALUE (known Failed — sema's
+            // typestate precondition guarantees this at every match/switch call site), reads
+            // out the inner 'effective_type' bytes: the single error member type directly, or
+            // the synthesized inner dispatch union for 2+ members (see sema::ErrorMatchUnwrap).
+            // Both live at the wrapper's Failed payload offset — the {v:T} wrapping struct's
+            // one field is always at offset 0 within it, so no further GEP is needed once
+            // there.
+            auto unwrap_failed_error_value(llvm::Value *wrapper_val, const sema::ResolvedType &wrapper_type,
+                                            const sema::ResolvedType &effective_type) -> llvm::Value * {
+                const auto &wrapper = sema_program_.unions.at(wrapper_type.union_index);
+                auto *wrapper_ll_ty = unions_.at(wrapper_type.union_index);
+                auto *slot = builder_.CreateAlloca(wrapper_ll_ty);
+                builder_.CreateStore(wrapper_val, slot);
+                auto *payload_ptr = builder_.CreateConstInBoundsGEP1_64(llvm::Type::getInt8Ty(*context_), slot, wrapper.payload_offset);
+                auto *effective_ll_ty = llvm_type(wrapper.module_path, effective_type);
+                return builder_.CreateLoad(effective_ll_ty, payload_ptr);
+            }
+
+            // Builds a Failed-tagged value of 'error_union_type' carrying 'member_val' (of
+            // sema type 'member_type', one of that error type's declared members). Shared by
+            // return_err (member_val comes from evaluating the operand expression) and
+            // try's cross-union translation (member_val comes from a runtime-dispatched
+            // extraction out of a differently-shaped callee error value — see
+            // translate_error_value).
+            auto build_error_failed_value(const sema::ResolvedType &member_type, llvm::Value *member_val,
+                                           const sema::ResolvedType &error_union_type) -> llvm::Value * {
+                const auto &wrapper = sema_program_.unions.at(error_union_type.union_index);
+                auto *wrapper_ll_ty = unions_.at(error_union_type.union_index);
+                auto *outer_slot = builder_.CreateAlloca(wrapper_ll_ty);
+                builder_.CreateStore(builder_.getInt32(1), outer_slot); // outer tag = Failed
+
+                // 'Failed' is always variants[1] by construction (see synthesize_error_union
+                // in type_resolver.cpp).
+                const auto &failed_variant = wrapper.variants[1];
+                auto *failed_struct_ll_ty = struct_lowering(failed_variant.payload_struct_index).type;
+                const unsigned failed_field_idx = struct_lowering(failed_variant.payload_struct_index).field_indices.at(0);
+
+                llvm::Value *failed_payload_val;
+                if (wrapper.error_member_types.size() > 1) {
+                    // 2+ error members: build the inner dispatch union {tag=member's inner
+                    // tag, payload={v:member_val}} first, then wrap THAT inner union value in
+                    // the outer Failed payload struct {v: InnerUnionType}.
+                    const auto &inner = sema_program_.unions.at(failed_variant.payload_type.union_index);
+                    auto *inner_ll_ty = unions_.at(failed_variant.payload_type.union_index);
+                    const auto inner_variant_it = std::ranges::find_if(inner.variants,
+                        [&](const auto &variant) { return variant.payload_type == member_type; });
+
+                    auto *inner_slot = builder_.CreateAlloca(inner_ll_ty);
+                    builder_.CreateStore(
+                        llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), static_cast<uint64_t>(inner_variant_it->tag_value), false),
+                        inner_slot);
+
+                    auto *inner_payload_struct_ll_ty = struct_lowering(inner_variant_it->payload_struct_index).type;
+                    const unsigned inner_field_idx = struct_lowering(inner_variant_it->payload_struct_index).field_indices.at(0);
+                    llvm::Value *inner_payload_val = llvm::Constant::getNullValue(inner_payload_struct_ll_ty);
+                    inner_payload_val = builder_.CreateInsertValue(inner_payload_val, member_val, {inner_field_idx});
+
+                    auto *inner_payload_ptr = builder_.CreateConstInBoundsGEP1_64(llvm::Type::getInt8Ty(*context_), inner_slot, inner.payload_offset);
+                    builder_.CreateStore(inner_payload_val, inner_payload_ptr);
+                    auto *inner_val = builder_.CreateLoad(inner_ll_ty, inner_slot);
+
+                    failed_payload_val = llvm::Constant::getNullValue(failed_struct_ll_ty);
+                    failed_payload_val = builder_.CreateInsertValue(failed_payload_val, inner_val, {failed_field_idx});
+                } else {
+                    // Single error member: Failed's payload struct wraps the member value directly.
+                    failed_payload_val = llvm::Constant::getNullValue(failed_struct_ll_ty);
+                    failed_payload_val = builder_.CreateInsertValue(failed_payload_val, member_val, {failed_field_idx});
+                }
+
+                auto *outer_payload_ptr = builder_.CreateConstInBoundsGEP1_64(llvm::Type::getInt8Ty(*context_), outer_slot, wrapper.payload_offset);
+                builder_.CreateStore(failed_payload_val, outer_payload_ptr);
+                return builder_.CreateLoad(wrapper_ll_ty, outer_slot);
+            }
+
+            // Translates a Failed value from callee_error_ty's representation into
+            // caller_error_ty's representation. Only called when the two are DIFFERENT
+            // synthesized unions (see emit_try_propagation's identical-union fast path) —
+            // i.e. the callee's error(...) spelling is a strict subset of the caller's.
+            // Payload bytes for a given member type are identical between any two error
+            // unions that both carry it (both wrap it via the same one-field struct
+            // convention); only the dispatch TAG differs, so this only ever needs to
+            // re-tag, never convert, the payload.
+            auto translate_error_value(llvm::Value *err_val, const sema::ResolvedType &callee_error_ty,
+                                        const sema::ResolvedType &caller_error_ty) -> llvm::Value * {
+                const auto &callee_wrapper = sema_program_.unions.at(callee_error_ty.union_index);
+                auto *callee_ll_ty = unions_.at(callee_error_ty.union_index);
+                auto *caller_ll_ty = unions_.at(caller_error_ty.union_index);
+
+                auto *slot = builder_.CreateAlloca(callee_ll_ty);
+                builder_.CreateStore(err_val, slot);
+                auto *failed_payload_ptr = builder_.CreateConstInBoundsGEP1_64(llvm::Type::getInt8Ty(*context_), slot, callee_wrapper.payload_offset);
+
+                const auto &failed_variant = callee_wrapper.variants[1];
+
+                if (callee_wrapper.error_member_types.size() == 1) {
+                    // Single-member callee: the member type is fixed at codegen-authoring
+                    // time, no runtime dispatch needed.
+                    const auto &member_type = failed_variant.payload_type;
+                    auto *member_ll_ty = llvm_type(callee_wrapper.module_path, member_type);
+                    auto *member_val = builder_.CreateLoad(member_ll_ty, failed_payload_ptr);
+                    return build_error_failed_value(member_type, member_val, caller_error_ty);
+                }
+
+                // Multi-member callee: dispatch at runtime on the inner tag. One switch case
+                // per POSSIBLE callee member (a compile-time-known list), each using its own
+                // concrete member type to drive build_error_failed_value.
+                const auto &inner = sema_program_.unions.at(failed_variant.payload_type.union_index);
+                auto *inner_tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), failed_payload_ptr);
+
+                auto *fn = builder_.GetInsertBlock()->getParent();
+                auto *merge_bb = llvm::BasicBlock::Create(*context_, "try.translate.merge", fn);
+                auto *unreachable_bb = llvm::BasicBlock::Create(*context_, "try.translate.unreachable", fn);
+                auto *result_slot = builder_.CreateAlloca(caller_ll_ty);
+                auto *sw = builder_.CreateSwitch(inner_tag, unreachable_bb, static_cast<unsigned>(inner.variants.size()));
+
+                for (const auto &variant : inner.variants) {
+                    auto *case_bb = llvm::BasicBlock::Create(*context_, "try.translate." + variant.name, fn);
+                    sw->addCase(llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), static_cast<uint64_t>(variant.tag_value), false), case_bb);
+                    builder_.SetInsertPoint(case_bb);
+                    auto *inner_payload_ptr = builder_.CreateConstInBoundsGEP1_64(llvm::Type::getInt8Ty(*context_), failed_payload_ptr, inner.payload_offset);
+                    auto *member_ll_ty = llvm_type(inner.module_path, variant.payload_type);
+                    auto *member_val = builder_.CreateLoad(member_ll_ty, inner_payload_ptr);
+                    builder_.CreateStore(build_error_failed_value(variant.payload_type, member_val, caller_error_ty), result_slot);
+                    builder_.CreateBr(merge_bb);
+                }
+
+                builder_.SetInsertPoint(unreachable_bb);
+                builder_.CreateUnreachable();
+
+                builder_.SetInsertPoint(merge_bb);
+                return builder_.CreateLoad(caller_ll_ty, result_slot);
+            }
+
+            // Returns err_val (or, if the callee's error(...) union differs from the
+            // enclosing function's, its translation — see translate_error_value) as the
+            // enclosing function's error result, leaving any non-error slots undefined.
+            // Defers run first. Shared by `try` propagation and `return_err` so both lower
+            // identically.
             void emit_error_return(llvm::Value *err_val) {
                 emit_defers_for_return();
 
@@ -2427,27 +2579,29 @@ namespace codegen {
                     // Enclosing fn returns just error
                     builder_.CreateRet(err_val);
                 } else {
-                    // Enclosing fn returns (T1, ..., error): zero-value T slots, propagate error
+                    // Enclosing fn returns (T1, ..., error): non-error slots are left
+                    // undefined, propagate error
                     auto *agg_ty = llvm::cast<llvm::StructType>(return_type(*current_module_path_, current_returns_));
                     llvm::Value *agg = llvm::UndefValue::get(agg_ty);
-                    for (size_t i = 0; i < current_returns_.size() - 1; ++i) {
-                        agg = builder_.CreateInsertValue(agg, zero_value(*current_module_path_, current_returns_[i]), {static_cast<unsigned>(i)});
-                    }
                     agg = builder_.CreateInsertValue(agg, err_val, {static_cast<unsigned>(current_returns_.size() - 1)});
                     builder_.CreateRet(agg);
                 }
             }
 
-            auto emit_try_propagation(llvm::Value *err_val, const SourceLocation &loc) -> llvm::BasicBlock * {
+            auto emit_try_propagation(llvm::Value *err_val, const sema::ResolvedType &callee_error_ty, const SourceLocation &loc) -> llvm::BasicBlock * {
                 auto *fn = builder_.GetInsertBlock()->getParent();
                 auto *propagate_bb = llvm::BasicBlock::Create(*context_, "try.propagate", fn);
                 auto *ok_bb = llvm::BasicBlock::Create(*context_, "try.ok", fn);
-                auto *zero = llvm::ConstantInt::get(err_val->getType(), 0, false);
-                auto *is_err = builder_.CreateICmpNE(err_val, zero);
+                auto *tag = extract_error_tag(err_val);
+                auto *is_err = builder_.CreateICmpNE(tag, builder_.getInt32(0));
                 builder_.CreateCondBr(is_err, propagate_bb, ok_bb);
 
                 builder_.SetInsertPoint(propagate_bb);
-                emit_error_return(err_val);
+                const auto &caller_error_ty = current_returns_.back();
+                llvm::Value *propagated = (callee_error_ty == caller_error_ty)
+                    ? err_val
+                    : translate_error_value(err_val, callee_error_ty, caller_error_ty);
+                emit_error_return(propagated);
 
                 builder_.SetInsertPoint(ok_bb);
                 return ok_bb;
@@ -2461,20 +2615,20 @@ namespace codegen {
                 // Extract the error value (last return slot)
                 llvm::Value *err_val;
                 if (returns.size() == 1) {
-                    err_val = result; // f() -> error: result IS the error
+                    err_val = result; // f() -> error(...): result IS the error
                 } else {
                     err_val = builder_.CreateExtractValue(result, {static_cast<unsigned>(returns.size() - 1)});
                 }
 
-                emit_try_propagation(err_val, expr.location);
+                emit_try_propagation(err_val, returns.back(), expr.location);
 
                 // On the ok path: return the non-error value (if any)
                 if (returns.size() == 1) {
-                    // f() -> error: expression is void; return a dummy value
+                    // f() -> error(...): expression is void; return a dummy value
                     return llvm::UndefValue::get(llvm::Type::getInt8Ty(*context_));
                 }
                 if (returns.size() == 2) {
-                    // f() -> T, error: extract T from the aggregate
+                    // f() -> T, error(...): extract T from the aggregate
                     return builder_.CreateExtractValue(result, {0});
                 }
                 // Multi-value try in expression position: sema rejects this; return first value
@@ -2825,7 +2979,22 @@ namespace codegen {
                 auto *fn = builder_.GetInsertBlock()->getParent();
                 auto *merge_bb = llvm::BasicBlock::Create(*context_, "match.end", fn);
 
-                const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(expr.operand));
+                auto operand_type = current_module_->expr_types.at(sema::get_expr_key(expr.operand));
+
+                // Transparent error-value matching: substitute the wrapper's Ok/Failed type
+                // for the inner representation sema actually dispatched arms against, and
+                // pre-evaluate the unwrapped value once (every branch below reads it via
+                // emit_operand() rather than re-evaluating expr.operand as the wrapper type).
+                llvm::Value *unwrapped_operand_val = nullptr;
+                if (const auto it = current_module_->expr_error_match_unwrap.find(sema::get_expr_key(expr.operand));
+                    it != current_module_->expr_error_match_unwrap.end()) {
+                    auto *wrapper_val = emit_expr(expr.operand);
+                    unwrapped_operand_val = unwrap_failed_error_value(wrapper_val, it->second.wrapper_type, it->second.effective_type);
+                    operand_type = it->second.effective_type;
+                }
+                const auto emit_operand = [&]() -> llvm::Value * {
+                    return unwrapped_operand_val ? unwrapped_operand_val : emit_expr(expr.operand);
+                };
 
                 // Find default arm (if any)
                 const ast::MatchExpr::Arm *default_arm = nullptr;
@@ -2851,7 +3020,7 @@ namespace codegen {
                     const auto &union_info = sema_program_.unions.at(operand_type.union_index);
                     auto *union_ll_ty = unions_.at(operand_type.union_index);
                     auto *union_slot = builder_.CreateAlloca(union_ll_ty, nullptr, "match.union");
-                    auto *operand_val = emit_expr(expr.operand);
+                    auto *operand_val = emit_operand();
                     builder_.CreateStore(operand_val, union_slot);
                     auto *tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), union_slot, "match.tag");
                     auto *sw = builder_.CreateSwitch(tag, default_bb, non_default_count);
@@ -2900,7 +3069,7 @@ namespace codegen {
 
                 // ---- Enum match ----
                 if (operand_type.kind == sema::TypeKind::Enum) {
-                    auto *operand = emit_expr(expr.operand);
+                    auto *operand = emit_operand();
                     const auto &enum_info = sema_program_.enums.at(operand_type.enum_index);
                     auto *underlying_llvm_ty = llvm_type(*current_module_path_, enum_info.underlying_type);
                     auto *sw = builder_.CreateSwitch(operand, default_bb, non_default_count);
@@ -2939,7 +3108,7 @@ namespace codegen {
                 }
 
                 // ---- Scalar match (integer or bool) ----
-                auto *operand = emit_expr(expr.operand);
+                auto *operand = emit_operand();
                 auto *operand_ll_ty = llvm_type(*current_module_path_, operand_type);
                 auto *sw = builder_.CreateSwitch(operand, default_bb, non_default_count);
 
@@ -2979,7 +3148,19 @@ namespace codegen {
                 auto *fn = builder_.GetInsertBlock()->getParent();
                 auto *after_bb = llvm::BasicBlock::Create(*context_, "switch.end", fn);
 
-                const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(stmt.operand));
+                auto operand_type = current_module_->expr_types.at(sema::get_expr_key(stmt.operand));
+
+                // Transparent error-value matching — see the identical comment in emit_match.
+                llvm::Value *unwrapped_operand_val = nullptr;
+                if (const auto it = current_module_->expr_error_match_unwrap.find(sema::get_expr_key(stmt.operand));
+                    it != current_module_->expr_error_match_unwrap.end()) {
+                    auto *wrapper_val = emit_expr(stmt.operand);
+                    unwrapped_operand_val = unwrap_failed_error_value(wrapper_val, it->second.wrapper_type, it->second.effective_type);
+                    operand_type = it->second.effective_type;
+                }
+                const auto emit_operand = [&]() -> llvm::Value * {
+                    return unwrapped_operand_val ? unwrapped_operand_val : emit_expr(stmt.operand);
+                };
 
                 // Find default arm
                 const ast::SwitchStmt::Arm *default_arm = nullptr;
@@ -3005,7 +3186,7 @@ namespace codegen {
                     const auto &union_info = sema_program_.unions.at(operand_type.union_index);
                     auto *union_ll_ty = unions_.at(operand_type.union_index);
                     auto *union_slot = builder_.CreateAlloca(union_ll_ty, nullptr, "switch.union");
-                    auto *operand_val = emit_expr(stmt.operand);
+                    auto *operand_val = emit_operand();
                     builder_.CreateStore(operand_val, union_slot);
                     auto *tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), union_slot, "switch.tag");
                     auto *sw = builder_.CreateSwitch(tag, default_bb, non_default_count);
@@ -3043,7 +3224,7 @@ namespace codegen {
 
                 // ---- Enum switch ----
                 if (operand_type.kind == sema::TypeKind::Enum) {
-                    auto *operand = emit_expr(stmt.operand);
+                    auto *operand = emit_operand();
                     const auto &enum_info = sema_program_.enums.at(operand_type.enum_index);
                     auto *underlying_llvm_ty = llvm_type(*current_module_path_, enum_info.underlying_type);
                     auto *sw = builder_.CreateSwitch(operand, default_bb, non_default_count);
@@ -3074,7 +3255,7 @@ namespace codegen {
                 }
 
                 // ---- Scalar switch (integer or bool) ----
-                auto *operand = emit_expr(stmt.operand);
+                auto *operand = emit_operand();
                 auto *operand_ll_ty = llvm_type(*current_module_path_, operand_type);
                 auto *sw = builder_.CreateSwitch(operand, default_bb, non_default_count);
 
@@ -3580,7 +3761,7 @@ namespace codegen {
                                 auto *err_val = all_returns.size() == 1
                                     ? result
                                     : builder_.CreateExtractValue(result, {static_cast<unsigned>(all_returns.size() - 1)});
-                                emit_try_propagation(err_val, {});
+                                emit_try_propagation(err_val, all_returns.back(), {});
                                 // On ok path: bind non-error names (all_returns[0..n-2])
                                 for (size_t i = 0; i < v.names.size(); ++i) {
                                     if (v.names[i].empty() || v.names[i] == "_") continue;
@@ -3850,7 +4031,13 @@ namespace codegen {
             }
 
             void emit_return_err(const ast::ReturnErrStmt &stmt) {
-                auto *err_val = emit_value_as(stmt.error_value, current_returns_.back(), *current_module_path_);
+                // The operand's own sema type is the concrete error MEMBER type (e.g.
+                // MemoryError), not the function's error(...) wrapper — sema resolved it that
+                // way specifically so ordinary enum/tagged-union codegen (emit_expr) applies
+                // unchanged; build_error_failed_value does the Ok/Failed wrapping.
+                const auto member_type = current_module_->expr_types.at(sema::get_expr_key(stmt.error_value));
+                auto *member_val = emit_expr(stmt.error_value);
+                auto *err_val = build_error_failed_value(member_type, member_val, current_returns_.back());
                 emit_error_return(err_val);
             }
 
@@ -3860,7 +4047,13 @@ namespace codegen {
                 for (size_t i = 0; i < stmt.return_values.size(); ++i) {
                     ret_vals.push_back(emit_value_as(stmt.return_values[i], current_returns_[i], *current_module_path_));
                 }
-                ret_vals.push_back(llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), 0, false));
+                // Ok: outer tag = 0, payload undefined (Ok carries no payload).
+                {
+                    auto *ll_ty = unions_.at(current_returns_.back().union_index);
+                    auto *slot = builder_.CreateAlloca(ll_ty);
+                    builder_.CreateStore(builder_.getInt32(0), slot);
+                    ret_vals.push_back(builder_.CreateLoad(ll_ty, slot));
+                }
 
                 emit_defers_for_return();
 

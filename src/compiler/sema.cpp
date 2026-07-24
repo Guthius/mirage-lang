@@ -132,7 +132,6 @@ namespace sema {
             case TypeKind::F64:      return "f64";
             case TypeKind::USize:    return "usize";
             case TypeKind::Bool:     return "bool";
-            case TypeKind::Error:    return "error";
             case TypeKind::Anyptr:   return "anyptr";
             case TypeKind::Pointer: {
                 const auto *pointee = program.pointee_at(t.pointee_index);
@@ -146,9 +145,19 @@ namespace sema {
                 const auto *info = program.array_at(t.array_index);
                 return info ? std::format("[{}]{}", info->count, describe_type(info->element_type, program)) : "[]?";
             }
+            case TypeKind::Union: {
+                if (const auto *info = program.union_at(t.union_index); info && info->is_error_union) {
+                    std::string out = "error(";
+                    for (size_t i = 0; i < info->error_member_types.size(); ++i) {
+                        if (i > 0) out += " | ";
+                        out += describe_type(info->error_member_types[i], program);
+                    }
+                    return out + ")";
+                }
+                [[fallthrough]];
+            }
             case TypeKind::Struct:
             case TypeKind::Enum:
-            case TypeKind::Union:
             case TypeKind::Trait: {
                 const auto [mod, name] = find_type_module_and_name(t, program);
                 return name.empty() ? "<unknown type>" : name;

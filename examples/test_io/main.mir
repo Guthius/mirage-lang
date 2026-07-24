@@ -20,7 +20,7 @@ pub fn token_kind_name(kind: TokenKind) -> *u8 {
     }
 }
 
-pub fn main() -> error {
+pub fn main() -> error(io.IoError) {
     const f := try io.open("Justfile", "r")
     defer f.close()
 
@@ -33,5 +33,5 @@ pub fn main() -> error {
     printf("Read %u bytes from Justfile\n", file_len)
     printf("%.*s\n", file_len, cast(file_data, *u8))
 
-    return 0
+    return_ok
 }

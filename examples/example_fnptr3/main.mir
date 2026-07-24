@@ -2,37 +2,41 @@
 
 ext fn printf(fmt: *u8, ...) -> i32
 
-fn divide(a: i32, b: i32) -> (i32, error) {
+pub type MathError = enum(i32) {
+    DivByZero = 1
+}
+
+fn divide(a: i32, b: i32) -> (i32, error(MathError)) {
     if b == 0 {
-        return 0, 1
+        return_err .DivByZero
     }
-    return a / b, 0
+    return_ok a / b
 }
 
 type Callback = struct {
-    op: fn(i32, i32) -> (i32, error)
+    op: fn(i32, i32) -> (i32, error(MathError))
 }
 
-pub fn main() -> error {
+pub fn main() -> error(MathError) {
     # Multi-return fn ptr
-    mut fp: fn(i32, i32) -> (i32, error) = divide
+    mut fp: fn(i32, i32) -> (i32, error(MathError)) = divide
 
-    mut val, err := fp(10, 2)
-    printf("%d %d\n", val, err)  # 5 0
+    const val, err := fp(10, 2)
+    printf("%d %d\n", val, err ? 1 : 0)  # 5 0
 
-    mut val2, err2 := fp(10, 0)
-    printf("%d %d\n", val2, err2)  # 0 1
+    const val2, err2 := fp(10, 0)
+    printf("%d %d\n", val2, err2 ? 1 : 0)  # val2 is undefined on the Failed path; err2 -> 1
 
     # Struct field fn ptr with multi-return
     mut cb: Callback
     cb.op = divide
 
-    mut val3, err3 := cb.op(20, 4)
-    printf("%d %d\n", val3, err3)  # 5 0
+    const val3, err3 := cb.op(20, 4)
+    printf("%d %d\n", val3, err3 ? 1 : 0)  # 5 0
 
     # try through fn ptr
-    mut val4: i32 = try fp(8, 2)
+    const val4: i32 = try fp(8, 2)
     printf("%d\n", val4)  # 4
 
-    return 0
+    return_ok
 }

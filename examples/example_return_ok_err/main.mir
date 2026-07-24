@@ -3,40 +3,42 @@
 
 mut g_cleanup_ran: i32 = 0
 
-const E_OOM: error = 1
-const E_BAD: error = 2
+pub type TestError = enum(i32) {
+    OutOfMemory = 1
+    BadInput    = 2
+}
 
 # Single non-error value + error, success and failure paths
-fn single_ok(should_fail: bool) -> (i32, error) {
+fn single_ok(should_fail: bool) -> (i32, error(TestError)) {
     if should_fail {
-        return_err E_OOM
+        return_err .OutOfMemory
     }
     return_ok 42
 }
 
-# Bare error return (fn returning only error)
-fn bare_ok() -> error {
+# Bare error return (fn returning only error(TestError))
+fn bare_ok() -> error(TestError) {
     return_ok
 }
 
-fn bare_err() -> error {
-    return_err E_BAD
+fn bare_err() -> error(TestError) {
+    return_err .BadInput
 }
 
 # Multi-value return_ok
-fn multi_ok() -> (i32, i32, error) {
+fn multi_ok() -> (i32, i32, error(TestError)) {
     return_ok 1, 2
 }
 
 # Defers must run before both return_err and return_ok
-fn defer_before_return_err() -> error {
+fn defer_before_return_err() -> error(TestError) {
     defer {
         g_cleanup_ran = g_cleanup_ran + 1
     }
-    return_err E_BAD
+    return_err .BadInput
 }
 
-fn defer_before_return_ok() -> error {
+fn defer_before_return_ok() -> error(TestError) {
     defer {
         g_cleanup_ran = g_cleanup_ran + 1
     }
@@ -44,40 +46,50 @@ fn defer_before_return_ok() -> error {
 }
 
 # try must propagate an error produced via return_err just like any other error
-fn try_propagates_return_err() -> error {
+fn try_propagates_return_err() -> error(TestError) {
     try bare_err()
-    return 0
+    return_ok
 }
 
 pub fn main() -> i32 {
     # Test 1: return_ok single value, success path
-    mut v, e := single_ok(false)
-    if e != 0 {
+    const v, e := single_ok(false)
+    if e {
         return 1
     }
     if v != 42 {
         return 2
     }
 
-    # Test 2: return_err on failure path
-    mut v2, e2 := single_ok(true)
-    if e2 != E_OOM {
+    # Test 2: return_err on failure path, check the specific variant
+    const v2, e2 := single_ok(true)
+    if !e2 {
         return 3
+    }
+    switch e2 {
+        .OutOfMemory: {},
+        .BadInput: { return 3 }
     }
 
     # Test 3: bare return_ok -> success
-    if bare_ok() != 0 {
+    const ok3 := bare_ok()
+    if ok3 {
         return 4
     }
 
     # Test 4: bare return_err
-    if bare_err() != E_BAD {
+    const err4 := bare_err()
+    if !err4 {
         return 5
+    }
+    switch err4 {
+        .OutOfMemory: { return 5 },
+        .BadInput: {}
     }
 
     # Test 5: multi-value return_ok
-    mut a, b, e3 := multi_ok()
-    if e3 != 0 {
+    const a, b, e3 := multi_ok()
+    if e3 {
         return 6
     }
     if a != 1 {
@@ -89,8 +101,8 @@ pub fn main() -> i32 {
 
     # Test 6: defer runs before return_err
     g_cleanup_ran = 0
-    const e4: error = defer_before_return_err()
-    if e4 != E_BAD {
+    const e4 := defer_before_return_err()
+    if !e4 {
         return 9
     }
     if g_cleanup_ran != 1 {
@@ -99,8 +111,8 @@ pub fn main() -> i32 {
 
     # Test 7: defer runs before return_ok
     g_cleanup_ran = 0
-    const e5: error = defer_before_return_ok()
-    if e5 != 0 {
+    const e5 := defer_before_return_ok()
+    if e5 {
         return 11
     }
     if g_cleanup_ran != 1 {
@@ -108,8 +120,8 @@ pub fn main() -> i32 {
     }
 
     # Test 8: try propagates an error produced by return_err
-    const e6: error = try_propagates_return_err()
-    if e6 != E_BAD {
+    const e6 := try_propagates_return_err()
+    if !e6 {
         return 13
     }
 

@@ -35,8 +35,11 @@ Mirage is a compiled, statically-typed systems language that targets native code
 |----------|----------------------------------------------------------------|
 | `bool`   | Boolean: `true` or `false`                                     |
 | `byte`   | Alias for `u8`; used for raw byte buffers                      |
-| `error`  | Unsigned 64-bit integer; `0` means no error                    |
 | `anyptr` | Untyped pointer; interoperates with all typed pointers and `nil` |
+
+Note: `error` is not a scalar type — `error(T)` / `error(A \| B \| C)` is a
+type-former used only in function return-type position. See §15, "Error
+Type System".
 
 ### The `anyptr` Type
 
@@ -163,6 +166,25 @@ const p: Shape = .point
 
 Payload fields in constructors use the `.field = value` syntax inside braces.
 
+**Single-value payload sugar:** when a variant's payload struct has exactly
+one field, `.variant(expr)` (unqualified only — no leading-type-name form)
+is sugar for `.variant{.v = expr}`, where `v` is the field name every
+non-struct payload (scalar, enum, union, slice, pointer, array) is wrapped
+under:
+
+```mirage
+type IoError = union(enum) {
+    NotFound: []u8
+    Closed
+}
+
+const e: IoError = .NotFound("missing.txt")   # sugar for .NotFound{.v = "missing.txt"}
+```
+
+This never collides with an ordinary function call — a bare `.name` can
+never resolve to a callable value, since `DotIdentExpr` always requires an
+expected enum/tagged-union type.
+
 Tagged union members cannot be accessed directly; use `match` to destructure.
 
 **Implicit coercion:** wherever an expected type is known (call arguments, return statements,
@@ -176,7 +198,7 @@ type Arg = union(enum) {
     str:  struct { value: []u8 }
 }
 
-fn take(a: Arg) -> error { ... }
+fn take(a: Arg) -> i32 { ... }
 
 const n: usize = 42
 take(n)          # implicitly wrapped as Arg.size{.value = n}
@@ -524,7 +546,16 @@ match operand {
 try fallible_call(args)
 ```
 
-Calls a fallible function (one whose last return type is `error`). If the error value is non-zero, propagates the error by returning from the enclosing function; all deferred statements in scope run before the return. On success, evaluates to the non-error return values.
+Calls a fallible function (one whose last return type is `error(...)`, see
+§15). If the call's error result is in the `Failed` state, propagates it by
+returning from the enclosing function; all deferred statements in scope run
+before the return. On success, evaluates to the non-error return values, and
+the callee's error result is discarded (there is nothing left to check — it
+is `Ok`).
+
+`try` requires the callee's `error(...)` type to be a subset of (or equal
+to) the enclosing function's own `error(...)` type — every error member type
+the callee can produce must also be a member of the caller's declared union.
 
 ### Braced Initializers
 
@@ -627,45 +658,63 @@ Returns from the current function. For multi-return functions, multiple values a
 ### `return_err` and `return_ok`
 
 ```mirage
-return_err error_value
+return_err .Variant
+return_err .Variant(payload)
+return_err TypeName.Variant{.field = value}
 return_ok [value1, value2, ...]
 ```
 
 Sugar over `return` for fallible functions (functions whose last return type
-is `error`). Both run deferred statements before returning, exactly like
-`return`.
+is `error(...)`, see §15). Both run deferred statements before returning,
+exactly like `return`.
 
-`return_err <expr>` returns from the current function with the given error
-value; all non-error return slots are `undefined` (matching what `try`
-emits on its error-propagation path — the two lower identically). The
-operand must be of type `error`.
+`return_err <expr>` returns from the current function with the error result
+in the `Failed` state, carrying `<expr>` as the payload; all non-error
+return slots are `undefined` (matching what `try` emits on its
+error-propagation path — the two lower identically). `<expr>` must name a
+variant of one of the function's declared `error(...)` member types:
 
 ```mirage
-if named_type == nil {
-    return_err E_OOM
+pub type MemoryError = enum(i32) {
+    OutOfMemory = 1
+}
+
+fn alloc(n: usize) -> (anyptr, error(MemoryError)) {
+    if n == 0 {
+        return_err .OutOfMemory
+    }
+    ...
 }
 ```
 
-Sema errors:
-- `return_err` used in a function whose last return type is not `error`.
-- Operand is not of type `error`.
-- Operand is a compile-time constant `0` — "returning E_OK via return_err
-  is certainly a bug; use return_ok or return 0".
+Unqualified `.Variant` / `.Variant(payload)` is accepted when the variant
+name is unique across all of the function's error member types; qualify as
+`TypeName.Variant{...}` when it isn't (this qualified form currently only
+supports variants with a payload — an ambiguous payload-free variant name
+must be renamed to disambiguate). The leading dot is always required for
+the unqualified form.
 
-`return_ok [expr {, expr}]` returns from the current function with error
-`0` (success). The operands supply the non-error return values in order,
-matching the function's non-error return types exactly via the same
-checking rules as `return`.
+Sema errors:
+- `return_err` used in a function whose last return type is not
+  `error(...)`.
+- The named variant does not belong to any of the function's error member
+  types.
+- The variant name is ambiguous across member types and was not qualified.
+
+`return_ok [expr {, expr}]` returns from the current function with the
+error result in the `Ok` state. The operands supply the non-error return
+values in order, matching the function's non-error return types exactly via
+the same checking rules as `return`.
 
 ```mirage
-return_ok named_type          # -> (*ast.NamedType, error)
-return_ok a, b                # -> (T1, T2, error)
-return_ok                     # -> error  (bare error return, no other values)
+return_ok named_type          # -> (*ast.NamedType, error(E))
+return_ok a, b                # -> (T1, T2, error(E))
+return_ok                     # -> error(E)  (bare error-only return)
 ```
 
 Sema errors:
-- `return_ok` used in a function whose last return type is not `error`
-  (including non-fallible functions).
+- `return_ok` used in a function whose last return type is not
+  `error(...)` (including non-fallible functions).
 - Wrong number of non-error values supplied.
 - Type mismatch on any supplied value (same checks as `return`).
 
@@ -765,9 +814,9 @@ Declares an external C function. `ext fn` functions:
 
 The root module must define one of:
 ```mirage
-pub fn main()           # void; exits with code 0
-pub fn main() -> i32    # exits with this code
-pub fn main() -> error  # exits with this error value (truncated to i32)
+pub fn main()               # void; exits with code 0
+pub fn main() -> i32        # exits with this code
+pub fn main() -> error(E)   # exits 0 on Ok, 1 on Failed
 ```
 
 For freestanding builds (`--freestanding`), use `fn _start()` instead.
@@ -1068,36 +1117,154 @@ Arithmetic, bitwise, and other binary operations require both operands to have t
 
 ---
 
-## 15. Error Handling
+## 15. Error Type System
 
-The `error` type is an unsigned 64-bit integer. By convention, `0` means "no error" and any non-zero value is an error code.
+Errors are typed enum or tagged-union values, wrapped in a
+compiler-generated `Ok`/`Failed` tag. A fallible function declares its
+error type explicitly in its return signature — there is no untyped
+"error code" convention.
 
-### Fallible Functions
+### Declaring Error Types
 
-A function is fallible when its last return type is `error`:
+Any `enum(i32)` or `union(enum)` type becomes an error type by virtue of
+being used inside an `error(...)` return type — no special keyword or
+attribute is required:
+
 ```mirage
-fn divide(a: i32, b: i32) -> (i32, error) {
-    if b == 0 { return 0, 1 }
-    return a / b, 0
+pub type MemoryError = enum(i32) {
+    OutOfMemory = 1
+    NotFound    = 2
+}
+
+pub type IoError = union(enum) {
+    NotFound:  []u8   # carries the path that wasn't found
+    Timeout:   u32     # carries the timeout value that elapsed
+    Closed             # no payload
 }
 ```
 
-Fallible return values with an `error` component must be captured; ignoring them is a sema error.
+Any variant value is permitted, including `0` — there is no zero-value
+restriction (success/failure is tracked by the separate `Ok`/`Failed` tag,
+not by the payload value). An `enum(i32)` error type's underlying type
+must be `i32`.
+
+### Fallible Functions
+
+A function is fallible when its last return type is `error(T)` (a single
+error type) or `error(A | B | C)` (a union of distinct error types):
+
+```mirage
+pub fn alloc(count: usize) -> (anyptr, error(MemoryError))
+pub fn read(fd: i32, buf: []u8) -> (usize, error(IoError))
+pub fn flush(fd: i32) -> error(IoError)
+pub fn load(path: []u8) -> ([]u8, error(MemoryError | IoError))
+```
+
+`error(A | A)` (a duplicate member) is a sema error. Member order is
+cosmetic — `error(A | B)` and `error(B | A)` are the same type.
+
+Fallible return values must be captured, propagated with `try`, or
+explicitly discarded with `_`; ignoring them is a sema error:
+
+```mirage
+alloc(n)                      # sema error: ignored error result
+const ptr, _ := alloc(n)      # ok: explicitly discarded
+const ptr := try alloc(n)     # ok: propagated
+const ptr, err := alloc(n)    # ok: captured
+```
+
+### Internal Representation
+
+The compiler generates a tagged union for every distinct `error(...)`
+spelling: an outer `Ok`/`Failed` tag (`Ok` = 0, `Failed` = 1), where
+`Failed` carries the error payload. For a single error type `error(T)`,
+the payload is `T` directly — the representation is conceptually
+`{tag: u32, payload: T}`. For a union `error(A | B | C)`, `Failed`'s
+payload is itself a second tagged union dispatching on which member type
+occurred. This generated type is never user-nameable and has no
+user-accessible fields — all interaction goes through boolean coercion,
+`return_ok`/`return_err`, `try`, and `match`/`switch`, described below.
+
+### Boolean Coercion
+
+An error value used in a boolean context (`if`, `while`, `&&`, `||`,
+unary `!`, ternary condition) implicitly coerces to a check on the
+`Ok`/`Failed` tag — `if err {}` is true when `err` is `Failed`; `if !err {}`
+is true when `err` is `Ok`. This coercion applies only to error types and
+only in boolean position.
+
+### Error State Tracking
+
+Sema tracks each error-typed local's state — `Unknown` (default),
+`Failed`, or `Ok` — flow-sensitively through `if`/`while` branches,
+block-scoped like any other local:
+
+```mirage
+const data, err := load_file(path)
+if err {
+    # err is known Failed here
+} else {
+    # err is known Ok here
+}
+```
+
+**Early-return narrowing:** after `if !err { <body> }` where the condition
+is exactly `!err`, there is no `else`, and every path through `<body>`
+definitely exits (`return`/`return_ok`/`return_err`/`break`/`continue`),
+`err` is narrowed to `Failed` in the code that follows:
+
+```mirage
+const data, err := load_file(path)
+if !err { return_ok data }
+# err is Failed here
+match err { ... }   # legal
+```
+
+Reassigning a `mut` error-tracked variable, or taking its address with
+`&`, resets its state to `Unknown`. Entering an `if err {}` (or
+`if !err {}`) when the state is already known produces a warning for the
+redundant check.
+
+### `match` / `switch` on Error Values
+
+Matching on an error value requires it to be known `Failed` at the match
+site (narrow it first with `if err {}` or an early return); otherwise it's
+a sema error. The match operates transparently on the inner payload — the
+`Ok`/`Failed` wrapper is invisible to the user. For a single error type,
+match goes directly to that type's own variants. For an error union, match
+first dispatches on the member type, then (typically via a nested match)
+on that member's own variants:
+
+```mirage
+if err {
+    match err {
+        .MemoryError(e): match e {
+            .OutOfMemory: log("out of memory"),
+            .NotFound:    log("not found"),
+        },
+        .IoError(e): match e {
+            .NotFound(path):  fmt.printf("not found: {}\n", path),
+            .Timeout(millis): fmt.printf("timed out after {}ms\n", millis),
+            .Closed:          log("connection closed"),
+        },
+    }
+}
+```
+
+Exhaustiveness follows the same rules as ordinary tagged-union/enum match
+(§8): every member type and every variant of each member must be covered,
+or a `_` default arm supplied.
+
+### `return_ok` / `return_err`
+
+See §6, "`return_err` and `return_ok`", for full syntax and sema rules.
 
 ### The `try` Expression
 
-```mirage
-mut result: i32 = try divide(10, 2)
-
-# In a group declaration:
-mut q, e := divide(20, 4)
-```
-
-When used as `try call(...)`, if the error return is non-zero, `try` propagates the error by returning it from the enclosing function. The enclosing function must itself return `error` as its last return type.
-
-### `defer` and Error Propagation
-
-Deferred statements registered at the time of `try` propagation run before the enclosing function returns with the error. This enables cleanup regardless of whether an error occurs.
+See §5, "`try` Expression". `try` requires the callee's `error(...)` type
+be a subset of (or equal to) the caller's; on `Failed`, all deferred
+statements in scope run before the enclosing function returns propagating
+the error.
 
 ---
 
@@ -1114,8 +1281,10 @@ ext fn printf(fmt: *u8, ...) -> i32
 Only `ext fn` functions may take C-style `...` varargs, matching C ABI variadic-argument
 promotion. In variadic calls, arguments after the fixed parameters must be at least 32 bits wide
 (C default argument promotion rules). Valid variadic argument types: `i32`, `u32`, `i64`, `u64`,
-`usize`, `error`, `f64`, typed pointers, `anyptr`. Narrower types (e.g., `f32`, `u8`, `i16`) must
-be cast to a valid type before passing. `expr...` spread ([Function Call](#function-call)) is not
+`usize`, `f64`, typed pointers, `anyptr`. Narrower types (e.g., `f32`, `u8`, `i16`) must
+be cast to a valid type before passing. `error(...)` values cannot be passed as C-style variadic
+arguments — the generated type's shape varies per spelling and has no fixed C-ABI representation.
+`expr...` spread ([Function Call](#function-call)) is not
 valid for C-style varargs, since they carry no element type to check a slice against.
 
 ### Native Variadics (`fn f(args: ...T)`)
