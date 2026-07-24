@@ -4,13 +4,28 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Functions — Mirage</title>
+  <meta name="description" content="Declaring, calling, and passing functions in Mirage.">
+  <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
+<div class="topbar">
+  <button class="nav-toggle" aria-label="Toggle navigation"><span></span><span></span><span></span></button>
+  <a href="index.html" class="topbar-logo">mir<span>age</span></a>
+</div>
+<div class="sidebar-backdrop"></div>
+
 <div class="layout">
 
   <aside class="sidebar">
-    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <div class="sidebar-header">
+      <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+      <button class="theme-toggle" aria-label="Toggle color theme">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+    </div>
     <nav>
       <div class="sidebar-section">Introduction</div>
       <ul>
@@ -23,6 +38,7 @@
         <li><a href="functions.html" class="active">Functions</a></li>
         <li><a href="control-flow.html">Control Flow</a></li>
         <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="traits.html">Traits</a></li>
         <li><a href="error-handling.html">Error Handling</a></li>
         <li><a href="modules.html">Modules</a></li>
       </ul>
@@ -31,6 +47,7 @@
         <li><a href="grammar.html">Grammar</a></li>
       </ul>
     </nav>
+    <div class="sidebar-footer">Mirage Language<br>Documentation</div>
   </aside>
 
   <main class="main">
@@ -80,25 +97,59 @@
       <p>Use <code>_</code> to discard one or more return values:</p>
       <pre><code><span class="kw">mut</span> <span class="var">q</span>, <span class="var">_</span> := <span class="fn">divmod</span>(<span class="num">17</span>, <span class="num">5</span>)   <span class="cmt"># only keep quotient</span></code></pre>
 
-      <h2>Fallible Functions (Error Return)</h2>
+      <h2>Fallible Functions (Typed Errors)</h2>
       <p>
-        By convention, a function that can fail has <code>error</code> as its last return type.
-        Callers must capture the error or use <code>try</code>.
+        A function is <em>fallible</em> when its last return type is <code>error(T)</code> (a single
+        error type) or <code>error(A | B | C)</code> (a union of error types). <code>T</code>, <code>A</code>,
+        <code>B</code>, ... are ordinary <code>enum(i32)</code> or tagged-union (<code>union(enum)</code>)
+        types you declare yourself — there is no built-in error type or convention-based error code.
       </p>
 
-      <pre><code><span class="kw">fn</span> <span class="fn">divide</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>) {
-    <span class="kw">if</span> <span class="var">b</span> == <span class="num">0</span> { <span class="kw">return</span> <span class="num">0</span>, <span class="num">1</span> }
-    <span class="kw">return</span> <span class="var">a</span> / <span class="var">b</span>, <span class="num">0</span>
+      <pre><code><span class="kw">type</span> <span class="ty">MathError</span> = <span class="kw">enum</span>(<span class="ty">i32</span>) {
+    <span class="var">DivideByZero</span>
 }
 
-<span class="cmt"># Must capture error</span>
+<span class="kw">fn</span> <span class="fn">divide</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>(<span class="ty">MathError</span>)) {
+    <span class="kw">if</span> <span class="var">b</span> == <span class="num">0</span> { <span class="kw">return_err</span> .<span class="var">DivideByZero</span> }
+    <span class="kw">return_ok</span> <span class="var">a</span> / <span class="var">b</span>
+}
+
+<span class="cmt"># Must capture the error, or propagate with try</span>
 <span class="kw">mut</span> <span class="var">result</span>, <span class="var">err</span> := <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">2</span>)
-<span class="kw">if</span> <span class="var">err</span> != <span class="num">0</span> { <span class="cmt">/* handle */</span> }
+<span class="kw">if</span> <span class="var">err</span> { <span class="cmt">/* handle failure */</span> }
 
-<span class="cmt"># Or propagate with try (enclosing fn must return error)</span>
-<span class="kw">mut</span> <span class="var">val</span>: <span class="ty">i32</span> = <span class="kw">try</span> <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">2</span>)</code></pre>
+<span class="cmt"># Or propagate with try (enclosing fn must return a compatible error(...))</span>
+<span class="kw">const</span> <span class="var">val</span>: <span class="ty">i32</span> = <span class="kw">try</span> <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">2</span>)</code></pre>
 
-      <p>See <a href="error-handling.html">Error Handling</a> for full details.</p>
+      <p>See <a href="error-handling.html">Error Handling</a> for the full <code>error(...)</code> system: <code>return_ok</code>/<code>return_err</code>, <code>try</code>, and typestate checking.</p>
+
+      <h2>Native Variadic Parameters</h2>
+      <p>
+        A function's <strong>final</strong> parameter may be declared <code>name: ...T</code> to accept
+        any number of trailing arguments of type <code>T</code>. Inside the function body,
+        <code>name</code> is an ordinary <code>[]T</code> slice:
+      </p>
+      <pre><code><span class="kw">fn</span> <span class="fn">sum</span>(<span class="var">base</span>: <span class="ty">i32</span>, <span class="var">nums</span>: ...<span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
+    <span class="kw">mut</span> <span class="var">total</span> := <span class="var">base</span>
+    <span class="kw">for</span> <span class="var">n</span> <span class="kw">in</span> <span class="var">nums</span> {
+        <span class="var">total</span> += <span class="var">n</span>
+    }
+    <span class="kw">return</span> <span class="var">total</span>
+}
+
+<span class="fn">sum</span>(<span class="num">10</span>)             <span class="cmt"># zero variadic args — nums is an empty slice</span>
+<span class="fn">sum</span>(<span class="num">10</span>, <span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>)   <span class="cmt"># nums is []i32{1, 2, 3}</span>
+
+<span class="cmt"># An existing slice can be forwarded directly with '...' spread</span>
+<span class="kw">const</span> <span class="var">values</span>: []<span class="ty">i32</span> = {<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>}
+<span class="fn">sum</span>(<span class="num">0</span>, <span class="var">values</span>...)</code></pre>
+
+      <div class="callout">
+        <div class="callout-title">Not the same as <code>ext fn</code> varargs</div>
+        Native variadics are fully type-checked against <code>T</code> (including implicit tagged-union
+        coercion) — unlike an <code>ext fn</code>'s untyped C <code>...</code>. A function with a native
+        variadic parameter cannot have its address taken as a function pointer.
+      </div>
 
       <h2>Visibility: <code>pub</code></h2>
       <p>
@@ -126,6 +177,12 @@
 <span class="kw">ext fn</span> <span class="fn">free</span>(<span class="var">ptr</span>: <span class="ty">anyptr</span>)
 <span class="kw">ext fn</span> <span class="fn">memcpy</span>(<span class="var">dest</span>: <span class="ty">anyptr</span>, <span class="var">src</span>: <span class="ty">anyptr</span>, <span class="var">n</span>: <span class="ty">usize</span>) -&gt; <span class="ty">anyptr</span></code></pre>
 
+      <div class="callout">
+        <div class="callout-title">Note</div>
+        <code>ext fn</code> parameters and return types cannot be structs, arrays, slices, or unions —
+        only scalars, pointers, and function pointer types.
+      </div>
+
       <h3>Variadic Extern Functions</h3>
       <p>
         Add <code>...</code> at the end of the parameter list to declare a variadic extern function.
@@ -140,15 +197,16 @@
         <div class="callout-title">Variadic Argument Types</div>
         Variadic arguments must be at least 32 bits wide and match C's default argument promotion rules.
         Valid types: <code>i32</code>, <code>u32</code>, <code>i64</code>, <code>u64</code>, <code>usize</code>,
-        <code>error</code>, <code>f64</code>, typed pointers, <code>anyptr</code>. Narrower types
+        <code>f64</code>, typed pointers, <code>anyptr</code>. Narrower types
         (e.g. <code>f32</code>, <code>u8</code>) must be explicitly <code>cast</code> first.
+        <code>error(...)</code> values cannot be passed as C-style variadic arguments.
       </div>
 
       <h2>Entry Points</h2>
       <p>The root module must define exactly one of:</p>
-      <pre><code><span class="kw">pub fn</span> <span class="fn">main</span>() { <span class="cmt">/* ... */</span> }                    <span class="cmt"># exits with code 0</span>
-<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">i32</span> { <span class="kw">return</span> <span class="num">0</span> }                <span class="cmt"># returns exit code</span>
-<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span> { <span class="kw">return</span> <span class="num">0</span> }              <span class="cmt"># error truncated to i32</span></code></pre>
+      <pre><code><span class="kw">pub fn</span> <span class="fn">main</span>() { <span class="cmt">/* ... */</span> }                             <span class="cmt"># exits with code 0</span>
+<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">i32</span> { <span class="kw">return</span> <span class="num">0</span> }                         <span class="cmt"># returns exit code</span>
+<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span>(<span class="ty">AppError</span>) { <span class="kw">return_ok</span> }        <span class="cmt"># Ok exits 0, Failed exits 1</span></code></pre>
 
       <p>
         For freestanding builds (<code>--freestanding</code>), define <code>fn _start()</code> instead.
@@ -178,16 +236,16 @@
 <span class="var">vfp</span>(<span class="str">"%d\n"</span>, <span class="num">42</span>)</code></pre>
 
       <h3>Multi-Return Function Pointer</h3>
-      <pre><code><span class="kw">fn</span> <span class="fn">divide</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>) {
-    <span class="kw">if</span> <span class="var">b</span> == <span class="num">0</span> { <span class="kw">return</span> <span class="num">0</span>, <span class="num">1</span> }
-    <span class="kw">return</span> <span class="var">a</span> / <span class="var">b</span>, <span class="num">0</span>
+      <pre><code><span class="kw">fn</span> <span class="fn">divide</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>(<span class="ty">MathError</span>)) {
+    <span class="kw">if</span> <span class="var">b</span> == <span class="num">0</span> { <span class="kw">return_err</span> .<span class="var">DivideByZero</span> }
+    <span class="kw">return_ok</span> <span class="var">a</span> / <span class="var">b</span>
 }
 
-<span class="kw">mut</span> <span class="var">fp</span>: <span class="ty">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>) = <span class="var">divide</span>
+<span class="kw">mut</span> <span class="var">fp</span>: <span class="ty">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>(<span class="ty">MathError</span>)) = <span class="var">divide</span>
 <span class="kw">mut</span> <span class="var">val</span>, <span class="var">err</span> := <span class="var">fp</span>(<span class="num">10</span>, <span class="num">2</span>)
 
 <span class="cmt"># try also works through fn ptrs</span>
-<span class="kw">mut</span> <span class="var">v</span>: <span class="ty">i32</span> = <span class="kw">try</span> <span class="var">fp</span>(<span class="num">8</span>, <span class="num">2</span>)</code></pre>
+<span class="kw">const</span> <span class="var">v</span>: <span class="ty">i32</span> = <span class="kw">try</span> <span class="var">fp</span>(<span class="num">8</span>, <span class="num">2</span>)</code></pre>
 
       <h2>Macros</h2>
       <p>
@@ -196,13 +254,34 @@
       </p>
 
       <pre><code><span class="kw">macro</span> <span class="fn">max</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; <span class="var">a</span> &gt; <span class="var">b</span> ? <span class="var">a</span> : <span class="var">b</span>
-<span class="kw">macro</span> <span class="fn">align_up</span>(<span class="var">n</span>: <span class="ty">usize</span>) -&gt; (<span class="var">n</span> + (<span class="num">15</span>)) &amp; ~(<span class="ty">usize</span>)<span class="num">15</span>
+<span class="kw">macro</span> <span class="fn">align_up</span>(<span class="var">n</span>: <span class="ty">usize</span>) -&gt; (<span class="var">n</span> + (<span class="var">alignment</span> <span class="op">-</span> <span class="num">1</span>)) &amp; ~(<span class="var">alignment</span> <span class="op">-</span> <span class="num">1</span>)
 
 <span class="kw">const</span> <span class="var">m</span> := <span class="fn">max</span>(<span class="num">3</span>, <span class="num">7</span>)        <span class="cmt"># expands to: 3 > 7 ? 3 : 7 → 7</span>
-<span class="kw">const</span> <span class="var">aligned</span> := <span class="fn">align_up</span>(<span class="var">size</span>)</code></pre>
+<span class="kw">const</span> <span class="var">alignment</span>: <span class="ty">usize</span> = <span class="num">16</span>
+<span class="kw">const</span> <span class="var">size</span>: <span class="ty">usize</span> = <span class="num">20</span>
+<span class="kw">const</span> <span class="var">aligned</span> := <span class="fn">align_up</span>(<span class="var">size</span>)   <span class="cmt"># (20 + 15) & ~15 = 32</span></code></pre>
+
+      <div class="callout">
+        <div class="callout-title">Macro bodies resolve names at their own declaration site</div>
+        A macro's body is checked once, where the macro itself is declared — <code>alignment</code>
+        above must be a name visible there (a module-level <code>const</code>/<code>mut</code> or
+        another macro/function), not something local to whichever function happens to call the macro.
+      </div>
 
       <p>Macros can be exported with <code>pub</code>:</p>
       <pre><code><span class="kw">pub macro</span> <span class="fn">min</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; <span class="var">a</span> &lt; <span class="var">b</span> ? <span class="var">a</span> : <span class="var">b</span></code></pre>
+
+      <p>
+        An optional <code>: ReturnType</code> annotation goes between the parameter list and <code>-&gt;</code>.
+        It's required whenever the body can't infer its own type without context — a struct-literal
+        body, for instance, needs an expected type the same way a <code>const</code>/<code>mut</code>
+        initializer does:
+      </p>
+      <pre><code><span class="kw">type</span> <span class="ty">Vector</span> = <span class="kw">struct</span> {
+    <span class="var">element_size</span>: <span class="ty">usize</span>
+}
+
+<span class="kw">pub macro</span> <span class="fn">new_vector</span>(<span class="var">element_size</span>: <span class="ty">usize</span>): <span class="ty">Vector</span> -&gt; {.<span class="var">element_size</span> = <span class="var">element_size</span>}</code></pre>
 
       <div class="callout">
         <div class="callout-title">Macros vs Functions</div>
@@ -210,9 +289,15 @@
         They are ideal for small, performance-critical inline expressions.
       </div>
 
+      <div class="page-nav">
+        <a href="types.html" class="prev"><span class="label">Previous</span>Types</a>
+        <a href="control-flow.html" class="next"><span class="label">Next</span>Control Flow</a>
+      </div>
+
     </div>
   </main>
 
 </div>
+<script src="site.js" defer></script>
 </body>
 </html>

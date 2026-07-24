@@ -4,13 +4,28 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Getting Started — Mirage</title>
+  <meta name="description" content="Build the Mirage compiler and write your first program.">
+  <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
+<div class="topbar">
+  <button class="nav-toggle" aria-label="Toggle navigation"><span></span><span></span><span></span></button>
+  <a href="index.html" class="topbar-logo">mir<span>age</span></a>
+</div>
+<div class="sidebar-backdrop"></div>
+
 <div class="layout">
 
   <aside class="sidebar">
-    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <div class="sidebar-header">
+      <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+      <button class="theme-toggle" aria-label="Toggle color theme">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+    </div>
     <nav>
       <div class="sidebar-section">Introduction</div>
       <ul>
@@ -23,6 +38,7 @@
         <li><a href="functions.html">Functions</a></li>
         <li><a href="control-flow.html">Control Flow</a></li>
         <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="traits.html">Traits</a></li>
         <li><a href="error-handling.html">Error Handling</a></li>
         <li><a href="modules.html">Modules</a></li>
       </ul>
@@ -31,6 +47,7 @@
         <li><a href="grammar.html">Grammar</a></li>
       </ul>
     </nav>
+    <div class="sidebar-footer">Mirage Language<br>Documentation</div>
   </aside>
 
   <main class="main">
@@ -49,31 +66,55 @@ just build</code></pre>
 
       <p>The compiler binary is produced at <code>./build/mirage</code>.</p>
 
-      <h2>Compiler Flags</h2>
+      <div class="callout">
+        <div class="callout-title">Modules are directories</div>
+        Mirage source files use the <code>.mir</code> extension, but the compiler always takes a
+        <strong>directory</strong> as its input, never a single file. Every <code>.mir</code> file
+        directly inside that directory is merged into one module — so a module can be split across
+        several files if that's convenient, but it doesn't have to be.
+      </div>
+
+      <h2>Command-Line Usage</h2>
+      <pre><code>mirage &lt;action&gt; &lt;module-dir&gt; [options]</code></pre>
+
       <table>
-        <tr><th>Flag</th><th>Description</th></tr>
-        <tr><td><code>--emit-ir</code></td><td>Print the generated LLVM IR to stdout instead of producing a binary</td></tr>
-        <tr><td><code>--freestanding</code></td><td>Build without a hosted entry point; use <code>fn _start()</code> instead of <code>main</code></td></tr>
-        <tr><td><code>-o &lt;file&gt;</code></td><td>Set the output file name</td></tr>
+        <tr><th>Action</th><th>Description</th></tr>
+        <tr><td><code>build</code></td><td>Compile a module directory to an executable</td></tr>
+        <tr><td><code>run</code></td><td>Compile the module and immediately run the resulting executable</td></tr>
       </table>
 
-      <pre><code><span class="cmt"># Compile a program</span>
-./build/mirage hello.mir -o hello
+      <table>
+        <tr><th>Option</th><th>Description</th></tr>
+        <tr><td><code>-o, --output &lt;file&gt;</code></td><td>Output file name (default: <code>a.out</code>)</td></tr>
+        <tr><td><code>-l &lt;lib&gt;</code></td><td>Link an additional library, e.g. <code>-l m</code> for libm (repeatable)</td></tr>
+        <tr><td><code>--emit-ir</code></td><td>Print the generated LLVM IR to stdout instead of producing a binary</td></tr>
+        <tr><td><code>--freestanding</code></td><td>Compile without the standard hosted entry point; the module must supply <code>fn _start()</code></td></tr>
+        <tr><td><code>--help</code></td><td>Show usage information</td></tr>
+      </table>
 
-<span class="cmt"># Inspect the generated LLVM IR</span>
-./build/mirage hello.mir --emit-ir
+      <pre><code><span class="cmt"># Compile the module in ./hello to ./hello_app</span>
+./build/mirage build hello -o hello_app
 
-<span class="cmt"># Freestanding (no libc, custom entry)</span>
-./build/mirage kernel.mir --freestanding -o kernel.o</code></pre>
+<span class="cmt"># Compile and run in one step</span>
+./build/mirage run hello
+
+<span class="cmt"># Inspect the generated LLVM IR instead of compiling</span>
+./build/mirage build hello --emit-ir
+
+<span class="cmt"># Link against an extra library</span>
+./build/mirage build hello -o hello_app -l m
+
+<span class="cmt"># Freestanding build (no libc, custom _start)</span>
+./build/mirage build kernel --freestanding -o kernel.bin</code></pre>
 
       <h2>Hello, World</h2>
       <p>
         Mirage does not have a built-in print function. Instead, it calls the C standard library's
-        <code>printf</code> via an <code>ext fn</code> declaration. This is typical for Mirage programs
+        <code>printf</code> via an <code>ext fn</code> declaration — typical for Mirage programs
         that run in a hosted environment.
       </p>
 
-      <pre><code><span class="cmt"># hello.mir</span>
+      <pre><code><span class="cmt"># hello/main.mir</span>
 
 <span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
 
@@ -81,13 +122,12 @@ just build</code></pre>
     <span class="fn">printf</span>(<span class="str">"Hello, World!\n"</span>)
 }</code></pre>
 
-      <pre><code>./build/mirage hello.mir -o hello
-./hello
+      <pre><code>./build/mirage run hello
 <span class="cmt"># Hello, World!</span></code></pre>
 
       <h2>Entry Points</h2>
       <p>
-        The root module must define a <code>pub fn main</code> in one of three signatures:
+        The root module must define a <code>pub fn main</code> using one of three signatures:
       </p>
 
       <pre><code><span class="cmt"># No return value — exits with code 0</span>
@@ -100,10 +140,18 @@ just build</code></pre>
     <span class="kw">return</span> <span class="num">0</span>
 }
 
-<span class="cmt"># Returns an error value (truncated to i32 for the exit code)</span>
-<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span> {
-    <span class="kw">return</span> <span class="num">0</span>
+<span class="cmt"># Returns a typed error — Ok exits 0, Failed exits 1</span>
+<span class="kw">type</span> <span class="ty">AppError</span> = <span class="kw">enum</span>(<span class="ty">i32</span>) { <span class="var">SetupFailed</span> }
+
+<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span>(<span class="ty">AppError</span>) {
+    <span class="kw">return_ok</span>
 }</code></pre>
+
+      <p>
+        See <a href="error-handling.html">Error Handling</a> for the full <code>error(...)</code> system.
+        For freestanding builds (<code>--freestanding</code>), define <code>fn _start()</code> instead —
+        <code>pub</code> is not required for <code>_start</code>.
+      </p>
 
       <h2>Basic Program Walkthrough</h2>
       <p>
@@ -111,7 +159,9 @@ just build</code></pre>
         loops, and C interop.
       </p>
 
-      <pre><code><span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
+      <pre><code><span class="cmt"># fizzbuzz/main.mir</span>
+
+<span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
 
 <span class="kw">fn</span> <span class="fn">fizzbuzz</span>(<span class="var">n</span>: <span class="ty">i32</span>) {
     <span class="kw">mut</span> <span class="var">i</span>: <span class="ty">i32</span> = <span class="num">1</span>
@@ -137,7 +187,7 @@ just build</code></pre>
       <ul>
         <li><code>ext fn printf</code> — declares the C <code>printf</code> function as a variadic extern.</li>
         <li><code>mut i: i32 = 1</code> — declares a mutable variable with an explicit type.</li>
-        <li><code>while i &lt;= n { ... }</code> — the only loop construct in Mirage.</li>
+        <li><code>while i &lt;= n { ... }</code> — a condition-checked loop (Mirage also has <code>for ... in</code>, see <a href="control-flow.html">Control Flow</a>).</li>
         <li><code>i++</code> — post-increment expression.</li>
         <li><code>i % 15</code> — modulo operator.</li>
       </ul>
@@ -179,15 +229,22 @@ just build</code></pre>
       <ul>
         <li><a href="types.html">Types</a> — all built-in and composite types</li>
         <li><a href="functions.html">Functions</a> — declarations, multi-return, extern</li>
-        <li><a href="control-flow.html">Control Flow</a> — if/else, while, match, switch</li>
+        <li><a href="control-flow.html">Control Flow</a> — if/else, while, for, match, switch</li>
         <li><a href="structs-and-types.html">Structs &amp; Types</a> — structs, enums, unions, impl</li>
-        <li><a href="error-handling.html">Error Handling</a> — error, try, defer</li>
+        <li><a href="traits.html">Traits</a> — dynamic dispatch via trait handles</li>
+        <li><a href="error-handling.html">Error Handling</a> — error(T), try, defer</li>
         <li><a href="modules.html">Modules</a> — import and pub visibility</li>
       </ul>
+
+      <div class="page-nav">
+        <a href="index.html" class="prev"><span class="label">Previous</span>Overview</a>
+        <a href="types.html" class="next"><span class="label">Next</span>Types</a>
+      </div>
 
     </div>
   </main>
 
 </div>
+<script src="site.js" defer></script>
 </body>
 </html>

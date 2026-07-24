@@ -4,13 +4,28 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Error Handling — Mirage</title>
+  <meta name="description" content="Mirage's typed error(T) system: return_ok/return_err, try propagation, typestate checking, and defer cleanup.">
+  <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
+<div class="topbar">
+  <button class="nav-toggle" aria-label="Toggle navigation"><span></span><span></span><span></span></button>
+  <a href="index.html" class="topbar-logo">mir<span>age</span></a>
+</div>
+<div class="sidebar-backdrop"></div>
+
 <div class="layout">
 
   <aside class="sidebar">
-    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <div class="sidebar-header">
+      <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+      <button class="theme-toggle" aria-label="Toggle color theme">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+    </div>
     <nav>
       <div class="sidebar-section">Introduction</div>
       <ul>
@@ -23,6 +38,7 @@
         <li><a href="functions.html">Functions</a></li>
         <li><a href="control-flow.html">Control Flow</a></li>
         <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="traits.html">Traits</a></li>
         <li><a href="error-handling.html" class="active">Error Handling</a></li>
         <li><a href="modules.html">Modules</a></li>
       </ul>
@@ -31,91 +47,226 @@
         <li><a href="grammar.html">Grammar</a></li>
       </ul>
     </nav>
+    <div class="sidebar-footer">Mirage Language<br>Documentation</div>
   </aside>
 
   <main class="main">
     <div class="content">
 
       <h1>Error Handling</h1>
-      <p class="subtitle">The <code>error</code> type, <code>try</code> propagation, and <code>defer</code> cleanup.</p>
+      <p class="subtitle">Typed <code>error(T)</code> unions, <code>try</code> propagation, typestate checking, and <code>defer</code> cleanup.</p>
 
-      <h2>The <code>error</code> Type</h2>
       <p>
-        The <code>error</code> type is a 64-bit unsigned integer. By convention:
+        Mirage has no exceptions and no single built-in "error code" type. Instead, a function that
+        can fail says exactly <em>what</em> it can fail with, using an ordinary enum or tagged union
+        wrapped in <code>error(...)</code>. The compiler then tracks, at compile time, whether you've
+        actually handled that failure before letting the value out of scope.
       </p>
-      <ul>
-        <li><code>0</code> — no error (success)</li>
-        <li>any non-zero value — an error code</li>
-      </ul>
-      <p>There is no built-in error enum or string. Error codes are application-defined.</p>
 
       <hr>
 
+      <h2>Declaring Error Types</h2>
+      <p>
+        Any <code>enum(i32)</code> or <code>union(enum)</code> type becomes usable as an error the
+        moment you reference it inside <code>error(...)</code> — there's no special keyword or
+        attribute needed:
+      </p>
+      <pre><code><span class="kw">type</span> <span class="ty">ParseError</span> = <span class="kw">enum</span>(<span class="ty">i32</span>) {
+    <span class="var">InvalidNumber</span> = <span class="num">1</span>
+    <span class="var">UnexpectedEnd</span> = <span class="num">2</span>
+}
+
+<span class="kw">type</span> <span class="ty">IoError</span> = <span class="kw">union</span>(<span class="kw">enum</span>) {
+    <span class="var">NotFound</span>:         []<span class="ty">u8</span>   <span class="cmt"># carries the path that wasn't found</span>
+    <span class="var">PermissionDenied</span>            <span class="cmt"># no payload</span>
+}</code></pre>
+      <p>
+        Any variant value is allowed, including <code>0</code> — success vs. failure is tracked by a
+        separate hidden tag, not by convention over the payload value. An <code>enum(i32)</code> used
+        as an error type must declare <code>i32</code> as its underlying type explicitly.
+      </p>
+
       <h2>Fallible Functions</h2>
       <p>
-        A function is <em>fallible</em> when its last return type is <code>error</code>. Such functions
-        return both a result value and an error code simultaneously.
+        A function is <em>fallible</em> when its last return type is <code>error(T)</code> (one error
+        type) or <code>error(A | B | C)</code> (a union of several). Any other return values come first:
       </p>
-
-      <pre><code><span class="cmt"># Returns (quotient, error): 0 = success, 1 = division by zero</span>
-<span class="kw">fn</span> <span class="fn">divide</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>) {
-    <span class="kw">if</span> <span class="var">b</span> == <span class="num">0</span> {
-        <span class="kw">return</span> <span class="num">0</span>, <span class="num">1</span>   <span class="cmt"># error code 1</span>
+      <pre><code><span class="kw">fn</span> <span class="fn">parse_int</span>(<span class="var">text</span>: []<span class="ty">u8</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>(<span class="ty">ParseError</span>)) {
+    <span class="kw">if</span> <span class="kw">len</span>(<span class="var">text</span>) == <span class="num">0</span> {
+        <span class="kw">return_err</span> .<span class="var">UnexpectedEnd</span>
     }
-    <span class="kw">return</span> <span class="var">a</span> / <span class="var">b</span>, <span class="num">0</span>
+    <span class="cmt"># ... parsing logic ...</span>
+    <span class="kw">return_ok</span> <span class="num">42</span>
 }
 
-<span class="cmt"># Void-return fallible</span>
-<span class="kw">fn</span> <span class="fn">open_file</span>(<span class="var">path</span>: *<span class="ty">u8</span>) -&gt; <span class="ty">error</span> {
-    <span class="cmt"># ... attempt to open ...</span>
-    <span class="kw">return</span> <span class="num">0</span>
-}</code></pre>
+<span class="cmt"># A void-return fallible function still needs the parentheses-free single type</span>
+<span class="kw">fn</span> <span class="fn">validate</span>(<span class="var">text</span>: []<span class="ty">u8</span>) -&gt; <span class="ty">error</span>(<span class="ty">ParseError</span>) {
+    <span class="kw">if</span> <span class="kw">len</span>(<span class="var">text</span>) == <span class="num">0</span> { <span class="kw">return_err</span> .<span class="var">UnexpectedEnd</span> }
+    <span class="kw">return_ok</span>
+}
 
-      <h3>Must Capture Errors</h3>
+<span class="cmt"># A function that can fail two different ways</span>
+<span class="kw">fn</span> <span class="fn">load_setting</span>(<span class="var">path</span>: []<span class="ty">u8</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>(<span class="ty">ParseError</span> | <span class="ty">IoError</span>)) {
+    <span class="cmt"># ...</span>
+    <span class="kw">return_ok</span> <span class="num">0</span>
+}</code></pre>
       <p>
-        Ignoring the return value of a fallible function is a compile-time error. You must either
-        capture the error or use <code>try</code>.
+        <code>error(A | A)</code> (a duplicate member) is rejected at compile time. Member order is
+        cosmetic — <code>error(A | B)</code> and <code>error(B | A)</code> name the same type.
       </p>
-      <pre><code><span class="cmt"># Correct: capture all return values</span>
-<span class="kw">mut</span> <span class="var">result</span>, <span class="var">err</span> := <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">2</span>)
-<span class="kw">if</span> <span class="var">err</span> != <span class="num">0</span> {
-    <span class="fn">printf</span>(<span class="str">"error: %llu\n"</span>, <span class="var">err</span>)
+
+      <div class="callout">
+        <div class="callout-title">What's really being returned?</div>
+        The compiler generates a hidden tagged union for every distinct <code>error(...)</code>
+        spelling: an outer <code>Ok</code> / <code>Failed</code> tag, where <code>Failed</code> carries
+        the payload (your error type, or — for a union — a second tag dispatching on which member
+        occurred). This generated type has no user-visible fields; you only ever interact with it
+        through <code>return_ok</code>/<code>return_err</code>, boolean checks, <code>try</code>, and
+        <code>match</code>/<code>switch</code> — never by reading a tag or payload directly.
+      </div>
+
+      <h2><code>return_ok</code> and <code>return_err</code></h2>
+      <p>
+        These are sugar over <code>return</code> for fallible functions. Both run deferred statements
+        first, exactly like a normal <code>return</code>.
+      </p>
+      <pre><code><span class="kw">return_err</span> .<span class="var">Variant</span>                     <span class="cmt"># payload-free variant</span>
+<span class="kw">return_err</span> .<span class="var">Variant</span>(<span class="var">payload</span>)             <span class="cmt"># single non-struct payload (sugar)</span>
+<span class="kw">return_err</span> <span class="ty">TypeName</span>.<span class="var">Variant</span>{.<span class="var">field</span> = <span class="var">value</span>}  <span class="cmt"># fully-qualified, for disambiguation</span>
+
+<span class="kw">return_ok</span> <span class="var">value1</span>, <span class="var">value2</span>       <span class="cmt"># non-error return values, in order</span>
+<span class="kw">return_ok</span>                       <span class="cmt"># bare — for an error-only return type</span></code></pre>
+      <p>
+        The unqualified <code>.Variant</code> form works as long as that variant's name is unique
+        across all of the function's declared error member types; if two member types both declare a
+        variant with the same name, qualify it as <code>TypeName.Variant{...}</code> (only variants
+        with a payload support the qualified form — rename an ambiguous payload-free variant instead).
+      </p>
+
+      <div class="callout warning">
+        <div class="callout-title"><code>return_err</code> takes a variant, not an error value</div>
+        <code>return_err</code>'s operand must construct a fresh variant — <code>.Variant</code>,
+        <code>.Variant(payload)</code>, or <code>TypeName.Variant{...}</code>. To re-propagate an
+        error value you already captured (e.g. from a group declaration), use a plain
+        <code>return</code> instead, since it already has the right <code>error(...)</code> type:
+        <pre><code><span class="kw">const</span> <span class="var">n</span>, <span class="var">err</span> := <span class="fn">parse_int</span>(<span class="var">text</span>)
+<span class="kw">if</span> <span class="var">err</span> {
+    <span class="kw">return</span> <span class="var">err</span>       <span class="cmt"># correct: re-propagate the captured error</span>
+    <span class="cmt"># return_err err   -- error: not a .Variant construction</span>
+}</code></pre>
+      </div>
+
+      <h2>Capturing Fallible Results</h2>
+      <p>
+        A fallible call's result must be captured, propagated with <code>try</code>, or explicitly
+        discarded with <code>_</code> — leaving it untouched is a compile error:
+      </p>
+      <pre><code><span class="fn">parse_int</span>(<span class="var">text</span>)                        <span class="cmt"># error: ignored error result</span>
+<span class="kw">const</span> <span class="var">n</span>, <span class="var">_</span> := <span class="fn">parse_int</span>(<span class="var">text</span>)          <span class="cmt"># ok: explicitly discarded</span>
+<span class="kw">const</span> <span class="var">n</span> := <span class="kw">try</span> <span class="fn">parse_int</span>(<span class="var">text</span>)         <span class="cmt"># ok: propagated</span>
+<span class="kw">const</span> <span class="var">n</span>, <span class="var">err</span> := <span class="fn">parse_int</span>(<span class="var">text</span>)        <span class="cmt"># ok: captured</span></code></pre>
+
+      <hr>
+
+      <h2>Boolean Coercion</h2>
+      <p>
+        An error value used where a <code>bool</code> is expected (<code>if</code>, <code>while</code>,
+        <code>&amp;&amp;</code>, <code>||</code>, unary <code>!</code>, ternary condition) implicitly
+        checks the hidden <code>Ok</code>/<code>Failed</code> tag: <code>if err</code> is true when
+        <code>err</code> is <code>Failed</code>; <code>if !err</code> is true when it's <code>Ok</code>.
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">n</span>, <span class="var">err</span> := <span class="fn">parse_int</span>(<span class="var">text</span>)
+<span class="kw">if</span> <span class="var">err</span> {
+    <span class="fn">printf</span>(<span class="str">"parse failed\n"</span>)
     <span class="kw">return</span> <span class="var">err</span>
 }
-<span class="fn">printf</span>(<span class="str">"result = %d\n"</span>, <span class="var">result</span>)</code></pre>
+<span class="fn">printf</span>(<span class="str">"parsed: %d\n"</span>, <span class="var">n</span>)</code></pre>
+
+      <h2>Error State Tracking</h2>
+      <p>
+        The compiler tracks each error-typed local's state — <code>Unknown</code> (just captured),
+        <code>Failed</code>, or <code>Ok</code> — as it flows through <code>if</code>/<code>while</code>
+        branches:
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">n</span>, <span class="var">err</span> := <span class="fn">parse_int</span>(<span class="var">text</span>)
+<span class="kw">if</span> <span class="var">err</span> {
+    <span class="cmt"># err is known Failed here</span>
+} <span class="kw">else</span> {
+    <span class="cmt"># err is known Ok here</span>
+}</code></pre>
+      <p>
+        <strong>Early-return narrowing:</strong> after <code>if !err { ... }</code> where the body
+        unconditionally exits (<code>return</code>/<code>return_ok</code>/<code>return_err</code>/
+        <code>break</code>/<code>continue</code> on every path) and there's no <code>else</code>,
+        <code>err</code> is narrowed to <code>Failed</code> for the rest of the enclosing scope:
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">n</span>, <span class="var">err</span> := <span class="fn">parse_int</span>(<span class="var">text</span>)
+<span class="kw">if</span> !<span class="var">err</span> { <span class="kw">return_ok</span> <span class="var">n</span> }
+<span class="cmt"># err is known Failed here — a match on it below is legal</span></code></pre>
+      <div class="callout warning">
+        <div class="callout-title">Redundant checks are flagged</div>
+        Checking an error variable again once its state is already known (e.g. two <code>if err</code>
+        checks in a row with nothing resetting it in between) produces a compiler warning. Reassigning
+        a <code>mut</code> error variable, or taking its address with <code>&amp;</code>, resets its
+        state back to <code>Unknown</code>.
+      </div>
+
+      <h2 id="match-switch-on-error-values"><code>match</code> / <code>switch</code> on Error Values</h2>
+      <p>
+        You can only <code>match</code>/<code>switch</code> on an error value once it's known
+        <code>Failed</code> (narrow it first, as above) — matching on an <code>Unknown</code>-state
+        error is a compile error. The match is <strong>transparent</strong>: you match directly
+        against your own variant names, never against the hidden <code>Ok</code>/<code>Failed</code>
+        wrapper. For an error <em>union</em>, match first dispatches on which member type occurred,
+        typically via a nested match on that member's own variants:
+      </p>
+      <pre><code><span class="kw">fn</span> <span class="fn">describe</span>(<span class="var">err</span>: <span class="ty">error</span>(<span class="ty">ParseError</span> | <span class="ty">IoError</span>)) {
+    <span class="kw">if</span> <span class="var">err</span> {
+        <span class="kw">match</span> <span class="var">err</span> {
+            .<span class="var">ParseError</span>(<span class="var">e</span>): <span class="kw">match</span> <span class="var">e</span> {
+                .<span class="var">InvalidNumber</span>: <span class="fn">printf</span>(<span class="str">"invalid number\n"</span>),
+                .<span class="var">UnexpectedEnd</span>: <span class="fn">printf</span>(<span class="str">"unexpected end of input\n"</span>)
+            },
+            .<span class="var">IoError</span>(<span class="var">e</span>): <span class="kw">match</span> <span class="var">e</span> {
+                .<span class="var">NotFound</span>(<span class="var">path</span>): <span class="fn">printf</span>(<span class="str">"not found: %s\n"</span>, <span class="var">path</span>),
+                .<span class="var">PermissionDenied</span>: <span class="fn">printf</span>(<span class="str">"permission denied\n"</span>)
+            }
+        }
+    }
+}</code></pre>
+      <p>Exhaustiveness follows the same rules as any tagged-union/enum <code>match</code> (see <a href="control-flow.html">Control Flow</a>): every member type and every one of its variants must be covered, or end with a <code>_</code> default arm.</p>
 
       <hr>
 
       <h2>The <code>try</code> Expression</h2>
       <p>
-        <code>try</code> is a unary operator that handles the error return of a fallible call.
-        If the error is non-zero, <code>try</code> immediately returns the error from the
-        enclosing function. The enclosing function must itself return <code>error</code> as its
-        last type.
+        <code>try</code> calls a fallible function and, if it failed, immediately propagates that
+        failure out of the <em>enclosing</em> function — running deferred statements first — instead
+        of returning to the caller normally. On success, it evaluates to the non-error return value(s).
       </p>
+      <pre><code><span class="kw">fn</span> <span class="fn">read_config_value</span>(<span class="var">text</span>: []<span class="ty">u8</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>(<span class="ty">ParseError</span>)) {
+    <span class="cmt"># If parse_int fails, propagate its error immediately</span>
+    <span class="kw">const</span> <span class="var">n</span>: <span class="ty">i32</span> = <span class="kw">try</span> <span class="fn">parse_int</span>(<span class="var">text</span>)
+    <span class="kw">return_ok</span> <span class="var">n</span> * <span class="num">2</span>
+}</code></pre>
+      <p>
+        <code>try</code> requires the callee's <code>error(...)</code> type to be a <strong>subset</strong>
+        of (or equal to) the caller's own declared <code>error(...)</code> — every error member type
+        the callee can produce must also be one the caller declares:
+      </p>
+      <pre><code><span class="cmt"># OK: caller's error union (ParseError | IoError) is a superset of
+# parse_int's (ParseError) and open_file's (IoError)</span>
+<span class="kw">fn</span> <span class="fn">load_setting</span>(<span class="var">path</span>: []<span class="ty">u8</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>(<span class="ty">ParseError</span> | <span class="ty">IoError</span>)) {
+    <span class="kw">const</span> <span class="var">handle</span> := <span class="kw">try</span> <span class="fn">open_file</span>(<span class="var">path</span>)   <span class="cmt"># open_file -> error(IoError)</span>
+    <span class="kw">defer</span> <span class="fn">close_file</span>(<span class="var">handle</span>)
 
-      <pre><code><span class="kw">fn</span> <span class="fn">process</span>() -&gt; <span class="ty">error</span> {
-    <span class="cmt"># If divide fails, propagate the error up immediately</span>
-    <span class="kw">mut</span> <span class="var">q</span>: <span class="ty">i32</span> = <span class="kw">try</span> <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">2</span>)   <span class="cmt"># q = 5</span>
-
-    <span class="cmt"># Chained: try in a group decl</span>
-    <span class="kw">mut</span> <span class="var">q2</span>, <span class="var">e2</span> := <span class="fn">divide</span>(<span class="num">20</span>, <span class="num">4</span>)
-    <span class="kw">if</span> <span class="var">e2</span> != <span class="num">0</span> { <span class="kw">return</span> <span class="var">e2</span> }
-
-    <span class="fn">printf</span>(<span class="str">"%d %d\n"</span>, <span class="var">q</span>, <span class="var">q2</span>)
-    <span class="kw">return</span> <span class="num">0</span>
-}
-
-<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span> {
-    <span class="cmt"># Propagate any error from process() up to OS</span>
-    <span class="kw">try</span> <span class="fn">process</span>()
-    <span class="kw">return</span> <span class="num">0</span>
+    <span class="kw">const</span> <span class="var">text</span> := <span class="fn">read_all</span>(<span class="var">handle</span>)
+    <span class="kw">const</span> <span class="var">n</span> := <span class="kw">try</span> <span class="fn">parse_int</span>(<span class="var">text</span>)          <span class="cmt"># parse_int -> error(ParseError)</span>
+    <span class="kw">return_ok</span> <span class="var">n</span>
 }</code></pre>
 
-      <h3>Try Precedence</h3>
-      <p>
-        <code>try</code> binds tighter than binary operators:
-      </p>
+      <h3><code>try</code> Precedence</h3>
+      <p><code>try</code> binds tighter than binary operators:</p>
       <pre><code><span class="cmt"># try applies only to f(x), not to the entire expression</span>
 <span class="kw">try</span> <span class="fn">f</span>(<span class="var">x</span>) + <span class="fn">g</span>()    <span class="cmt"># same as: (try f(x)) + g()</span>
 
@@ -130,12 +281,12 @@
         fall-through, <code>return</code>, <code>break</code>, or <code>continue</code>.
       </p>
 
-      <pre><code><span class="kw">fn</span> <span class="fn">with_resource</span>() -&gt; <span class="ty">error</span> {
+      <pre><code><span class="kw">fn</span> <span class="fn">with_resource</span>() -&gt; <span class="ty">error</span>(<span class="ty">IoError</span>) {
     <span class="kw">const</span> <span class="var">handle</span> := <span class="fn">open</span>(<span class="str">"file.txt"</span>)
     <span class="kw">defer</span> <span class="fn">close</span>(<span class="var">handle</span>)   <span class="cmt"># always runs on exit</span>
 
     <span class="kw">try</span> <span class="fn">read</span>(<span class="var">handle</span>)      <span class="cmt"># defer still runs if this propagates</span>
-    <span class="kw">return</span> <span class="num">0</span>
+    <span class="kw">return_ok</span>
 }</code></pre>
 
       <h3>LIFO Order</h3>
@@ -187,74 +338,81 @@
         <li><code>return</code>, <code>break</code>, or <code>continue</code> that escape the defer body are compile errors.</li>
       </ul>
 
-      <hr>
-
       <h2>Defer + Try Together</h2>
       <p>
-        When <code>try</code> propagates an error, all deferred statements accumulated up to that point
-        in the function run before the function returns. This enables reliable cleanup even in
-        error paths:
+        When <code>try</code> propagates a failure, every deferred statement accumulated up to that
+        point in the function runs before the function actually returns — in LIFO order — enabling
+        reliable cleanup even on error paths:
       </p>
 
-      <pre><code><span class="kw">fn</span> <span class="fn">acquire_and_process</span>() -&gt; <span class="ty">error</span> {
+      <pre><code><span class="kw">fn</span> <span class="fn">acquire_and_process</span>() -&gt; <span class="ty">error</span>(<span class="ty">IoError</span>) {
     <span class="kw">const</span> <span class="var">a</span> := <span class="kw">try</span> <span class="fn">acquire_resource_a</span>()
     <span class="kw">defer</span> <span class="fn">release_resource_a</span>(<span class="var">a</span>)
 
     <span class="kw">const</span> <span class="var">b</span> := <span class="kw">try</span> <span class="fn">acquire_resource_b</span>()
     <span class="kw">defer</span> <span class="fn">release_resource_b</span>(<span class="var">b</span>)
 
-    <span class="cmt"># If this fails, both release_b and release_a will run (LIFO)</span>
+    <span class="cmt"># If this fails, both release_b and release_a run (LIFO), then the error propagates</span>
     <span class="kw">try</span> <span class="fn">do_work</span>(<span class="var">a</span>, <span class="var">b</span>)
 
-    <span class="kw">return</span> <span class="num">0</span>
+    <span class="kw">return_ok</span>
 }</code></pre>
 
       <hr>
 
-      <h2>Error in Entry Points</h2>
-      <p>The <code>error</code> type can be the return type of <code>main</code>. The value is truncated to <code>i32</code> and used as the process exit code:</p>
-      <pre><code><span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span> {
-    <span class="kw">try</span> <span class="fn">some_init</span>()
-    <span class="kw">try</span> <span class="fn">run</span>()
-    <span class="kw">return</span> <span class="num">0</span>
+      <h2>Errors at Entry Points</h2>
+      <p>
+        <code>error(T)</code> can be the return type of <code>main</code>. <code>Ok</code> exits with
+        code 0; <code>Failed</code> exits with code 1:
+      </p>
+      <pre><code><span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span>(<span class="ty">ParseError</span> | <span class="ty">IoError</span>) {
+    <span class="kw">try</span> <span class="fn">run_app</span>()
+    <span class="kw">return_ok</span>
 }</code></pre>
 
       <h2>Full Example</h2>
       <pre><code><span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
 
-<span class="kw">fn</span> <span class="fn">maybe_fail</span>(<span class="var">should_fail</span>: <span class="ty">bool</span>) -&gt; <span class="ty">error</span> {
-    <span class="kw">if</span> <span class="var">should_fail</span> { <span class="kw">return</span> <span class="num">42</span> }
-    <span class="kw">return</span> <span class="num">0</span>
+<span class="kw">type</span> <span class="ty">ParseError</span> = <span class="kw">enum</span>(<span class="ty">i32</span>) {
+    <span class="var">InvalidNumber</span> = <span class="num">1</span>
+    <span class="var">UnexpectedEnd</span> = <span class="num">2</span>
 }
 
-<span class="kw">fn</span> <span class="fn">divide</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>) {
-    <span class="kw">if</span> <span class="var">b</span> == <span class="num">0</span> { <span class="kw">return</span> <span class="num">0</span>, <span class="num">1</span> }
-    <span class="kw">return</span> <span class="var">a</span> / <span class="var">b</span>, <span class="num">0</span>
-}
-
-<span class="kw">fn</span> <span class="fn">test_defer_before_try</span>() -&gt; <span class="ty">error</span> {
-    <span class="kw">defer</span> {
-        <span class="fn">printf</span>(<span class="str">"cleanup ran\n"</span>)
+<span class="kw">fn</span> <span class="fn">parse_digit</span>(<span class="var">c</span>: <span class="ty">u8</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>(<span class="ty">ParseError</span>)) {
+    <span class="kw">if</span> <span class="var">c</span> &lt; <span class="str">'0'</span> || <span class="var">c</span> &gt; <span class="str">'9'</span> {
+        <span class="kw">return_err</span> .<span class="var">InvalidNumber</span>
     }
-    <span class="kw">try</span> <span class="fn">maybe_fail</span>(<span class="lit">true</span>)    <span class="cmt"># propagates 42; defer runs first</span>
-    <span class="kw">return</span> <span class="num">0</span>
+    <span class="kw">return_ok</span> <span class="kw">cast</span>(<span class="var">c</span> <span class="op">-</span> <span class="str">'0'</span>, <span class="ty">i32</span>)
 }
 
-<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">i32</span> {
-    <span class="kw">const</span> <span class="var">e</span>: <span class="ty">error</span> = <span class="fn">test_defer_before_try</span>()
-    <span class="fn">printf</span>(<span class="str">"error code: %llu\n"</span>, <span class="var">e</span>)   <span class="cmt"># 42</span>
-
-    <span class="kw">mut</span> <span class="var">q</span>, <span class="var">err</span> := <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">0</span>)
-    <span class="kw">if</span> <span class="var">err</span> != <span class="num">0</span> {
-        <span class="fn">printf</span>(<span class="str">"division failed\n"</span>)
-        <span class="kw">return</span> <span class="num">1</span>
+<span class="kw">fn</span> <span class="fn">sum_digits</span>(<span class="var">text</span>: []<span class="ty">u8</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>(<span class="ty">ParseError</span>)) {
+    <span class="kw">mut</span> <span class="var">total</span>: <span class="ty">i32</span> = <span class="num">0</span>
+    <span class="kw">for</span> <span class="var">c</span> <span class="kw">in</span> <span class="var">text</span> {
+        <span class="cmt"># try propagates a bad digit straight out of sum_digits</span>
+        <span class="var">total</span> += <span class="kw">try</span> <span class="fn">parse_digit</span>(<span class="var">c</span>)
     }
-    <span class="kw">return</span> <span class="num">0</span>
+    <span class="kw">return_ok</span> <span class="var">total</span>
+}
+
+<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span>(<span class="ty">ParseError</span>) {
+    <span class="kw">const</span> <span class="var">total</span>, <span class="var">err</span> := <span class="fn">sum_digits</span>(<span class="str">"1234"</span>)
+    <span class="kw">if</span> <span class="var">err</span> {
+        <span class="fn">printf</span>(<span class="str">"parse failed\n"</span>)
+        <span class="kw">return</span> <span class="var">err</span>
+    }
+    <span class="fn">printf</span>(<span class="str">"sum = %d\n"</span>, <span class="var">total</span>)   <span class="cmt"># sum = 10</span>
+    <span class="kw">return_ok</span>
 }</code></pre>
+
+      <div class="page-nav">
+        <a href="traits.html" class="prev"><span class="label">Previous</span>Traits</a>
+        <a href="modules.html" class="next"><span class="label">Next</span>Modules</a>
+      </div>
 
     </div>
   </main>
 
 </div>
+<script src="site.js" defer></script>
 </body>
 </html>

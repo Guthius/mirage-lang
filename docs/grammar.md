@@ -149,7 +149,7 @@ trait methods have no vtable entry representation). Unlike `method_decl`
 above, `trait_method_decl`'s non-self params do **not** accept a `mut`
 prefix.
 
-Note: Struct and enum fields in type definitions are newline-separated (not comma-separated).
+Note: Struct, enum, and union fields/variants need no separator token between them at all (see Notes on Syntax Conventions, note 1) — commas are not valid there.
 
 ---
 
@@ -253,16 +253,20 @@ additive_expr ::= mult_expr  { ( '+' | '-' ) mult_expr }
 mult_expr     ::= unary_expr { ( '*' | '/' | '%' ) unary_expr }
 
 unary_expr    ::= try_expr
-               | ( '-' | '!' | '~' | '&' | '*' | '++' | '--' ) unary_expr
+               | ( '-' | '!' | '~' | '&' | '++' | '--' ) unary_expr
                | postfix_expr
+
+(* NOTE: dereference is NOT a prefix operator in Mirage — there is no C-style '*p'.
+   It is the postfix_op '.' '*' below: 'p.*' *)
 
 try_expr      ::= 'try' postfix_expr
 
 postfix_expr  ::= primary_expr { postfix_op }
 
 postfix_op    ::= '(' [ arg { ',' arg } ] ')'    (* call *)
-               | '.' IDENT                        (* member access *)
+               | '.' IDENT                        (* member access — auto-derefs through a pointer *)
                | '.' IDENT '{.' field_init { ',' field_init } '}'  (* qualified tagged variant constructor *)
+               | '.' '*'                           (* dereference: 'p.*' reads/writes the pointee *)
                | '[' expr ']'                     (* index *)
                | '[' expr '..' expr ']'           (* slice *)
                | '++'
@@ -279,6 +283,7 @@ arg           ::= expr '...'                      (* spread — expr must be a s
 primary_expr  ::= INT_LITERAL
                | FLOAT_LITERAL
                | STRING_LITERAL
+               | CHAR_LITERAL
                | 'true'
                | 'false'
                | 'nil'
@@ -290,16 +295,26 @@ primary_expr  ::= INT_LITERAL
                | sizeof_expr
                | len_expr
                | cast_expr
+               | stackalloc_expr
+               | import_bin_expr
                | match_expr
                | braced_initializer
                | dot_ident_expr
                | contextual_tagged_variant
 
-sizeof_expr   ::= 'sizeof' '(' expr ')'
+sizeof_expr   ::= 'sizeof' '(' sizeof_operand ')'
+
+sizeof_operand ::= type    (* whenever the token(s) can only start a type: a builtin type
+                               keyword, '*', '[', 'struct', 'enum', 'union', 'fn', 'trait' *)
+               | expr      (* otherwise — may still simply name a type, e.g. a module member *)
 
 len_expr      ::= 'len' '(' expr ')'
 
 cast_expr     ::= 'cast' '(' expr ',' type [ ',' expr ] ')'
+
+stackalloc_expr ::= 'stackalloc' '(' expr ')'
+
+import_bin_expr ::= 'import_bin' '(' STRING ')'
 
 match_expr    ::= 'match' expr '{' [ match_arm { ',' match_arm } [ ',' ] ] '}'
 
@@ -316,9 +331,9 @@ contextual_tagged_variant ::= '.' IDENT '{.' field_init { ',' field_init } '}'
 
 field_init    ::= '.' IDENT '=' expr
 
-braced_initializer ::= '{' '}'                                    (* empty *)
-               | '{' IDENT '=' expr { ',' IDENT '=' expr } '}'   (* struct fields *)
-               | '{' expr { ',' expr } [ '...' ] '}'              (* array values, optional trailing fill *)
+braced_initializer ::= '{' '}'                                        (* empty *)
+               | '{' field_init { ',' field_init } '}'             (* struct fields *)
+               | '{' expr { ',' expr } [ '...' ] '}'                  (* array values, optional trailing fill *)
 ```
 
 ---
@@ -336,7 +351,13 @@ FLOAT_LITERAL ::= DIGIT { DIGIT } '.' DIGIT { DIGIT }
 
 STRING_LITERAL ::= '"' { char | escape_seq } '"'
 
-escape_seq    ::= '\\' | '\"' | '\n' | '\t' | '\r' | '\0'
+CHAR_LITERAL   ::= "'" ( char | escape_seq ) "'"          (* type u8, not a distinct char type *)
+
+escape_seq    ::= '\\' | '\"' | "\'" | '\n' | '\t' | '\r'
+               | '\x' HEX_DIGIT HEX_DIGIT                (* exactly two hex digits *)
+               | '\' OCTAL_DIGIT [ OCTAL_DIGIT [ OCTAL_DIGIT ] ]   (* 1-3 octal digits, max 0xFF *)
+
+OCTAL_DIGIT   ::= '0' .. '7'
 
 IDENT         ::= LETTER { LETTER | DIGIT | '_' }
 
@@ -350,7 +371,7 @@ LETTER        ::= 'a'..'z' | 'A'..'Z' | '_'
 
 ## Notes on Syntax Conventions
 
-1. **Struct field separators**: Struct fields in type definitions use newlines as separators (not commas). In `StructExpr` (braced init), fields use `.name = val` syntax with commas: `{.x = 1, .y = 2}`.
+1. **Struct field separators**: Struct fields in type definitions need no separator token at all between them — each field is self-delimiting, so writing one per line reads naturally. A `;` may optionally be sprinkled anywhere between (or after) fields with no semantic effect (the parser just skips any number of them) — this is how a single-line form like `struct { w: f64; h: f64 }` works. Commas are **not** valid here. The same "no separator required, `;` optionally tolerated" rule applies to enum variants, union members, and block statements. In `StructExpr` (braced init), fields use `.name = val` syntax with commas instead: `{.x = 1, .y = 2}`.
 
 2. **Match/switch arm separator**: Arms are comma-separated; a trailing comma before `}` is optional.
 
@@ -376,3 +397,7 @@ LETTER        ::= 'a'..'z' | 'A'..'Z' | '_'
 10. **Array fill `...` in array initializer**: In an array initializer `{ expr, ... }`, a trailing `...` immediately after the last value repeats that value (evaluated once) to fill all remaining elements of the array. It must be the last token before `}`.
 
 11. **Inferred array size `[?]T`**: Valid only as the declared type of a `const`/`let` (or local `const`/`mut`) declaration. The element count is taken directly from the initializer, which must be a literal array initializer `{ ... }` with no trailing `...` fill (note 10) and must not be an identifier, function call, or other computed expression.
+
+12. **`sizeof`'s operand may be a type or an expression**: the parser looks ahead to decide — a built-in type keyword, or a token that can *only* begin a type (`*`, `[`, `struct`, `enum`, `union`, `fn`, `trait`), is parsed as `type`; anything else is parsed as an ordinary `expr` (which may itself simply name a type, e.g. `sizeof(module.TypeName)`). `sizeof(u64)`, `sizeof(*u8)`, and `sizeof([]T)` are all valid.
+
+13. **`stackalloc` vs. `import_bin`**: both are primary expressions shaped like a builtin call (`'ident' '(' ... ')'`), same as `sizeof`/`len`/`cast`, but neither takes a type argument: `stackalloc` takes a single size `expr` and evaluates to `anyptr`; `import_bin` takes a single `STRING` path and evaluates to a compile-time `[N]u8` constant.

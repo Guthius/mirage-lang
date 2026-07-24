@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Traits — Mirage</title>
+  <meta name="description" content="Dynamic dispatch in Mirage through trait handles: declaring traits, impl TRAIT for TYPE, coherence, and static vs dynamic dispatch.">
+  <script src="theme-init.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" aria-label="Toggle navigation"><span></span><span></span><span></span></button>
+  <a href="index.html" class="topbar-logo">mir<span>age</span></a>
+</div>
+<div class="sidebar-backdrop"></div>
+
+<div class="layout">
+
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+      <button class="theme-toggle" aria-label="Toggle color theme">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+    </div>
+    <nav>
+      <div class="sidebar-section">Introduction</div>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="getting-started.html">Getting Started</a></li>
+      </ul>
+      <div class="sidebar-section">Language</div>
+      <ul>
+        <li><a href="types.html">Types</a></li>
+        <li><a href="functions.html">Functions</a></li>
+        <li><a href="control-flow.html">Control Flow</a></li>
+        <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="traits.html" class="active">Traits</a></li>
+        <li><a href="error-handling.html">Error Handling</a></li>
+        <li><a href="modules.html">Modules</a></li>
+      </ul>
+      <div class="sidebar-section">Reference</div>
+      <ul>
+        <li><a href="grammar.html">Grammar</a></li>
+      </ul>
+    </nav>
+    <div class="sidebar-footer">Mirage Language<br>Documentation</div>
+  </aside>
+
+  <main class="main">
+    <div class="content">
+
+      <h1>Traits</h1>
+      <p class="subtitle">Dynamic dispatch through lightweight trait handles.</p>
+
+      <p>
+        Mirage has no generics. When you need one function to work over several unrelated types —
+        without a big <code>switch</code> over every possibility — traits give you that, through
+        runtime dynamic dispatch. If you've used Go's interfaces or Rust's <code>dyn Trait</code>,
+        this will feel familiar: a trait is a set of method signatures, and any type that implements
+        all of them can be used wherever that trait is expected.
+      </p>
+
+      <h2>Declaring a Trait</h2>
+      <p>
+        A trait is declared like any other named type, using <code>trait { ... }</code> as the type
+        expression. Its body lists method signatures only — <code>fn</code> declarations with
+        <code>self</code> or <code>mut self</code> as the first parameter, no body:
+      </p>
+      <pre><code><span class="kw">type</span> <span class="ty">Drawable</span> = <span class="kw">trait</span> {
+    <span class="kw">fn</span> <span class="fn">draw</span>(<span class="var">self</span>)
+    <span class="kw">fn</span> <span class="fn">area</span>(<span class="var">self</span>) -&gt; <span class="ty">f64</span>
+}</code></pre>
+      <p>A trait must declare at least one method — an empty <code>trait {}</code> is a compile error.</p>
+
+      <div class="callout">
+        <div class="callout-title">A trait name in type position means "handle", not "definition"</div>
+        Writing <code>Drawable</code> as a type (a variable's type, a parameter type, a field type)
+        doesn't mean "a value of some type that implements Drawable" the way it might read at first
+        glance — it means a <strong>handle</strong>: a fixed-size, 16-byte fat pointer (a data pointer
+        plus a vtable pointer), the same regardless of which trait it names.
+      </div>
+
+      <h2>Implementing a Trait</h2>
+      <p>
+        Use <code>impl TRAIT for TYPE</code> to implement a trait for a concrete struct, enum, or
+        union type:
+      </p>
+      <pre><code><span class="kw">type</span> <span class="ty">Circle</span> = <span class="kw">struct</span> {
+    <span class="var">x</span>: <span class="ty">f64</span>
+    <span class="var">y</span>: <span class="ty">f64</span>
+    <span class="var">radius</span>: <span class="ty">f64</span>
+}
+
+<span class="kw">impl</span> <span class="ty">Drawable</span> <span class="kw">for</span> <span class="ty">Circle</span> {
+    <span class="kw">fn</span> <span class="fn">draw</span>(<span class="var">self</span>) {
+        <span class="fn">printf</span>(<span class="str">"circle at (%.1f, %.1f)\n"</span>, <span class="var">self</span>.<span class="var">x</span>, <span class="var">self</span>.<span class="var">y</span>)
+    }
+    <span class="kw">fn</span> <span class="fn">area</span>(<span class="var">self</span>) -&gt; <span class="ty">f64</span> {
+        <span class="kw">return</span> <span class="var">self</span>.<span class="var">radius</span> * <span class="var">self</span>.<span class="var">radius</span> * <span class="num">3.14159</span>
+    }
+}
+
+<span class="kw">type</span> <span class="ty">Square</span> = <span class="kw">struct</span> {
+    <span class="var">x</span>: <span class="ty">f64</span>
+    <span class="var">y</span>: <span class="ty">f64</span>
+    <span class="var">side</span>: <span class="ty">f64</span>
+}
+
+<span class="kw">impl</span> <span class="ty">Drawable</span> <span class="kw">for</span> <span class="ty">Square</span> {
+    <span class="kw">fn</span> <span class="fn">draw</span>(<span class="var">self</span>) {
+        <span class="fn">printf</span>(<span class="str">"square at (%.1f, %.1f)\n"</span>, <span class="var">self</span>.<span class="var">x</span>, <span class="var">self</span>.<span class="var">y</span>)
+    }
+    <span class="kw">fn</span> <span class="fn">area</span>(<span class="var">self</span>) -&gt; <span class="ty">f64</span> {
+        <span class="kw">return</span> <span class="var">self</span>.<span class="var">side</span> * <span class="var">self</span>.<span class="var">side</span>
+    }
+}</code></pre>
+      <p>
+        <code>self</code> inside a trait impl is a pointer to the concrete type, exactly like a bare
+        <code>impl TYPE { ... }</code> block. Every method the trait declares must be implemented with
+        an exactly matching signature (same name, same <code>self</code>/<code>mut self</code>, same
+        parameter and return types) — and the impl block may not contain extra methods beyond the
+        trait's own surface; put those in a separate bare <code>impl TYPE { ... }</code> instead.
+      </p>
+
+      <h3>Coherence Rules</h3>
+      <ul>
+        <li><code>impl TRAIT for TYPE</code> is only legal in the module that defines the trait, or the module that defines the type. Implementing someone else's trait for someone else's type ("orphan impl") is a compile error.</li>
+        <li>A given <code>(TRAIT, TYPE)</code> pair may be implemented at most once anywhere in the program.</li>
+        <li>A trait-impl method with the same name as an existing bare-impl method on the same type is an error, caught at the trait impl. Two different trait impls on the same type supplying a method of the same name is an error at the second one.</li>
+      </ul>
+      <p>These rules are all checked at declaration time, so a program that compiles is guaranteed to have no ambiguity about which method a call resolves to.</p>
+
+      <hr>
+
+      <h2>Static vs. Dynamic Dispatch</h2>
+      <p>
+        Calling a trait method directly on a concrete value or a pointer to one is <strong>static
+        dispatch</strong> — resolved entirely at compile time, no vtable involved:
+      </p>
+      <pre><code><span class="kw">mut</span> <span class="var">circle</span>: <span class="ty">Circle</span> = {.<span class="var">x</span> = <span class="num">10.0</span>, .<span class="var">y</span> = <span class="num">10.0</span>, .<span class="var">radius</span> = <span class="num">5.0</span>}
+<span class="var">circle</span>.<span class="fn">draw</span>()          <span class="cmt"># static dispatch: calls Circle's draw() directly</span></code></pre>
+      <p>
+        A pointer to a type that implements a trait automatically <strong>coerces to that trait's
+        handle</strong> wherever an expected type is known — variable initializers, assignment, return
+        statements, call arguments, struct and array field initializers:
+      </p>
+      <pre><code><span class="kw">mut</span> <span class="var">square</span>: <span class="ty">Square</span> = {.<span class="var">x</span> = <span class="num">0.0</span>, .<span class="var">y</span> = <span class="num">0.0</span>, .<span class="var">side</span> = <span class="num">4.0</span>}
+
+<span class="cmt"># &circle and &square (pointers) coerce to Drawable handles here</span>
+<span class="kw">mut</span> <span class="var">shapes</span>: [<span class="num">2</span>]<span class="ty">Drawable</span> = { &amp;<span class="var">circle</span>, &amp;<span class="var">square</span> }
+
+<span class="kw">for</span> <span class="var">shape</span> <span class="kw">in</span> <span class="var">shapes</span> {
+    <span class="var">shape</span>.<span class="fn">draw</span>()        <span class="cmt"># dynamic dispatch: resolved through the handle's vtable at runtime</span>
+    <span class="fn">printf</span>(<span class="str">"area = %.2f\n"</span>, <span class="var">shape</span>.<span class="fn">area</span>())
+}</code></pre>
+      <p>
+        This is <strong>dynamic dispatch</strong>: the call resolves against the trait's method list
+        and jumps through the handle's vtable at runtime, so the loop above doesn't need to know
+        whether each element is a <code>Circle</code> or a <code>Square</code>. Static and dynamic
+        dispatch ultimately call the exact same underlying function — the vtable only exists so the
+        call site doesn't need to know the concrete type.
+      </p>
+      <p>
+        Only a <strong>pointer</strong> coerces to a handle — coercing a bare (non-pointer) value is a
+        compile error, as is coercing a pointer to a type that doesn't implement the trait. And it
+        only works one way: once a concrete pointer has become a handle, <strong>there is no
+        downcasting</strong> back to the concrete type or pointer.
+      </p>
+
+      <div class="callout tip">
+        <div class="callout-title"><code>try</code> and multi-return through a handle</div>
+        Calling a fallible trait method through a handle works exactly like a fallible free-function
+        call — <code>try</code> propagates the same way whether the call is static or dynamic. A
+        multi-return trait method can be captured with a group declaration through a handle too.
+      </div>
+
+      <h2>Handle Values</h2>
+      <table>
+        <tr><th>Value</th><th>Meaning</th></tr>
+        <tr><td><code>nil</code></td><td>Assignable to a handle — both the data pointer and vtable pointer are zero.</td></tr>
+        <tr><td><code>default</code></td><td>Same as <code>nil</code> for a handle type.</td></tr>
+        <tr><td><code>undefined</code></td><td>Legal — uninitialized storage, no zeroing.</td></tr>
+      </table>
+      <div class="callout warning">
+        <div class="callout-title">Calling through a <code>nil</code> handle is undefined behavior</div>
+        No runtime check is emitted for a nil handle — calling a method on one will crash. If a handle
+        might be <code>nil</code>, compare it against <code>nil</code> first.
+      </div>
+      <p>
+        A handle supports no field access, no dereference, and no arithmetic. The only comparisons
+        allowed are <code>==</code> and <code>!=</code> against <code>nil</code> — comparing two
+        non-nil handles for equality, or any relational operator, is a compile error. Otherwise,
+        handles round-trip like any other 16-byte value: struct fields, function parameters, return
+        values, and array/slice elements all work with no special handling.
+      </p>
+      <div class="callout warning">
+        <div class="callout-title">Not usable in <code>ext fn</code> signatures</div>
+        A handle has no C ABI representation, so it cannot appear as an <code>ext fn</code> parameter or return type.
+      </div>
+
+      <h2>Full Example</h2>
+      <pre><code><span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
+
+<span class="kw">type</span> <span class="ty">Drawable</span> = <span class="kw">trait</span> {
+    <span class="kw">fn</span> <span class="fn">draw</span>(<span class="var">self</span>)
+}
+
+<span class="kw">type</span> <span class="ty">Circle</span> = <span class="kw">struct</span> { <span class="var">radius</span>: <span class="ty">f64</span> }
+
+<span class="kw">impl</span> <span class="ty">Drawable</span> <span class="kw">for</span> <span class="ty">Circle</span> {
+    <span class="kw">fn</span> <span class="fn">draw</span>(<span class="var">self</span>) {
+        <span class="fn">printf</span>(<span class="str">"○ radius=%.1f\n"</span>, <span class="var">self</span>.<span class="var">radius</span>)
+    }
+}
+
+<span class="kw">type</span> <span class="ty">Square</span> = <span class="kw">struct</span> { <span class="var">side</span>: <span class="ty">f64</span> }
+
+<span class="kw">impl</span> <span class="ty">Drawable</span> <span class="kw">for</span> <span class="ty">Square</span> {
+    <span class="kw">fn</span> <span class="fn">draw</span>(<span class="var">self</span>) {
+        <span class="fn">printf</span>(<span class="str">"□ side=%.1f\n"</span>, <span class="var">self</span>.<span class="var">side</span>)
+    }
+}
+
+<span class="kw">pub fn</span> <span class="fn">main</span>() {
+    <span class="kw">mut</span> <span class="var">c</span>: <span class="ty">Circle</span> = {.<span class="var">radius</span> = <span class="num">2.0</span>}
+    <span class="kw">mut</span> <span class="var">s</span>: <span class="ty">Square</span> = {.<span class="var">side</span> = <span class="num">3.0</span>}
+
+    <span class="kw">const</span> <span class="var">shapes</span>: [<span class="num">2</span>]<span class="ty">Drawable</span> = { &amp;<span class="var">c</span>, &amp;<span class="var">s</span> }
+    <span class="kw">for</span> <span class="var">shape</span> <span class="kw">in</span> <span class="var">shapes</span> {
+        <span class="var">shape</span>.<span class="fn">draw</span>()
+    }
+}
+<span class="cmt"># Output:
+# ○ radius=2.0
+# □ side=3.0</span></code></pre>
+
+      <div class="page-nav">
+        <a href="structs-and-types.html" class="prev"><span class="label">Previous</span>Structs &amp; Types</a>
+        <a href="error-handling.html" class="next"><span class="label">Next</span>Error Handling</a>
+      </div>
+
+    </div>
+  </main>
+
+</div>
+<script src="site.js" defer></script>
+</body>
+</html>

@@ -4,13 +4,28 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Types — Mirage</title>
+  <meta name="description" content="Mirage's type system: primitives, pointers, arrays, slices, and function pointers.">
+  <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
+<div class="topbar">
+  <button class="nav-toggle" aria-label="Toggle navigation"><span></span><span></span><span></span></button>
+  <a href="index.html" class="topbar-logo">mir<span>age</span></a>
+</div>
+<div class="sidebar-backdrop"></div>
+
 <div class="layout">
 
   <aside class="sidebar">
-    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <div class="sidebar-header">
+      <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+      <button class="theme-toggle" aria-label="Toggle color theme">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+    </div>
     <nav>
       <div class="sidebar-section">Introduction</div>
       <ul>
@@ -23,6 +38,7 @@
         <li><a href="functions.html">Functions</a></li>
         <li><a href="control-flow.html">Control Flow</a></li>
         <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="traits.html">Traits</a></li>
         <li><a href="error-handling.html">Error Handling</a></li>
         <li><a href="modules.html">Modules</a></li>
       </ul>
@@ -31,6 +47,7 @@
         <li><a href="grammar.html">Grammar</a></li>
       </ul>
     </nav>
+    <div class="sidebar-footer">Mirage Language<br>Documentation</div>
   </aside>
 
   <main class="main">
@@ -58,6 +75,16 @@
 <span class="kw">const</span> <span class="var">b</span> := <span class="num">0xFF</span>
 <span class="kw">const</span> <span class="var">c</span> := <span class="num">0b1010_1010</span></code></pre>
 
+      <p>
+        A <strong>character literal</strong> like <code>'a'</code> is just convenient syntax for a
+        single <code>u8</code> value — there is no distinct character type:
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">newline</span>: <span class="ty">u8</span> = <span class="str">'\n'</span>
+
+<span class="kw">fn</span> <span class="fn">is_digit</span>(<span class="var">c</span>: <span class="ty">u8</span>) -&gt; <span class="ty">bool</span> {
+    <span class="kw">return</span> <span class="var">c</span> &gt;= <span class="str">'0'</span> &amp;&amp; <span class="var">c</span> &lt;= <span class="str">'9'</span>
+}</code></pre>
+
       <div class="callout warning">
         <div class="callout-title">No Implicit Coercion</div>
         Mirage does not promote or widen integer types automatically. Mixing types in arithmetic is a compile error.
@@ -84,13 +111,6 @@
       <pre><code><span class="kw">mut</span> <span class="var">buf</span>: [<span class="num">512</span>]<span class="ty">byte</span>
 <span class="kw">mut</span> <span class="var">p</span>: *<span class="ty">byte</span> = <span class="kw">cast</span>(<span class="var">ptr</span>, *<span class="ty">byte</span>)</code></pre>
 
-      <h2>The <code>error</code> Type</h2>
-      <p>
-        <code>error</code> is an unsigned 64-bit integer. By convention, <code>0</code> means success
-        and any non-zero value is an error code. See <a href="error-handling.html">Error Handling</a>
-        for details.
-      </p>
-
       <h2>The <code>anyptr</code> Type</h2>
       <p>
         <code>anyptr</code> is an untyped pointer — equivalent to <code>void*</code> in C. It can hold any
@@ -101,6 +121,13 @@
 <span class="var">raw</span> = <span class="kw">cast</span>(<span class="var">my_struct_ptr</span>, <span class="ty">anyptr</span>)
 <span class="kw">mut</span> <span class="var">next</span>: <span class="ty">anyptr</span> = <span class="var">raw</span> + <span class="num">16</span>    <span class="cmt"># pointer arithmetic</span></code></pre>
 
+      <div class="callout">
+        <div class="callout-title">Where's the <code>error</code> type?</div>
+        <code>error</code> isn't a standalone scalar type in Mirage — it only appears spelled out as
+        <code>error(T)</code> or <code>error(A | B | C)</code>, naming the specific error type(s) a
+        function can fail with. See <a href="error-handling.html">Error Handling</a> for the full system.
+      </div>
+
       <hr>
 
       <h2>Pointer Types</h2>
@@ -108,15 +135,22 @@
 
       <pre><code><span class="kw">mut</span> <span class="var">x</span>: <span class="ty">i32</span> = <span class="num">42</span>
 <span class="kw">const</span> <span class="var">p</span>: *<span class="ty">i32</span> = &amp;<span class="var">x</span>    <span class="cmt"># address-of</span>
-<span class="kw">const</span> <span class="var">v</span>: <span class="ty">i32</span> = *<span class="var">p</span>   <span class="cmt"># dereference</span>
-*<span class="var">p</span> = <span class="num">99</span>              <span class="cmt"># write through pointer</span></code></pre>
+<span class="kw">const</span> <span class="var">v</span>: <span class="ty">i32</span> = <span class="var">p</span>.*   <span class="cmt"># dereference</span>
+<span class="var">p</span>.* = <span class="num">99</span>              <span class="cmt"># write through pointer</span></code></pre>
+
+      <div class="callout warning">
+        <div class="callout-title">Dereference is postfix: <code>p.*</code></div>
+        Mirage has no C-style prefix dereference — there is no <code>*p</code> expression. To read or
+        write the whole value a pointer points to, write the pointer first and follow it with
+        <code>.*</code>.
+      </div>
 
       <p>
         <strong>Auto-deref:</strong> When accessing a struct field or calling a method on a pointer-to-struct,
-        the pointer is automatically dereferenced. There is no need for <code>-&gt;</code>:
+        the pointer is automatically dereferenced — you never need <code>.*</code> just to reach a field or method:
       </p>
       <pre><code><span class="kw">const</span> <span class="var">ptr</span>: *<span class="ty">Vec2</span> = &amp;<span class="var">v</span>
-<span class="fn">printf</span>(<span class="str">"%f\n"</span>, <span class="var">ptr</span>.<span class="var">x</span>)       <span class="cmt"># same as (*ptr).x</span>
+<span class="fn">printf</span>(<span class="str">"%f\n"</span>, <span class="var">ptr</span>.<span class="var">x</span>)       <span class="cmt"># auto-deref: same as ptr.*.x, but no '.*' needed</span>
 <span class="var">ptr</span>.<span class="fn">length_sq</span>()              <span class="cmt"># method call through pointer</span></code></pre>
 
       <h2>Array Types</h2>
@@ -140,7 +174,13 @@
 <span class="kw">mut</span> <span class="var">c</span>: [<span class="num">3</span>]<span class="ty">i32</span> = {<span class="num">10</span>, <span class="num">20</span>, <span class="num">30</span>}
 
 <span class="cmt"># Empty braces: same as no init</span>
-<span class="kw">mut</span> <span class="var">d</span>: [<span class="num">3</span>]<span class="ty">i32</span> = {}</code></pre>
+<span class="kw">mut</span> <span class="var">d</span>: [<span class="num">3</span>]<span class="ty">i32</span> = {}
+
+<span class="cmt"># Trailing '...' repeats the last value for the rest of the array</span>
+<span class="kw">mut</span> <span class="var">e</span>: [<span class="num">10</span>]<span class="ty">i32</span> = { <span class="op">-</span><span class="num">1</span>... }        <span class="cmt"># all 10 elements set to -1</span>
+
+<span class="cmt"># Size inferred from the initializer with '[?]T'</span>
+<span class="kw">const</span> <span class="var">f</span>: [<span class="op">?</span>]<span class="ty">i32</span> = {<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>, <span class="num">4</span>}   <span class="cmt"># f: [4]i32</span></code></pre>
 
       <h2>Slice Types</h2>
       <p>
@@ -168,7 +208,7 @@
 
       <pre><code><span class="cmt"># Type syntax</span>
 <span class="ty">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; <span class="ty">i32</span>
-<span class="ty">fn</span>(<span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>)      <span class="cmt"># multi-return</span>
+<span class="ty">fn</span>(<span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>(<span class="ty">MyError</span>))    <span class="cmt"># multi-return, fallible</span>
 <span class="ty">fn</span>(*<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>           <span class="cmt"># variadic</span>
 <span class="ty">fn</span>()                           <span class="cmt"># void, no params</span></code></pre>
 
@@ -223,13 +263,31 @@
       </ul>
 
       <h2>The <code>sizeof</code> and <code>len</code> Operators</h2>
-      <pre><code><span class="kw">const</span> <span class="var">sz</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(<span class="var">my_struct</span>)   <span class="cmt"># size of a value or named type</span>
+      <pre><code><span class="kw">const</span> <span class="var">sz</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(<span class="var">my_struct</span>)   <span class="cmt"># size of a value</span>
+<span class="kw">const</span> <span class="var">sz2</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(<span class="ty">u64</span>)      <span class="cmt"># size of a type keyword works too</span>
+<span class="kw">const</span> <span class="var">sz3</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(*<span class="ty">u8</span>)      <span class="cmt"># size of a pointer type</span>
 <span class="kw">const</span> <span class="var">n</span>:  <span class="ty">usize</span> = <span class="kw">len</span>(<span class="var">my_array</span>)        <span class="cmt"># element count of array or slice</span></code></pre>
 
       <div class="callout">
         <div class="callout-title">Note</div>
-        <code>sizeof</code> cannot take built-in type keywords directly (e.g. <code>sizeof(i32)</code> is unsupported).
-        Use a variable of that type: <code>sizeof(my_i32_variable)</code>.
+        <code>sizeof</code>'s operand can be either a value expression or a type written directly —
+        including built-in type keywords, pointer types, slice types, and function pointer types.
+      </div>
+
+      <h2>Stack Allocation: <code>stackalloc</code></h2>
+      <p>
+        <code>stackalloc(size)</code> allocates <code>size</code> bytes on the current function's
+        stack frame and returns an <code>anyptr</code>. Unlike a fixed-size array, <code>size</code>
+        does not need to be known at compile time — it can be computed at runtime.
+      </p>
+      <pre><code><span class="kw">fn</span> <span class="fn">read_line</span>(<span class="var">max_len</span>: <span class="ty">usize</span>) -&gt; []<span class="ty">u8</span> {
+    <span class="kw">const</span> <span class="var">buf</span>: <span class="ty">anyptr</span> = <span class="kw">stackalloc</span>(<span class="var">max_len</span>)
+    <span class="kw">return</span> <span class="kw">cast</span>(<span class="var">buf</span>, []<span class="ty">u8</span>, <span class="var">max_len</span>)
+}</code></pre>
+      <div class="callout warning">
+        <div class="callout-title">Lifetime</div>
+        Memory from <code>stackalloc</code> is only valid for the lifetime of the function that
+        allocated it — never return it (or a slice/pointer derived from it) to a caller.
       </div>
 
       <h2>Type Compatibility Summary</h2>
@@ -244,9 +302,15 @@
         <tr><td>Pointer</td><td>Slice</td><td><code>cast(p, []T, len)</code></td></tr>
       </table>
 
+      <div class="page-nav">
+        <a href="getting-started.html" class="prev"><span class="label">Previous</span>Getting Started</a>
+        <a href="functions.html" class="next"><span class="label">Next</span>Functions</a>
+      </div>
+
     </div>
   </main>
 
 </div>
+<script src="site.js" defer></script>
 </body>
 </html>

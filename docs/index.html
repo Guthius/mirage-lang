@@ -4,14 +4,29 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Mirage — Systems Programming Language</title>
+  <meta name="description" content="Mirage is a compiled, statically-typed systems language targeting native code via LLVM.">
+  <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
+<div class="topbar">
+  <button class="nav-toggle" aria-label="Toggle navigation"><span></span><span></span><span></span></button>
+  <a href="index.html" class="topbar-logo">mir<span>age</span></a>
+</div>
+<div class="sidebar-backdrop"></div>
+
 <div class="layout">
 
   <!-- Sidebar -->
   <aside class="sidebar">
-    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <div class="sidebar-header">
+      <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+      <button class="theme-toggle" aria-label="Toggle color theme">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+    </div>
     <nav>
       <div class="sidebar-section">Introduction</div>
       <ul>
@@ -24,6 +39,7 @@
         <li><a href="functions.html">Functions</a></li>
         <li><a href="control-flow.html">Control Flow</a></li>
         <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="traits.html">Traits</a></li>
         <li><a href="error-handling.html">Error Handling</a></li>
         <li><a href="modules.html">Modules</a></li>
       </ul>
@@ -32,6 +48,7 @@
         <li><a href="grammar.html">Grammar</a></li>
       </ul>
     </nav>
+    <div class="sidebar-footer">Mirage Language<br>Documentation</div>
   </aside>
 
   <!-- Main -->
@@ -53,8 +70,9 @@
       </p>
       <p>
         The language provides fine-grained control over memory layout while keeping the syntax readable.
-        Error handling is built into the type system via the <code>error</code> type and the
-        <code>try</code>/<code>defer</code> mechanism.
+        Error handling is built into the type system via typed <code>error(...)</code> unions and the
+        <code>try</code>/<code>defer</code> mechanism, and dynamic polymorphism is available through
+        <code>trait</code> handles when you need it.
       </p>
 
       <h2>Key Features</h2>
@@ -80,8 +98,12 @@
           <p>Structs, enums, tagged unions, and untagged unions with exhaustive <code>match</code>.</p>
         </div>
         <div class="feature-card">
-          <h3>Error Handling</h3>
-          <p>First-class <code>error</code> type with <code>try</code> propagation and <code>defer</code> cleanup.</p>
+          <h3>Typed Errors</h3>
+          <p><code>error(T)</code> return types with <code>try</code> propagation, typestate checking, and <code>defer</code> cleanup.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Traits &amp; Dynamic Dispatch</h3>
+          <p>Opt-in runtime polymorphism through lightweight trait handles — no generics required.</p>
         </div>
         <div class="feature-card">
           <h3>Function Pointers</h3>
@@ -94,7 +116,7 @@
       </div>
 
       <h2>Quick Look</h2>
-      <p>A taste of Mirage syntax — a simple program using structs, methods, and error handling:</p>
+      <p>A taste of Mirage syntax — structs, methods, and typed error handling:</p>
       <pre><code><span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
 
 <span class="kw">type</span> <span class="ty">Vec2</span> = <span class="kw">struct</span> {
@@ -108,19 +130,21 @@
     }
 }
 
-<span class="kw">fn</span> <span class="fn">divide</span>(<span class="var">a</span>: <span class="ty">f64</span>, <span class="var">b</span>: <span class="ty">f64</span>) -&gt; (<span class="ty">f64</span>, <span class="ty">error</span>) {
-    <span class="kw">if</span> <span class="var">b</span> == <span class="num">0.0</span> { <span class="kw">return</span> <span class="num">0.0</span>, <span class="num">1</span> }
-    <span class="kw">return</span> <span class="var">a</span> / <span class="var">b</span>, <span class="num">0</span>
+<span class="kw">type</span> <span class="ty">MathError</span> = <span class="kw">enum</span>(<span class="ty">i32</span>) { <span class="var">DivideByZero</span> }
+
+<span class="kw">fn</span> <span class="fn">divide</span>(<span class="var">a</span>: <span class="ty">f64</span>, <span class="var">b</span>: <span class="ty">f64</span>) -&gt; (<span class="ty">f64</span>, <span class="ty">error</span>(<span class="ty">MathError</span>)) {
+    <span class="kw">if</span> <span class="var">b</span> == <span class="num">0.0</span> { <span class="kw">return_err</span> .<span class="var">DivideByZero</span> }
+    <span class="kw">return_ok</span> <span class="var">a</span> / <span class="var">b</span>
 }
 
-<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span> {
-    <span class="kw">mut</span> <span class="var">v</span>: <span class="ty">Vec2</span> = {<span class="var">x</span> = <span class="num">3.0</span>, <span class="var">y</span> = <span class="num">4.0</span>}
+<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">error</span>(<span class="ty">MathError</span>) {
+    <span class="kw">mut</span> <span class="var">v</span>: <span class="ty">Vec2</span> = {.<span class="var">x</span> = <span class="num">3.0</span>, .<span class="var">y</span> = <span class="num">4.0</span>}
     <span class="fn">printf</span>(<span class="str">"length_sq = %.1f\n"</span>, <span class="var">v</span>.<span class="fn">length_sq</span>())
 
-    <span class="kw">mut</span> <span class="var">result</span>: <span class="ty">f64</span> = <span class="kw">try</span> <span class="fn">divide</span>(<span class="var">v</span>.<span class="var">x</span>, <span class="var">v</span>.<span class="var">y</span>)
+    <span class="kw">const</span> <span class="var">result</span>: <span class="ty">f64</span> = <span class="kw">try</span> <span class="fn">divide</span>(<span class="var">v</span>.<span class="var">x</span>, <span class="var">v</span>.<span class="var">y</span>)
     <span class="fn">printf</span>(<span class="str">"x / y = %.4f\n"</span>, <span class="var">result</span>)
 
-    <span class="kw">return</span> <span class="num">0</span>
+    <span class="kw">return_ok</span>
 }</code></pre>
 
       <h2>Language at a Glance</h2>
@@ -128,18 +152,24 @@
         <tr><th>Feature</th><th>Mirage</th></tr>
         <tr><td>Paradigm</td><td>Imperative, structured</td></tr>
         <tr><td>Type system</td><td>Static, nominally-typed composites</td></tr>
-        <tr><td>Memory model</td><td>Manual (no GC); <code>anyptr</code> for raw memory</td></tr>
-        <tr><td>Loops</td><td><code>while</code></td></tr>
+        <tr><td>Memory model</td><td>Manual (no GC); <code>anyptr</code> for raw memory, <code>stackalloc</code> for runtime-sized stack buffers</td></tr>
+        <tr><td>Loops</td><td><code>while</code>, <code>for ... in</code></td></tr>
         <tr><td>Generics</td><td>Not yet implemented</td></tr>
+        <tr><td>Polymorphism</td><td>Traits (dynamic dispatch via fat-pointer handles)</td></tr>
         <tr><td>Closures</td><td>Not yet implemented (function pointers only)</td></tr>
-        <tr><td>Exceptions</td><td>No — use <code>error</code> + <code>try</code></td></tr>
+        <tr><td>Exceptions</td><td>No — use <code>error(T)</code> + <code>try</code>/<code>return_ok</code>/<code>return_err</code></td></tr>
         <tr><td>Null safety</td><td>Explicit — pointers can hold <code>nil</code></td></tr>
         <tr><td>Backend</td><td>LLVM IR</td></tr>
       </table>
+
+      <div class="page-nav">
+        <a href="getting-started.html" class="next"><span class="label">Next</span>Getting Started</a>
+      </div>
 
     </div>
   </main>
 
 </div>
+<script src="site.js" defer></script>
 </body>
 </html>

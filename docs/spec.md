@@ -55,9 +55,18 @@ Type System".
 *T
 ```
 
-A typed pointer to a value of type `T`. Dereferenced with unary `*`. Address taken with unary `&`. Typed pointers are implicitly assignable to/from `anyptr`.
+A typed pointer to a value of type `T`. Address taken with unary `&`. Typed pointers are implicitly assignable to/from `anyptr`.
 
-Auto-deref: accessing members or calling methods on a pointer-to-struct automatically dereferences the pointer.
+Dereferenced with the **postfix** `.*` operator — `p.*` reads or writes the pointee (there is no C-style prefix `*p`; a leading `*` in expression position is not a valid operator):
+
+```mirage
+mut x: i32 = 42
+const p: *i32 = &x    # address-of
+const v: i32 = p.*    # dereference: reads x through p
+p.* = 99              # dereference: writes x through p
+```
+
+Auto-deref: accessing members or calling methods on a pointer-to-struct automatically dereferences the pointer, so `p.field` and `p.method()` never need an explicit `.*` — only reading/writing/matching the whole pointee value does.
 
 ### Array Types
 
@@ -252,9 +261,28 @@ Multi-return function pointer types use `-> (T1, T2)` syntax.
 "hello\nworld"
 ```
 
-Supported escape sequences: `\\`, `\"`, `\n`, `\t`, `\r`, `\0`.
+Supported escape sequences: `\\`, `\"`, `\'`, `\n`, `\t`, `\r`, `\xNN` (exactly two hex digits), and
+octal `\0` through `\777` (one to three octal digits, clamped to a single byte).
 
 String literals have type `*u8` (null-terminated). The null terminator is appended automatically.
+
+### Character Literals
+
+```mirage
+'a'
+'\n'
+'\x41'      # 'A'
+```
+
+A character literal is a single byte in single quotes, with the same escape sequences as string
+literals. It has type `u8` — there is no distinct `char` type; a character literal is simply
+convenient syntax for a `u8` value:
+
+```mirage
+fn is_digit(c: u8) -> bool {
+    return c >= '0' && c <= '9'
+}
+```
 
 ### Boolean Literals
 
@@ -417,8 +445,9 @@ Both operands must have the same type.
 !x       # logical NOT (bool only)
 ~x       # bitwise NOT
 &x       # address-of (produces *T)
-*x       # dereference pointer
 ```
+
+Note: dereference is **not** in this list — it is the postfix `.*` operator (`x.*`), not a prefix operator. See [Pointer Types](#pointer-types).
 
 ### Ternary
 
@@ -518,7 +547,7 @@ sizeof(TypeName)
 sizeof(module.TypeName)
 ```
 
-Returns the size in bytes as `usize`. Note: built-in type keywords (e.g., `sizeof(u64)`) are not supported as operands; use a variable of that type.
+Returns the size in bytes as `usize`. The operand may be an arbitrary expression *or* a type written directly — including built-in type keywords: `sizeof(u64)`, `sizeof(*u8)`, `sizeof([]T)`, and `sizeof(fn(i32) -> i32)` are all valid. The parser disambiguates by looking ahead: anything that can only start a type (a built-in type keyword, `*`, `[`, `struct`, `enum`, `union`, `fn`, `trait`) is parsed as a type; otherwise the operand is parsed as a normal expression (which may itself simply name a type, e.g. `sizeof(module.TypeName)`).
 
 ### `len`
 
@@ -527,6 +556,23 @@ len(array_or_slice)
 ```
 
 Returns the number of elements as `usize`. Valid on array and slice types.
+
+### `stackalloc`
+
+```mirage
+stackalloc(size)
+```
+
+Allocates `size` bytes on the current function's stack frame and returns an `anyptr` pointing at the start of that memory. The size expression need not be a compile-time constant — `stackalloc` supports runtime-sized allocations (a dynamic `alloca`), unlike a fixed-size array whose length must be known at compile time. Pair it with `cast(ptr, []T, len)` to view the raw memory as a typed slice:
+
+```mirage
+fn read_line(max_len: usize) -> []u8 {
+    const buf: anyptr = stackalloc(max_len)
+    return cast(buf, []u8, max_len)
+}
+```
+
+The memory is only valid for the lifetime of the stack frame that allocated it — never return a pointer/slice derived from `stackalloc` out of the function that called it. Each call to `stackalloc` (e.g. inside a loop body) allocates a fresh region for that iteration; the storage is not hoisted and reused across iterations.
 
 ### `match` Expression
 
@@ -579,6 +625,22 @@ const mod := import("path/to/module")
 ```
 
 `import(...)` is only valid as the initializer of a `const` declaration with no explicit type. It binds the imported module as a namespace.
+
+### `import_bin` Expression
+
+```mirage
+const font_data := import_bin("assets/font.ttf")
+```
+
+`import_bin` embeds the raw bytes of a file into the compiled binary at compile time, as a constant array of type `[N]u8` where `N` is the file's size in bytes. Unlike `import(...)`, the result is an ordinary array value — it can be used anywhere a `[N]u8` constant is valid, not just as a whole `const` initializer.
+
+The path is a string literal resolved **relative to the directory of the importing module** (not the current working directory). Rules enforced at compile time:
+- The resolved path must stay inside the module's own directory — using `../` to escape it is a sema error.
+- A missing file is a sema error.
+- A file that cannot be read is a sema error.
+- A file larger than 1 MiB compiles successfully but emits a sema **warning**, since embedding very large files bloats the executable.
+
+`import_bin` is a compile-time constant expression, so its size is known to the compiler — the resulting binding's type is always a fixed-size array, e.g. `const icon := import_bin("assets/icon.bin")` gives `icon` the type `[N]u8` for whatever `N` the file's byte length is.
 
 ---
 
@@ -953,7 +1015,7 @@ names.
 ### Implementing a Trait
 
 ```mirage
-type Circle = struct { x: i32, y: i32, r: i32 }
+type Circle = struct { x: i32; y: i32; r: i32 }
 
 impl Drawable for Circle {
     fn draw(self) { # draw the circle }
@@ -1061,7 +1123,13 @@ there is no way to recover the concrete type or pointer from the handle.
 const io := import("path/to/module")
 ```
 
-`import(...)` is valid only as the initializer of a `const` declaration with no explicit type. The path is a string resolved by the compiler. The result is a namespace binding.
+`import(...)` is valid only as the initializer of a `const` declaration with no explicit type. The result is a namespace binding, not a value — it cannot be assigned, passed as an argument, or stored.
+
+The path is resolved in two steps:
+1. **Relative to the importing module's own directory** — `<importing-module-dir>/<path>` — if that directory exists, it's used.
+2. Otherwise, relative to the directory named by the **`MIRAGE_PATH` environment variable**, if set. The resolved path must stay inside `MIRAGE_PATH` (no escaping it with `../`); if it doesn't resolve to a directory inside `MIRAGE_PATH`, the import fails.
+
+This lets a project keep local, closely-related modules as subdirectories of the importing module, while sharing a common library root via `MIRAGE_PATH` for anything meant to be reused across unrelated parts of a project.
 
 ### Accessing Module Symbols
 
@@ -1305,6 +1373,15 @@ declared `...T`, dissolving to `[]T` inside the function body. Unlike C-style va
 
 The following identifiers are reserved by the language:
 
-`break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `iota` `len` `macro` `match` `mut` `nil` `return` `return_err` `return_ok` `sizeof` `struct` `switch` `trait` `true` `try` `type` `undefined` `union` `while`
+`break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `import_bin` `in` `iota` `len` `macro` `match` `mut` `nil` `pub` `return` `return_err` `return_ok` `sizeof` `stackalloc` `struct` `switch` `trait` `true` `try` `type` `undefined` `union` `while`
 
 `ext` is parsed as an identifier, not a keyword; it is used as the prefix for extern function declarations.
+
+### Reserved for Future Use
+
+The lexer also reserves the following identifiers, but nothing in the language currently uses them — writing any of them (e.g. as a variable or function name) is a parse error today, even though no feature consumes them yet:
+
+- **`namespace`** — likely reserved for an explicit namespace-declaration feature; not implemented.
+- **`asm`** — the lexer already has special handling that scans a following `{ ... }` block as raw text, but the parser does not yet accept `asm` blocks anywhere. Inline assembly is not currently usable.
+- **`when`** — likely reserved for a future compile-time conditional; not implemented.
+- **`offsetof`** — likely reserved as a future sibling to `sizeof` for computing a struct field's byte offset; not implemented.

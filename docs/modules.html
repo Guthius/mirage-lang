@@ -4,13 +4,28 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Modules — Mirage</title>
+  <meta name="description" content="Splitting Mirage code across modules with import, pub visibility, and import_bin.">
+  <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
+<div class="topbar">
+  <button class="nav-toggle" aria-label="Toggle navigation"><span></span><span></span><span></span></button>
+  <a href="index.html" class="topbar-logo">mir<span>age</span></a>
+</div>
+<div class="sidebar-backdrop"></div>
+
 <div class="layout">
 
   <aside class="sidebar">
-    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <div class="sidebar-header">
+      <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+      <button class="theme-toggle" aria-label="Toggle color theme">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+    </div>
     <nav>
       <div class="sidebar-section">Introduction</div>
       <ul>
@@ -23,6 +38,7 @@
         <li><a href="functions.html">Functions</a></li>
         <li><a href="control-flow.html">Control Flow</a></li>
         <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="traits.html">Traits</a></li>
         <li><a href="error-handling.html">Error Handling</a></li>
         <li><a href="modules.html" class="active">Modules</a></li>
       </ul>
@@ -31,29 +47,45 @@
         <li><a href="grammar.html">Grammar</a></li>
       </ul>
     </nav>
+    <div class="sidebar-footer">Mirage Language<br>Documentation</div>
   </aside>
 
   <main class="main">
     <div class="content">
 
       <h1>Modules</h1>
-      <p class="subtitle">Splitting code across files with <code>import</code> and <code>pub</code>.</p>
+      <p class="subtitle">Splitting code across directories with <code>import</code> and <code>pub</code>.</p>
 
       <h2>Importing a Module</h2>
       <p>
-        A module is a <code>.mir</code> source file. You import it using the <code>import</code>
-        expression, which must appear as the initializer of a <code>const</code> declaration with
-        no explicit type:
+        A module is a directory containing one or more <code>.mir</code> files (all merged together as
+        one module — see <a href="getting-started.html">Getting Started</a>). You import one using the
+        <code>import</code> expression, which must appear as the initializer of a <code>const</code>
+        declaration with no explicit type:
       </p>
 
       <pre><code><span class="kw">const</span> <span class="var">mem</span> := <span class="kw">import</span>(<span class="str">"mem"</span>)
 <span class="kw">const</span> <span class="var">vec</span> := <span class="kw">import</span>(<span class="str">"vector"</span>)</code></pre>
 
+      <p>The import result is a <em>namespace</em> binding — it is not a value and cannot be assigned, passed as an argument, or stored.</p>
+
+      <h3>How the Path Is Resolved</h3>
+      <p>The string is resolved in two steps:</p>
+      <ol>
+        <li>First, relative to the <strong>importing module's own directory</strong>: <code>&lt;importing-module-dir&gt;/&lt;path&gt;</code>. If that's a directory, it's used.</li>
+        <li>Otherwise, relative to the directory named by the <code>MIRAGE_PATH</code> environment variable, if set — and the result must stay inside <code>MIRAGE_PATH</code> (no escaping it with <code>../</code>).</li>
+      </ol>
       <p>
-        The string is a path (without the <code>.mir</code> extension) resolved relative to the
-        compiler's search paths. The import result is a <em>namespace</em> binding — it is not
-        a value and cannot be assigned, passed as an argument, or stored.
+        In practice: keep modules that are specific to one project as subdirectories next to the code
+        that imports them, and put anything meant to be shared across unrelated projects under the
+        directory pointed to by <code>MIRAGE_PATH</code>.
       </p>
+      <pre><code><span class="cmt"># project/
+#   main/
+#     main.mir        -- import("../lib/vector") reaches project/lib/vector
+#   lib/
+#     vector/
+#       main.mir</span></code></pre>
 
       <h2>Accessing Module Symbols</h2>
       <p>
@@ -75,7 +107,7 @@
         from other modules, add <code>pub</code>:
       </p>
 
-      <pre><code><span class="cmt"># vector.mir</span>
+      <pre><code><span class="cmt"># vector/main.mir</span>
 
 <span class="kw">const</span> <span class="var">mem</span> := <span class="kw">import</span>(<span class="str">"mem"</span>)
 
@@ -87,7 +119,7 @@
     <span class="var">element_size</span>: <span class="ty">usize</span>
 }
 
-<span class="kw">pub fn</span> <span class="fn">init</span>(<span class="var">v</span>: *<span class="ty">vector</span>, <span class="var">element_size</span>: <span class="ty">usize</span>) -&gt; <span class="ty">bool</span> {
+<span class="kw">pub fn</span> <span class="fn">create</span>(<span class="var">v</span>: *<span class="ty">vector</span>, <span class="var">element_size</span>: <span class="ty">usize</span>) -&gt; <span class="ty">bool</span> {
     <span class="var">v</span>.<span class="var">data</span>         = <span class="lit">nil</span>
     <span class="var">v</span>.<span class="var">length</span>       = <span class="num">0</span>
     <span class="var">v</span>.<span class="var">capacity</span>     = <span class="num">0</span>
@@ -119,7 +151,7 @@
         The <code>impl</code> block itself cannot be <code>pub</code>.
       </p>
 
-      <pre><code><span class="cmt"># vector.mir</span>
+      <pre><code><span class="cmt"># vector/main.mir</span>
 <span class="kw">impl</span> <span class="ty">vector</span> {
     <span class="kw">pub fn</span> <span class="fn">push</span>(<span class="var">self</span>, <span class="var">element</span>: <span class="ty">anyptr</span>) -&gt; <span class="ty">bool</span> {
         <span class="cmt"># ...</span>
@@ -130,12 +162,12 @@
     }
 }
 
-<span class="cmt"># start.mir</span>
+<span class="cmt"># main/main.mir</span>
 <span class="kw">const</span> <span class="var">vec</span> := <span class="kw">import</span>(<span class="str">"vector"</span>)
 
 <span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">i32</span> {
     <span class="kw">mut</span> <span class="var">v</span>: <span class="var">vec</span>.<span class="ty">vector</span>
-    <span class="var">vec</span>.<span class="fn">init</span>(&amp;<span class="var">v</span>, <span class="kw">sizeof</span>(<span class="var">v</span>))
+    <span class="var">vec</span>.<span class="fn">create</span>(&amp;<span class="var">v</span>, <span class="kw">sizeof</span>(<span class="var">v</span>))
 
     <span class="kw">const</span> <span class="var">x</span>: <span class="ty">i32</span> = <span class="num">42</span>
     <span class="var">v</span>.<span class="fn">push</span>(&amp;<span class="var">x</span>)   <span class="cmt"># method call on cross-module type</span>
@@ -146,10 +178,10 @@
 
       <h2>Chained Module Access</h2>
       <p>If a module re-exports another module via <code>pub const</code>, you can chain access:</p>
-      <pre><code><span class="cmt"># lib.mir</span>
+      <pre><code><span class="cmt"># lib/main.mir</span>
 <span class="kw">pub const</span> <span class="var">utils</span> := <span class="kw">import</span>(<span class="str">"utils"</span>)
 
-<span class="cmt"># main.mir</span>
+<span class="cmt"># main/main.mir</span>
 <span class="kw">const</span> <span class="var">lib</span> := <span class="kw">import</span>(<span class="str">"lib"</span>)
 
 <span class="kw">pub fn</span> <span class="fn">main</span>() {
@@ -163,7 +195,7 @@
         (or cross-module if <code>pub</code>).
       </p>
 
-      <pre><code><span class="cmt"># mem.mir</span>
+      <pre><code><span class="cmt"># mem/main.mir</span>
 <span class="kw">mut</span> <span class="var">heap_head</span>: *<span class="ty">block_header</span> = <span class="lit">nil</span>
 <span class="kw">mut</span> <span class="var">heap_tail</span>: *<span class="ty">block_header</span> = <span class="lit">nil</span>
 
@@ -171,10 +203,29 @@
 
 <span class="kw">pub const</span> <span class="var">alignment</span>: <span class="ty">usize</span> = <span class="num">16</span></code></pre>
 
-      <h2>Complete Module Example</h2>
-      <p>Here is a minimal two-file example. <code>math.mir</code> provides arithmetic utilities; <code>main.mir</code> imports and uses them.</p>
+      <hr>
 
-      <pre><code><span class="cmt"># math.mir</span>
+      <h2>Embedding Files: <code>import_bin</code></h2>
+      <p>
+        <code>import_bin("path")</code> embeds a file's raw bytes into the compiled binary at compile
+        time, as a fixed-size array constant of type <code>[N]u8</code> where <code>N</code> is the
+        file's size in bytes. It's useful for baking small assets — shaders, icons, default config
+        files — directly into the executable so there's nothing extra to ship at runtime.
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">banner</span> := <span class="kw">import_bin</span>(<span class="str">"assets/banner.txt"</span>)   <span class="cmt"># banner: [N]u8</span>
+
+<span class="fn">printf</span>(<span class="str">"%.*s\n"</span>, <span class="kw">cast</span>(<span class="kw">len</span>(<span class="var">banner</span>), <span class="ty">i32</span>), &amp;<span class="var">banner</span>[<span class="num">0</span>])</code></pre>
+      <p>
+        Unlike <code>import</code>, the path is resolved relative to the <strong>importing module's
+        own directory</strong> only, and it must not escape that directory (no <code>../</code> traversal
+        out of the module). A missing or unreadable file is a compile error; a file larger than 1 MiB
+        still compiles, but emits a warning, since embedding very large files bloats the executable.
+      </p>
+
+      <h2>Complete Module Example</h2>
+      <p>Here is a minimal two-module example. <code>math/main.mir</code> provides arithmetic utilities; <code>app/main.mir</code> imports and uses them.</p>
+
+      <pre><code><span class="cmt"># math/main.mir</span>
 
 <span class="kw">pub fn</span> <span class="fn">abs</span>(<span class="var">x</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
     <span class="kw">return</span> <span class="var">x</span> &lt; <span class="num">0</span> ? <span class="num">0</span> - <span class="var">x</span> : <span class="var">x</span>
@@ -186,19 +237,25 @@
     <span class="kw">return</span> <span class="var">x</span>
 }</code></pre>
 
-      <pre><code><span class="cmt"># main.mir</span>
+      <pre><code><span class="cmt"># app/main.mir</span>
 
 <span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
-<span class="kw">const</span> <span class="var">math</span> := <span class="kw">import</span>(<span class="str">"math"</span>)
+<span class="kw">const</span> <span class="var">math</span> := <span class="kw">import</span>(<span class="str">"../math"</span>)
 
 <span class="kw">pub fn</span> <span class="fn">main</span>() {
     <span class="fn">printf</span>(<span class="str">"%d\n"</span>, <span class="var">math</span>.<span class="fn">abs</span>(<span class="op">-</span><span class="num">5</span>))           <span class="cmt"># 5</span>
     <span class="fn">printf</span>(<span class="str">"%d\n"</span>, <span class="var">math</span>.<span class="fn">clamp</span>(<span class="num">15</span>, <span class="num">0</span>, <span class="num">10</span>))  <span class="cmt"># 10</span>
 }</code></pre>
 
+      <div class="page-nav">
+        <a href="error-handling.html" class="prev"><span class="label">Previous</span>Error Handling</a>
+        <a href="grammar.html" class="next"><span class="label">Next</span>Grammar</a>
+      </div>
+
     </div>
   </main>
 
 </div>
+<script src="site.js" defer></script>
 </body>
 </html>

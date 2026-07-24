@@ -4,13 +4,28 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Control Flow — Mirage</title>
+  <meta name="description" content="Conditionals, loops, and pattern matching in Mirage.">
+  <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
+<div class="topbar">
+  <button class="nav-toggle" aria-label="Toggle navigation"><span></span><span></span><span></span></button>
+  <a href="index.html" class="topbar-logo">mir<span>age</span></a>
+</div>
+<div class="sidebar-backdrop"></div>
+
 <div class="layout">
 
   <aside class="sidebar">
-    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <div class="sidebar-header">
+      <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+      <button class="theme-toggle" aria-label="Toggle color theme">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+    </div>
     <nav>
       <div class="sidebar-section">Introduction</div>
       <ul>
@@ -23,6 +38,7 @@
         <li><a href="functions.html">Functions</a></li>
         <li><a href="control-flow.html" class="active">Control Flow</a></li>
         <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="traits.html">Traits</a></li>
         <li><a href="error-handling.html">Error Handling</a></li>
         <li><a href="modules.html">Modules</a></li>
       </ul>
@@ -31,6 +47,7 @@
         <li><a href="grammar.html">Grammar</a></li>
       </ul>
     </nav>
+    <div class="sidebar-footer">Mirage Language<br>Documentation</div>
   </aside>
 
   <main class="main">
@@ -64,8 +81,8 @@
 
       <h2>While Loop</h2>
       <p>
-        <code>while</code> is the only looping construct in Mirage. It repeatedly executes the body
-        block as long as the condition is <code>true</code>.
+        <code>while</code> repeatedly executes the body block as long as the condition is <code>true</code>.
+        The body must be a block statement.
       </p>
 
       <pre><code><span class="kw">mut</span> <span class="var">i</span>: <span class="ty">i32</span> = <span class="num">0</span>
@@ -86,6 +103,60 @@
 <span class="kw">while</span> <span class="var">n</span>-- {
     <span class="cmt"># runs 5 times: n is tested before decrement</span>
 }</code></pre>
+
+      <hr>
+
+      <h2>For Loop</h2>
+      <p>
+        <code>for</code> iterates a range, or the elements of a slice or fixed-size array. It always
+        binds one or two names between <code>for</code> and <code>in</code>.
+      </p>
+
+      <pre><code><span class="kw">for</span> <span class="var">x</span> <span class="kw">in</span> <span class="num">0</span>..<span class="num">10</span> {
+    <span class="fn">printf</span>(<span class="str">"%d\n"</span>, <span class="var">x</span>)     <span class="cmt"># 0, 1, 2, ..., 9 (upper bound is exclusive)</span>
+}
+
+<span class="kw">for</span> <span class="var">x</span> <span class="kw">in</span> ..<span class="num">10</span> {
+    <span class="cmt"># same as 0..10 — lower bound defaults to 0</span>
+}</code></pre>
+
+      <p>Iterating a slice or array binds the element by value, or by index and value:</p>
+      <pre><code><span class="kw">const</span> <span class="var">names</span>: [<span class="num">3</span>]*<span class="ty">u8</span> = {<span class="str">"alice"</span>, <span class="str">"bob"</span>, <span class="str">"carol"</span>}
+
+<span class="kw">for</span> <span class="var">name</span> <span class="kw">in</span> <span class="var">names</span> {
+    <span class="fn">printf</span>(<span class="str">"%s\n"</span>, <span class="var">name</span>)
+}
+
+<span class="kw">for</span> <span class="var">i</span>, <span class="var">name</span> <span class="kw">in</span> <span class="var">names</span> {
+    <span class="fn">printf</span>(<span class="str">"%zu: %s\n"</span>, <span class="var">i</span>, <span class="var">name</span>)
+}</code></pre>
+
+      <p>
+        Prefix the element binding with <code>&amp;</code> to bind a pointer to the element in place —
+        mutating through it mutates the underlying slice or array, instead of working on a copy:
+      </p>
+      <pre><code><span class="kw">mut</span> <span class="var">scores</span>: [<span class="num">3</span>]<span class="ty">i32</span> = {<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>}
+
+<span class="kw">for</span> &amp;<span class="var">s</span> <span class="kw">in</span> <span class="var">scores</span> {
+    <span class="var">s</span>.* *= <span class="num">10</span>   <span class="cmt"># scores becomes {10, 20, 30}</span>
+}
+
+<span class="kw">for</span> <span class="var">i</span>, &amp;<span class="var">s</span> <span class="kw">in</span> <span class="var">scores</span> {
+    <span class="var">s</span>.* += <span class="kw">cast</span>(<span class="var">i</span>, <span class="ty">i32</span>)
+}</code></pre>
+
+      <div class="callout">
+        <div class="callout-title">Dereferencing is postfix: <code>s.*</code>, not <code>*s</code></div>
+        Mirage has no C-style prefix dereference. To read or write the whole value a pointer points
+        to, use the postfix <code>.*</code> operator. See <a href="types.html">Types</a> for details —
+        this only matters for the whole pointee; <code>ptr.field</code> already auto-derefs.
+      </div>
+
+      <div class="callout">
+        <div class="callout-title">Discarding a binding</div>
+        Any binding name may be <code>_</code> to discard it, e.g. <code>for _, name in names</code>
+        when only the value is needed but the two-binding form reads better at a call site.
+      </div>
 
       <h3>Break and Continue</h3>
       <pre><code><span class="kw">mut</span> <span class="var">i</span>: <span class="ty">i32</span> = <span class="num">0</span>
@@ -148,7 +219,10 @@
       <h3>Matching on Tagged Unions</h3>
       <pre><code><span class="kw">type</span> <span class="ty">Shape</span> = <span class="kw">union</span>(<span class="kw">enum</span>) {
     <span class="var">circle</span>: <span class="kw">struct</span> { <span class="var">radius</span>: <span class="ty">f64</span> }
-    <span class="var">rect</span>:   <span class="kw">struct</span> { <span class="var">w</span>: <span class="ty">f64</span>; <span class="var">h</span>: <span class="ty">f64</span> }
+    <span class="var">rect</span>:   <span class="kw">struct</span> {
+        <span class="var">w</span>: <span class="ty">f64</span>
+        <span class="var">h</span>: <span class="ty">f64</span>
+    }
     <span class="var">point</span>
 }
 
@@ -160,7 +234,7 @@
     }
 }
 
-<span class="cmt"># By-reference capture: s is *PayloadStruct</span>
+<span class="cmt"># By-reference capture: c is *PayloadStruct</span>
 <span class="kw">const</span> <span class="var">desc</span> := <span class="kw">match</span> <span class="var">shape</span> {
     .<span class="var">circle</span>(&amp;<span class="var">c</span>): <span class="var">c</span>.<span class="var">radius</span>,
     .<span class="var">rect</span>(<span class="var">r</span>):   <span class="var">r</span>.<span class="var">w</span>,
@@ -177,6 +251,13 @@
     <span class="num">404</span>: <span class="str">"not found"</span>,
     <span class="var">_</span>:   <span class="str">"other"</span>
 }</code></pre>
+
+      <div class="callout tip">
+        <div class="callout-title">Matching on <code>error(...)</code> values</div>
+        <code>match</code>/<code>switch</code> on a fallible call's error result transparently unwrap
+        the compiler-generated <code>Ok</code>/<code>Failed</code> tag — you match directly against
+        your own error variant names. See <a href="error-handling.html#match-switch-on-error-values">Error Handling</a>.
+      </div>
 
       <hr>
 
@@ -212,6 +293,15 @@
     .<span class="var">point</span>:     <span class="fn">printf</span>(<span class="str">"point\n"</span>)
 }</code></pre>
 
+      <div class="callout warning">
+        <div class="callout-title">Watch the trailing comma with <code>return</code></div>
+        A switch arm body ending in <code>return expr</code> followed by a comma can be
+        misparsed — the comma looks like it separates switch arms, but <code>return</code> itself
+        accepts comma-separated multi-return values, so <code>.A: return 1, .B: return 2</code> may
+        not parse the way it looks. Wrap arm bodies containing <code>return</code> in a block:
+        <code>.A: { return 1 }, .B: { return 2 }</code>.
+      </div>
+
       <div class="callout">
         <div class="callout-title">Switch vs Match</div>
         Use <code>match</code> when you need a result value (it's an expression). Use <code>switch</code>
@@ -228,9 +318,15 @@
         <tr><td>Default</td><td><code>_</code></td><td>Any remaining value (must be last)</td></tr>
       </table>
 
+      <div class="page-nav">
+        <a href="functions.html" class="prev"><span class="label">Previous</span>Functions</a>
+        <a href="structs-and-types.html" class="next"><span class="label">Next</span>Structs &amp; Types</a>
+      </div>
+
     </div>
   </main>
 
 </div>
+<script src="site.js" defer></script>
 </body>
 </html>

@@ -4,35 +4,38 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Grammar Reference — Mirage</title>
+  <meta name="description" content="Complete EBNF grammar for Mirage, derived from the compiler's parser.">
+  <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css">
   <style>
-    /* Override pre/code for BNF grammar to de-emphasize syntax colors */
-    .grammar pre {
-      background: #0d1117;
-      border: 1px solid #30363d;
-      border-radius: 8px;
-      padding: 1.25rem;
-      font-size: 0.85rem;
-      line-height: 1.7;
-      overflow-x: auto;
-      color: #e6edf3;
-    }
-    .grammar pre code {
-      background: none;
-      border: none;
-      padding: 0;
-    }
     .bnf-nt  { color: #d2a8ff; }   /* non-terminals */
     .bnf-t   { color: #a5d6ff; }   /* terminals / literals */
     .bnf-op  { color: #ff7b72; }   /* ::= | [ ] { } */
     .bnf-cm  { color: #8b949e; font-style: italic; }  /* comments */
+    :root[data-theme="light"] .bnf-nt { color: #8250df; }
+    :root[data-theme="light"] .bnf-t  { color: #0a3069; }
+    :root[data-theme="light"] .bnf-op { color: #cf222e; }
+    :root[data-theme="light"] .bnf-cm { color: #59636e; }
   </style>
 </head>
 <body>
+
+<div class="topbar">
+  <button class="nav-toggle" aria-label="Toggle navigation"><span></span><span></span><span></span></button>
+  <a href="index.html" class="topbar-logo">mir<span>age</span></a>
+</div>
+<div class="sidebar-backdrop"></div>
+
 <div class="layout">
 
   <aside class="sidebar">
-    <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+    <div class="sidebar-header">
+      <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+      <button class="theme-toggle" aria-label="Toggle color theme">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+    </div>
     <nav>
       <div class="sidebar-section">Introduction</div>
       <ul>
@@ -45,6 +48,7 @@
         <li><a href="functions.html">Functions</a></li>
         <li><a href="control-flow.html">Control Flow</a></li>
         <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="traits.html">Traits</a></li>
         <li><a href="error-handling.html">Error Handling</a></li>
         <li><a href="modules.html">Modules</a></li>
       </ul>
@@ -53,6 +57,7 @@
         <li><a href="grammar.html" class="active">Grammar</a></li>
       </ul>
     </nav>
+    <div class="sidebar-footer">Mirage Language<br>Documentation</div>
   </aside>
 
   <main class="main">
@@ -81,18 +86,20 @@ declaration   ::= [ 'pub' ] fn_decl
       <pre><code>fn_decl       ::= 'fn' IDENT '(' [ param { ',' param } ] ')' [ return_types ] stmt
 
 param         ::= [ 'mut' ] IDENT ':' type
+               | IDENT ':' '...' type   <span class="bnf-cm">-- native variadic; must be the last parameter</span>
 
 return_types  ::= '->' type
                | '->' '(' type { ',' type } ')'</code></pre>
 
       <h3>Extern Function Declaration</h3>
-      <pre><code>ext_fn_decl   ::= 'ext' 'fn' IDENT '(' [ ext_params ] ')' [ '->' type ]
+      <pre><code>ext_fn_decl   ::= ext_kw 'fn' IDENT '(' [ ext_params ] ')' [ '->' type ]
+
+ext_kw        ::= 'ext'     <span class="bnf-cm">-- parsed as an identifier, not a keyword token</span>
 
 ext_params    ::= ext_param { ',' ext_param } [ ',' '...' ]
+               | '...'      <span class="bnf-cm">-- error: requires at least one named param first</span>
 
-ext_param     ::= IDENT ':' type
-
-<span class="bnf-cm">-- 'ext' is lexed as an identifier, not a keyword</span></code></pre>
+ext_param     ::= IDENT ':' type</code></pre>
 
       <h3>Type Declaration</h3>
       <pre><code>type_decl     ::= 'type' IDENT '=' type</code></pre>
@@ -103,40 +110,50 @@ ext_param     ::= IDENT ':' type
                   | ':=' expr )
 
 <span class="bnf-cm">-- 'const' requires an initializer
--- top-level 'const' initializer may be import(...)</span></code></pre>
+-- a top-level 'const' initializer may be import(...)</span></code></pre>
 
       <h3>Macro Declaration</h3>
-      <pre><code>macro_decl    ::= 'macro' IDENT '(' [ macro_param { ',' macro_param } ] ')' '->' expr
+      <pre><code>macro_decl    ::= 'macro' IDENT '(' [ macro_param { ',' macro_param } ] ')' [ ':' type ] '->' expr
 
-macro_param   ::= IDENT ':' type</code></pre>
+macro_param   ::= IDENT ':' type
+
+<span class="bnf-cm">-- the optional ': type' names the macro's result type explicitly;
+-- required when the body can't infer its own type without context (e.g. a struct literal)</span></code></pre>
 
       <h3>Impl Block</h3>
-      <pre><code>impl_decl     ::= 'impl' named_type '{' { method_decl } '}'
+      <pre><code>impl_decl     ::= 'impl' named_type '{' { method_decl } '}'                    <span class="bnf-cm">-- bare impl</span>
+               | 'impl' named_type 'for' named_type '{' { method_decl } '}'  <span class="bnf-cm">-- trait impl</span>
 
 method_decl   ::= [ 'pub' ] 'fn' IDENT
                   '(' ( 'self' | 'mut' 'self' )
-                      { ',' IDENT ':' type }
+                      { ',' [ 'mut' ] IDENT ':' type }
                   ')'
                   [ return_types ]
-                  stmt</code></pre>
+                  stmt
+
+<span class="bnf-cm">-- in the trait-impl form, 'pub' on an individual method_decl is rejected —
+-- the trait's own visibility governs which methods are externally callable</span></code></pre>
 
       <h2>Types</h2>
       <pre><code>type          ::= '*' type                              <span class="bnf-cm">-- pointer</span>
                | '[' ']' type                          <span class="bnf-cm">-- slice</span>
                | '[' expr ']' type                     <span class="bnf-cm">-- array</span>
+               | '[' '?' ']' type                       <span class="bnf-cm">-- array, size inferred from initializer</span>
                | struct_type
                | enum_type
                | union_type
+               | trait_type
+               | error_type
                | fn_type
                | named_type
                | builtin_type
 
 struct_type   ::= 'struct' [ '(' 'packed' ')' ] '{'
-                    { IDENT ':' type [ '=' expr ] }   <span class="bnf-cm">-- newline-separated fields</span>
+                    { IDENT ':' type [ '=' expr ] }   <span class="bnf-cm">-- no separator required between fields</span>
                   '}'
 
 enum_type     ::= 'enum' [ '(' type ')' ] '{'
-                    { IDENT [ '=' expr ] }             <span class="bnf-cm">-- newline-separated variants</span>
+                    { IDENT [ '=' expr ] }             <span class="bnf-cm">-- no separator required between variants</span>
                   '}'
 
 union_type    ::= 'union' '{'                          <span class="bnf-cm">-- untagged</span>
@@ -146,27 +163,45 @@ union_type    ::= 'union' '{'                          <span class="bnf-cm">-- u
                     { IDENT [ ':' type ] }
                   '}'
 
+trait_type    ::= 'trait' '{' { trait_method_decl } '}'
+                  <span class="bnf-cm">-- a trait handle type; must declare at least one method (empty trait{} is an error)</span>
+
+trait_method_decl ::= 'fn' IDENT
+                      '(' ( 'self' | 'mut' 'self' ) { ',' IDENT ':' type } ')'
+                      [ return_types ]
+                  <span class="bnf-cm">-- signature only, no body; no 'pub'; no native-variadic ('...T') param;
+                  -- non-self params do NOT accept a 'mut' prefix (unlike method_decl)</span>
+
+error_type    ::= 'error' '(' named_type { '|' named_type } ')'
+                  <span class="bnf-cm">-- named_type must be an enum(i32) or union(enum) type; duplicate members are an error</span>
+
 fn_type       ::= 'fn' '(' [ fn_type_params ] ')'
                     [ '->' type | '->' '(' type { ',' type } ')' ]
 
-fn_type_params ::= type { ',' type } [ ',' '...' ]
+fn_type_params ::= fn_type_param { ',' fn_type_param } [ ',' '...' ]
+                | '...'
+
+fn_type_param ::= [ IDENT ':' ] type
 
 named_type    ::= IDENT { '.' IDENT }
 
 builtin_type  ::= 'u8' | 'u16' | 'u32' | 'u64'
                | 'i8' | 'i16' | 'i32' | 'i64'
                | 'f32' | 'f64'
-               | 'usize' | 'bool' | 'byte' | 'error' | 'anyptr'</code></pre>
+               | 'usize' | 'bool' | 'byte' | 'anyptr'</code></pre>
 
       <h2>Statements</h2>
       <pre><code>stmt          ::= block_stmt
                | if_stmt
                | while_stmt
+               | for_stmt
                | switch_stmt
                | var_decl_stmt
                | continue_stmt
                | break_stmt
                | return_stmt
+               | return_err_stmt
+               | return_ok_stmt
                | defer_stmt
                | expr_stmt
 
@@ -176,28 +211,38 @@ if_stmt       ::= 'if' expr stmt [ 'else' stmt ]
 
 while_stmt    ::= 'while' expr block_stmt
 
+for_stmt      ::= 'for' for_binding 'in' for_iterable block_stmt
+
+for_binding   ::= '&' IDENT                    <span class="bnf-cm">-- for &val in ...: element bound by reference</span>
+               | IDENT [ ',' [ '&' ] IDENT ]   <span class="bnf-cm">-- for val in ...  OR  for idx, [&]val in ...</span>
+
+for_iterable  ::= '..' expr             <span class="bnf-cm">-- upper-bound-only range; lower bound defaults to 0</span>
+               | expr [ '..' expr ]     <span class="bnf-cm">-- a slice/array, or a lower..upper range</span>
+
 switch_stmt   ::= 'switch' expr '{' [ switch_arm { ',' switch_arm } [ ',' ] ] '}'
 
 switch_arm    ::= arm_pattern ':' stmt
+
+continue_stmt ::= 'continue'
+break_stmt    ::= 'break'
+return_stmt   ::= 'return' [ expr { ',' expr } ]
+return_err_stmt ::= 'return_err' expr
+return_ok_stmt  ::= 'return_ok' [ expr { ',' expr } ]
+defer_stmt    ::= 'defer' stmt
+expr_stmt     ::= expr
 
 var_decl_stmt ::= ( 'mut' | 'const' ) IDENT
                   ( ':' type [ '=' expr ]
                   | ',' IDENT { ',' IDENT } ':=' expr   <span class="bnf-cm">-- group decl</span>
                   | ':=' expr )
 
-continue_stmt ::= 'continue'
-break_stmt    ::= 'break'
-return_stmt   ::= 'return' [ expr { ',' expr } ]
-defer_stmt    ::= 'defer' stmt
-expr_stmt     ::= expr
-
-<span class="bnf-cm">-- In group decl, any name may be '_' (identifier) to discard that slot</span></code></pre>
+<span class="bnf-cm">-- In a group decl, any name position may be '_' (an ordinary identifier) to discard that slot</span></code></pre>
 
       <h2>Expressions — Precedence (low → high)</h2>
       <pre><code>expr          ::= assign_expr | import_expr
 
 import_expr   ::= 'import' '(' STRING ')'
-                  <span class="bnf-cm">-- only valid as initializer of const := with no type annotation</span>
+                  <span class="bnf-cm">-- only valid as the initializer of 'const :=' with no type annotation</span>
 
 assign_expr   ::= ternary_expr [ assign_op assign_expr ]   <span class="bnf-cm">-- right-associative</span>
 
@@ -226,26 +271,37 @@ additive_expr ::= mult_expr     { ( '+' | '-' ) mult_expr }
 
 mult_expr     ::= unary_expr    { ( '*' | '/' | '%' ) unary_expr }
 
-unary_expr    ::= 'try' postfix_expr
-               | ( '-' | '!' | '~' | '&amp;' | '*' ) unary_expr
+unary_expr    ::= try_expr
+               | ( '-' | '!' | '~' | '&amp;' | '++' | '--' ) unary_expr
                | postfix_expr
+
+<span class="bnf-cm">-- dereference is NOT a prefix operator here — there is no C-style '*p' in Mirage.
+-- it's the postfix_op '.' '*' below: 'p.*'</span>
+
+try_expr      ::= 'try' postfix_expr
 
 <span class="bnf-cm">-- 'try' has tighter binding than binary operators</span>
 
 postfix_expr  ::= primary_expr { postfix_op }
 
-postfix_op    ::= '(' [ expr { ',' expr } ] ')'            <span class="bnf-cm">-- call</span>
-               | '.' IDENT                                  <span class="bnf-cm">-- member</span>
+postfix_op    ::= '(' [ arg { ',' arg } ] ')'                       <span class="bnf-cm">-- call</span>
+               | '.' IDENT                                          <span class="bnf-cm">-- member (auto-derefs through a pointer)</span>
                | '.' IDENT '{.' field_init { ',' field_init } '}'  <span class="bnf-cm">-- qualified tagged variant</span>
-               | '[' expr ']'                               <span class="bnf-cm">-- index</span>
-               | '[' expr '..' expr ']'                     <span class="bnf-cm">-- slice range</span>
-               | '++'                                       <span class="bnf-cm">-- post-increment</span>
-               | '--'                                       <span class="bnf-cm">-- post-decrement</span></code></pre>
+               | '.' '*'                                            <span class="bnf-cm">-- dereference: 'p.*' reads/writes the pointee</span>
+               | '[' expr ']'                                       <span class="bnf-cm">-- index</span>
+               | '[' expr '..' expr ']'                             <span class="bnf-cm">-- slice range</span>
+               | '++'                                               <span class="bnf-cm">-- post-increment</span>
+               | '--'                                               <span class="bnf-cm">-- post-decrement</span>
+
+arg           ::= expr '...'    <span class="bnf-cm">-- spread; only legal as the sole, final argument
+                                    of a call whose callee has a native '...T' parameter</span>
+               | expr</code></pre>
 
       <h2>Primary Expressions</h2>
       <pre><code>primary_expr  ::= INT_LITERAL
                | FLOAT_LITERAL
                | STRING_LITERAL
+               | CHAR_LITERAL
                | 'true'
                | 'false'
                | 'nil'
@@ -257,16 +313,28 @@ postfix_op    ::= '(' [ expr { ',' expr } ] ')'            <span class="bnf-cm">
                | sizeof_expr
                | len_expr
                | cast_expr
+               | stackalloc_expr
+               | import_bin_expr
                | match_expr
                | braced_initializer
                | dot_ident_expr
                | contextual_tagged_variant
 
-sizeof_expr   ::= 'sizeof' expr
+sizeof_expr   ::= 'sizeof' '(' sizeof_operand ')'
 
-len_expr      ::= 'len' expr
+sizeof_operand ::= type   <span class="bnf-cm">-- whenever the next token(s) can only start a type
+                              (builtin keyword, '*', '[', 'struct', 'enum', 'union', 'fn', 'trait')</span>
+               | expr     <span class="bnf-cm">-- otherwise (may still simply name a type, e.g. module.TypeName)</span>
+
+len_expr      ::= 'len' '(' expr ')'
 
 cast_expr     ::= 'cast' '(' expr ',' type [ ',' expr ] ')'
+
+stackalloc_expr ::= 'stackalloc' '(' expr ')'
+                  <span class="bnf-cm">-- runtime-sized stack allocation, evaluates to anyptr</span>
+
+import_bin_expr ::= 'import_bin' '(' STRING ')'
+                  <span class="bnf-cm">-- embeds a file's bytes at compile time as a [N]u8 constant</span>
 
 match_expr    ::= 'match' expr '{' [ match_arm { ',' match_arm } [ ',' ] ] '}'
 
@@ -274,19 +342,20 @@ match_arm     ::= arm_pattern ':' expr
 
 arm_pattern   ::= '.' IDENT [ '(' [ '&amp;' ] IDENT ')' ]   <span class="bnf-cm">-- variant (enum/tagged-union)</span>
                | '_'                                       <span class="bnf-cm">-- default / wildcard (must be last)</span>
-               | expr                                      <span class="bnf-cm">-- literal constant (integer or bool)</span>
+               | expr                                      <span class="bnf-cm">-- literal constant</span>
 
-dot_ident_expr              ::= '.' IDENT
-                                <span class="bnf-cm">-- enum literal; requires expected type context</span>
+dot_ident_expr ::= '.' IDENT              <span class="bnf-cm">-- enum literal; requires expected-type context</span>
+               | '.' IDENT '(' expr ')'   <span class="bnf-cm">-- sugar for '.' IDENT '{.v = expr}' (single
+                                             non-struct payload only)</span>
 
 contextual_tagged_variant   ::= '.' IDENT '{.' field_init { ',' field_init } '}'
                                 <span class="bnf-cm">-- '{.' disambiguates from block statements</span>
 
 field_init    ::= '.' IDENT '=' expr
 
-braced_initializer ::= '{' '}'                                    <span class="bnf-cm">-- empty (full default)</span>
-               | '{' IDENT '=' expr { ',' IDENT '=' expr } '}'   <span class="bnf-cm">-- struct fields</span>
-               | '{' expr { ',' expr } '}'                        <span class="bnf-cm">-- array values</span>
+braced_initializer ::= '{' '}'                                        <span class="bnf-cm">-- empty (full default)</span>
+               | '{' field_init { ',' field_init } '}'             <span class="bnf-cm">-- struct fields</span>
+               | '{' expr { ',' expr } [ '...' ] '}'                  <span class="bnf-cm">-- array values, optional trailing fill</span>
                <span class="bnf-cm">-- Disambiguation: '{' IDENT '=' detects struct form; else array form</span></code></pre>
 
       <h2>Literals</h2>
@@ -300,12 +369,18 @@ FLOAT_LITERAL ::= DIGIT { DIGIT } '.' DIGIT { DIGIT }
 
 STRING_LITERAL ::= '"' { char | escape_seq } '"'
 
-escape_seq    ::= '\\' | '\"' | '\n' | '\t' | '\r' | '\0'
+CHAR_LITERAL  ::= "'" ( char | escape_seq ) "'"
+               <span class="bnf-cm">-- always type u8; there is no distinct character type</span>
+
+escape_seq    ::= '\\' | '\"' | "\'" | '\n' | '\t' | '\r'
+               | '\x' HEX_DIGIT HEX_DIGIT                        <span class="bnf-cm">-- exactly two hex digits</span>
+               | '\' OCTAL_DIGIT [ OCTAL_DIGIT [ OCTAL_DIGIT ] ]  <span class="bnf-cm">-- 1-3 octal digits, max 0xFF</span>
 
 IDENT         ::= LETTER { LETTER | DIGIT | '_' }
 
 DIGIT         ::= '0' .. '9'
 HEX_DIGIT     ::= '0' .. '9' | 'a' .. 'f' | 'A' .. 'F'
+OCTAL_DIGIT   ::= '0' .. '7'
 BIN_DIGIT     ::= '0' | '1'
 LETTER        ::= 'a' .. 'z' | 'A' .. 'Z' | '_'</code></pre>
 
@@ -314,15 +389,21 @@ LETTER        ::= 'a' .. 'z' | 'A' .. 'Z' | '_'</code></pre>
       <h3>Field Separators</h3>
       <table>
         <tr><th>Context</th><th>Separator</th></tr>
-        <tr><td>Struct fields in type definition</td><td>Newline (no commas)</td></tr>
-        <tr><td>Enum fields in type definition</td><td>Newline (no commas)</td></tr>
-        <tr><td>Tagged union variants in type definition</td><td>Newline (no commas)</td></tr>
+        <tr><td>Struct fields in type definition</td><td>None required; optional <code>;</code> tolerated</td></tr>
+        <tr><td>Enum variants in type definition</td><td>None required; optional <code>;</code> tolerated</td></tr>
+        <tr><td>Tagged/untagged union members in type definition</td><td>None required; optional <code>;</code> tolerated</td></tr>
         <tr><td>Struct braced initializer <code>{.x = 1, .y = 2}</code></td><td>Comma</td></tr>
         <tr><td>Array braced initializer <code>{1, 2, 3}</code></td><td>Comma</td></tr>
         <tr><td>Match / switch arms</td><td>Comma (trailing comma optional)</td></tr>
         <tr><td>Function parameters</td><td>Comma</td></tr>
-        <tr><td>Multiple return values in <code>return</code></td><td>Comma</td></tr>
+        <tr><td>Multiple return values in <code>return</code> / <code>return_ok</code></td><td>Comma</td></tr>
       </table>
+      <p>
+        The <code>;</code> token is not really a "separator" in the usual sense — the parser simply
+        skips any number of stray semicolons wherever it looks for one. This is what makes a one-line
+        form like <code>struct { w: f64; h: f64 }</code> valid; commas are never accepted in these
+        positions.
+      </p>
 
       <h3>Braced Initializer Disambiguation</h3>
       <p>
@@ -337,7 +418,7 @@ LETTER        ::= 'a' .. 'z' | 'A' .. 'Z' | '_'</code></pre>
       <h3>Multi-Return Syntax</h3>
       <p>
         Multi-return type annotations require parentheses: <code>-&gt; (T1, T2)</code>.
-        Multi-return <code>return</code> statements use commas: <code>return a, b</code>.
+        Multi-return <code>return</code>/<code>return_ok</code> statements use commas: <code>return a, b</code>.
         Multi-return calls use group declarations: <code>mut a, b := call()</code>.
       </p>
 
@@ -352,17 +433,32 @@ LETTER        ::= 'a' .. 'z' | 'A' .. 'Z' | '_'</code></pre>
       <p>
         <code>break</code> <code>byte</code> <code>cast</code> <code>const</code> <code>continue</code>
         <code>default</code> <code>defer</code> <code>else</code> <code>enum</code> <code>error</code>
-        <code>false</code> <code>fn</code> <code>for</code> <code>if</code> <code>impl</code>
-        <code>import</code> <code>iota</code> <code>len</code> <code>macro</code> <code>match</code>
-        <code>mut</code> <code>nil</code> <code>return</code> <code>sizeof</code> <code>struct</code>
-        <code>switch</code> <code>true</code> <code>try</code> <code>type</code> <code>undefined</code>
-        <code>union</code> <code>while</code>
+        <code>ext</code> <code>false</code> <code>fn</code> <code>for</code> <code>if</code> <code>impl</code>
+        <code>import</code> <code>import_bin</code> <code>in</code> <code>iota</code> <code>len</code>
+        <code>macro</code> <code>match</code> <code>mut</code> <code>nil</code> <code>pub</code>
+        <code>return</code> <code>return_err</code> <code>return_ok</code> <code>sizeof</code>
+        <code>stackalloc</code> <code>struct</code> <code>switch</code> <code>trait</code> <code>true</code>
+        <code>try</code> <code>type</code> <code>undefined</code> <code>union</code> <code>while</code>
       </p>
-      <p>Note: <code>for</code> is reserved but not yet implemented. <code>ext</code> is scanned as an identifier.</p>
+      <p>
+        <code>ext</code> is scanned as a plain identifier, not a keyword token — it's only special at
+        the very start of a declaration in <code>ext fn name(...)</code> form.
+      </p>
+      <div class="callout warning">
+        <div class="callout-title">Reserved for future use</div>
+        <code>namespace</code>, <code>asm</code>, <code>when</code>, and <code>offsetof</code> are also
+        reserved lexer keywords, but nothing in the language currently consumes them — using any of
+        these identifiers today is a parse error, even though no feature is implemented for them yet.
+      </div>
+
+      <div class="page-nav">
+        <a href="modules.html" class="prev"><span class="label">Previous</span>Modules</a>
+      </div>
 
     </div>
   </main>
 
 </div>
+<script src="site.js" defer></script>
 </body>
 </html>
