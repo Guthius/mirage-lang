@@ -77,11 +77,16 @@
       <p>A trait must declare at least one method — an empty <code>trait {}</code> is a compile error.</p>
 
       <div class="callout">
-        <div class="callout-title">A trait name in type position means "handle", not "definition"</div>
-        Writing <code>Drawable</code> as a type (a variable's type, a parameter type, a field type)
-        doesn't mean "a value of some type that implements Drawable" the way it might read at first
-        glance — it means a <strong>handle</strong>: a fixed-size, 16-byte fat pointer (a data pointer
-        plus a vtable pointer), the same regardless of which trait it names.
+        <div class="callout-title">What <code>Drawable</code> means as a type</div>
+        Using <code>Drawable</code> as a variable's, field's, or parameter's type works exactly like
+        you'd expect from Go or Rust's <code>dyn Trait</code>: it means "any value that implements
+        <code>Drawable</code>", and the compiler enforces that — only a pointer to a type with an
+        <code>impl Drawable for ...</code> can go there. Under the hood, that's represented as a
+        <strong>handle</strong>: a fixed-size, 16-byte fat pointer (a data pointer plus a vtable
+        pointer), the same 16 bytes regardless of which trait it names. That representation detail
+        is why only a <em>pointer</em> coerces to it (see below) and why handles can't cross an
+        <code>ext fn</code> boundary — but day to day, just think of <code>Drawable</code> as
+        "a Drawable object."
       </div>
 
       <h2>Implementing a Trait</h2>

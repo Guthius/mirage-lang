@@ -179,9 +179,22 @@
 
       <div class="callout">
         <div class="callout-title">Note</div>
-        <code>ext fn</code> parameters and return types cannot be structs, arrays, slices, or unions —
-        only scalars, pointers, and function pointer types.
+        <code>ext fn</code> parameters and return types can be scalars, pointers, function pointer
+        types, structs, arrays, and slices — a struct is passed/returned using the correct C ABI
+        (e.g. small structs are packed into registers on x86-64, matching what a C compiler does for
+        the same struct). The only types <em>not</em> allowed are <code>union</code>s (tagged or
+        untagged — not yet supported across an <code>ext fn</code> boundary) and trait handles (no C
+        ABI representation), plus multi-return function pointer types.
       </div>
+      <pre><code><span class="cmt"># A struct crossing the C ABI boundary — must match the C struct's layout</span>
+<span class="kw">type</span> <span class="ty">Color</span> = <span class="kw">struct</span> {
+    <span class="var">r</span>: <span class="ty">u8</span>
+    <span class="var">g</span>: <span class="ty">u8</span>
+    <span class="var">b</span>: <span class="ty">u8</span>
+    <span class="var">a</span>: <span class="ty">u8</span>
+}
+
+<span class="kw">ext fn</span> <span class="fn">make_color</span>(<span class="var">r</span>: <span class="ty">u8</span>, <span class="var">g</span>: <span class="ty">u8</span>, <span class="var">b</span>: <span class="ty">u8</span>, <span class="var">a</span>: <span class="ty">u8</span>) -&gt; <span class="ty">Color</span></code></pre>
 
       <h3>Variadic Extern Functions</h3>
       <p>

@@ -95,7 +95,10 @@
 <span class="kw">mut</span> <span class="var">d</span>: <span class="ty">Vec2</span> = {}
 
 <span class="cmt"># 'default' keyword: explicitly default-initialize</span>
-<span class="kw">mut</span> <span class="var">e</span>: <span class="ty">Vec2</span> = <span class="kw">default</span></code></pre>
+<span class="kw">mut</span> <span class="var">e</span>: <span class="ty">Vec2</span> = <span class="kw">default</span>
+
+<span class="cmt"># 'undefined': allocates storage, no initialization at all (mut only, not const)</span>
+<span class="kw">mut</span> <span class="var">f</span>: <span class="ty">Vec2</span> = <span class="kw">undefined</span></code></pre>
 
       <h3>Accessing Fields</h3>
       <pre><code><span class="kw">const</span> <span class="var">len</span> := <span class="var">c</span>.<span class="var">x</span> * <span class="var">c</span>.<span class="var">x</span> + <span class="var">c</span>.<span class="var">y</span> * <span class="var">c</span>.<span class="var">y</span>

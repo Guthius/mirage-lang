@@ -870,7 +870,13 @@ Declares an external C function. `ext fn` functions:
 - Accept at most one `...` at the end (variadic)
 - `...` requires at least one named parameter before it
 - Return at most one type
-- Cannot have parameters or return types that are structs, arrays, slices, or unions
+- Parameters and return types may be scalars, pointers, function pointer types, structs, arrays, or
+  slices — a struct crossing the boundary is passed/returned using the platform C ABI (e.g. small
+  structs are packed into registers on x86-64, matching a C compiler's own calling convention for
+  that struct)
+- Cannot have parameters or return types that are `union`s (tagged or untagged — not yet supported
+  across an `ext fn` boundary) or trait handles (no C ABI representation); a multi-return function
+  pointer type is also rejected (no C ABI representation for multiple return values)
 
 ### Entry Points
 
@@ -1008,9 +1014,13 @@ parameters are rejected: there is no vtable-entry representation for a
 variadic call.
 
 **Using a trait name in type position denotes a HANDLE, not the trait
-definition.** A handle is a fat pointer — a data pointer plus a vtable
-pointer — always 16 bytes, 8-byte aligned, regardless of which trait it
-names.
+definition.** Semantically this behaves like Go's interface types or Rust's
+`dyn Trait`: it means "any value that implements this trait," and the
+compiler only accepts a pointer to a conforming type there. Concretely, a
+handle is a fat pointer — a data pointer plus a vtable pointer — always 16
+bytes, 8-byte aligned, regardless of which trait it names. This is why only
+a pointer (not a bare value) coerces to it, and why handles have no `ext fn`
+ABI representation.
 
 ### Implementing a Trait
 
