@@ -104,6 +104,10 @@ namespace ast {
             auto report_error(const SourceLocation location, std::string message) -> void override {
                 diagnostics_.report_error(DiagnosticStage::Parser, location, std::move(message));
             }
+
+            [[nodiscard]] auto has_reached_max_errors() const -> bool override {
+                return diagnostics_.has_reached_max_errors();
+            }
         };
     }
 

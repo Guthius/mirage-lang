@@ -84,6 +84,31 @@ namespace ast {
             }
         }
 
+        // Several list-parsing loops below (struct/union/enum/trait/impl bodies, parameter
+        // lists) parse one member/param per iteration via expect()/expect_identifier()/
+        // parse_type(), none of which are guaranteed to consume a token on failure - a
+        // single unexpected token (not the closing delimiter, not EOF) would otherwise spin
+        // the loop forever, pushing a new garbage entry every iteration. This guard forces
+        // at least one token of progress per iteration regardless of what failed inside it.
+        class LoopProgressGuard {
+          public:
+            explicit LoopProgressGuard(Parser &parser) : parser_(parser), start_offset_(parser.current_location().offset) {
+            }
+
+            LoopProgressGuard(const LoopProgressGuard &) = delete;
+            auto operator=(const LoopProgressGuard &) -> LoopProgressGuard & = delete;
+
+            ~LoopProgressGuard() {
+                if (!parser_.at_end() && parser_.current_location().offset == start_offset_) {
+                    parser_.advance();
+                }
+            }
+
+          private:
+            Parser &parser_;
+            size_t start_offset_;
+        };
+
         auto parse_struct_type(Parser &parser) -> Type {
             const auto location = parser.current_location();
 
@@ -101,9 +126,11 @@ namespace ast {
             std::vector<StructType::Field> fields;
             while (true) {
                 skip_semicolons(parser);
-                if (parser.check(TokenKind::RBrace) || parser.at_end()) {
+                if (parser.check(TokenKind::RBrace) || parser.at_end() || parser.has_reached_max_errors()) {
                     break;
                 }
+
+                const LoopProgressGuard progress_guard(parser);
 
                 const auto field_location = parser.current_location();
                 const auto field_name = parser.expect_identifier();
@@ -169,9 +196,11 @@ namespace ast {
             std::vector<UnionType::Member> members;
             while (true) {
                 skip_semicolons(parser);
-                if (parser.check(TokenKind::RBrace) || parser.at_end()) {
+                if (parser.check(TokenKind::RBrace) || parser.at_end() || parser.has_reached_max_errors()) {
                     break;
                 }
+
+                const LoopProgressGuard progress_guard(parser);
 
                 const auto member_location = parser.current_location();
                 const auto member_name = parser.expect_identifier();
@@ -237,9 +266,11 @@ namespace ast {
             std::vector<EnumType::Field> fields;
             while (true) {
                 skip_semicolons(parser);
-                if (parser.check(TokenKind::RBrace) || parser.at_end()) {
+                if (parser.check(TokenKind::RBrace) || parser.at_end() || parser.has_reached_max_errors()) {
                     break;
                 }
+
+                const LoopProgressGuard progress_guard(parser);
 
                 fields.push_back(parse_enum_field(parser));
             }
@@ -1701,6 +1732,8 @@ namespace ast {
             bool seen_variadic = false;
 
             while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                const LoopProgressGuard progress_guard(parser);
+
                 if (parser.check(TokenKind::DotDotDot)) {
                     parser.report_error(parser.current_location(),
                         "variadic parameters ('...') are only allowed on 'ext fn' declarations, not 'fn'; "
@@ -1798,6 +1831,8 @@ namespace ast {
             // Non-self params: 'IDENT : type' only — no 'mut' prefix, no variadics.
             std::vector<TraitType::Param> params;
             while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                const LoopProgressGuard progress_guard(parser);
+
                 parser.expect(TokenKind::Comma, "','");
                 const auto param_location = parser.current_location();
                 auto param_name = parser.expect_identifier();
@@ -1844,9 +1879,11 @@ namespace ast {
             std::vector<TraitType::Method> methods;
             while (true) {
                 skip_semicolons(parser);
-                if (parser.check(TokenKind::RBrace) || parser.at_end()) {
+                if (parser.check(TokenKind::RBrace) || parser.at_end() || parser.has_reached_max_errors()) {
                     break;
                 }
+
+                const LoopProgressGuard progress_guard(parser);
 
                 methods.push_back(parse_trait_method_decl(parser));
             }
@@ -1953,6 +1990,8 @@ namespace ast {
             out_is_variadic = false;
 
             while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                const LoopProgressGuard progress_guard(parser);
+
                 if (parser.check(TokenKind::DotDotDot)) {
                     if (params.empty()) {
                         parser.report_error(parser.current_location(),
@@ -2061,6 +2100,8 @@ namespace ast {
             parser.expect(TokenKind::LParen, "'('");
 
             while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                const LoopProgressGuard progress_guard(parser);
+
                 const auto param_location = parser.current_location();
                 const auto param_name = parser.expect_identifier();
 
@@ -2377,6 +2418,8 @@ namespace ast {
         std::vector<ImplDecl::Function::Param> params;
         bool seen_variadic = false;
         while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+            const LoopProgressGuard progress_guard(parser);
+
             parser.expect(TokenKind::Comma, "','");
             const auto param_location = parser.current_location();
             const bool param_is_mut = parser.match(TokenKind::KwMut);
@@ -2434,9 +2477,11 @@ namespace ast {
             std::vector<ImplDecl::Function> functions;
             while (true) {
                 skip_semicolons(parser);
-                if (parser.check(TokenKind::RBrace) || parser.at_end()) {
+                if (parser.check(TokenKind::RBrace) || parser.at_end() || parser.has_reached_max_errors()) {
                     break;
                 }
+
+                const LoopProgressGuard progress_guard(parser);
 
                 functions.push_back(parse_impl_method(parser, /*allow_pub=*/false));
             }
@@ -2456,9 +2501,11 @@ namespace ast {
         std::vector<ImplDecl::Function> functions;
         while (true) {
             skip_semicolons(parser);
-            if (parser.check(TokenKind::RBrace) || parser.at_end()) {
+            if (parser.check(TokenKind::RBrace) || parser.at_end() || parser.has_reached_max_errors()) {
                 break;
             }
+
+            const LoopProgressGuard progress_guard(parser);
 
             functions.push_back(parse_impl_method(parser, /*allow_pub=*/true));
         }

@@ -593,4 +593,8 @@ namespace lexer {
     auto tokenize(const std::string_view source, const std::string_view filename, DiagnosticEngine &diagnostics) -> std::vector<Token> {
         return LexerImpl(source, filename, diagnostics).tokenize();
     }
+
+    auto keyword_spellings() -> const std::unordered_map<std::string_view, TokenKind> & {
+        return keywords;
+    }
 }

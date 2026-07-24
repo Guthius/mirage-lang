@@ -21,5 +21,6 @@ namespace ast {
         virtual auto expect(TokenKind kind, std::string_view message) -> const Token = 0;
         virtual auto expect_identifier() -> const std::string & = 0;
         virtual auto report_error(SourceLocation location, std::string message) -> void = 0;
+        virtual auto has_reached_max_errors() const -> bool = 0;
     };
 }

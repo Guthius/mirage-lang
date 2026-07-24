@@ -1,6 +1,8 @@
 #include "analysis.hpp"
 
+#include <algorithm>
 #include <filesystem>
+#include <ranges>
 
 namespace lsp::analysis {
     auto analyse(const std::string &root_module_path,
@@ -33,6 +35,10 @@ namespace lsp::analysis {
         };
     }
 
+    namespace {
+        constexpr size_t MAX_CACHED_MODULES = 32;
+    }
+
     void DocumentStore::open(const std::string &canonical_path, std::string text) {
         open_texts_[canonical_path] = std::move(text);
         invalidate(canonical_path);
@@ -46,6 +52,7 @@ namespace lsp::analysis {
     void DocumentStore::close(const std::string &canonical_path) {
         open_texts_.erase(canonical_path);
         invalidate(canonical_path);
+        evict_unreferenced_bundles();
     }
 
     auto DocumentStore::text_of(const std::string &canonical_path) const -> const std::string * {
@@ -57,7 +64,7 @@ namespace lsp::analysis {
         const auto dir = std::filesystem::path(canonical_path).parent_path().string();
 
         for (auto it = module_results_.begin(); it != module_results_.end();) {
-            if (it->second.ast_program.modules.contains(dir)) {
+            if (it->second.result.ast_program.modules.contains(dir)) {
                 it = module_results_.erase(it);
             } else {
                 ++it;
@@ -65,16 +72,79 @@ namespace lsp::analysis {
         }
     }
 
+    void DocumentStore::evict_unreferenced_bundles() {
+        std::set<std::string> open_dirs;
+        for (const auto &path : open_texts_ | std::views::keys) {
+            open_dirs.insert(std::filesystem::path(path).parent_path().string());
+        }
+
+        for (auto it = module_results_.begin(); it != module_results_.end();) {
+            const auto &modules = it->second.result.ast_program.modules;
+            const bool still_referenced =
+                std::ranges::any_of(open_dirs, [&](const auto &dir) { return modules.contains(dir); });
+
+            if (!still_referenced) {
+                it = module_results_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    void DocumentStore::evict_lru_if_over_capacity() {
+        if (module_results_.size() <= MAX_CACHED_MODULES) {
+            return;
+        }
+
+        auto oldest = module_results_.begin();
+        for (auto it = module_results_.begin(); it != module_results_.end(); ++it) {
+            if (it->second.last_access < oldest->second.last_access) {
+                oldest = it;
+            }
+        }
+        module_results_.erase(oldest);
+    }
+
     auto DocumentStore::ensure_analysed(const std::string &canonical_path) -> ProgramResult & {
         const auto dir = ast::canonicalize(std::filesystem::path(canonical_path).parent_path().string());
 
-        for (auto &[root, result] : module_results_) {
-            if (result.ast_program.modules.contains(dir)) {
-                return result;
+        for (auto &bundle : module_results_ | std::views::values) {
+            if (bundle.result.ast_program.modules.contains(dir)) {
+                bundle.last_access = ++access_clock_;
+                return bundle.result;
             }
         }
 
-        auto [it, inserted] = module_results_.insert_or_assign(dir, analyse(dir, open_texts_));
-        return it->second;
+        auto [it, inserted] = module_results_.insert_or_assign(
+            dir, CachedBundle{.result = analyse(dir, open_texts_), .last_access = ++access_clock_});
+        evict_lru_if_over_capacity();
+        return it->second.result;
+    }
+
+    auto DocumentStore::files_that_became_clean(const std::set<std::string> &closure_dirs,
+                                                 const std::set<std::string> &current_nonempty_files)
+        -> std::vector<std::string> {
+        std::vector<std::string> became_clean;
+
+        for (auto it = last_published_nonempty_diag_files_.begin(); it != last_published_nonempty_diag_files_.end();) {
+            const auto dir = std::filesystem::path(*it).parent_path().string();
+            if (!closure_dirs.contains(dir)) {
+                ++it; // not part of this closure - leave untouched, some other bundle owns it
+                continue;
+            }
+
+            if (current_nonempty_files.contains(*it)) {
+                ++it;
+            } else {
+                became_clean.push_back(*it);
+                it = last_published_nonempty_diag_files_.erase(it);
+            }
+        }
+
+        for (const auto &file : current_nonempty_files) {
+            last_published_nonempty_diag_files_.insert(file);
+        }
+
+        return became_clean;
     }
 }

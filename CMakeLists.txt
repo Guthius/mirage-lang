@@ -90,6 +90,18 @@ target_include_directories(lexer_asi_test
 enable_testing()
 add_test(NAME lexer_asi_test COMMAND lexer_asi_test)
 
+add_executable(ast_parser_progress_test
+        tests/ast_parser_progress_test.cpp
+        $<TARGET_OBJECTS:mirage_core>
+)
+
+target_include_directories(ast_parser_progress_test
+        PRIVATE src
+)
+
+add_test(NAME ast_parser_progress_test COMMAND ast_parser_progress_test)
+set_tests_properties(ast_parser_progress_test PROPERTIES TIMEOUT 10)
+
 include(FetchContent)
 FetchContent_Declare(nlohmann_json
         URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
@@ -100,6 +112,7 @@ add_executable(mirage-lsp
         src/lsp/main.cpp
         src/lsp/server.hpp
         src/lsp/server.cpp
+        src/lsp/task_queue.hpp
         src/lsp/transport.hpp
         src/lsp/transport.cpp
         src/lsp/uri.hpp
@@ -112,12 +125,18 @@ add_executable(mirage-lsp
         src/lsp/type_printer.cpp
         src/lsp/handlers/common.hpp
         src/lsp/handlers/common.cpp
+        src/lsp/handlers/ast_walker.hpp
+        src/lsp/handlers/ast_walker.cpp
         src/lsp/handlers/hover.hpp
         src/lsp/handlers/hover.cpp
         src/lsp/handlers/definition.hpp
         src/lsp/handlers/definition.cpp
+        src/lsp/handlers/completion.hpp
+        src/lsp/handlers/completion.cpp
         $<TARGET_OBJECTS:mirage_core>
 )
 
+find_package(Threads REQUIRED)
+
 target_include_directories(mirage-lsp PRIVATE src)
-target_link_libraries(mirage-lsp PRIVATE nlohmann_json::nlohmann_json)
+target_link_libraries(mirage-lsp PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
