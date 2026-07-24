@@ -196,7 +196,7 @@ namespace {
     }
 
     auto link_executable(const std::filesystem::path &object_path, const std::filesystem::path &output_path,
-                          const Options &options) -> bool {
+                          const Options &options, const std::vector<sema::LinkDirective> &link_directives) -> bool {
         std::vector<std::string> args{"clang"};
         if (options.freestanding) {
             args.emplace_back("-ffreestanding");
@@ -210,6 +210,25 @@ namespace {
         for (const auto &lib : options.libs) {
             args.push_back("-l" + lib);
         }
+
+        // '@link' directives collected from the compiled program (module scope, or a live
+        // 'when' branch). 'lib' paths are resolved relative to the directory of the module
+        // file that declared them (source_module is a canonicalized module *directory*
+        // path, matching import resolution) — not the current working directory.
+        for (const auto &link : link_directives) {
+            switch (link.category) {
+            case sema::LinkCategory::Lib:
+                args.push_back((std::filesystem::path(link.source_module) / link.data).string());
+                break;
+            case sema::LinkCategory::System:
+                args.push_back("-l" + link.data);
+                break;
+            case sema::LinkCategory::Flag:
+                args.push_back(link.data);
+                break;
+            }
+        }
+
         args.emplace_back("-o");
         args.push_back(output_path.string());
 
@@ -436,7 +455,7 @@ auto main(const int argc, char *argv[]) -> int {
         : std::filesystem::path(options.output);
 
     const auto link_start = std::chrono::steady_clock::now();
-    if (!link_executable(object_path, exe_path, options)) {
+    if (!link_executable(object_path, exe_path, options, sema.link_directives)) {
         std::error_code remove_error;
         std::filesystem::remove(object_path, remove_error);
         llvm::errs() << "mirage: linker failed\n";
