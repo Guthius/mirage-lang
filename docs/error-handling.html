@@ -142,17 +142,19 @@
         variant with the same name, qualify it as <code>TypeName.Variant{...}</code> (only variants
         with a payload support the qualified form — rename an ambiguous payload-free variant instead).
       </p>
-
-      <div class="callout warning">
-        <div class="callout-title"><code>return_err</code> takes a variant, not an error value</div>
-        <code>return_err</code>'s operand must construct a fresh variant — <code>.Variant</code>,
-        <code>.Variant(payload)</code>, or <code>TypeName.Variant{...}</code>. To re-propagate an
-        error value you already captured (e.g. from a group declaration), use a plain
-        <code>return</code> instead, since it already has the right <code>error(...)</code> type:
+      <div class="callout tip">
+        <div class="callout-title">re-propagating a captured error</div>
+        <code>return_err</code>'s operand isn't limited to a fresh <code>.Variant</code>
+        construction — it also accepts an expression that already evaluates to a compatible error
+        value: a plain value of one of the function's error member types, or a captured
+        <code>error(...)</code> value (this function's own, or one whose member types are a subset of
+        it, the same rule <code>try</code> uses). This is the natural way to re-propagate an error
+        you already captured from a group declaration, and unlike a plain <code>return</code> it
+        works even when the function has other non-error return values, since <code>return_err</code>
+        leaves those slots <code>undefined</code> for you:
         <pre><code><span class="kw">const</span> <span class="var">n</span>, <span class="var">err</span> := <span class="fn">parse_int</span>(<span class="var">text</span>)
 <span class="kw">if</span> <span class="var">err</span> {
-    <span class="kw">return</span> <span class="var">err</span>       <span class="cmt"># correct: re-propagate the captured error</span>
-    <span class="cmt"># return_err err   -- error: not a .Variant construction</span>
+    <span class="kw">return_err</span> <span class="var">err</span>       <span class="cmt"># re-propagate the captured error as-is</span>
 }</code></pre>
       </div>
 

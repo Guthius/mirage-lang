@@ -1991,11 +1991,13 @@ namespace sema {
         return ty;
     }
 
-    // Resolves 'return_err <expr>' operand against the enclosing function's error(...) type,
-    // returning the concrete error MEMBER type (e.g. MemoryError) that <expr> denotes a variant
-    // of. The caller then passes this back into check_expr as 'expected' — DotIdentExpr and
-    // TaggedVariantExpr resolve '.Variant' / '.Variant(payload)' against it with no changes of
-    // their own, exactly as they would for an ordinary bare enum/tagged-union return.
+    // Resolves a '.Variant' / '.Variant(payload)' 'return_err' operand against the enclosing
+    // function's error(...) type, returning the concrete error MEMBER type (e.g. MemoryError)
+    // that <expr> denotes a variant of. The caller then passes this back into check_expr as
+    // 'expected' — DotIdentExpr and TaggedVariantExpr resolve against it with no changes of
+    // their own, exactly as they would for an ordinary bare enum/tagged-union return. Returns
+    // nullopt (with no diagnostic) if <expr> isn't one of these two sugar forms at all; the
+    // caller falls back to the general expression path in that case.
     auto resolve_return_err_member_type(const ast::Expr &error_value, const ResolvedType &fn_error_type,
                                          const std::string &module_path, Program &program, DiagnosticEngine &diag,
                                          const SourceLocation &loc) -> std::optional<ResolvedType> {
@@ -2022,7 +2024,9 @@ namespace sema {
         } else if (const auto *tv = std::get_if<std::unique_ptr<ast::TaggedVariantExpr>>(&error_value)) {
             variant_name = (*tv)->variant_name;
         } else {
-            diag.report_error(DiagnosticStage::Sema, loc, "'return_err' operand must be a '.Variant' or '.Variant(payload)' error value");
+            // Not '.Variant' sugar — the caller (check_stmt's ReturnErrStmt case) only
+            // reaches here for those two forms; anything else goes through the general
+            // expression path instead. See there for why.
             return std::nullopt;
         }
 
@@ -2669,10 +2673,42 @@ namespace sema {
                         check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         return;
                     }
+                    // '.Variant' / '.Variant(payload)' need the expected member type fed in to
+                    // resolve at all (see resolve_return_err_member_type); anything else is an
+                    // ordinary expression that already carries its own type, so check it with
+                    // no expected type and classify what came back.
                     if (const auto member_type = resolve_return_err_member_type(v.error_value, *fn_error_type, module_path, program, diag, v.location)) {
                         auto ty = check_expr(v.error_value, locals, module_path, program, diag, *member_type, loop_depth, defer_loop_base, fn_error_type);
                         if (!assignable_in_module(ty, *member_type, module_path, program)) {
                             diag.report_error(DiagnosticStage::Sema, v.location, "'return_err' operand does not match the resolved error member type");
+                        }
+                    } else if (std::holds_alternative<ast::DotIdentExpr>(v.error_value) ||
+                               std::holds_alternative<std::unique_ptr<ast::TaggedVariantExpr>>(v.error_value)) {
+                        // resolve_return_err_member_type already reported a diagnostic for this
+                        // sugar form (unknown/ambiguous variant, etc).
+                        check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    } else {
+                        auto ty = check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                        if (ty.kind == TypeKind::Invalid) {
+                            // check_expr already reported a diagnostic.
+                        } else if (is_error_union_type(ty, program)) {
+                            // Already a full error(...) value — this function's own, or (like
+                            // 'try') a subset of it; propagated as-is by codegen, translating
+                            // tags if the two unions differ.
+                            if (!error_union_is_subset(ty, *fn_error_type, program)) {
+                                diag.report_error(DiagnosticStage::Sema, v.location,
+                                    "'return_err' operand's error type is not a subset of the enclosing function's error type; "
+                                    "widen the enclosing function's 'error(...)' return type or handle the error explicitly");
+                            }
+                        } else {
+                            const auto *wrapper = program.union_at(fn_error_type->union_index);
+                            const bool is_member = wrapper && std::ranges::any_of(
+                                wrapper->error_member_types, [&](const auto &m) { return m == ty; });
+                            if (!is_member) {
+                                diag.report_error(DiagnosticStage::Sema, v.location,
+                                    "'return_err' operand must be a '.Variant', '.Variant(payload)', a value of one of the "
+                                    "enclosing function's error member types, or a compatible 'error(...)' value");
+                            }
                         }
                     }
 

@@ -4031,13 +4031,29 @@ namespace codegen {
             }
 
             void emit_return_err(const ast::ReturnErrStmt &stmt) {
-                // The operand's own sema type is the concrete error MEMBER type (e.g.
-                // MemoryError), not the function's error(...) wrapper — sema resolved it that
-                // way specifically so ordinary enum/tagged-union codegen (emit_expr) applies
-                // unchanged; build_error_failed_value does the Ok/Failed wrapping.
-                const auto member_type = current_module_->expr_types.at(sema::get_expr_key(stmt.error_value));
-                auto *member_val = emit_expr(stmt.error_value);
-                auto *err_val = build_error_failed_value(member_type, member_val, current_returns_.back());
+                // For '.Variant' / '.Variant(payload)' sugar (and any other bare error-member
+                // expression) the operand's sema type is the concrete error MEMBER type (e.g.
+                // MemoryError) — ordinary enum/tagged-union codegen (emit_expr) applies
+                // unchanged; build_error_failed_value does the Ok/Failed wrapping. But sema
+                // also allows the operand to already be a full error(...) value (this
+                // function's own, or a subset of it — see error_union_is_subset in
+                // sema_check.cpp); that case is propagated as-is, translating tags if the two
+                // unions differ, exactly like 'try' propagation.
+                const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(stmt.error_value));
+                auto *operand_val = emit_expr(stmt.error_value);
+
+                if (operand_type.kind == sema::TypeKind::Union) {
+                    const auto *union_info = sema_program_.union_at(operand_type.union_index);
+                    if (union_info && union_info->is_error_union) {
+                        llvm::Value *err_val = (operand_type == current_returns_.back())
+                            ? operand_val
+                            : translate_error_value(operand_val, operand_type, current_returns_.back());
+                        emit_error_return(err_val);
+                        return;
+                    }
+                }
+
+                auto *err_val = build_error_failed_value(operand_type, operand_val, current_returns_.back());
                 emit_error_return(err_val);
             }
 

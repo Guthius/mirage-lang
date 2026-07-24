@@ -1,11 +1,17 @@
 # example_return_ok_err.mir — demonstrates return_err/return_ok, including
-# defer interaction and try propagation through a return_err-producing call.
+# defer interaction, try propagation through a return_err-producing call, and
+# return_err re-propagating a captured error(...) value (same-union, widened-union,
+# and bare-member-value forms).
 
 mut g_cleanup_ran: i32 = 0
 
 pub type TestError = enum(i32) {
     OutOfMemory = 1
     BadInput    = 2
+}
+
+pub type OtherError = enum(i32) {
+    Timeout = 1
 }
 
 # Single non-error value + error, success and failure paths
@@ -48,6 +54,33 @@ fn defer_before_return_ok() -> error(TestError) {
 # try must propagate an error produced via return_err just like any other error
 fn try_propagates_return_err() -> error(TestError) {
     try bare_err()
+    return_ok
+}
+
+# return_err's operand need not be '.Variant' sugar: a captured error(...) value can be
+# re-propagated as-is (same union here — no translation needed).
+fn propagate_captured_same_union() -> error(TestError) {
+    const err := bare_err()
+    if err {
+        return_err err
+    }
+    return_ok
+}
+
+# ...or a bare value of one of the function's error member types, without going through
+# '.Variant' syntax at all.
+fn propagate_bare_member(m: TestError) -> error(TestError) {
+    return_err m
+}
+
+# ...or a captured error(...) value whose member types are a subset of this function's
+# (here TestError is a subset of TestError | OtherError) — cross-union tag translation,
+# same rule 'try' uses.
+fn propagate_captured_widened() -> error(TestError | OtherError) {
+    const err := bare_err()
+    if err {
+        return_err err
+    }
     return_ok
 }
 
@@ -123,6 +156,33 @@ pub fn main() -> i32 {
     const e6 := try_propagates_return_err()
     if !e6 {
         return 13
+    }
+
+    # Test 9: return_err re-propagating a captured error(...) value as-is
+    const e7 := propagate_captured_same_union()
+    if !e7 {
+        return 14
+    }
+    switch e7 {
+        .OutOfMemory: { return 14 },
+        .BadInput: {}
+    }
+
+    # Test 10: return_err with a bare error-member value (no '.Variant' sugar)
+    const e8 := propagate_bare_member(TestError.OutOfMemory)
+    if !e8 {
+        return 15
+    }
+    switch e8 {
+        .OutOfMemory: {},
+        .BadInput: { return 15 }
+    }
+
+    # Test 11: return_err re-propagating a captured error(...) value into a widened
+    # error(...) type (cross-union tag translation)
+    const e9 := propagate_captured_widened()
+    if !e9 {
+        return 16
     }
 
     return 0

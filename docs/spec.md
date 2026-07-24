@@ -730,11 +730,25 @@ Sugar over `return` for fallible functions (functions whose last return type
 is `error(...)`, see §15). Both run deferred statements before returning,
 exactly like `return`.
 
-`return_err <expr>` returns from the current function with the error result
-in the `Failed` state, carrying `<expr>` as the payload; all non-error
-return slots are `undefined` (matching what `try` emits on its
-error-propagation path — the two lower identically). `<expr>` must name a
-variant of one of the function's declared `error(...)` member types:
+`return_err <expr>` returns from the current function with the error
+result; all non-error return slots are `undefined` (matching what `try`
+emits on its error-propagation path — the two lower identically). `<expr>`
+may take any of these forms:
+
+- `.Variant` / `.Variant(payload)` / `TypeName.Variant{.field = value}` —
+  naming a variant of one of the function's declared `error(...)` member
+  types. The result is `Failed`, carrying the constructed variant as the
+  payload.
+- An arbitrary expression whose type is already one of the function's
+  declared `error(...)` member types (e.g. a variable holding a bare enum
+  or tagged-union error value). The result is `Failed`, carrying that value
+  as the payload — equivalent to the variant-sugar forms above but without
+  requiring `.Variant` syntax at the call site.
+- An arbitrary expression whose type is itself an `error(...)` value —
+  this function's own, or (like `try`) one whose member types are a subset
+  of this function's — propagated as-is, `Ok` or `Failed` alike, with
+  cross-union tag translation applied automatically when the two
+  `error(...)` types differ.
 
 ```mirage
 pub type MemoryError = enum(i32) {
@@ -744,6 +758,15 @@ pub type MemoryError = enum(i32) {
 fn alloc(n: usize) -> (anyptr, error(MemoryError)) {
     if n == 0 {
         return_err .OutOfMemory
+    }
+    ...
+}
+
+fn realloc(n: usize) -> (anyptr, error(MemoryError)) {
+    const p, err := alloc(n)
+    if err {
+        # 'err' is already an error(MemoryError) value; propagated as-is.
+        return_err err
     }
     ...
 }
@@ -762,6 +785,11 @@ Sema errors:
 - The named variant does not belong to any of the function's error member
   types.
 - The variant name is ambiguous across member types and was not qualified.
+- The operand is itself an `error(...)` value whose member types are not a
+  subset of the function's declared `error(...)` type.
+- The operand is none of the above (not a `.Variant` form, not a value of
+  one of the function's error member types, and not a compatible
+  `error(...)` value).
 
 `return_ok [expr {, expr}]` returns from the current function with the
 error result in the `Ok` state. The operands supply the non-error return
