@@ -2074,6 +2074,18 @@ namespace codegen {
             }
 
             auto try_namespace_chain(const ast::Expr &expr) const -> std::optional<std::string> {
+                // Inline 'import("...")' used directly as (part of) a MemberExpr chain's base,
+                // e.g. 'import("...").target_os' — mirrors sema's try_resolve_namespace_chain
+                // (sema_check.cpp), resolved and cached by declare_global at sema time since
+                // that's the only point ast::Program::module_imports is available.
+                if (const auto *imp = std::get_if<ast::ImportExpr>(&expr)) {
+                    const auto path_it = current_module_->inline_import_paths.find(imp);
+                    if (path_it == current_module_->inline_import_paths.end()) {
+                        return std::nullopt;
+                    }
+                    return path_it->second;
+                }
+
                 if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
                     if (locals_.contains(ident->name) || macro_args_.contains(ident->name)) {
                         return std::nullopt;
@@ -3686,6 +3698,29 @@ namespace codegen {
                                     }
                                 },
                                 *v);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                            // Cross-module qualified const access, e.g. 'opts.target_os' or
+                            // 'import("...").target_os' — mirrors sema's evaluate_const_value
+                            // MemberExpr case (value_resolver.cpp), which is what sema used to
+                            // decide this global's initializer counts as constant in the first
+                            // place (is_constant_expr_impl gates global const initializers).
+                            if (const auto target_module = try_namespace_chain(v->object)) {
+                                const auto &target = module_for(*target_module);
+                                const auto sym_it = target.symbols.find(v->member);
+                                if (sym_it != target.symbols.end()) {
+                                    if (const auto *g = std::get_if<sema::GlobalSymbol>(&sym_it->second); g && !g->is_mut && g->decl->init) {
+                                        const std::string target_path = *target_module;
+                                        const auto *saved_path = current_module_path_;
+                                        const auto *saved_module = current_module_;
+                                        current_module_path_ = &target_path;
+                                        current_module_ = &target;
+                                        auto *value = emit_const_or_runtime(*g->decl->init, true);
+                                        current_module_path_ = saved_path;
+                                        current_module_ = saved_module;
+                                        return value;
+                                    }
+                                }
+                            }
                         }
 
                         report_codegen_error(diag_, {}, "unsupported global constant initializer");
