@@ -47,7 +47,7 @@ namespace ast {
 
             for (auto &decl : module) {
                 if (auto *var_decl = std::get_if<VarDecl>(&decl); var_decl && var_decl->init) {
-                    if (auto *import_stmt = std::get_if<ImportExpr>(&*var_decl->init)) {
+                    if (const auto *import_stmt = find_leaf_import(*var_decl->init)) {
                         found.emplace_back(import_stmt->module_name, import_stmt->location);
                     }
                 }

@@ -2337,6 +2337,16 @@ namespace ast {
         }
     }
 
+    auto find_leaf_import(const Expr &expr) -> const ImportExpr * {
+        if (const auto *import_expr = std::get_if<ImportExpr>(&expr)) {
+            return import_expr;
+        }
+        if (const auto *member = std::get_if<std::unique_ptr<MemberExpr>>(&expr)) {
+            return find_leaf_import((*member)->object);
+        }
+        return nullptr;
+    }
+
     auto parse_type(Parser &parser) -> Type {
         const auto location = parser.current_location();
 
@@ -2393,13 +2403,27 @@ namespace ast {
 
     auto parse_expr(Parser &parser, const bool allow_import) -> Expr {
         if (parser.check(TokenKind::KwImport)) {
-            if (allow_import) {
+            if (!allow_import) {
+                parser.report_error(parser.current_location(), "'import()' can only be used to initialize a 'const' declaration with no explicit type");
                 return parse_import_expr(parser);
             }
 
-            parser.report_error(parser.current_location(), "'import()' can only be used to initialize a 'const' declaration with no explicit type");
-
-            return parse_import_expr(parser);
+            // import(...) is not a general expression (see find_leaf_import's comment) -
+            // it never enters parse_postfix - but a trailing chain of plain '.field'
+            // accesses is allowed here so `import("...").field` can be written without
+            // first binding the import to its own const.
+            Expr expr = parse_import_expr(parser);
+            while (parser.check(TokenKind::Dot)) {
+                const auto location = parser.current_location();
+                parser.advance();
+                const auto member_name = parser.expect_identifier();
+                expr = make_expr(MemberExpr{
+                    .object = std::move(expr),
+                    .member = member_name,
+                    .location = location,
+                });
+            }
+            return expr;
         }
 
         return parse_assign_expr(parser);

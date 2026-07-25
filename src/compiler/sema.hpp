@@ -227,6 +227,12 @@ namespace sema {
         std::unordered_map<const ast::WhenStmt *, bool> when_stmt_selected;
         // module-scope 'when' DECLARATION -> which branch is live.
         std::unordered_map<const ast::WhenDecl *, bool> when_decl_selected;
+        // ImportExpr node (found nested under a '.field' MemberExpr chain by
+        // ast::find_leaf_import, e.g. `import("...").target_arch`) -> its resolved module
+        // path, cached at declare time (declare_global) since the check phase's
+        // try_resolve_namespace_chain only has access to sema::Program, not the
+        // ast::Program::module_imports map the resolution needs.
+        std::unordered_map<const ast::ImportExpr *, std::string> inline_import_paths;
         bool ok = false;
     };
 

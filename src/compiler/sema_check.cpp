@@ -484,6 +484,23 @@ namespace sema {
         }
 
         auto try_resolve_namespace_chain(const ast::Expr &expr, const std::string &module_path, LocalScope &locals, Program &program) -> std::optional<std::string> {
+            // Inline `import("...")` used directly as (part of) a MemberExpr chain's base,
+            // e.g. `import("...").target_arch` - its module path was already resolved and
+            // cached by declare_global (sema_declare.cpp), keyed by this exact node's
+            // address, since resolving it here would need ast::Program::module_imports,
+            // which isn't threaded through the check phase.
+            if (auto *imp = std::get_if<ast::ImportExpr>(&expr)) {
+                const auto mod_it = program.modules.find(module_path);
+                if (mod_it == program.modules.end()) {
+                    return std::nullopt;
+                }
+                const auto path_it = mod_it->second.inline_import_paths.find(imp);
+                if (path_it == mod_it->second.inline_import_paths.end()) {
+                    return std::nullopt;
+                }
+                return path_it->second;
+            }
+
             if (auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
                 if (locals.contains(ident->name)) {
                     return std::nullopt;

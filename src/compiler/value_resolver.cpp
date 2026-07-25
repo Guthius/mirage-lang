@@ -7,6 +7,33 @@
 
 namespace sema {
     namespace {
+        // Resolves the module a MemberExpr's `object` refers to, for the two shapes cross-
+        // module qualified const access can take: a plain identifier bound to an
+        // ImportSymbol (`opts.target_os`, opts := import(...)) or an inline import used
+        // directly as the object (`import("...").target_os`) — mirrors
+        // try_resolve_namespace_chain's IdentExpr/ImportExpr base cases (sema_check.cpp),
+        // duplicated here since is_constant_expr_impl/evaluate_const_value run without a
+        // LocalScope and need to be checkable before/without a full check_expr pass.
+        auto resolve_member_object_import_path(const ast::Expr &object, const std::string &module_path, const Program &program) -> std::optional<std::string> {
+            if (const auto *obj_ident = std::get_if<ast::IdentExpr>(&object)) {
+                const auto mod_it = program.modules.find(module_path);
+                if (mod_it == program.modules.end()) return std::nullopt;
+                const auto sym_it = mod_it->second.symbols.find(obj_ident->name);
+                if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
+                const auto *imp = std::get_if<ImportSymbol>(&sym_it->second);
+                if (!imp) return std::nullopt;
+                return imp->module_path;
+            }
+            if (const auto *obj_import = std::get_if<ast::ImportExpr>(&object)) {
+                const auto mod_it = program.modules.find(module_path);
+                if (mod_it == program.modules.end()) return std::nullopt;
+                const auto path_it = mod_it->second.inline_import_paths.find(obj_import);
+                if (path_it == mod_it->second.inline_import_paths.end()) return std::nullopt;
+                return path_it->second;
+            }
+            return std::nullopt;
+        }
+
         auto is_constant_expr_impl(const ast::Expr &expr, const std::string &module_path, const Program &program, const std::unordered_set<std::string> &treated_as_const) -> bool {
             if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
                 if (mod_it->second.expr_variant_coercions.contains(get_expr_key(expr))) {
@@ -57,17 +84,10 @@ namespace sema {
                     // MemberExpr case, which is what actually folds this expression's value;
                     // this only decides whether it's ELIGIBLE to be folded at all.
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
-                        const auto *obj_ident = std::get_if<ast::IdentExpr>(&v->object);
-                        if (!obj_ident) return false;
+                        const auto other_module_path = resolve_member_object_import_path(v->object, module_path, program);
+                        if (!other_module_path) return false;
 
-                        const auto mod_it = program.modules.find(module_path);
-                        if (mod_it == program.modules.end()) return false;
-                        const auto sym_it = mod_it->second.symbols.find(obj_ident->name);
-                        if (sym_it == mod_it->second.symbols.end()) return false;
-                        const auto *imp = std::get_if<ImportSymbol>(&sym_it->second);
-                        if (!imp) return false;
-
-                        const auto other_mod_it = program.modules.find(imp->module_path);
+                        const auto other_mod_it = program.modules.find(*other_module_path);
                         if (other_mod_it == program.modules.end()) return false;
                         const auto other_sym_it = other_mod_it->second.symbols.find(v->member);
                         if (other_sym_it == other_mod_it->second.symbols.end()) return false;
@@ -619,25 +639,19 @@ namespace sema {
                 }
 
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
-                    // Cross-module qualified const access, e.g. 'opts.target_os'.
-                    const auto *obj_ident = std::get_if<ast::IdentExpr>(&v->object);
-                    if (!obj_ident) return std::nullopt;
+                    // Cross-module qualified const access, e.g. 'opts.target_os' or
+                    // 'import("opts").target_os'.
+                    const auto other_module_path = resolve_member_object_import_path(v->object, module_path, program);
+                    if (!other_module_path) return std::nullopt;
 
-                    const auto mod_it = program.modules.find(module_path);
-                    if (mod_it == program.modules.end()) return std::nullopt;
-                    const auto sym_it = mod_it->second.symbols.find(obj_ident->name);
-                    if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
-                    const auto *imp = std::get_if<ImportSymbol>(&sym_it->second);
-                    if (!imp) return std::nullopt;
-
-                    const auto other_mod_it = program.modules.find(imp->module_path);
+                    const auto other_mod_it = program.modules.find(*other_module_path);
                     if (other_mod_it == program.modules.end()) return std::nullopt;
                     const auto other_sym_it = other_mod_it->second.symbols.find(v->member);
                     if (other_sym_it == other_mod_it->second.symbols.end()) return std::nullopt;
                     const auto *g = std::get_if<GlobalSymbol>(&other_sym_it->second);
                     if (!g || g->is_mut || !g->decl->init) return std::nullopt;
-                    resolve_global_symbol(imp->module_path, v->member, program, diag, g->decl->location);
-                    return evaluate_const_value(*g->decl->init, imp->module_path, program, diag);
+                    resolve_global_symbol(*other_module_path, v->member, program, diag, g->decl->location);
+                    return evaluate_const_value(*g->decl->init, *other_module_path, program, diag);
                 }
 
                 if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {

@@ -117,6 +117,28 @@ namespace sema {
                 return;
             }
 
+            // Not a bare `const NAME := import(...)` module alias, but the initializer may
+            // still be a chained '.field' access on an inline import (e.g.
+            // `const target_arch := import("...").target_arch`) - resolve and cache the
+            // import's module path now (while the ast::Program::module_imports map built by
+            // module_resolver.cpp is available) so the check phase's
+            // try_resolve_namespace_chain can look it up by node address later. `target_arch`
+            // itself is a plain value here, so it still falls through to the ordinary
+            // GlobalSymbol registration below.
+            if (decl.init) {
+                if (const auto *leaf_import = ast::find_leaf_import(*decl.init)) {
+                    const auto resolved_path = resolve_import(program, module_path, leaf_import->module_name);
+                    if (resolved_path.empty()) {
+                        // Same sentinel-module rationale as the direct-import case above.
+                        const std::string sentinel_path = "<unresolved:" + leaf_import->module_name + ">";
+                        module.inline_import_paths[leaf_import] = sentinel_path;
+                        sema_program.modules[sentinel_path];
+                    } else {
+                        module.inline_import_paths[leaf_import] = resolved_path;
+                    }
+                }
+            }
+
             declare_symbol(
                 module.symbols, decl.name,
                 GlobalSymbol{

@@ -790,4 +790,10 @@ namespace ast {
     auto parse_decl(Parser &parser, bool top_level) -> std::optional<Decl>;
     auto parse_stmt(Parser &parser) -> Stmt;
     auto parse_expr(Parser &parser, bool allow_import = false) -> Expr;
+
+    // Unwraps a chain of MemberExpr.object (e.g. `import(...).a.b`) down to its base
+    // ImportExpr, or returns nullptr if the chain doesn't bottom out in one. Shared by
+    // module_resolver.cpp (import-graph discovery) and sema_declare.cpp/sema_check.cpp
+    // (resolving/caching the module path a chained '.field' access reads from).
+    auto find_leaf_import(const Expr &expr) -> const ImportExpr *;
 }
