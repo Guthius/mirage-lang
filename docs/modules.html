@@ -41,6 +41,7 @@
         <li><a href="traits.html">Traits</a></li>
         <li><a href="error-handling.html">Error Handling</a></li>
         <li><a href="modules.html" class="active">Modules</a></li>
+        <li><a href="comptime-config.html">Compile-Time Config</a></li>
       </ul>
       <div class="sidebar-section">Reference</div>
       <ul>
@@ -100,6 +101,23 @@
     <span class="var">mem</span>.<span class="fn">free</span>(<span class="var">ptr</span>)
     <span class="kw">mut</span> <span class="var">v</span>: <span class="var">mem</span>.<span class="ty">SomeType</span>                    <span class="cmt"># use a type</span>
 }</code></pre>
+
+      <h3 id="inline-member-access">Inline Member Access</h3>
+      <p>
+        When you only need a single value out of a module, you can chain a <code>.field</code> access
+        (or several, for re-exports — see <a href="#chained-module-access">Chained Module Access</a>
+        below) directly onto the <code>import(...)</code> call, instead of binding the whole module to
+        its own <code>const</code> first:
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">target_arch</span> := <span class="kw">import</span>(<span class="str">"../../Core/Build/Options"</span>).<span class="var">target_arch</span></code></pre>
+      <p>
+        This is exactly equivalent to the two-step form — <code>const opts := import("...")</code>
+        followed by a separate <code>opts.target_arch</code> — it only saves a name when you don't need
+        the module itself for anything else. The chain is still only legal as the initializer of a
+        <code>const</code> declaration with no explicit type (same restriction as a bare
+        <code>import(...)</code>), and only plain <code>.field</code> accesses may follow — never a call
+        or index, since the <code>import(...)</code> result itself is still not a value.
+      </p>
 
       <h2>Visibility with <code>pub</code></h2>
       <p>
@@ -176,7 +194,7 @@
     <span class="kw">return</span> <span class="var">result</span>
 }</code></pre>
 
-      <h2>Chained Module Access</h2>
+      <h2 id="chained-module-access">Chained Module Access</h2>
       <p>If a module re-exports another module via <code>pub const</code>, you can chain access:</p>
       <pre><code><span class="cmt"># lib/main.mir</span>
 <span class="kw">pub const</span> <span class="var">utils</span> := <span class="kw">import</span>(<span class="str">"utils"</span>)
@@ -249,7 +267,7 @@
 
       <div class="page-nav">
         <a href="error-handling.html" class="prev"><span class="label">Previous</span>Error Handling</a>
-        <a href="grammar.html" class="next"><span class="label">Next</span>Grammar</a>
+        <a href="comptime-config.html" class="next"><span class="label">Next</span>Compile-Time Config</a>
       </div>
 
     </div>

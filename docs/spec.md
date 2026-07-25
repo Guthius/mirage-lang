@@ -647,6 +647,17 @@ const mod := import("path/to/module")
 
 `import(...)` is only valid as the initializer of a `const` declaration with no explicit type. It binds the imported module as a namespace.
 
+A chain of plain `.field` accesses may follow `import(...)` directly, as a shortcut for pulling a
+single value out of a module without binding the module itself to a name:
+
+```mirage
+const target_arch := import("path/to/module").target_arch
+```
+
+This is equivalent to the two-step form (`const mod := import(...)` then `mod.target_arch`
+elsewhere). Only `.field` accesses are accepted in the chain — never a call or index — since the
+`import(...)` result itself remains a namespace binding, not a value.
+
 ### `import_bin` Expression
 
 ```mirage
@@ -1205,6 +1216,15 @@ const io := import("path/to/module")
 
 `import(...)` is valid only as the initializer of a `const` declaration with no explicit type. The result is a namespace binding, not a value — it cannot be assigned, passed as an argument, or stored.
 
+A chain of plain `.field` accesses is accepted directly after `import(...)` — no call or index —
+as a shortcut for extracting one value without a separate binding for the module itself:
+
+```mirage
+const target_arch := import("path/to/module").target_arch
+```
+
+See [Import Expression](#import-expression) and [Compile-Time Configuration](#12-compile-time-configuration) for a full example.
+
 The path is resolved in two steps:
 1. **Relative to the importing module's own directory** — `<importing-module-dir>/<path>` — if that directory exists, it's used.
 2. Otherwise, relative to the directory named by the **`MIRAGE_PATH` environment variable**, if set. The resolved path must stay inside `MIRAGE_PATH` (no escaping it with `../`); if it doesn't resolve to a directory inside `MIRAGE_PATH`, the import fails.
@@ -1373,14 +1393,16 @@ default/operand.
 ### Example
 
 ```mirage
-const opts := import("Core/Compiler/Options")   # OperatingSystem/Architecture enums + @option-backed consts
+# Core/Compiler/Options/main.mir
+const target_os   := import("Core/Compiler/Options").target_os     # chained '.field' shortcut
+const target_arch := import("Core/Compiler/Options").target_arch   # (see Import Expression)
 
 const raylib_shared := @option("raylib_shared", false)
 
-when opts.target_os == .Windows {
+when target_os == .Windows {
     @link(lib, "windows/raylibdll.lib" when raylib_shared else "windows/raylib.lib")
     @link(system, "User32")
-} else when opts.target_os == .Linux {
+} else when target_os == .Linux {
     @link(lib, "linux/libraylib.so.600" when raylib_shared else "linux/libraylib.a")
     @link(system, "dl")
 } else {

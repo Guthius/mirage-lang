@@ -266,7 +266,7 @@ Expressions are parsed via precedence climbing. Listed from lowest to highest pr
 expr          ::= assign_expr
                | import_expr          (* only in const := position *)
 
-import_expr   ::= 'import' '(' STRING ')'
+import_expr   ::= 'import' '(' STRING ')' { '.' IDENT }
 
 assign_expr   ::= when_expr [ assign_op assign_expr ]
 

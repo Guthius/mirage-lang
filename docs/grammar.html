@@ -51,6 +51,7 @@
         <li><a href="traits.html">Traits</a></li>
         <li><a href="error-handling.html">Error Handling</a></li>
         <li><a href="modules.html">Modules</a></li>
+        <li><a href="comptime-config.html">Compile-Time Config</a></li>
       </ul>
       <div class="sidebar-section">Reference</div>
       <ul>
@@ -78,7 +79,9 @@ declaration   ::= [ 'pub' ] fn_decl
                | [ 'pub' ] type_decl
                | [ 'pub' ] var_decl
                | [ 'pub' ] macro_decl
-               | impl_decl           <span class="bnf-cm">-- impl cannot be pub</span></code></pre>
+               | impl_decl           <span class="bnf-cm">-- impl cannot be pub</span>
+               | link_decl           <span class="bnf-cm">-- cannot be pub</span>
+               | when_decl           <span class="bnf-cm">-- cannot be pub</span></code></pre>
 
       <h2>Declarations</h2>
 
@@ -133,6 +136,29 @@ method_decl   ::= [ 'pub' ] 'fn' IDENT
 
 <span class="bnf-cm">-- in the trait-impl form, 'pub' on an individual method_decl is rejected —
 -- the trait's own visibility governs which methods are externally callable</span></code></pre>
+
+      <h3>Link Declaration</h3>
+      <pre><code>link_decl     ::= '@link' '(' link_category ',' expr ')'
+
+link_category ::= 'lib' | 'system' | 'flag'
+
+<span class="bnf-cm">-- '@' is a sigil, not part of an identifier; 'link' (like 'ext' above) is parsed
+-- as a plain identifier immediately following it, not a reserved keyword. A
+-- module-scope linker directive: 'lib' links a library file (path relative to the
+-- current module file's directory), 'system' links a system library by name,
+-- 'flag' passes a raw linker flag verbatim. 'data' must be a compile-time
+-- constant '[]u8' expression — the when_expr form is legal here. Legal at module
+-- scope or inside a module-scope 'when' block; a sema error everywhere else.</span></code></pre>
+
+      <h3>When Declaration</h3>
+      <pre><code>when_decl     ::= 'when' expr block_decl [ 'else' ( when_decl | block_decl ) ]
+
+block_decl    ::= '{' { declaration } '}'
+
+<span class="bnf-cm">-- a compile-time conditional declaration block; 'expr' must be a compile-time
+-- constant expression. Parses any declaration kind inside block_decl; sema
+-- restricts the permitted kinds to '@link', 'const' with '@option', 'type',
+-- and 'ext fn' — see the Compile-Time Configuration page.</span></code></pre>
 
       <h2>Types</h2>
       <pre><code>type          ::= '*' type                              <span class="bnf-cm">-- pointer</span>
@@ -203,6 +229,9 @@ builtin_type  ::= 'u8' | 'u16' | 'u32' | 'u64'
                | return_err_stmt
                | return_ok_stmt
                | defer_stmt
+               | when_stmt
+               | link_decl           <span class="bnf-cm">-- legal anywhere a stmt is, but always a sema
+                                         error here — parses so the diagnostic can name it precisely</span>
                | expr_stmt
 
 block_stmt    ::= '{' { stmt } '}'
@@ -210,6 +239,14 @@ block_stmt    ::= '{' { stmt } '}'
 if_stmt       ::= 'if' expr stmt [ 'else' stmt ]
 
 while_stmt    ::= 'while' expr block_stmt
+
+when_stmt     ::= 'when' expr block_stmt [ 'else' ( when_stmt | block_stmt ) ]
+
+<span class="bnf-cm">-- 'expr' must be a compile-time constant expression (a sema error otherwise).
+-- Both branches are always type-checked; only the selected branch's statements
+-- are emitted by codegen. The 'then' branch (and each block in an 'else'/
+-- 'else when' chain) must be a literal block_stmt, unlike if_stmt's 'stmt'
+-- which accepts any statement.</span>
 
 for_stmt      ::= 'for' for_binding 'in' for_iterable block_stmt
 
@@ -241,13 +278,26 @@ var_decl_stmt ::= ( 'mut' | 'const' ) IDENT
       <h2>Expressions — Precedence (low → high)</h2>
       <pre><code>expr          ::= assign_expr | import_expr
 
-import_expr   ::= 'import' '(' STRING ')'
-                  <span class="bnf-cm">-- only valid as the initializer of 'const :=' with no type annotation</span>
+import_expr   ::= 'import' '(' STRING ')' { '.' IDENT }
+                  <span class="bnf-cm">-- only valid as the initializer of 'const :=' with no type annotation;
+                  -- the optional trailing '.' IDENT chain is a shortcut for pulling one
+                  -- value out of the module without binding it to its own name first —
+                  -- see the Compile-Time Configuration page</span>
 
-assign_expr   ::= ternary_expr [ assign_op assign_expr ]   <span class="bnf-cm">-- right-associative</span>
+assign_expr   ::= when_expr [ assign_op assign_expr ]   <span class="bnf-cm">-- right-associative</span>
 
 assign_op     ::= '=' | '+=' | '-=' | '*=' | '/='
                | '&amp;=' | '|=' | '^=' | '&lt;&lt;=' | '&gt;&gt;='
+
+when_expr     ::= ternary_expr [ 'when' ternary_expr 'else' expr ]
+
+<span class="bnf-cm">-- 'then_val when cond else else_val' binds looser than every binary operator
+-- (including ternary '?:') but tighter than assignment. Both branches must
+-- have the same type. When 'cond' is a compile-time constant, only the
+-- selected branch is emitted by codegen (both are still type-checked); when
+-- 'cond' is a runtime value, this behaves exactly like ternary '?:'. A bare
+-- unparenthesized nested 'when...else' in 'cond' position does not parse —
+-- see the Compile-Time Configuration page.</span>
 
 ternary_expr  ::= logical_or_expr [ '?' expr ':' expr ]   <span class="bnf-cm">-- right-assoc</span>
 
@@ -319,6 +369,18 @@ arg           ::= expr '...'    <span class="bnf-cm">-- spread; only legal as th
                | braced_initializer
                | dot_ident_expr
                | contextual_tagged_variant
+               | option_expr
+
+option_expr   ::= '@option' '(' STRING [ ',' expr ] ')'
+
+<span class="bnf-cm">-- '@' is a sigil, not part of an identifier; 'option' (like 'link' above) is
+-- parsed as a plain identifier immediately following it, not a reserved
+-- keyword. A compile-time expression: legal only as a 'const' declaration's
+-- whole initializer (module scope or inside a function body), or as a direct
+-- operand of a when_expr/when_stmt (its condition or either branch) — a sema
+-- error everywhere else, including nested inside another expression at one of
+-- those positions. See the Compile-Time Configuration page for the target-type
+-- resolution priority and '--opt' coercion rules.</span>
 
 sizeof_expr   ::= 'sizeof' '(' sizeof_operand ')'
 
@@ -452,7 +514,7 @@ LETTER        ::= 'a' .. 'z' | 'A' .. 'Z' | '_'</code></pre>
       </div>
 
       <div class="page-nav">
-        <a href="modules.html" class="prev"><span class="label">Previous</span>Modules</a>
+        <a href="comptime-config.html" class="prev"><span class="label">Previous</span>Compile-Time Config</a>
       </div>
 
     </div>
