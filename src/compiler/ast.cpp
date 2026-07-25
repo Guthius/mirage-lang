@@ -714,6 +714,37 @@ namespace ast {
             };
         }
 
+        // '@error(message)' / '@warn(message)'. 'warn' (like 'option'/'link' above) is a
+        // plain identifier after '@', not a keyword — but 'error' already IS a keyword
+        // (KwError, for the 'error(T)' type syntax), so lookahead for these two can't share
+        // a single 'Identifier' check; see peek_diagnostic_directive_kind below.
+        auto parse_diagnostic_decl(Parser &parser, const DiagnosticDirectiveKind kind) -> DiagnosticDecl {
+            const auto location = parser.current_location();
+            parser.expect(TokenKind::At, "'@'");
+            parser.advance(); // consume 'error' or 'warn'
+
+            parser.expect(TokenKind::LParen, "'('");
+            auto message = parse_expr(parser);
+            parser.expect(TokenKind::RParen, "')'");
+
+            return DiagnosticDecl{
+                .kind = kind,
+                .message = std::move(message),
+                .location = location,
+            };
+        }
+
+        // Returns which '@error'/'@warn' directive (if any) starts at the CURRENT token
+        // (the '@' itself, not yet consumed) — nullopt if the current token isn't '@' or the
+        // following token doesn't name either directive. 'error' lexes as KwError, 'warn' as
+        // a plain Identifier.
+        auto peek_diagnostic_directive_kind(const Parser &parser) -> std::optional<DiagnosticDirectiveKind> {
+            if (!parser.check(TokenKind::At)) return std::nullopt;
+            if (parser.peek().kind == TokenKind::KwError) return DiagnosticDirectiveKind::Error;
+            if (parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "warn") return DiagnosticDirectiveKind::Warn;
+            return std::nullopt;
+        }
+
         auto parse_primary(Parser &parser) -> Expr {
             const auto location = parser.current_location();
 
@@ -2552,6 +2583,13 @@ namespace ast {
             return parse_link_decl(parser);
         }
 
+        // '@error(...)'/'@warn(...)' parse here for the same reason '@link' does just
+        // above — so sema can reject them inside a function body with a precise "module
+        // scope only" diagnostic instead of a raw parse error.
+        if (const auto directive_kind = peek_diagnostic_directive_kind(parser)) {
+            return parse_diagnostic_decl(parser, *directive_kind);
+        }
+
         if (parser.check(TokenKind::KwFor)) {
             return parse_for_in_stmt(parser);
         }
@@ -2820,6 +2858,15 @@ namespace ast {
                 parser.report_error(parser.current_location(), "'@link' directives cannot be 'pub'");
             }
             return Decl{parse_link_decl(parser)};
+        }
+
+        if (const auto directive_kind = peek_diagnostic_directive_kind(parser)) {
+            if (is_pub) {
+                parser.report_error(parser.current_location(),
+                    std::format("'@{}' directives cannot be 'pub'",
+                        *directive_kind == DiagnosticDirectiveKind::Error ? "error" : "warn"));
+            }
+            return Decl{parse_diagnostic_decl(parser, *directive_kind)};
         }
 
         parser.report_error(

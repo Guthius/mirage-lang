@@ -357,6 +357,8 @@ namespace {
                     out << "\n";
                 } else if constexpr (std::is_same_v<V, ast::LinkDecl>) {
                     out << "@link(...)\n";
+                } else if constexpr (std::is_same_v<V, ast::DiagnosticDecl>) {
+                    out << (v.kind == ast::DiagnosticDirectiveKind::Error ? "@error(...)\n" : "@warn(...)\n");
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenDecl>>) {
                     out << "when "; dump_expr(v->condition, out); out << " {\n";
                     for (auto &d : v->then_decls) dump_decl(d, out);

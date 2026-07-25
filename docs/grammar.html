@@ -81,6 +81,7 @@ declaration   ::= [ 'pub' ] fn_decl
                | [ 'pub' ] macro_decl
                | impl_decl           <span class="bnf-cm">-- impl cannot be pub</span>
                | link_decl           <span class="bnf-cm">-- cannot be pub</span>
+               | diagnostic_decl     <span class="bnf-cm">-- cannot be pub</span>
                | when_decl           <span class="bnf-cm">-- cannot be pub</span></code></pre>
 
       <h2>Declarations</h2>
@@ -150,6 +151,19 @@ link_category ::= 'lib' | 'system' | 'flag'
 -- constant '[]u8' expression — the when_expr form is legal here. Legal at module
 -- scope or inside a module-scope 'when' block; a sema error everywhere else.</span></code></pre>
 
+      <h3>Diagnostic Declaration</h3>
+      <pre><code>diagnostic_decl ::= diagnostic_kw '(' expr ')'
+
+diagnostic_kw   ::= 'error' | 'warn'   <span class="bnf-cm">-- '@error'/'@warn'; 'error' is the KwError
+                                           keyword, 'warn' a plain identifier</span>
+
+<span class="bnf-cm">-- '@' is a sigil, not part of the keyword/identifier that follows it. A
+-- compile-time diagnostic directive: '@error' emits a sema error, '@warn' a
+-- sema warning, at the directive's location. 'expr' must be a compile-time
+-- constant '[]u8' expression, exactly like link_decl's 'data' above. Legal at
+-- module scope or inside a module-scope 'when' block; a sema error everywhere
+-- else — mirrors link_decl exactly.</span></code></pre>
+
       <h3>When Declaration</h3>
       <pre><code>when_decl     ::= 'when' expr block_decl [ 'else' ( when_decl | block_decl ) ]
 
@@ -157,8 +171,8 @@ block_decl    ::= '{' { declaration } '}'
 
 <span class="bnf-cm">-- a compile-time conditional declaration block; 'expr' must be a compile-time
 -- constant expression. Parses any declaration kind inside block_decl; sema
--- restricts the permitted kinds to '@link', 'const' with '@option'/'@env',
--- 'type', and 'ext fn' — see the Compile-Time Configuration page.</span></code></pre>
+-- restricts the permitted kinds to '@link', '@error', '@warn', 'const' with
+-- '@option'/'@env', 'type', and 'ext fn' — see the Compile-Time Configuration page.</span></code></pre>
 
       <h2>Types</h2>
       <pre><code>type          ::= '*' type                              <span class="bnf-cm">-- pointer</span>
@@ -232,6 +246,7 @@ builtin_type  ::= 'u8' | 'u16' | 'u32' | 'u64'
                | when_stmt
                | link_decl           <span class="bnf-cm">-- legal anywhere a stmt is, but always a sema
                                          error here — parses so the diagnostic can name it precisely</span>
+               | diagnostic_decl     <span class="bnf-cm">-- same as link_decl above — always a sema error as a stmt</span>
                | expr_stmt
 
 block_stmt    ::= '{' { stmt } '}'

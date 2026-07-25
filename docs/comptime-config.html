@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Compile-Time Configuration — Mirage</title>
-  <meta name="description" content="Conditional compilation and linking driven by build-time flags and environment variables: @option, @env, @link, and the when statement.">
+  <meta name="description" content="Conditional compilation and linking driven by build-time flags and environment variables: @option, @env, @link, @error, @warn, and the when statement.">
   <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -55,12 +55,12 @@
     <div class="content">
 
       <h1>Compile-Time Configuration</h1>
-      <p class="subtitle">Reading build-time flags and environment variables, and conditionally compiling declarations, statements, and linker inputs with <code>@option</code>, <code>@env</code>, <code>@link</code>, and <code>when</code>.</p>
+      <p class="subtitle">Reading build-time flags and environment variables, and conditionally compiling declarations, statements, and linker inputs with <code>@option</code>, <code>@env</code>, <code>@link</code>, <code>@error</code>/<code>@warn</code>, and <code>when</code>.</p>
 
       <p>
-        Five coupled features let a module read configuration supplied by the compiler driver or the
-        host environment and act on it entirely at compile time — no runtime branching, no dead code
-        left in the binary:
+        Seven coupled features let a module read configuration supplied by the compiler driver or the
+        host environment, act on it entirely at compile time — no runtime branching, no dead code
+        left in the binary — and surface configuration problems as compiler diagnostics:
       </p>
       <ul>
         <li><code>@option</code> — reads a value passed with <code>--opt key=value</code>.</li>
@@ -68,6 +68,7 @@
         <li>the <code>when</code> <strong>statement</strong> — compiles only the selected branch's declarations or statements.</li>
         <li>the <code>when</code> <strong>expression</strong> — folds to one branch's value at compile time (or behaves like a runtime ternary otherwise).</li>
         <li><code>@link</code> — declares a linker input (library, system library, or raw flag) conditionally.</li>
+        <li><code>@error</code>/<code>@warn</code> — emits a compile-time error/warning with a custom message, typically guarded by <code>when</code>.</li>
       </ul>
       <p>
         Together they replace what other languages solve with build scripts, <code>#ifdef</code>, or
@@ -189,11 +190,11 @@
 
       <h3>At Module Scope</h3>
       <p>
-        A module-scope <code>when</code> block may only contain <code>@link</code> declarations,
-        <code>const</code> declarations initialized directly with <code>@option</code>/<code>@env</code>,
-        <code>type</code> declarations, and <code>ext fn</code> declarations. Anything else is a compile
-        error. This restricted set is exactly what's needed for platform-specific externs and type
-        aliases:
+        A module-scope <code>when</code> block may only contain <code>@link</code>, <code>@error</code>,
+        and <code>@warn</code> declarations, <code>const</code> declarations initialized directly with
+        <code>@option</code>/<code>@env</code>, <code>type</code> declarations, and <code>ext fn</code>
+        declarations. Anything else is a compile error. This restricted set is exactly what's needed for
+        platform-specific externs, type aliases, and configuration validation:
       </p>
       <pre><code><span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Windows</span> {
     <span class="kw">ext fn</span> <span class="fn">GetLastError</span>() -&gt; <span class="ty">u32</span>
@@ -266,6 +267,31 @@
         compiler collects every <code>@link</code> reachable from a <em>live</em> <code>when</code>
         branch, across every compiled module, into one list for the driver to act on; directives in an
         unselected branch are type-checked but never collected.
+      </p>
+
+      <h2><code>@error</code> / <code>@warn</code></h2>
+      <pre><code><span class="kw">@error</span>(<span class="var">message</span>)
+<span class="kw">@warn</span>(<span class="var">message</span>)</code></pre>
+      <p>
+        Compile-time diagnostic directives: <code>@error</code> emits a compiler <strong>error</strong>
+        at the directive's location, <code>@warn</code> a <strong>warning</strong>. <code>message</code>
+        must be a compile-time constant <code>[]u8</code> expression, exactly like <code>@link</code>'s
+        <code>data</code> argument. Used on their own they're unconditional — <code>@error(...)</code>
+        reached anywhere in a live position always fails the build. Their real job is inside a
+        <code>when</code> block, rejecting or flagging a bad configuration right where it's selected
+        instead of failing later with a more confusing, indirect error:
+      </p>
+      <pre><code><span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Windows</span> {
+    <span class="kw">@error</span>(<span class="str">"Windows is not supported"</span>)
+} <span class="kw">else when</span> <span class="var">target_arch</span> == .<span class="var">Wasm32</span> {
+    <span class="kw">@warn</span>(<span class="str">"Wasm32 support is experimental"</span>)
+}</code></pre>
+      <p>
+        Like <code>@link</code>, <code>@error</code>/<code>@warn</code> are legal only at module scope,
+        or inside a module-scope <code>when</code> block — anywhere else it's a compile error. And like
+        every other module-scope <code>when</code> directive, the <strong>unselected</strong> branch's
+        <code>message</code> argument is still fully type-checked, it just never actually emits the
+        diagnostic.
       </p>
 
       <h2>Combining With Modules</h2>

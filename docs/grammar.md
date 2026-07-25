@@ -16,6 +16,7 @@ declaration   ::= [ 'pub' ] fn_decl
                | [ 'pub' ] macro_decl
                | impl_decl           (* impl cannot be pub *)
                | link_decl           (* cannot be pub *)
+               | diagnostic_decl     (* cannot be pub *)
                | when_decl           (* cannot be pub *)
 ```
 
@@ -112,6 +113,23 @@ constant `[]u8` expression — the `when` expression form is legal here (see
 below). Legal at module scope or inside a module-scope `when` block; legal
 nowhere else (a sema error, not a parse error — see spec.md).
 
+### Diagnostic Declaration
+
+```ebnf
+diagnostic_decl ::= diagnostic_kw '(' expr ')'
+
+diagnostic_kw   ::= 'error' | 'warn'    (* '@error'/'@warn'; 'error' is the KwError
+                                            keyword, 'warn' a plain identifier *)
+```
+
+`@` is a sigil, not part of the keyword/identifier that follows it. A
+compile-time diagnostic directive: `@error` emits a sema error, `@warn` a
+sema warning, at the directive's location. `expr` must be a compile-time
+constant `[]u8` expression, exactly like `link_decl`'s `data` above. Legal
+at module scope or inside a module-scope `when` block; legal nowhere else
+(a sema error, not a parse error — see spec.md), mirroring `link_decl`
+exactly.
+
 ### When Declaration
 
 ```ebnf
@@ -122,8 +140,9 @@ block_decl    ::= '{' { declaration } '}'
 
 A compile-time conditional declaration block. `expr` must be a compile-time
 constant expression. Parses any declaration kind inside `block_decl`; sema
-restricts the permitted kinds to `@link`, `const` with `@option`/`@env`,
-`type`, and `ext fn` (see spec.md's "Compile-Time Configuration" section).
+restricts the permitted kinds to `@link`, `@error`, `@warn`, `const` with
+`@option`/`@env`, `type`, and `ext fn` (see spec.md's "Compile-Time
+Configuration" section).
 
 ---
 
@@ -203,6 +222,7 @@ stmt          ::= block_stmt
                | when_stmt
                | link_decl          (* legal anywhere a stmt is, but always a SEMA error here —
                                         see spec.md; parses so the diagnostic can name it precisely *)
+               | diagnostic_decl    (* same as link_decl above — always a SEMA error as a stmt *)
                | expr_stmt
 
 block_stmt    ::= '{' { stmt } '}'

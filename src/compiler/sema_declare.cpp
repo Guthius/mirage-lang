@@ -170,6 +170,7 @@ namespace sema {
         // processed.
         auto decl_allowed_in_module_scope_when(const ast::Decl &decl) -> bool {
             if (std::holds_alternative<ast::LinkDecl>(decl)) return true;
+            if (std::holds_alternative<ast::DiagnosticDecl>(decl)) return true;
             if (std::holds_alternative<ast::TypeDecl>(decl)) return true;
             if (std::holds_alternative<ast::ExtFunctionDecl>(decl)) return true;
             if (std::holds_alternative<std::unique_ptr<ast::WhenDecl>>(decl)) return true;
@@ -184,6 +185,7 @@ namespace sema {
         void declare_one_decl(const ast::Decl &decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag);
         void declare_when_decl(const ast::WhenDecl &when_decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag);
         void declare_link_decl(const ast::LinkDecl &link_decl, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, bool collect);
+        void declare_diagnostic_decl(const ast::DiagnosticDecl &decl, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, bool live);
         void check_decl_unreachable(const ast::Decl &decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag);
         void check_when_decl_unreachable(const ast::WhenDecl &when_decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag);
 
@@ -196,8 +198,8 @@ namespace sema {
             for (const auto &decl : decls) {
                 if (!decl_allowed_in_module_scope_when(decl)) {
                     diag.report_error(DiagnosticStage::Sema, decl_location(decl),
-                        "only '@link', 'const' with '@option'/'@env', 'type', and 'ext fn' "
-                        "declarations are permitted inside a module-scope 'when' block.");
+                        "only '@link', '@error', '@warn', 'const' with '@option'/'@env', 'type', "
+                        "and 'ext fn' declarations are permitted inside a module-scope 'when' block.");
                     continue;
                 }
                 if (is_live) {
@@ -228,6 +230,8 @@ namespace sema {
                         }
                     } else if constexpr (std::is_same_v<V, ast::LinkDecl>) {
                         declare_link_decl(v, module_path, sema_program, diag, /*collect=*/false);
+                    } else if constexpr (std::is_same_v<V, ast::DiagnosticDecl>) {
+                        declare_diagnostic_decl(v, module_path, sema_program, diag, /*live=*/false);
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenDecl>>) {
                         check_when_decl_unreachable(*v, program, module_path, module, sema_program, diag);
                     }
@@ -339,6 +343,45 @@ namespace sema {
             });
         }
 
+        // Type-checks '@error'/'@warn's 'message' argument as a compile-time-constant '[]u8'
+        // expression and, if 'live' is true, emits the corresponding sema diagnostic. A
+        // dead-branch '@error'/'@warn' (an unselected 'when' arm) is still fully type-checked
+        // here (per the module-scope 'when' rule every other directive follows) — 'live=false'
+        // just skips the actual diag.report_error/diag.warn call, mirroring declare_link_decl's
+        // 'collect' parameter above.
+        void declare_diagnostic_decl(const ast::DiagnosticDecl &decl, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const bool live) {
+            const auto directive = decl.kind == ast::DiagnosticDirectiveKind::Error ? "@error" : "@warn";
+
+            LocalScope empty;
+            const auto u8_slice = intern_slice(sema_program, ResolvedType{.kind = TypeKind::U8});
+            const auto message_ty = check_expr(decl.message, empty, module_path, sema_program, diag, u8_slice, 0);
+            if (!is_assignable(message_ty, u8_slice)) {
+                diag.report_error(DiagnosticStage::Sema, decl.location,
+                    std::format("'{}' message argument must be a compile-time constant '[]u8' expression", directive));
+                return;
+            }
+            if (!is_constant_expr(decl.message, module_path, sema_program)) {
+                diag.report_error(DiagnosticStage::Sema, decl.location,
+                    std::format("'{}' message argument must be a compile-time constant expression", directive));
+                return;
+            }
+            if (!live) return;
+
+            const auto folded = evaluate_const_value(decl.message, module_path, sema_program, diag);
+            const auto *str = folded ? std::get_if<std::string>(&*folded) : nullptr;
+            if (!str) {
+                diag.report_error(DiagnosticStage::Sema, decl.location,
+                    std::format("internal error: could not resolve '{}' message to a constant string", directive));
+                return;
+            }
+
+            if (decl.kind == ast::DiagnosticDirectiveKind::Error) {
+                diag.report_error(DiagnosticStage::Sema, decl.location, *str);
+            } else {
+                diag.warn(DiagnosticStage::Sema, decl.location, *str);
+            }
+        }
+
         // Folds a module-scope 'when' declaration's condition and either declares its live
         // branch for real (persisting symbols / collecting '@link') or scratch-checks it
         // (dead branch — still fully type-checked, per spec, but never declared/collected).
@@ -412,6 +455,8 @@ namespace sema {
                         }
                     } else if constexpr (std::is_same_v<V, ast::LinkDecl>) {
                         declare_link_decl(v, module_path, sema_program, diag, /*collect=*/true);
+                    } else if constexpr (std::is_same_v<V, ast::DiagnosticDecl>) {
+                        declare_diagnostic_decl(v, module_path, sema_program, diag, /*live=*/true);
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenDecl>>) {
                         declare_when_decl(*v, program, module_path, module, sema_program, diag);
                     }

@@ -2850,6 +2850,14 @@ namespace sema {
                         "'@link' is a linker directive and may only appear at module scope "
                         "or inside a module-scope 'when' block.");
 
+                } else if constexpr (std::is_same_v<V, ast::DiagnosticDecl>) {
+                    // Same reasoning as '@link' just above: parses here only so this
+                    // diagnostic can name the exact construct.
+                    diag.report_error(DiagnosticStage::Sema, v.location,
+                        std::format("'@{}' is a compile-time diagnostic directive and may only "
+                                    "appear at module scope or inside a module-scope 'when' block.",
+                                    v.kind == ast::DiagnosticDirectiveKind::Error ? "error" : "warn"));
+
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenStmt>>) {
                     check_when_stmt(*v, locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base, fn_error_type);
                 }

@@ -552,6 +552,21 @@ namespace ast {
         SourceLocation location;
     };
 
+    // '@error(message)' / '@warn(message)' — compile-time diagnostic directives. Emits a
+    // sema error/warning with 'message' (a compile-time constant '[]u8' expression) when
+    // reached while declaring a LIVE branch — the intended use is guarding it with a
+    // module-scope 'when' block, e.g. 'when target_os == .Windows { @error("Windows is not
+    // supported") } '. Legal at module scope (or inside a module-scope 'when' block); parses
+    // successfully as a Stmt too (inside a function body) purely so sema can reject it there
+    // with a precise diagnostic instead of a raw parse error — mirrors '@link' exactly.
+    enum class DiagnosticDirectiveKind : uint8_t { Error, Warn };
+
+    struct DiagnosticDecl {
+        DiagnosticDirectiveKind kind;
+        Expr message;
+        SourceLocation location;
+    };
+
     struct ExprStmt {
         Expr expr;
         SourceLocation location;
@@ -616,6 +631,7 @@ namespace ast {
         ReturnOkStmt,
         std::unique_ptr<DeferStmt>,
         LinkDecl,
+        DiagnosticDecl,
         std::unique_ptr<WhenStmt>>;
 
     struct DeferStmt {
@@ -784,7 +800,7 @@ namespace ast {
     struct WhenDecl;
 
     using Decl = std::variant<FunctionDecl, ExtFunctionDecl, VarDecl, MacroDecl, TypeDecl, ImplDecl, TraitImplDecl,
-                               LinkDecl, std::unique_ptr<WhenDecl>>;
+                               LinkDecl, DiagnosticDecl, std::unique_ptr<WhenDecl>>;
 
     struct WhenDecl {
         Expr condition;

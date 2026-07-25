@@ -1252,10 +1252,11 @@ Cross-module access uses dot notation. Only `pub` symbols are accessible from ou
 
 ## 12. Compile-Time Configuration
 
-Five coupled features let a module read compile-time-supplied configuration
-and conditionally compile declarations, statements, and linker inputs based
-on it: `@option`, `@env`, `@link`, the `when` statement, and the `when`
-expression.
+Seven coupled features let a module read compile-time-supplied
+configuration, conditionally compile declarations, statements, and linker
+inputs based on it, and surface configuration problems as sema
+diagnostics: `@option`, `@env`, `@link`, `@error`, `@warn`, the `when`
+statement, and the `when` expression.
 
 ### `@option`
 
@@ -1347,6 +1348,42 @@ The compiler collects every `@link` directive reachable from a *live*
 list the driver can act on (the exact linking mechanism is driver-specific
 and out of the compiler's scope — collection only).
 
+### `@error` / `@warn`
+
+```mirage
+@error(message)
+@warn(message)
+```
+
+Compile-time diagnostic directives: `@error` emits a sema **error** at the
+directive's location; `@warn` emits a sema **warning**. `message` must be a
+compile-time constant `[]u8` expression, exactly like `@link`'s `data`
+argument. On their own, both are unconditional — `@error(...)` reached
+anywhere in a live position always fails the build. Their real use is
+inside a `when` block, to reject or flag configurations at the point
+they're selected instead of failing later with a less specific error:
+
+```mirage
+when target_os == .Windows {
+    @error("Windows is not supported")
+} else when target_arch == .Wasm32 {
+    @warn("Wasm32 support is experimental")
+}
+```
+
+Like `@link`, `@error`/`@warn` are legal only at module scope, or inside a
+module-scope `when` block; anywhere else (a function body, an `if`, etc.)
+it is a sema error:
+
+```
+error: '@error' is a compile-time diagnostic directive and may only appear
+       at module scope or inside a module-scope 'when' block.
+```
+
+The **unselected** branch of a `when` still fully type-checks an
+`@error`/`@warn` directive's `message` argument (per the "both branches
+type-checked" rule below) — it just never actually emits the diagnostic.
+
 ### `when` Statement
 
 ```mirage
@@ -1377,13 +1414,15 @@ emitted by codegen; the other branch is never executed and never even
 visited by codegen (an `ext fn` declared only in an unselected module-scope
 branch, for instance, never needs an LLVM declaration synthesized for it).
 
-**At module scope**, a `when` block may contain only `@link` declarations,
-`const` declarations initialized directly with `@option`/`@env`, `type`
-declarations, and `ext fn` declarations — anything else is a sema error:
+**At module scope**, a `when` block may contain only `@link`, `@error`, and
+`@warn` declarations, `const` declarations initialized directly with
+`@option`/`@env`, `type` declarations, and `ext fn` declarations — anything
+else is a sema error:
 
 ```
-error: only '@link', 'const' with '@option'/'@env', 'type', and 'ext fn'
-       declarations are permitted inside a module-scope 'when' block.
+error: only '@link', '@error', '@warn', 'const' with '@option'/'@env',
+       'type', and 'ext fn' declarations are permitted inside a
+       module-scope 'when' block.
 ```
 
 This is what makes platform-specific `ext fn` declarations possible:
@@ -1661,11 +1700,14 @@ The following identifiers are reserved by the language:
 `break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `import_bin` `in` `iota` `len` `macro` `match` `mut` `nil` `pub` `return` `return_err` `return_ok` `sizeof` `stackalloc` `struct` `switch` `trait` `true` `try` `type` `undefined` `union` `when` `while`
 
 `ext` is parsed as an identifier, not a keyword; it is used as the prefix
-for extern function declarations. `option` and `link` are likewise parsed
-as plain identifiers, not keywords — they're only meaningful immediately
-after the `@` sigil (`@option(...)`, `@link(...)`, see
-[Compile-Time Configuration](#12-compile-time-configuration)); `option` and
-`link` remain ordinary, unreserved identifiers everywhere else.
+for extern function declarations. `option`, `env`, `link`, and `warn` are
+likewise parsed as plain identifiers, not keywords — they're only
+meaningful immediately after the `@` sigil (`@option(...)`, `@env(...)`,
+`@link(...)`, `@warn(...)`, see
+[Compile-Time Configuration](#12-compile-time-configuration)) and remain
+ordinary, unreserved identifiers everywhere else. `error` (used both as the
+`error(T)` type syntax and after `@` in `@error(...)`) IS a reserved
+keyword, unlike its three siblings above.
 
 ### Reserved for Future Use
 

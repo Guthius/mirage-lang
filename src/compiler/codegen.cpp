@@ -3896,8 +3896,8 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenStmt>>) {
                             emit_when_stmt(*v);
                         }
-                        // ast::LinkDecl reaching here is a sema error (rejected in check_stmt) —
-                        // nothing to emit even in an already-erroring program.
+                        // ast::LinkDecl/ast::DiagnosticDecl reaching here is a sema error (rejected
+                        // in check_stmt) — nothing to emit even in an already-erroring program.
                     },
                     stmt);
             }
