@@ -764,6 +764,19 @@ namespace sema {
                     return it->second;
                 }
 
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
+                    // Mirrors WhenExpr below - is_constant_expr_impl already treats a
+                    // ternary-of-constants as eligible (same shape as WhenExpr's check), so
+                    // this fold must exist too or that eligibility check is a dead end: any
+                    // constant-only context (e.g. '@link's data argument) that accepts a
+                    // ternary here would hit an "internal error: could not resolve" instead
+                    // of the correct diagnostic or value.
+                    const auto cond = evaluate_const_value(v->condition, module_path, program, diag);
+                    const auto *ci = cond ? std::get_if<int64_t>(&*cond) : nullptr;
+                    if (!ci) return std::nullopt;
+                    return evaluate_const_value(*ci != 0 ? v->then_expr : v->else_expr, module_path, program, diag);
+                }
+
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
                     const auto cond = evaluate_const_value(v->condition, module_path, program, diag);
                     const auto *ci = cond ? std::get_if<int64_t>(&*cond) : nullptr;

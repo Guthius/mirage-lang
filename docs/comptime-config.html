@@ -203,16 +203,26 @@
         <li><strong>Runtime value</strong> — behaves exactly like the ternary <code>?:</code>: both
           branches are emitted and the result is chosen at runtime.</li>
       </ul>
-      <div class="callout warning">
-        <div class="callout-title"><code>?:</code> never folds — use <code>when</code>/<code>else</code> for constant contexts</div>
-        The ternary <code>?:</code> operator is always a runtime construct, even when both branches are
-        literals. Anywhere a compile-time constant is required — like <code>@link</code>'s data argument
-        below — use <code>when</code>/<code>else</code>, not <code>?:</code>.
-        <pre><code><span class="cmt"># wrong — '?:' doesn't fold, so this can't satisfy '@link's constant requirement</span>
-<span class="fn">@link</span>(<span class="var">lib</span>, <span class="var">raylib_shared</span> ? <span class="str">"raylibdll.lib"</span> : <span class="str">"raylib.lib"</span>)
+      <p>
+        The ordinary ternary <code>?:</code> also folds to a compile-time constant when its condition
+        and both branches are themselves constants, so it works fine anywhere a constant is required —
+        like <code>@link</code>'s data argument:
+      </p>
+      <pre><code><span class="fn">@link</span>(<span class="var">lib</span>, <span class="var">raylib_shared</span> ? <span class="str">"raylibdll.lib"</span> : <span class="str">"raylib.lib"</span>)   <span class="cmt"># folds fine</span></code></pre>
+      <div class="callout tip">
+        <div class="callout-title">Prefer <code>when</code>/<code>else</code> for platform-specific branches</div>
+        The difference that survives is <em>where</em> the unselected branch's code gets skipped.
+        <code>when</code>/<code>else</code> skips it everywhere, including plain runtime-looking
+        expressions — so it's still the right choice when a branch references something that only
+        makes sense on one target (an <code>ext fn</code> only declared for that platform, say).
+        Plain <code>?:</code> only skips emitting the unselected side when the whole expression sits
+        somewhere a constant is required in the first place; used as an ordinary value it always
+        builds a runtime branch, even with two literal operands.
+        <pre><code><span class="cmt"># right for a value that only needs to be constant-foldable</span>
+<span class="fn">@link</span>(<span class="var">lib</span>, <span class="str">"raylibdll.lib"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"raylib.lib"</span>)
 
-<span class="cmt"># right</span>
-<span class="fn">@link</span>(<span class="var">lib</span>, <span class="str">"raylibdll.lib"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"raylib.lib"</span>)</code></pre>
+<span class="cmt"># right when a branch wouldn't even compile on the other target</span>
+<span class="kw">const</span> <span class="var">err_code</span> := <span class="fn">GetLastError</span>() <span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Windows</span> <span class="kw">else</span> <span class="num">0</span>   <span class="cmt"># GetLastError only exists on Windows</span></code></pre>
       </div>
 
       <h2><code>@link</code></h2>
