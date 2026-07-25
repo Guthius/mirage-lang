@@ -1272,18 +1272,11 @@ error: required option 'build/target_os' was not provided.
        Pass it with: --opt build/target_os=<value>
 ```
 
-**Legal positions** — `@option` may appear only:
-- As the (whole) initializer of a `const` declaration, at module scope or inside a function body.
-- As a direct operand of a `when` expression or `when` statement (its condition, or either branch).
-
-Anywhere else — as an argument to an ordinary function call, the RHS of a
-`mut` variable, nested inside arithmetic (`@option(...) + 1`), etc. — it is
-a sema error:
-
-```
-error: '@option' is a compile-time expression and may only appear in
-       const declarations or when conditions.
-```
+`@option` is legal anywhere an expression is legal — nested inside
+arithmetic (`@option(...) + 1`), passed as a function argument (including
+`@link`'s `data` argument), as a `mut` variable's initializer, and so on.
+Its value is always resolved once from `--opt`/the default and cached, so it
+behaves as an ordinary compile-time-constant expression wherever it appears.
 
 **Target-type resolution**, in priority order:
 1. The expected type from context (e.g. the declared type of a `const`).

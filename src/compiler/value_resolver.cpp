@@ -321,7 +321,7 @@ namespace sema {
 
         if (g->decl->init) {
             LocalScope no_locals;
-            const auto init_ty = check_expr(*g->decl->init, no_locals, module_path, program, diag, has_declared_ty ? std::optional(declared_ty) : std::nullopt, 0, -1, nullptr, /*in_option_position=*/!g->is_mut);
+            const auto init_ty = check_expr(*g->decl->init, no_locals, module_path, program, diag, has_declared_ty ? std::optional(declared_ty) : std::nullopt, 0, -1, nullptr);
             if (has_declared_ty) {
                 if (!is_assignable(init_ty, declared_ty)) {
                     diag.report_error(DiagnosticStage::Sema, g->decl->location, "type mismatch in variable declaration");

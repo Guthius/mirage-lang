@@ -375,11 +375,11 @@ option_expr   ::= '@option' '(' STRING [ ',' expr ] ')'
 
 <span class="bnf-cm">-- '@' is a sigil, not part of an identifier; 'option' (like 'link' above) is
 -- parsed as a plain identifier immediately following it, not a reserved
--- keyword. A compile-time expression: legal only as a 'const' declaration's
--- whole initializer (module scope or inside a function body), or as a direct
--- operand of a when_expr/when_stmt (its condition or either branch) — a sema
--- error everywhere else, including nested inside another expression at one of
--- those positions. See the Compile-Time Configuration page for the target-type
+-- keyword. Legal anywhere primary_expr is legal — nested inside arithmetic,
+-- as a call argument (including '@link's data), as a 'mut' initializer, etc.
+-- Its value is resolved once from '--opt'/the default and cached, so it
+-- composes as an ordinary compile-time-constant expression wherever it's
+-- written. See the Compile-Time Configuration page for the target-type
 -- resolution priority and '--opt' coercion rules.</span>
 
 sizeof_expr   ::= 'sizeof' '(' sizeof_operand ')'

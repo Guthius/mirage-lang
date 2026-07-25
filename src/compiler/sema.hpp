@@ -398,12 +398,7 @@ namespace sema {
     auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
     auto resolve_global_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
     auto resolve_macro_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> MacroSymbol &;
-    // 'in_option_position' gates '@option(...)' legality: true only at the handful of call
-    // sites the spec allows it (a const declaration's own initializer, and a 'when'
-    // statement/expression's condition/then/else) — NOT propagated into ordinary recursive
-    // sub-checks (binary operands, call arguments, etc.), so '@option' nested inside
-    // arithmetic or passed to a function is still rejected. See check_expr's OptionExpr case.
-    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, std::optional<ResolvedType> expected, int loop_depth, int defer_loop_base = -1, const ResolvedType *fn_error_type = nullptr, bool in_option_position = false) -> ResolvedType;
+    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, std::optional<ResolvedType> expected, int loop_depth, int defer_loop_base = -1, const ResolvedType *fn_error_type = nullptr) -> ResolvedType;
     auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth, int defer_loop_base = -1) -> void;
     auto is_constant_expr(const ast::Expr &expr, const std::string &module_path, const Program &program) -> bool;
     // Evaluate a compile-time integer or bool constant expression. Returns nullopt if the expression

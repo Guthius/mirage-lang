@@ -410,14 +410,13 @@ braced_initializer ::= '{' '}'                                        (* empty *
 
 `@` is a sigil, not part of an identifier; `option` (like `link` in
 `link_decl` above) is parsed as a plain identifier immediately following it,
-not a reserved keyword. `option_expr` is a compile-time expression: legal
-only as a `const` declaration's initializer (module scope or inside a
-function body) or as a direct operand of a `when_expr`/`when_stmt` (its
-condition or either branch) — a sema error everywhere else, including nested
-inside another expression at one of those positions (e.g. `@option(...) + 1`
-in a `const` initializer is rejected; the `@option(...)` must be the whole
-initializer). See spec.md's "Compile-Time Configuration" section for the
-target-type resolution priority and `--opt` coercion rules.
+not a reserved keyword. `option_expr` is legal anywhere `primary_expr` is
+legal — nested inside arithmetic, as a call argument (including `@link`'s
+`data`), as a `mut` initializer, etc. Its value is resolved once from
+`--opt`/the default and cached, so it composes as an ordinary compile-time-
+constant expression wherever it's written. See spec.md's "Compile-Time
+Configuration" section for the target-type resolution priority and `--opt`
+coercion rules.
 
 ---
 

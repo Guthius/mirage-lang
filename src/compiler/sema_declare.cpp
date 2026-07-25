@@ -221,7 +221,7 @@ namespace sema {
                         std::optional<ResolvedType> declared_ty;
                         if (v.type) declared_ty = resolve_type(*v.type, module_path, sema_program, diag);
                         if (v.init) {
-                            check_expr(*v.init, empty, module_path, sema_program, diag, declared_ty, 0, -1, nullptr, /*in_option_position=*/true);
+                            check_expr(*v.init, empty, module_path, sema_program, diag, declared_ty, 0, -1, nullptr);
                         }
                     } else if constexpr (std::is_same_v<V, ast::LinkDecl>) {
                         declare_link_decl(v, module_path, sema_program, diag, /*collect=*/false);
@@ -241,7 +241,7 @@ namespace sema {
         // be declared for real regardless of how this nested condition itself would fold.
         void check_when_decl_unreachable(const ast::WhenDecl &when_decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
             LocalScope empty;
-            check_expr(when_decl.condition, empty, module_path, sema_program, diag, ResolvedType{.kind = TypeKind::Bool}, 0, -1, nullptr, /*in_option_position=*/true);
+            check_expr(when_decl.condition, empty, module_path, sema_program, diag, ResolvedType{.kind = TypeKind::Bool}, 0, -1, nullptr);
             if (!is_constant_expr(when_decl.condition, module_path, sema_program)) {
                 diag.report_error(DiagnosticStage::Sema, when_decl.location,
                     "'when' condition must be a compile-time constant expression. "
@@ -343,7 +343,7 @@ namespace sema {
             ensure_condition_modules_declared(when_decl.condition, program, module_path, module, sema_program, diag);
 
             LocalScope empty;
-            check_expr(when_decl.condition, empty, module_path, sema_program, diag, ResolvedType{.kind = TypeKind::Bool}, 0, -1, nullptr, /*in_option_position=*/true);
+            check_expr(when_decl.condition, empty, module_path, sema_program, diag, ResolvedType{.kind = TypeKind::Bool}, 0, -1, nullptr);
 
             bool selected = false;
             if (!is_constant_expr(when_decl.condition, module_path, sema_program)) {

@@ -87,22 +87,17 @@
        Pass it with: --opt build/target_os=&lt;value&gt;</code></pre>
 
       <h3>Where It Can Appear</h3>
-      <p><code>@option</code> is only legal in two positions:</p>
-      <ul>
-        <li>As the whole initializer of a <code>const</code> declaration (module scope or inside a function).</li>
-        <li>As a direct operand of a <code>when</code> expression or <code>when</code> statement — its condition, or either branch.</li>
-      </ul>
-      <div class="callout warning">
-        <div class="callout-title">Not a general sub-expression</div>
-        <code>@option(...)</code> cannot be nested inside arithmetic, passed as a function argument, or
-        used as a <code>mut</code> variable's initializer. Bind it to its own <code>const</code> first:
-        <pre><code><span class="cmt"># wrong — '@option' as a call argument</span>
+      <p>
+        <code>@option</code> is a normal expression — legal anywhere an expression is legal, including
+        nested inside arithmetic, passed straight as a function argument (<code>@link</code>'s
+        <code>data</code> argument included), or as a <code>mut</code> variable's initializer. Its
+        value is resolved once from <code>--opt</code>/the default and cached, so it behaves as an
+        ordinary compile-time-constant wherever it's written:
+      </p>
+      <pre><code><span class="cmt"># no need to bind it to a const first</span>
 <span class="fn">@link</span>(<span class="var">lib</span>, <span class="kw">@option</span>(<span class="str">"wasm_lib"</span>, <span class="str">"libraylib.web.a"</span>))
 
-<span class="cmt"># right — bind it to a const first</span>
-<span class="kw">const</span> <span class="var">wasm_lib</span> := <span class="kw">@option</span>(<span class="str">"wasm_lib"</span>, <span class="str">"libraylib.web.a"</span>)
-<span class="fn">@link</span>(<span class="var">lib</span>, <span class="var">wasm_lib</span>)</code></pre>
-      </div>
+<span class="kw">mut</span> <span class="var">retries</span> := <span class="kw">@option</span>(<span class="str">"max_retries"</span>, <span class="num">3</span>) + <span class="num">1</span>   <span class="cmt"># retries is mut afterward</span></code></pre>
 
       <h3>Target Type</h3>
       <p>The type <code>@option</code> coerces the raw <code>--opt</code> string into is chosen in this order:</p>
@@ -290,10 +285,9 @@
 <span class="kw">pub const</span> <span class="var">target_arch</span>: <span class="ty">Architecture</span>    = <span class="kw">@option</span>(<span class="str">"build/target_arch"</span>, .<span class="var">X86_64</span>)</code></pre>
       <pre><code><span class="cmt"># raylib_binding/main.mir</span>
 
-<span class="kw">const</span> <span class="var">target_os</span>       := <span class="kw">import</span>(<span class="str">"../../Core/Build/Options"</span>).<span class="var">target_os</span>
-<span class="kw">const</span> <span class="var">target_arch</span>     := <span class="kw">import</span>(<span class="str">"../../Core/Build/Options"</span>).<span class="var">target_arch</span>
-<span class="kw">const</span> <span class="var">raylib_shared</span>   := <span class="kw">@option</span>(<span class="str">"raylib/shared"</span>, <span class="lit">false</span>)
-<span class="kw">const</span> <span class="var">raylib_wasm_lib</span> := <span class="kw">@option</span>(<span class="str">"raylib/wasm_lib"</span>, <span class="str">"wasm/libraylib.web.a"</span>)
+<span class="kw">const</span> <span class="var">target_os</span>     := <span class="kw">import</span>(<span class="str">"../../Core/Build/Options"</span>).<span class="var">target_os</span>
+<span class="kw">const</span> <span class="var">target_arch</span>   := <span class="kw">import</span>(<span class="str">"../../Core/Build/Options"</span>).<span class="var">target_arch</span>
+<span class="kw">const</span> <span class="var">raylib_shared</span> := <span class="kw">@option</span>(<span class="str">"raylib/shared"</span>, <span class="lit">false</span>)
 
 <span class="cmt"># Windows</span>
 <span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Windows</span> {
@@ -317,7 +311,7 @@
 
 <span class="cmt"># WebAssembly</span>
 <span class="kw">when</span> <span class="var">target_arch</span> == .<span class="var">Wasm32</span> || <span class="var">target_arch</span> == .<span class="var">Wasm64p32</span> {
-    <span class="kw">@link</span>(<span class="var">lib</span>, <span class="var">raylib_wasm_lib</span>)
+    <span class="kw">@link</span>(<span class="var">lib</span>, <span class="kw">@option</span>(<span class="str">"raylib/wasm_lib"</span>, <span class="str">"wasm/libraylib.web.a"</span>))
 }
 
 <span class="cmt"># Windows has 32-bit 'long' even on x64...</span>

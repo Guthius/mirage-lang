@@ -400,9 +400,11 @@ namespace ast {
     };
 
     // '@option(key)' / '@option(key, default)' — a compile-time expression that reads a
-    // value supplied by the compiler driver via '--opt key=value'. Legal only in const
-    // declaration initializers and 'when' conditions/operands; enforced in sema, not the
-    // parser (see check_expr's 'in_option_position' parameter).
+    // value supplied by the compiler driver via '--opt key=value'. Legal anywhere an
+    // expression is legal (arithmetic, call arguments, 'mut' initializers, ...): its value
+    // is always resolved once from '--opt'/the default and cached (ProgramModule::
+    // expr_option_values), so it composes with is_constant_expr/evaluate_const_value like
+    // any other compile-time-constant expression — see check_expr's OptionExpr case.
     struct OptionExpr {
         std::string key;
         std::optional<Expr> default_value;

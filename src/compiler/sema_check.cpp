@@ -792,7 +792,7 @@ namespace sema {
         }
     }
 
-    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type, const bool in_option_position) -> ResolvedType {
+    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
         const auto ty = std::visit(
             [&]<typename T0>(const T0 &v) -> ResolvedType {
                 using V = std::decay_t<T0>;
@@ -962,33 +962,23 @@ namespace sema {
                     return then_ty;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
-                    if (!in_option_position) {
-                        return error(diag, v->location,
-                            "'@option' is a compile-time expression and may only appear in "
-                            "const declarations or when conditions.");
-                    }
                     return resolve_option_expr(get_expr_key(expr), *v, expected, module_path, program, diag);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
-                    // '@option' is explicitly legal as a direct operand of a 'when' expression
-                    // (condition or either branch), per spec — granted unconditionally here,
-                    // not forwarded from the outer call's own in_option_position, matching the
-                    // spec's phrasing of this as a standalone legal position.
-                    check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type, /*in_option_position=*/true);
-                    ResolvedType then_ty = check_expr(v->then_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type, /*in_option_position=*/true);
-                    const ResolvedType else_ty = check_expr(v->else_expr, locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type, /*in_option_position=*/true);
+                    check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
+                    ResolvedType then_ty = check_expr(v->then_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+                    const ResolvedType else_ty = check_expr(v->else_expr, locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
                     if (then_ty != else_ty) {
                         return error(diag, v->location, "'when' expression branches have different types");
                     }
 
-                    // A runtime condition is fine in general (behaves like an ordinary
-                    // ternary — both branches type-checked AND emitted); the spec's
-                    // restriction to compile-time-constant conditions specifically inside
-                    // '@option'/'@link' contexts is enforced at THOSE call sites instead
-                    // (resolve_option_expr's default-value fold, declare_link_decl's
-                    // is_constant_expr check) — not here, since 'in_option_position' being
-                    // true merely means "@option is legal here" (e.g. any const
-                    // declaration), not "this whole expression must be foldable".
+                    // The condition/branches may freely contain '@option(...)' (or anything
+                    // else) — '@option' is always a compile-time-constant expression (see
+                    // OptionExpr's doc comment in ast.hpp), so no special-casing is needed
+                    // here beyond the ordinary is_constant_expr/evaluate_const_value fold
+                    // below. The restriction to compile-time-constant conditions specifically
+                    // inside '@link' contexts is enforced at that call site instead
+                    // (declare_link_decl's is_constant_expr check).
                     if (is_constant_expr(v->condition, module_path, program)) {
                         if (const auto folded = evaluate_const_value(v->condition, module_path, program, diag)) {
                             if (const auto *iv = std::get_if<int64_t>(&*folded)) {
@@ -2239,7 +2229,7 @@ namespace sema {
     // recurse directly on a dereferenced 'const ast::WhenStmt&' without needing to
     // reconstruct an ast::Stmt variant around a borrowed (non-owned) unique_ptr.
     void check_when_stmt(const ast::WhenStmt &when_stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) {
-        check_expr(when_stmt.condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type, /*in_option_position=*/true);
+        check_expr(when_stmt.condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
 
         bool selected = false;
         if (!is_constant_expr(when_stmt.condition, module_path, program)) {
@@ -2419,7 +2409,7 @@ namespace sema {
                             diag.report_error(DiagnosticStage::Sema, v.location, "'undefined' is not allowed in a 'const' declaration");
                         }
                         auto init_ty = check_expr(*v.init, locals, module_path, program, diag,
-                                                  has_declared_ty ? std::optional(declared_ty) : std::nullopt, loop_depth, defer_loop_base, fn_error_type, /*in_option_position=*/!v.is_mut);
+                                                  has_declared_ty ? std::optional(declared_ty) : std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         if (has_declared_ty && !assignable_in_module(init_ty, declared_ty, module_path, program)) {
                             diag.report_error(DiagnosticStage::Sema, v.location, "type mismatch in variable declaration");
                         }
