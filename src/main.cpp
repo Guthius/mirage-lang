@@ -304,6 +304,8 @@ namespace {
                     dump_expr(v->object, out); out << "." << v->member;
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
                     out << "@option(\"" << v->key << "\")";
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
+                    out << "@env(\"" << v->key << "\")";
                 } else if constexpr (std::is_same_v<V, ast::ImportExpr>) {
                     out << "import(\"" << v.module_name << "\")";
                 } else {

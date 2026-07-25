@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <format>
 #include <unordered_set>
 
@@ -229,6 +230,12 @@ namespace sema {
                     // Always compile-time evaluable (like SizeOfExpr/ImportBinExpr above) — its
                     // value comes from '--opt' or a constant default, never a runtime store.
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
+                        return true;
+                    }
+
+                    // Same as OptionExpr above, but the value comes from an environment
+                    // variable or a constant default — still never a runtime store.
+                    if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
                         return true;
                     }
 
@@ -493,10 +500,14 @@ namespace sema {
     }
 
     namespace {
-        // Coerces a raw '--opt key=value' string against @option's resolved target type.
-        // Reports its own diagnostic (naming 'key') and returns nullopt on failure.
+        // Coerces a raw '--opt key=value' (or '@env' environment-variable) string against
+        // @option's/@env's resolved target type. Reports its own diagnostic (naming 'key')
+        // and returns nullopt on failure. 'directive' ("@option"/"@env") and 'noun'
+        // ("option"/"environment variable") let the two callers share this logic while
+        // keeping diagnostics accurate about where the value actually came from.
         auto coerce_option_string(const std::string &raw, const ResolvedType &target, const Program &program,
-                                   DiagnosticEngine &diag, const SourceLocation &loc, const std::string &key) -> std::optional<ConstFoldValue> {
+                                   DiagnosticEngine &diag, const SourceLocation &loc, const std::string &key,
+                                   const char *directive, const char *noun) -> std::optional<ConstFoldValue> {
             switch (target.kind) {
             case TypeKind::Bool: {
                 std::string lower = raw;
@@ -504,7 +515,7 @@ namespace sema {
                 if (lower == "true" || lower == "1") return int64_t{1};
                 if (lower == "false" || lower == "0") return int64_t{0};
                 diag.report_error(DiagnosticStage::Sema, loc,
-                    std::format("option '{}' expects a boolean value ('true'/'false'/'1'/'0'), got '{}'", key, raw));
+                    std::format("{} '{}' expects a boolean value ('true'/'false'/'1'/'0'), got '{}'", noun, key, raw));
                 return std::nullopt;
             }
             case TypeKind::I8: case TypeKind::I16: case TypeKind::I32: case TypeKind::I64:
@@ -517,7 +528,7 @@ namespace sema {
                     return static_cast<int64_t>(parsed);
                 } catch (...) {
                     diag.report_error(DiagnosticStage::Sema, loc,
-                        std::format("option '{}' expects an integer value, got '{}'", key, raw));
+                        std::format("{} '{}' expects an integer value, got '{}'", noun, key, raw));
                     return std::nullopt;
                 }
             }
@@ -526,7 +537,7 @@ namespace sema {
                     return raw;
                 }
                 diag.report_error(DiagnosticStage::Sema, loc,
-                    std::format("'@option' does not support this target type for option '{}'", key));
+                    std::format("'{}' does not support this target type for {} '{}'", directive, noun, key));
                 return std::nullopt;
             }
             case TypeKind::Enum: {
@@ -553,12 +564,12 @@ namespace sema {
                     valid_names += field.name;
                 }
                 diag.report_error(DiagnosticStage::Sema, loc,
-                    std::format("option '{}' value '{}' does not match any variant of this enum; valid values: {}", key, raw, valid_names));
+                    std::format("{} '{}' value '{}' does not match any variant of this enum; valid values: {}", noun, key, raw, valid_names));
                 return std::nullopt;
             }
             default:
                 diag.report_error(DiagnosticStage::Sema, loc,
-                    std::format("'@option' does not support this target type for option '{}'", key));
+                    std::format("'{}' does not support this target type for {} '{}'", directive, noun, key));
                 return std::nullopt;
             }
         }
@@ -588,7 +599,7 @@ namespace sema {
 
         const auto opt_it = program.options.opt_values.find(opt.key);
         if (opt_it != program.options.opt_values.end()) {
-            resolved_value = coerce_option_string(opt_it->second, target, program, diag, opt.location, opt.key);
+            resolved_value = coerce_option_string(opt_it->second, target, program, diag, opt.location, opt.key, "@option", "option");
         } else if (opt.default_value) {
             resolved_value = evaluate_const_value(*opt.default_value, module_path, program, diag);
             if (!resolved_value) {
@@ -598,6 +609,46 @@ namespace sema {
         } else {
             diag.report_error(DiagnosticStage::Sema, opt.location,
                 std::format("required option '{}' was not provided.\n       Pass it with: --opt {}=<value>", opt.key, opt.key));
+        }
+
+        if (resolved_value) {
+            if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
+                mod_it->second.expr_option_values[expr_key] = *resolved_value;
+            }
+        }
+
+        return target;
+    }
+
+    auto resolve_env_expr(const void *expr_key, const ast::EnvExpr &opt, std::optional<ResolvedType> expected,
+                           const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType {
+        ResolvedType target;
+        if (expected) {
+            target = *expected;
+            if (opt.default_value) {
+                LocalScope empty;
+                check_expr(*opt.default_value, empty, module_path, program, diag, target, 0);
+            }
+        } else if (opt.default_value) {
+            LocalScope empty;
+            target = check_expr(*opt.default_value, empty, module_path, program, diag, std::nullopt, 0);
+        } else {
+            target = intern_slice(program, ResolvedType{.kind = TypeKind::U8});
+        }
+
+        std::optional<ConstFoldValue> resolved_value;
+
+        if (const char *env_value = std::getenv(opt.key.c_str()); env_value != nullptr) {
+            resolved_value = coerce_option_string(env_value, target, program, diag, opt.location, opt.key, "@env", "environment variable");
+        } else if (opt.default_value) {
+            resolved_value = evaluate_const_value(*opt.default_value, module_path, program, diag);
+            if (!resolved_value) {
+                diag.report_error(DiagnosticStage::Sema, opt.location,
+                    std::format("'@env' default value for '{}' is not a compile-time constant", opt.key));
+            }
+        } else {
+            diag.report_error(DiagnosticStage::Sema, opt.location,
+                std::format("required environment variable '{}' was not set.\n       Set it with: {}=<value>", opt.key, opt.key));
         }
 
         if (resolved_value) {
@@ -757,6 +808,14 @@ namespace sema {
                 }
 
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
+                    const auto mod_it = program.modules.find(module_path);
+                    if (mod_it == program.modules.end()) return std::nullopt;
+                    const auto it = mod_it->second.expr_option_values.find(get_expr_key(expr));
+                    if (it == mod_it->second.expr_option_values.end()) return std::nullopt;
+                    return it->second;
+                }
+
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
                     const auto mod_it = program.modules.find(module_path);
                     if (mod_it == program.modules.end()) return std::nullopt;
                     const auto it = mod_it->second.expr_option_values.find(get_expr_key(expr));

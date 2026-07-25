@@ -1,0 +1,12 @@
+# example_env_missing_required.mir — REJECTION CASE. An '@env' with no default value
+# must be supplied via the environment; if it isn't, sema reports exactly which variable
+# is missing and how to supply it.
+#
+# Expected (with 'MIRAGE_REQUIRED_THING' unset): compilation fails with
+#   error: required environment variable 'MIRAGE_REQUIRED_THING' was not set.
+#          Set it with: MIRAGE_REQUIRED_THING=<value>
+
+const x := @env("MIRAGE_REQUIRED_THING")
+
+pub fn main() {
+}

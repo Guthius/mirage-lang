@@ -145,6 +145,7 @@ namespace ast {
 
     struct SizeOfExpr;
     struct OptionExpr;
+    struct EnvExpr;
     struct TypeExpr;
     struct LenExpr;
     struct StackAllocExpr;
@@ -207,6 +208,7 @@ namespace ast {
         ImportBinExpr,
         std::unique_ptr<SizeOfExpr>,
         std::unique_ptr<OptionExpr>,
+        std::unique_ptr<EnvExpr>,
         std::unique_ptr<TypeExpr>,
         std::unique_ptr<LenExpr>,
         std::unique_ptr<StackAllocExpr>,
@@ -406,6 +408,17 @@ namespace ast {
     // expr_option_values), so it composes with is_constant_expr/evaluate_const_value like
     // any other compile-time-constant expression — see check_expr's OptionExpr case.
     struct OptionExpr {
+        std::string key;
+        std::optional<Expr> default_value;
+        SourceLocation location;
+    };
+
+    // '@env(key)' / '@env(key, default)' — like '@option' above, but the value comes from
+    // an environment variable ('key') instead of a '--opt key=value' driver flag. Shares
+    // '@option''s resolution/caching/codegen machinery end-to-end (see resolve_env_expr,
+    // ProgramModule::expr_option_values, codegen's emit_option_value) — only the value
+    // source differs.
+    struct EnvExpr {
         std::string key;
         std::optional<Expr> default_value;
         SourceLocation location;

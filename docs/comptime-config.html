@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Compile-Time Configuration — Mirage</title>
-  <meta name="description" content="Conditional compilation and linking driven by build-time flags: @option, @link, and the when statement.">
+  <meta name="description" content="Conditional compilation and linking driven by build-time flags and environment variables: @option, @env, @link, and the when statement.">
   <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -55,14 +55,16 @@
     <div class="content">
 
       <h1>Compile-Time Configuration</h1>
-      <p class="subtitle">Reading build-time flags and conditionally compiling declarations, statements, and linker inputs with <code>@option</code>, <code>@link</code>, and <code>when</code>.</p>
+      <p class="subtitle">Reading build-time flags and environment variables, and conditionally compiling declarations, statements, and linker inputs with <code>@option</code>, <code>@env</code>, <code>@link</code>, and <code>when</code>.</p>
 
       <p>
-        Four coupled features let a module read configuration supplied by the compiler driver and act
-        on it entirely at compile time — no runtime branching, no dead code left in the binary:
+        Five coupled features let a module read configuration supplied by the compiler driver or the
+        host environment and act on it entirely at compile time — no runtime branching, no dead code
+        left in the binary:
       </p>
       <ul>
         <li><code>@option</code> — reads a value passed with <code>--opt key=value</code>.</li>
+        <li><code>@env</code> — reads a value from an environment variable, otherwise identical to <code>@option</code>.</li>
         <li>the <code>when</code> <strong>statement</strong> — compiles only the selected branch's declarations or statements.</li>
         <li>the <code>when</code> <strong>expression</strong> — folds to one branch's value at compile time (or behaves like a runtime ternary otherwise).</li>
         <li><code>@link</code> — declares a linker input (library, system library, or raw flag) conditionally.</li>
@@ -140,6 +142,28 @@
         imported wherever target-specific decisions are made — see the full example below.
       </p>
 
+      <h2><code>@env</code></h2>
+      <pre><code><span class="kw">@env</span>(<span class="var">key</span>)
+<span class="kw">@env</span>(<span class="var">key</span>, <span class="var">default</span>)</code></pre>
+      <p>
+        Identical to <code>@option</code> in every respect — legality, target-type resolution, value
+        coercion, and the required-value error shape — except <code>key</code> names an
+        <strong>environment variable</strong> instead of a <code>--opt</code> key, and the value is read
+        once at compile time (on the machine running the compiler) instead of coming from the command
+        line:
+      </p>
+      <pre><code>error: required environment variable 'MIRAGE_TARGET_ARCH' was not set.
+       Set it with: MIRAGE_TARGET_ARCH=&lt;value&gt;</code></pre>
+      <pre><code><span class="kw">pub const</span> <span class="var">target_os</span>:   <span class="ty">OperatingSystem</span> = <span class="kw">@env</span>(<span class="str">"MIRAGE_TARGET_OS"</span>,   .<span class="var">Linux</span>)
+<span class="kw">pub const</span> <span class="var">target_arch</span>: <span class="ty">Architecture</span>    = <span class="kw">@env</span>(<span class="str">"MIRAGE_TARGET_ARCH"</span>, .<span class="var">X86_64</span>)</code></pre>
+      <p>
+        <code>@option</code> and <code>@env</code> can be mixed freely — including reading the same key
+        from both, e.g. an <code>@option</code> whose own default is an <code>@env</code> lookup, so a
+        <code>--opt</code> flag overrides an environment variable which in turn overrides a hardcoded
+        default:
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">retries</span> := <span class="kw">@option</span>(<span class="str">"max_retries"</span>, <span class="kw">@env</span>(<span class="str">"MIRAGE_MAX_RETRIES"</span>, <span class="num">3</span>))</code></pre>
+
       <h2>The <code>when</code> Statement</h2>
       <pre><code><span class="kw">when</span> <span class="var">condition</span> {
     ...
@@ -166,9 +190,10 @@
       <h3>At Module Scope</h3>
       <p>
         A module-scope <code>when</code> block may only contain <code>@link</code> declarations,
-        <code>const</code> declarations initialized directly with <code>@option</code>, <code>type</code>
-        declarations, and <code>ext fn</code> declarations. Anything else is a compile error. This
-        restricted set is exactly what's needed for platform-specific externs and type aliases:
+        <code>const</code> declarations initialized directly with <code>@option</code>/<code>@env</code>,
+        <code>type</code> declarations, and <code>ext fn</code> declarations. Anything else is a compile
+        error. This restricted set is exactly what's needed for platform-specific externs and type
+        aliases:
       </p>
       <pre><code><span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Windows</span> {
     <span class="kw">ext fn</span> <span class="fn">GetLastError</span>() -&gt; <span class="ty">u32</span>

@@ -122,8 +122,8 @@ block_decl    ::= '{' { declaration } '}'
 
 A compile-time conditional declaration block. `expr` must be a compile-time
 constant expression. Parses any declaration kind inside `block_decl`; sema
-restricts the permitted kinds to `@link`, `const` with `@option`, `type`, and
-`ext fn` (see spec.md's "Compile-Time Configuration" section).
+restricts the permitted kinds to `@link`, `const` with `@option`/`@env`,
+`type`, and `ext fn` (see spec.md's "Compile-Time Configuration" section).
 
 ---
 
@@ -371,8 +371,11 @@ primary_expr  ::= INT_LITERAL
                | dot_ident_expr
                | contextual_tagged_variant
                | option_expr
+               | env_expr
 
 option_expr   ::= '@option' '(' STRING [ ',' expr ] ')'
+
+env_expr      ::= '@env' '(' STRING [ ',' expr ] ')'
 
 sizeof_expr   ::= 'sizeof' '(' sizeof_operand ')'
 
@@ -408,15 +411,17 @@ braced_initializer ::= '{' '}'                                        (* empty *
                | '{' expr { ',' expr } [ '...' ] '}'                  (* array values, optional trailing fill *)
 ```
 
-`@` is a sigil, not part of an identifier; `option` (like `link` in
-`link_decl` above) is parsed as a plain identifier immediately following it,
-not a reserved keyword. `option_expr` is legal anywhere `primary_expr` is
-legal — nested inside arithmetic, as a call argument (including `@link`'s
-`data`), as a `mut` initializer, etc. Its value is resolved once from
-`--opt`/the default and cached, so it composes as an ordinary compile-time-
-constant expression wherever it's written. See spec.md's "Compile-Time
-Configuration" section for the target-type resolution priority and `--opt`
-coercion rules.
+`@` is a sigil, not part of an identifier; `option`/`env` (like `link` in
+`link_decl` above) are parsed as plain identifiers immediately following it,
+not reserved keywords. `option_expr`/`env_expr` are legal anywhere
+`primary_expr` is legal — nested inside arithmetic, as a call argument
+(including `@link`'s `data`), as a `mut` initializer, etc. Their value is
+resolved once — from `--opt`/the default for `option_expr`, from the named
+environment variable/the default for `env_expr` — and cached, so each
+composes as an ordinary compile-time-constant expression wherever it's
+written. See spec.md's "Compile-Time Configuration" section for the
+target-type resolution priority and value-coercion rules (identical for
+both).
 
 ---
 

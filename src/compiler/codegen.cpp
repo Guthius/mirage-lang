@@ -2852,7 +2852,8 @@ namespace codegen {
                                     }
                                 },
                                 *v);
-                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>> ||
+                                              std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
                             return emit_option_value(expr, ty);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
                             return emit_when_expr(*v, expr, ty);
@@ -3297,13 +3298,14 @@ namespace codegen {
                 builder_.SetInsertPoint(after_bb);
             }
 
-            // Materializes an '@option(...)' expression's compile-time-resolved value
-            // (cached by sema in ProgramModule::expr_option_values — see
-            // sema::resolve_option_expr) as an LLVM constant of its resolved type 'ty'.
+            // Materializes an '@option(...)'/'@env(...)' expression's compile-time-resolved
+            // value (cached by sema in ProgramModule::expr_option_values — see
+            // sema::resolve_option_expr/resolve_env_expr) as an LLVM constant of its
+            // resolved type 'ty'.
             auto emit_option_value(const ast::Expr &expr, const sema::ResolvedType &ty) -> llvm::Value * {
                 const auto it = current_module_->expr_option_values.find(sema::get_expr_key(expr));
                 if (it == current_module_->expr_option_values.end()) {
-                    report_codegen_error(diag_, {}, "internal error: '@option' value was not resolved by sema");
+                    report_codegen_error(diag_, {}, "internal error: '@option'/'@env' value was not resolved by sema");
                     return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
                 }
                 return std::visit(
@@ -3550,7 +3552,8 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
                             auto *cond = llvm::cast<llvm::ConstantInt>(emit_const_or_runtime(v->condition, true));
                             return emit_const_or_runtime(cond->isZero() ? v->else_expr : v->then_expr, true);
-                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>> ||
+                                              std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
                             return llvm::cast<llvm::Constant>(emit_option_value(expr, ty));
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
                             // Only reachable for a compile-time-constant condition — sema's

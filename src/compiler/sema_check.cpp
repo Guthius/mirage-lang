@@ -964,6 +964,9 @@ namespace sema {
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
                     return resolve_option_expr(get_expr_key(expr), *v, expected, module_path, program, diag);
 
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
+                    return resolve_env_expr(get_expr_key(expr), *v, expected, module_path, program, diag);
+
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
                     check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
                     ResolvedType then_ty = check_expr(v->then_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);

@@ -163,17 +163,20 @@ namespace sema {
             }, decl);
         }
 
-        // Only '@link', 'const' with a direct '@option(...)' initializer, 'type', and
-        // 'ext fn' declarations are permitted inside a module-scope 'when' block (spec).
-        // A nested 'when' is always structurally allowed here — its OWN contents are
-        // checked recursively against this same allow-list wherever they're processed.
+        // Only '@link', 'const' with a direct '@option(...)'/'@env(...)' initializer,
+        // 'type', and 'ext fn' declarations are permitted inside a module-scope 'when'
+        // block (spec). A nested 'when' is always structurally allowed here — its OWN
+        // contents are checked recursively against this same allow-list wherever they're
+        // processed.
         auto decl_allowed_in_module_scope_when(const ast::Decl &decl) -> bool {
             if (std::holds_alternative<ast::LinkDecl>(decl)) return true;
             if (std::holds_alternative<ast::TypeDecl>(decl)) return true;
             if (std::holds_alternative<ast::ExtFunctionDecl>(decl)) return true;
             if (std::holds_alternative<std::unique_ptr<ast::WhenDecl>>(decl)) return true;
             if (const auto *vd = std::get_if<ast::VarDecl>(&decl)) {
-                return !vd->is_mut && vd->init && std::holds_alternative<std::unique_ptr<ast::OptionExpr>>(*vd->init);
+                return !vd->is_mut && vd->init &&
+                       (std::holds_alternative<std::unique_ptr<ast::OptionExpr>>(*vd->init) ||
+                        std::holds_alternative<std::unique_ptr<ast::EnvExpr>>(*vd->init));
             }
             return false;
         }
@@ -193,7 +196,7 @@ namespace sema {
             for (const auto &decl : decls) {
                 if (!decl_allowed_in_module_scope_when(decl)) {
                     diag.report_error(DiagnosticStage::Sema, decl_location(decl),
-                        "only '@link', 'const' with '@option', 'type', and 'ext fn' "
+                        "only '@link', 'const' with '@option'/'@env', 'type', and 'ext fn' "
                         "declarations are permitted inside a module-scope 'when' block.");
                     continue;
                 }

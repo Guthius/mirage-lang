@@ -620,7 +620,7 @@ namespace ast {
             parser.expect(TokenKind::At, "'@'");
 
             if (!parser.check(TokenKind::Identifier) || parser.current_lexeme() != "option") {
-                parser.report_error(location, std::format("expected 'option' after '@', got '{}'", parser.current_lexeme()));
+                parser.report_error(location, std::format("expected 'option' or 'env' after '@', got '{}'", parser.current_lexeme()));
 
                 return LiteralIntegerExpr{.value = 0, .location = location};
             }
@@ -637,6 +637,32 @@ namespace ast {
             parser.expect(TokenKind::RParen, "')'");
 
             return std::make_unique<OptionExpr>(OptionExpr{
+                .key = key.value,
+                .default_value = std::move(default_value),
+                .location = location,
+            });
+        }
+
+        // '@env(key)' / '@env(key, default)' — reads 'key' as an environment variable
+        // instead of a '--opt key=value' driver flag. Parsed identically to '@option'
+        // above (see its comment); the caller (parse_primary) has already peeked past '@'
+        // to confirm the identifier is 'env' before dispatching here.
+        auto parse_env_expr(Parser &parser) -> Expr {
+            const auto location = parser.current_location();
+            parser.expect(TokenKind::At, "'@'");
+            parser.advance(); // consume 'env'
+
+            parser.expect(TokenKind::LParen, "'('");
+            const auto key = parse_string_literal(parser);
+
+            std::optional<Expr> default_value;
+            if (parser.match(TokenKind::Comma)) {
+                default_value = parse_expr(parser);
+            }
+
+            parser.expect(TokenKind::RParen, "')'");
+
+            return std::make_unique<EnvExpr>(EnvExpr{
                 .key = key.value,
                 .default_value = std::move(default_value),
                 .location = location,
@@ -794,6 +820,9 @@ namespace ast {
             }
 
             if (parser.check(TokenKind::At)) {
+                if (parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "env") {
+                    return parse_env_expr(parser);
+                }
                 return parse_option_expr(parser);
             }
 

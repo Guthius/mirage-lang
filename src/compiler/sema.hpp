@@ -199,10 +199,11 @@ namespace sema {
         ResolvedType effective_type;
     };
 
-    // A '--opt key=value' value coerced (per @option's target-type coercion rules) or
-    // folded from a default expression: an integer/bool/enum-underlying value, or a []u8
-    // string. Used both for '@option' itself and for constant-folding 'when' conditions
-    // and '@link' data expressions that reference an '@option'-backed const.
+    // A '--opt key=value' or environment-variable value coerced (per @option's/@env's
+    // target-type coercion rules) or folded from a default expression: an integer/bool/
+    // enum-underlying value, or a []u8 string. Used for '@option'/'@env' themselves and for
+    // constant-folding 'when' conditions and '@link' data expressions that reference an
+    // '@option'/'@env'-backed const.
     using ConstFoldValue = std::variant<int64_t, std::string>;
 
     struct ProgramModule {
@@ -214,9 +215,9 @@ namespace sema {
         std::unordered_map<const void *, TraitCoercion> expr_trait_coercions;
         std::unordered_map<const void *, TraitDispatchInfo> expr_trait_dispatch;
         std::unordered_map<const void *, ErrorMatchUnwrap> expr_error_match_unwrap;
-        // '@option(...)' expression -> its resolved compile-time value, cached by
-        // check_expr's OptionExpr case so later constant-folding (when conditions, '@link'
-        // data) never re-runs coercion/diagnostics for the same node.
+        // '@option(...)'/'@env(...)' expression -> its resolved compile-time value, cached
+        // by check_expr's OptionExpr/EnvExpr cases so later constant-folding (when
+        // conditions, '@link' data) never re-runs coercion/diagnostics for the same node.
         std::unordered_map<const void *, ConstFoldValue> expr_option_values;
         // 'when' EXPRESSION -> which branch (true=then_expr, false=else_expr) a
         // compile-time-constant condition folded to; absent if the condition is a runtime
@@ -425,6 +426,12 @@ namespace sema {
     // into ProgramModule::expr_option_values) — see check_expr's OptionExpr case.
     auto resolve_option_expr(const void *expr_key, const ast::OptionExpr &opt, std::optional<ResolvedType> expected,
                               const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType;
+
+    // Same as resolve_option_expr above, but the value source is an environment variable
+    // (std::getenv(opt.key)) instead of '--opt'. Shares the same target-type resolution,
+    // expr_option_values cache, and required/invalid-value diagnostic shape.
+    auto resolve_env_expr(const void *expr_key, const ast::EnvExpr &opt, std::optional<ResolvedType> expected,
+                           const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType;
 
     // Returns the module path and type name for a given resolved struct/enum type,
     // searching all modules. Returns {"", ""} if not found.

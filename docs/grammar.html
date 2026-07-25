@@ -157,8 +157,8 @@ block_decl    ::= '{' { declaration } '}'
 
 <span class="bnf-cm">-- a compile-time conditional declaration block; 'expr' must be a compile-time
 -- constant expression. Parses any declaration kind inside block_decl; sema
--- restricts the permitted kinds to '@link', 'const' with '@option', 'type',
--- and 'ext fn' — see the Compile-Time Configuration page.</span></code></pre>
+-- restricts the permitted kinds to '@link', 'const' with '@option'/'@env',
+-- 'type', and 'ext fn' — see the Compile-Time Configuration page.</span></code></pre>
 
       <h2>Types</h2>
       <pre><code>type          ::= '*' type                              <span class="bnf-cm">-- pointer</span>
@@ -370,17 +370,21 @@ arg           ::= expr '...'    <span class="bnf-cm">-- spread; only legal as th
                | dot_ident_expr
                | contextual_tagged_variant
                | option_expr
+               | env_expr
 
 option_expr   ::= '@option' '(' STRING [ ',' expr ] ')'
 
-<span class="bnf-cm">-- '@' is a sigil, not part of an identifier; 'option' (like 'link' above) is
--- parsed as a plain identifier immediately following it, not a reserved
--- keyword. Legal anywhere primary_expr is legal — nested inside arithmetic,
+env_expr      ::= '@env' '(' STRING [ ',' expr ] ')'
+
+<span class="bnf-cm">-- '@' is a sigil, not part of an identifier; 'option'/'env' (like 'link' above) are
+-- parsed as plain identifiers immediately following it, not reserved
+-- keywords. Legal anywhere primary_expr is legal — nested inside arithmetic,
 -- as a call argument (including '@link's data), as a 'mut' initializer, etc.
--- Its value is resolved once from '--opt'/the default and cached, so it
+-- Each value is resolved once — from '--opt'/the default for option_expr, from
+-- the named environment variable/the default for env_expr — and cached, so it
 -- composes as an ordinary compile-time-constant expression wherever it's
 -- written. See the Compile-Time Configuration page for the target-type
--- resolution priority and '--opt' coercion rules.</span>
+-- resolution priority and value-coercion rules (identical for both).</span>
 
 sizeof_expr   ::= 'sizeof' '(' sizeof_operand ')'
 

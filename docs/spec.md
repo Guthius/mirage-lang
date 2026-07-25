@@ -1252,9 +1252,10 @@ Cross-module access uses dot notation. Only `pub` symbols are accessible from ou
 
 ## 12. Compile-Time Configuration
 
-Four coupled features let a module read compile-time-supplied configuration
+Five coupled features let a module read compile-time-supplied configuration
 and conditionally compile declarations, statements, and linker inputs based
-on it: `@option`, `@link`, the `when` statement, and the `when` expression.
+on it: `@option`, `@env`, `@link`, the `when` statement, and the `when`
+expression.
 
 ### `@option`
 
@@ -1292,6 +1293,29 @@ behaves as an ordinary compile-time-constant expression wherever it appears.
 - `[]u8`: the raw string, unconverted.
 - Enum types: matched first by variant name (case-sensitive), then by integer value (e.g. `--opt build/target_os=Windows` and `--opt build/target_os=1` can both select the same variant). Neither matching is a sema error naming the valid variant names.
 - Any other target type: a sema error — `@option` does not support it.
+
+### `@env`
+
+```mirage
+@env(key)
+@env(key, default)
+```
+
+Identical to `@option` in every respect — legality, target-type resolution,
+value coercion, and the required-value error shape — except that `key`
+names an **environment variable** instead of a `--opt` key, and the value
+comes from `std::getenv(key)` (read once at compile time, on the machine
+running the compiler) instead of `--opt key=value`:
+
+```
+error: required environment variable 'MIRAGE_TARGET_ARCH' was not set.
+       Set it with: MIRAGE_TARGET_ARCH=<value>
+```
+
+```mirage
+pub const target_os:   OperatingSystem = @env("MIRAGE_TARGET_OS",   .Linux)
+pub const target_arch: Architecture    = @env("MIRAGE_TARGET_ARCH", .X86_64)
+```
 
 ### `@link`
 
@@ -1354,11 +1378,11 @@ visited by codegen (an `ext fn` declared only in an unselected module-scope
 branch, for instance, never needs an LLVM declaration synthesized for it).
 
 **At module scope**, a `when` block may contain only `@link` declarations,
-`const` declarations initialized directly with `@option`, `type`
+`const` declarations initialized directly with `@option`/`@env`, `type`
 declarations, and `ext fn` declarations — anything else is a sema error:
 
 ```
-error: only '@link', 'const' with '@option', 'type', and 'ext fn'
+error: only '@link', 'const' with '@option'/'@env', 'type', and 'ext fn'
        declarations are permitted inside a module-scope 'when' block.
 ```
 
@@ -1382,7 +1406,7 @@ collected.
 ### `when` Expression
 
 See [`when` Expression](#when-expression) under Expressions — same
-construct, used here as `@link`'s `data` argument or an `@option`
+construct, used here as `@link`'s `data` argument or an `@option`/`@env`
 default/operand.
 
 ### Example
