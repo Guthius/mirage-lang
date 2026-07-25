@@ -150,7 +150,8 @@ namespace ast {
         return canonical_path.string();
     }
 
-    auto resolve(const std::string &root_module_path, SourceManager &source_manager, DiagnosticEngine &diagnostics) -> Program {
+    auto resolve(const std::string &root_module_path, SourceManager &source_manager, DiagnosticEngine &diagnostics,
+                 const std::string &std_path_override) -> Program {
         Program program;
 
         const auto canonical = canonicalize(root_module_path);
@@ -165,7 +166,18 @@ namespace ast {
         program.root_module_path = canonical;
 
         std::string mirage_path;
-        if (const char *env_value = std::getenv("MIRAGE_PATH"); env_value != nullptr) {
+        if (!std_path_override.empty()) {
+            auto candidate = canonicalize(std_path_override);
+            if (!candidate.empty() && std::filesystem::is_directory(candidate)) {
+                mirage_path = candidate;
+            } else {
+                diagnostics.report_error(
+                    DiagnosticStage::Parser, {},
+                    std::format("'{}' is not a valid standard library directory", std_path_override));
+
+                return program;
+            }
+        } else if (const char *env_value = std::getenv("MIRAGE_PATH"); env_value != nullptr) {
             auto candidate = canonicalize(env_value);
             if (!candidate.empty() && std::filesystem::is_directory(candidate)) {
                 mirage_path = candidate;

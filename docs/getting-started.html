@@ -88,6 +88,7 @@ just build</code></pre>
         <tr><th>Option</th><th>Description</th></tr>
         <tr><td><code>-o, --output &lt;file&gt;</code></td><td>Output file name (default: <code>a.out</code>)</td></tr>
         <tr><td><code>-l &lt;lib&gt;</code></td><td>Link an additional library, e.g. <code>-l m</code> for libm (repeatable)</td></tr>
+        <tr><td><code>--std=&lt;path&gt;</code></td><td>Override the standard library path (takes precedence over <code>MIRAGE_PATH</code>)</td></tr>
         <tr><td><code>--emit-ir</code></td><td>Print the generated LLVM IR to stdout instead of producing a binary</td></tr>
         <tr><td><code>--freestanding</code></td><td>Compile without the standard hosted entry point; the module must supply <code>fn _start()</code></td></tr>
         <tr><td><code>--help</code></td><td>Show usage information</td></tr>

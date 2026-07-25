@@ -36,6 +36,7 @@ namespace {
         bool dump_ast = false;
         std::string module_path;
         std::string output = "a.out";
+        std::string std_path;
         std::vector<std::string> libs;
         std::unordered_map<std::string, std::string> opt_values;
     };
@@ -50,6 +51,7 @@ namespace {
                      << "Options:\n"
                      << "  -o, --output <file>  Output file name (default: a.out)\n"
                      << "  -l <lib>             Link with additional library (may be repeated)\n"
+                     << "  --std=<path>         Override the standard library path (takes precedence over MIRAGE_PATH)\n"
                      << "  --emit-ir            Print LLVM IR to stdout instead of compiling\n"
                      << "  --freestanding       Compile without standard library\n"
                      << "  --opt key=value      Set a compile-time '@option' value (may be repeated)\n"
@@ -90,6 +92,8 @@ namespace {
                     return options;
                 }
                 options.output = argv[++i];
+            } else if (arg.starts_with("--std=")) {
+                options.std_path = arg.substr(6);
             } else if (arg == "-l") {
                 if (i + 1 >= argc) {
                     return options;
@@ -389,7 +393,7 @@ auto main(const int argc, char *argv[]) -> int {
     DiagnosticEngine diag(source_manager);
 
     const auto parse_start = std::chrono::steady_clock::now();
-    const auto ast = ast::resolve(options.module_path, source_manager, diag);
+    const auto ast = ast::resolve(options.module_path, source_manager, diag, options.std_path);
     if (!ast.ok) {
         return 1;
     }

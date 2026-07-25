@@ -1231,6 +1231,8 @@ The path is resolved in two steps:
 
 This lets a project keep local, closely-related modules as subdirectories of the importing module, while sharing a common library root via `MIRAGE_PATH` for anything meant to be reused across unrelated parts of a project.
 
+The `mirage build`/`mirage run` CLI also accepts a `--std=<path>` flag, which overrides `MIRAGE_PATH` for that invocation.
+
 ### Accessing Module Symbols
 
 ```mirage

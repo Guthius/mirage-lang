@@ -18,7 +18,8 @@ namespace ast {
     };
 
     auto canonicalize(const std::string &path) -> std::string;
-    auto resolve(const std::string &root_module_path, SourceManager &source_manager, DiagnosticEngine &diagnostics) -> Program;
+    auto resolve(const std::string &root_module_path, SourceManager &source_manager, DiagnosticEngine &diagnostics,
+                 const std::string &std_path_override = {}) -> Program;
 
     // Resolves 'relative_path' against 'base_dir', rejecting absolute paths and any path
     // that escapes 'base_dir' (e.g. via '..'). Returns the canonical absolute path on success,
