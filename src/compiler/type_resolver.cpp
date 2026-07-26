@@ -995,12 +995,20 @@ namespace sema {
                     m.name = method.name;
                     m.is_mut_self = method.is_mut_self;
                     m.location = method.location;
+                    m.decl = &method;
                     for (auto &p : method.params) {
-                        m.params.push_back(resolve_field_type(module_path, p.type, p.location));
+                        if (p.type) {
+                            m.params.push_back(resolve_field_type(module_path, *p.type, p.location));
+                        } else {
+                            // ':=' inferred-type param — infer from the (parser-guaranteed) default expr.
+                            LocalScope empty;
+                            m.params.push_back(check_expr(*p.default_value, empty, module_path, program, diag, std::nullopt, 0));
+                        }
                     }
                     for (auto &rt : method.return_types) {
                         m.return_types.push_back(resolve_field_type(module_path, rt, method.location));
                     }
+                    check_param_defaults(method.params, m.params, m.required_params, m.param_default_is_const, module_path, program, diag);
                     info.methods.push_back(std::move(m));
                 }
 

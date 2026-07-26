@@ -1,0 +1,12 @@
+# example_default_params_ext_fn — REJECTION CASE. 'ext fn' declarations may
+# not have default parameter values — they have no C ABI representation.
+#
+# Expected: compilation fails with
+#   error: 'ext fn' declarations may not have default parameter values.
+#   Default arguments have no C ABI representation.
+
+ext fn foo(x: i32 = 1) -> i32
+
+pub fn main() -> i32 {
+    return foo(1)
+}

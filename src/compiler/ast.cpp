@@ -2030,23 +2030,36 @@ namespace ast {
                 const auto param_is_mutable = parser.match(TokenKind::KwMut);
                 const auto param_name = parser.expect_identifier();
 
-                parser.expect(TokenKind::Colon, "':'");
-
-                if (seen_variadic) {
-                    parser.report_error(param_location, "'...' variadic parameter must be the last parameter in the parameter list");
-                }
-
+                std::optional<Type> param_type;
+                std::optional<Expr> default_value;
                 bool param_is_variadic = false;
-                if (parser.check(TokenKind::DotDotDot)) {
-                    parser.advance();
-                    param_is_variadic = true;
-                    seen_variadic = true;
+
+                if (parser.match(TokenKind::Colon)) {
+                    if (seen_variadic) {
+                        parser.report_error(param_location, "'...' variadic parameter must be the last parameter in the parameter list");
+                    }
+
+                    if (parser.check(TokenKind::DotDotDot)) {
+                        parser.advance();
+                        param_is_variadic = true;
+                        seen_variadic = true;
+                    }
+
+                    param_type = parse_type(parser);
+
+                    if (!param_is_variadic && parser.match(TokenKind::Equal)) {
+                        default_value = parse_expr(parser);
+                    }
+                } else {
+                    parser.expect(TokenKind::ColonEqual, "':' or ':='");
+                    default_value = parse_expr(parser);
                 }
 
                 params.push_back({
                     .is_mut = param_is_mutable,
                     .name = param_name,
-                    .type = parse_type(parser),
+                    .type = std::move(param_type),
+                    .default_value = std::move(default_value),
                     .is_variadic = param_is_variadic,
                     .location = param_location,
                 });
@@ -2120,18 +2133,29 @@ namespace ast {
                 parser.expect(TokenKind::Comma, "','");
                 const auto param_location = parser.current_location();
                 auto param_name = parser.expect_identifier();
-                parser.expect(TokenKind::Colon, "':'");
 
-                if (parser.check(TokenKind::DotDotDot)) {
-                    parser.report_error(param_location, "variadic parameters are not allowed in trait method declarations");
-                    parser.advance();
+                std::optional<Type> param_type;
+                std::optional<Expr> default_value;
+                if (parser.match(TokenKind::Colon)) {
+                    if (parser.check(TokenKind::DotDotDot)) {
+                        parser.report_error(param_location, "variadic parameters are not allowed in trait method declarations");
+                        parser.advance();
+                    }
+
+                    param_type = parse_type(parser);
+
+                    if (parser.match(TokenKind::Equal)) {
+                        default_value = parse_expr(parser);
+                    }
+                } else {
+                    parser.expect(TokenKind::ColonEqual, "':' or ':='");
+                    default_value = parse_expr(parser);
                 }
-
-                auto param_type = parse_type(parser);
 
                 params.push_back(TraitType::Param{
                     .name = std::move(param_name),
                     .type = std::move(param_type),
+                    .default_value = std::move(default_value),
                     .location = param_location,
                 });
             }
@@ -2293,10 +2317,17 @@ namespace ast {
                 const auto param_name = parser.expect_identifier();
 
                 parser.expect(TokenKind::Colon, "':'");
+                auto param_type = parse_type(parser);
+
+                std::optional<Expr> default_value;
+                if (parser.match(TokenKind::Equal)) {
+                    default_value = parse_expr(parser);
+                }
 
                 params.push_back({
                     .name = param_name,
-                    .type = parse_type(parser),
+                    .type = std::move(param_type),
+                    .default_value = std::move(default_value),
                     .location = param_location,
                 });
 
@@ -2756,22 +2787,36 @@ namespace ast {
             const auto param_location = parser.current_location();
             const bool param_is_mut = parser.match(TokenKind::KwMut);
             auto param_name = parser.expect_identifier();
-            parser.expect(TokenKind::Colon, "':'");
 
-            if (seen_variadic) {
-                parser.report_error(param_location, "'...' variadic parameter must be the last parameter in the parameter list");
-            }
-
+            std::optional<Type> param_type;
+            std::optional<Expr> default_value;
             bool param_is_variadic = false;
-            if (parser.check(TokenKind::DotDotDot)) {
-                parser.advance();
-                param_is_variadic = true;
-                seen_variadic = true;
+
+            if (parser.match(TokenKind::Colon)) {
+                if (seen_variadic) {
+                    parser.report_error(param_location, "'...' variadic parameter must be the last parameter in the parameter list");
+                }
+
+                if (parser.check(TokenKind::DotDotDot)) {
+                    parser.advance();
+                    param_is_variadic = true;
+                    seen_variadic = true;
+                }
+
+                param_type = parse_type(parser);
+
+                if (!param_is_variadic && parser.match(TokenKind::Equal)) {
+                    default_value = parse_expr(parser);
+                }
+            } else {
+                parser.expect(TokenKind::ColonEqual, "':' or ':='");
+                default_value = parse_expr(parser);
             }
 
             params.push_back(ImplDecl::Function::Param{
                 .name = std::move(param_name),
-                .type = parse_type(parser),
+                .type = std::move(param_type),
+                .default_value = std::move(default_value),
                 .is_mut = param_is_mut,
                 .is_variadic = param_is_variadic,
                 .location = param_location,

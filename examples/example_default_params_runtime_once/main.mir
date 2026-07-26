@@ -1,0 +1,25 @@
+# A non-constant default expression is evaluated exactly once per call that
+# omits the argument — proven with an observable side effect (incrementing a
+# global mut counter) in the default expression.
+
+mut counter: i32 = 0
+
+fn next_val() -> i32 {
+    counter += 1
+    return counter
+}
+
+fn f(x: i32, y := next_val()) -> i32 {
+    return x + y
+}
+
+pub fn main() -> i32 {
+    const a := f(0) # y = next_val() = 1 (counter: 0 -> 1)
+    const b := f(0) # y = next_val() = 2 (counter: 1 -> 2)
+
+    if a != 1 { return 1 }
+    if b != 2 { return 2 }
+    if counter != 2 { return 3 } # exactly two increments total
+
+    return 0
+}

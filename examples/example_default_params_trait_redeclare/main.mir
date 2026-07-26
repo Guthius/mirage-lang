@@ -1,0 +1,27 @@
+# example_default_params_trait_redeclare — REJECTION CASE. An impl method
+# must NOT redeclare a default value that the trait method already declares
+# — it's inherited automatically.
+#
+# Expected: compilation fails with
+#   error: parameter 'loud' in 'Bot.greet' redeclares a default value already
+#   declared by the trait 'Greeter'. Remove the default from the
+#   implementation — it is inherited from the trait.
+
+type Greeter = trait {
+    fn greet(self, loud: bool = false) -> i32
+}
+
+type Bot = struct {
+    id: i32
+}
+
+impl Greeter for Bot {
+    fn greet(self, loud: bool = true) -> i32 {
+        return loud ? 100 : self.id
+    }
+}
+
+pub fn main() -> i32 {
+    const b: Bot = {.id = 7}
+    return b.greet(true)
+}

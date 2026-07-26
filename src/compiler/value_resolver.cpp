@@ -360,6 +360,56 @@ namespace sema {
         return g->type;
     }
 
+    // Lazily/reentrantly resolves a free function's signature — mirrors
+    // resolve_global_symbol above. Required because a default parameter
+    // expression may call another function, and a ':=' inferred-type parameter's
+    // type is itself derived from checking its default expression: one function's
+    // signature can therefore depend on another's, regardless of Program::modules'
+    // unordered iteration order.
+    auto ensure_function_signature_resolved(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag) -> FunctionSymbol & {
+        auto &sym = std::get<FunctionSymbol>(program.modules.at(module_path).symbols.at(name));
+        if (sym.is_resolved) {
+            return sym;
+        }
+
+        const auto key = std::make_pair(module_path, name);
+        if (program.resolve_state.fn_signature_resolving.contains(key)) {
+            diag.report_error(DiagnosticStage::Sema, sym.decl->location,
+                std::format("circular dependency detected resolving default value(s) of function '{}'", name));
+            sym.is_resolved = true; // avoid infinite recursion on repeated lookups of this cycle
+            return sym;
+        }
+        program.resolve_state.fn_signature_resolving.insert(key);
+
+        for (auto &p : sym.decl->params) {
+            ResolvedType pt;
+            if (p.type) {
+                pt = resolve_type(*p.type, module_path, program, diag);
+            } else {
+                // ':=' inferred-type param — infer from the (parser-guaranteed) default expr,
+                // checked in an empty (module-scope) LocalScope, no caller in scope.
+                LocalScope empty;
+                pt = check_expr(*p.default_value, empty, module_path, program, diag, std::nullopt, 0);
+            }
+            if (p.is_variadic) {
+                sym.is_variadic = true;
+                sym.variadic_element_type = pt;
+                sym.params.push_back(intern_slice(program, pt));
+            } else {
+                sym.params.push_back(pt);
+            }
+        }
+        for (auto &rt : sym.decl->return_types) {
+            sym.return_types.push_back(resolve_type(rt, module_path, program, diag));
+        }
+
+        check_param_defaults(sym.decl->params, sym.params, sym.required_params, sym.param_default_is_const, module_path, program, diag);
+
+        sym.is_resolved = true;
+        program.resolve_state.fn_signature_resolving.erase(key);
+        return sym;
+    }
+
     auto resolve_macro_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> MacroSymbol & {
         static MacroSymbol invalid_sentinel{};
 

@@ -6,6 +6,7 @@
 #include "resolved_type.hpp"
 #include "symbol_table.hpp"
 
+#include <format>
 #include <map>
 #include <optional>
 #include <set>
@@ -131,6 +132,12 @@ namespace sema {
         bool is_variadic = false;             // true if the last param is native '...T'
         ResolvedType variadic_element_type{}; // T; only meaningful if is_variadic
 
+        // Count of leading non-defaulted params (== param_types.size() for a
+        // trait-impl method, which is never allowed to declare its own defaults —
+        // see resolve_trait_impl_signatures_for_program).
+        size_t required_params = 0;
+        std::vector<bool> param_default_is_const; // parallel to param_types
+
         // Set (to the trait's local name) only when this MethodInfo came from an
         // 'impl TRAIT for TYPE' block, rather than a bare 'impl TYPE' block. Codegen
         // uses this to route function lookups to the trait_functions_ table instead
@@ -138,6 +145,13 @@ namespace sema {
         // avoid colliding with a same-named inherent method (see Generator::run()).
         std::optional<std::string> trait_name;
         std::string trait_module; // only meaningful if trait_name has a value
+
+        // Set alongside trait_name: the trait's own TraitInfo/TraitMethodInfo this
+        // method backs, so a call resolved via this MethodInfo (not via a dyn Trait
+        // handle) can still source its default parameter values from the trait's
+        // signature, never from the impl (which is never allowed to declare its own).
+        int trait_index = -1;
+        int trait_method_index = -1;
     };
 
     // A single trait method's resolved signature (no body — trait methods are
@@ -150,6 +164,9 @@ namespace sema {
         std::vector<ResolvedType> params; // excludes self
         std::vector<ResolvedType> return_types;
         SourceLocation location;
+        const ast::TraitType::Method *decl = nullptr; // needed to reach param default_value AST nodes
+        size_t required_params = 0;                    // count of leading non-defaulted params
+        std::vector<bool> param_default_is_const;        // parallel to params
     };
 
     struct TraitInfo {
@@ -255,6 +272,7 @@ namespace sema {
         std::set<std::pair<std::string, std::string>> bitset_resolving;
         std::set<std::pair<std::string, std::string>> trait_resolving;
         std::set<std::pair<std::string, std::string>> value_resolving;
+        std::set<std::pair<std::string, std::string>> fn_signature_resolving;
         // Cycle guard for the reentrant module-scope-'when' symbol declaration helper
         // (ensure_module_declared, sema_declare.cpp) — a 'when' condition that references
         // another module's const can force that module's symbol table to be built
@@ -407,6 +425,14 @@ namespace sema {
     auto resolve_import_bin_type(const std::string &module_path, const std::string &path, const SourceLocation &loc,
                                   Program &program, DiagnosticEngine &diag) -> ResolvedType;
     auto is_assignable(const ResolvedType &from, const ResolvedType &to) -> bool;
+    // Like is_assignable, but also allows the additional expected-type-position-only
+    // coercions available at an ordinary call/assignment site (array<->slice/pointer,
+    // bitset->storage). Used for call-argument checking and default-parameter-value
+    // type-checking so a defaulted argument coerces exactly like an explicit one would.
+    auto assignable_in_module(const ResolvedType &from, const ResolvedType &to, const std::string &module_path, Program &program) -> bool;
+    // Minimal human-readable rendering of a resolved type, used for trait conformance
+    // and default-parameter-value diagnostics.
+    auto describe_type(const ResolvedType &t, const Program &program) -> std::string;
     auto error_union_is_subset(const ResolvedType &callee, const ResolvedType &caller, const Program &program) -> bool;
     auto function_params_compatible(const std::vector<ResolvedType> &actual, const std::vector<ResolvedType> &expected) -> bool;
     auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType;
@@ -414,10 +440,87 @@ namespace sema {
     auto intern_function_type(Program &program, FunctionTypeInfo sig) -> ResolvedType;
     auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
     auto resolve_global_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
+    // Lazily/reentrantly resolves a free function's full signature (param types —
+    // inferring ':=' param types from their default expression — return types, and
+    // default-parameter validation: ordering, ext-fn exclusion doesn't apply here,
+    // type-checking, 'try'-rejection, constant-flagging). Safe to call multiple
+    // times; a no-op once FunctionSymbol::is_resolved is true. Required because a
+    // default expression may call another not-yet-resolved function (mirrors
+    // resolve_global_symbol's reentrant design for the same reason consts can
+    // reference other consts).
+    auto ensure_function_signature_resolved(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag) -> FunctionSymbol &;
     auto resolve_macro_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> MacroSymbol &;
     auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, std::optional<ResolvedType> expected, int loop_depth, int defer_loop_base = -1, const ResolvedType *fn_error_type = nullptr) -> ResolvedType;
     auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth, int defer_loop_base = -1) -> void;
     auto is_constant_expr(const ast::Expr &expr, const std::string &module_path, const Program &program) -> bool;
+
+    // Validates default parameter values, shared by free functions, inherent
+    // methods, and trait method declarations (a template since those three each
+    // have their own independent AST Param struct — see ast.hpp): forbids mixing a
+    // native variadic parameter with any default in the same list, enforces the
+    // "once a default appears, all later params need one too" ordering rule,
+    // type-checks explicitly-typed ('= expr') defaults against their declared
+    // type, and records each defaulted param's compile-time-constant-ness for
+    // codegen. ':=' inferred-type defaults are already fully checked (and their
+    // type already derived) by the caller before this runs — via check_expr with
+    // expected=nullopt in an empty (module-scope) LocalScope — so they're only
+    // visited here for the ordering/variadic/constant-flag bookkeeping.
+    // Every default expression is checked with fn_error_type = nullptr (no caller
+    // in scope, since defaults are validated once at declaration time, not per
+    // call site) — this is what naturally makes 'try' inside a default expression
+    // a sema error via the ordinary TryExpr check, with no special casing needed
+    // here or anywhere else in this feature.
+    template <typename ParamT>
+    void check_param_defaults(const std::vector<ParamT> &decl_params, const std::vector<ResolvedType> &resolved_params,
+                               size_t &required_params, std::vector<bool> &param_default_is_const,
+                               const std::string &module_path, Program &program, DiagnosticEngine &diag) {
+        required_params = decl_params.size();
+        param_default_is_const.assign(decl_params.size(), false);
+        if (decl_params.empty()) return;
+
+        bool has_variadic = false;
+        bool has_default = false;
+        for (const auto &p : decl_params) {
+            if constexpr (requires { p.is_variadic; }) {
+                if (p.is_variadic) has_variadic = true;
+            }
+            if (p.default_value) has_default = true;
+        }
+        if (has_variadic && has_default) {
+            diag.report_error(DiagnosticStage::Sema, decl_params.front().location,
+                "a parameter list cannot mix a native variadic parameter with default parameter values");
+            return;
+        }
+
+        bool seen_default = false;
+        std::string last_defaulted_name;
+        for (size_t i = 0; i < decl_params.size(); ++i) {
+            const auto &p = decl_params[i];
+            if (p.default_value) {
+                if (!seen_default) {
+                    required_params = i;
+                    seen_default = true;
+                }
+                if (p.type) {
+                    LocalScope empty;
+                    const auto default_ty = check_expr(*p.default_value, empty, module_path, program, diag, resolved_params[i], 0);
+                    if (!assignable_in_module(default_ty, resolved_params[i], module_path, program)) {
+                        diag.report_error(DiagnosticStage::Sema, p.location, std::format(
+                            "default value for parameter '{}' has type '{}' but parameter is declared as '{}'",
+                            p.name, describe_type(default_ty, program), describe_type(resolved_params[i], program)));
+                    }
+                }
+                param_default_is_const[i] = is_constant_expr(*p.default_value, module_path, program);
+                last_defaulted_name = p.name;
+            } else if (seen_default) {
+                diag.report_error(DiagnosticStage::Sema, p.location, std::format(
+                    "parameter '{}' has no default value but follows parameter '{}' which does. "
+                    "All parameters after the first defaulted parameter must also have defaults.",
+                    p.name, last_defaulted_name));
+            }
+        }
+    }
+
     // Evaluate a compile-time integer or bool constant expression. Returns nullopt if the expression
     // cannot be statically evaluated (e.g. non-constant or unsupported form). Used by match/switch
     // for duplicate arm detection (sema) and case-value emission (codegen).

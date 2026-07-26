@@ -1,0 +1,17 @@
+# example_default_params_fnptr_arity — REJECTION CASE. Function pointer types
+# never carry default values — defaults are a property of a specific
+# function declaration, not of a function-pointer type. Calling through a
+# function pointer always requires every argument explicitly, even if the
+# pointed-to function declares a default for that parameter.
+#
+# Expected: compilation fails with
+#   error: 'fp' expects 2 argument(s), got 1
+
+fn f(a: i32, b: i32 = 10) -> i32 {
+    return a + b
+}
+
+pub fn main() -> i32 {
+    const fp: fn(i32, i32) -> i32 = f
+    return fp(1)
+}

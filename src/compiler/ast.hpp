@@ -308,7 +308,8 @@ namespace ast {
     struct TraitType {
         struct Param {
             std::string name;
-            Type type;
+            std::optional<Type> type;          // absent only for ':=' inferred-type form
+            std::optional<Expr> default_value; // set whenever 'type' is absent
             SourceLocation location;
         };
 
@@ -721,7 +722,8 @@ namespace ast {
         struct Param {
             bool is_mut;
             std::string name;
-            Type type;
+            std::optional<Type> type;          // absent only for ':=' inferred-type form
+            std::optional<Expr> default_value; // set whenever 'type' is absent
             bool is_variadic = false; // 'name: ...T' — native variadic; T is the element type, dissolves to []T in sema
             SourceLocation location;
         };
@@ -737,7 +739,8 @@ namespace ast {
     struct ExtFunctionDecl {
         struct Param {
             std::string name;
-            Type type;
+            Type type; // always required — ext fn params never use ':=' inference
+            std::optional<Expr> default_value; // parsed so sema can reject with a clear diagnostic; never valid
             SourceLocation location;
         };
 
@@ -784,7 +787,8 @@ namespace ast {
         struct Function {
             struct Param {
                 std::string name;
-                Type type;
+                std::optional<Type> type;          // absent only for ':=' inferred-type form
+                std::optional<Expr> default_value; // set whenever 'type' is absent
                 bool is_mut;
                 bool is_variadic = false;
                 SourceLocation location;

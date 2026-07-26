@@ -21,6 +21,9 @@ namespace sema {
         bool is_pub = false;
         bool is_variadic = false;             // true if the last param is native '...T'
         ResolvedType variadic_element_type{};  // T; only meaningful if is_variadic
+        bool is_resolved = false;              // lazily/reentrantly resolved — see ensure_function_signature_resolved
+        size_t required_params = 0;            // count of leading non-defaulted params; == params.size() if none are defaulted
+        std::vector<bool> param_default_is_const; // parallel to params; meaningful only at i >= required_params
     };
 
     struct ExtFunctionSymbol {

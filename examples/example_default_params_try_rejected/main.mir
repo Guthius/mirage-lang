@@ -1,0 +1,26 @@
+# example_default_params_try_rejected — REJECTION CASE. Default parameter
+# expressions may not contain 'try' (v1 scope decision) — default
+# expressions are checked once at declaration time, with no caller context
+# (error type / defer nesting) available yet. This falls out of the ordinary
+# 'try'-outside-fallible-function check, since defaults are always checked
+# with no enclosing function in scope.
+#
+# Expected: compilation fails with
+#   error: enclosing function must return 'error(...)' to use 'try'
+
+type MyErr = enum {
+    Bad
+}
+
+fn might_fail() -> (i32, error(MyErr)) {
+    return_ok 1
+}
+
+fn f(x: i32, y := try might_fail()) -> i32 {
+    return x + y
+}
+
+pub fn main() -> error(MyErr) {
+    const z := f(1)
+    return_ok
+}

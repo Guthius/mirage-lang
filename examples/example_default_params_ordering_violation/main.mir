@@ -1,0 +1,15 @@
+# example_default_params_ordering_violation — REJECTION CASE. Once a parameter
+# has a default value, every parameter after it must also have one.
+#
+# Expected: compilation fails with
+#   error: parameter 'b' has no default value but follows parameter 'a' which
+#   does. All parameters after the first defaulted parameter must also have
+#   defaults.
+
+fn f(a: i32 = 0, b: i32) -> i32 {
+    return a + b
+}
+
+pub fn main() -> i32 {
+    return f(1, 2)
+}

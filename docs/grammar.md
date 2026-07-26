@@ -29,12 +29,25 @@ declaration   ::= [ 'pub' ] fn_decl
 ```ebnf
 fn_decl       ::= 'fn' IDENT '(' [ param { ',' param } ] ')' [ return_types ] stmt
 
-param         ::= [ 'mut' ] IDENT ':' type
-               | IDENT ':' '...' type             (* native variadic; must be the last parameter *)
+param         ::= [ 'mut' ] IDENT ':' type [ '=' expr ]  (* typed, optional default *)
+               | [ 'mut' ] IDENT ':=' expr               (* inferred type, default required *)
+               | IDENT ':' '...' type                    (* native variadic; must be the last parameter *)
 
 return_types  ::= '->' type                       (* single return *)
                | '->' '(' type { ',' type } ')'  (* multi-return *)
 ```
+
+A parameter's `':=' expr` form infers the parameter's type from the default
+expression's type (same literal-defaulting rules as `var_decl_stmt`'s `:=`
+form). Once any parameter in a list has a default value, every parameter
+after it must also have one — `self` is exempt (never passed explicitly at
+call sites, not subject to this rule). A native variadic parameter (`'...'
+type`) cannot appear in the same parameter list as any defaulted parameter.
+Default expressions are checked in module scope, not the function's own
+local scope — they may reference module-scope symbols (consts, other
+functions, imported modules) but never another parameter of the same
+function, and may not contain `try`. See spec.md's "Default Parameter
+Values" section for the full semantics.
 
 ### Extern Function Declaration
 
@@ -46,8 +59,14 @@ ext_kw        ::= 'ext'     (* parsed as identifier, not keyword *)
 ext_params    ::= ext_param { ',' ext_param } [ ',' '...' ]
                | '...'      (* error: requires at least one named param *)
 
-ext_param     ::= IDENT ':' type
+ext_param     ::= IDENT ':' type [ '=' expr ]
 ```
+
+The `[ '=' expr ]` on `ext_param` is accepted by the parser only so sema can
+reject it with a clear diagnostic ("`ext fn` declarations may not have
+default parameter values") rather than a generic parse error — it is never
+valid on an `ext fn` declaration. There is no `':='` inferred-type form for
+`ext_param`; `ext fn` parameters always require an explicit type.
 
 ### Type Declaration
 
@@ -81,11 +100,19 @@ impl_decl     ::= 'impl' named_type '{' { method_decl } '}'                    (
 
 method_decl   ::= [ 'pub' ] 'fn' IDENT
                   '(' ( 'self' | 'mut' 'self' )
-                      { ',' [ 'mut' ] IDENT ':' type }
+                      { ',' ( [ 'mut' ] IDENT ':' type [ '=' expr ]
+                            | [ 'mut' ] IDENT ':=' expr ) }
                   ')'
                   [ return_types ]
                   stmt
 ```
+
+`method_decl`'s non-self params accept the same default-value forms as
+`param` above (see the note after `fn_decl`'s grammar). In `impl TRAIT for
+TYPE { ... }`, a method whose corresponding trait method declares a default
+must be declared here *without* that default (it's inherited); declaring a
+default the trait method doesn't have, or redeclaring one it does, is a
+sema error.
 
 In the trait-impl form (`impl TRAIT for TYPE { ... }`), `pub` on an individual
 `method_decl` is rejected — the trait's own visibility governs which methods
@@ -191,7 +218,9 @@ builtin_type  ::= 'u8' | 'u16' | 'u32' | 'u64'
                | 'usize' | 'bool' | 'byte' | 'anyptr'
 
 trait_method_decl ::= 'fn' IDENT
-                      '(' ( 'self' | 'mut' 'self' ) { ',' IDENT ':' type } ')'
+                      '(' ( 'self' | 'mut' 'self' )
+                          { ',' ( IDENT ':' type [ '=' expr ] | IDENT ':=' expr ) }
+                      ')'
                       [ return_types ]
 ```
 
@@ -202,6 +231,12 @@ governs) or a native-variadic (`...T`) parameter (a parse error — variadic
 trait methods have no vtable entry representation). Unlike `method_decl`
 above, `trait_method_decl`'s non-self params do **not** accept a `mut`
 prefix.
+
+A trait method may declare default parameter values, following the same
+rules as `fn_decl`'s `param` above. When a trait handle (`dyn`-style dynamic
+dispatch) call omits an argument, the default always comes from the trait's
+own declaration — never from whichever concrete impl happens to be behind
+the handle — and is resolved before the vtable call.
 
 Note: Struct, enum, and union fields/variants need no separator token between them at all (see Notes on Syntax Conventions, note 1) — commas are not valid there.
 

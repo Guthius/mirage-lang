@@ -926,6 +926,59 @@ pub fn name(p: Type) -> (T1, T2) {
 - Multi-return: `-> (T1, T2, ...)` syntax.
 - Void return: omit the `->` clause.
 
+### Default Parameter Values
+
+```mirage
+fn alloc(size: usize, zero_memory: bool = true) -> (anyptr, Allocator_Error)
+fn repeat(s: []u8, times := 3) -> []u8   # inferred type form
+```
+
+A parameter may declare a default value, used at call sites where the
+caller omits that argument (and every argument after it):
+
+```mirage
+const p1 := try alloc(1024)          # zero_memory = true
+const p2 := try alloc(1024, false)   # zero_memory = false
+
+const s1 := repeat("hi")             # times = 3
+const s2 := repeat("hi", 5)          # times = 5
+```
+
+- **Two forms**: `name: Type = expr` declares the type explicitly; `name :=
+  expr` infers the parameter's type from the default expression, using the
+  same literal-defaulting rules as an inferred-type `mut`/`const` variable
+  declaration.
+- **Ordering**: once any parameter in a list has a default value, every
+  parameter after it must also have one. `self` in a method declaration is
+  exempt — it's never passed explicitly at a call site, so it isn't subject
+  to this rule.
+- **Variadic exclusion**: a native variadic parameter (`...T`) cannot
+  appear in the same parameter list as a defaulted parameter.
+- **Scope**: a default expression is evaluated at the call site but checked
+  in *module* scope, not the function's own local scope — it may reference
+  `const` declarations, imported module symbols, global `mut` variables,
+  and other functions, but it can never refer to another parameter of the
+  same function (parameters are simply not in scope for this check).
+- **No `try`**: a default expression may not contain `try` — it's checked
+  once, at the function's declaration site, with no calling function's
+  error type or defer state available yet to check it against.
+- **Evaluation**: a compile-time-constant default (`= true`, `= 0`, an enum
+  literal, ...) is folded directly into the call site with no runtime
+  code. A non-constant default is evaluated inline at the call site,
+  exactly once per call that omits the argument, in the same position a
+  literal argument expression would occupy.
+- **Only at the call site**: calling through a function pointer always
+  requires every argument explicitly — a function pointer's type carries no
+  default-value information (two functions with identical signatures but
+  different defaults share the same function-pointer type), and the call
+  site has no way to know which concrete function it will end up calling.
+  Omitting an argument through a function pointer is an ordinary arity
+  error.
+- Inherent methods (`impl Type { ... }`) may declare their own defaults,
+  following the same rules as free functions. Trait methods and their
+  implementations have additional rules — see
+  [Traits and Dynamic Dispatch](#10-traits-and-dynamic-dispatch).
+
 ### Native Variadic Parameters
 
 ```mirage
@@ -967,6 +1020,9 @@ Declares an external C function. `ext fn` functions:
 - Cannot have parameters or return types that are `union`s (tagged or untagged — not yet supported
   across an `ext fn` boundary) or trait handles (no C ABI representation); a multi-return function
   pointer type is also rejected (no C ABI representation for multiple return values)
+- Cannot declare [default parameter values](#default-parameter-values) — a
+  default argument has no C ABI representation, so this is a sema error at
+  the declaration site
 
 ### Entry Points
 
@@ -1074,6 +1130,7 @@ impl TypeName {
 - `impl` blocks cannot be `pub` (the individual methods control visibility).
 - Methods are called as `value.method(args)` or `pointer.method(args)`.
 - Cross-module: `module_name.TypeName` struct can have methods defined in the type's own module.
+- Non-`self` parameters may declare [default parameter values](#default-parameter-values), following the same rules as free functions.
 
 ---
 
@@ -1102,6 +1159,12 @@ method declaration — the trait's own `pub` (or lack of it) governs whether
 importing modules can use it at all. Native-variadic (`...T`) trait method
 parameters are rejected: there is no vtable-entry representation for a
 variadic call.
+
+A trait method may declare [default parameter values](#default-parameter-values).
+Every implementation of that method — through any `impl TRAIT for TYPE`
+block, and (as of dynamic dispatch) any call through a `dyn Trait` handle —
+inherits that default; see [Implementing a Trait](#implementing-a-trait)
+below for how an impl must (not) redeclare it.
 
 **Using a trait name in type position denotes a HANDLE, not the trait
 definition.** Semantically this behaves like Go's interface types or Rust's
@@ -1135,9 +1198,35 @@ declaration itself.
 
 **Conformance**: every method the trait declares must be implemented in the
 `impl TRAIT for TYPE` block, with an exactly matching signature (same name,
-same `self`/`mut self`, same parameter types, same return types). A trait
-impl may not contain methods beyond the trait's own surface — put those in a
-separate bare `impl TYPE { }` block instead.
+same `self`/`mut self`, same parameter types, same return types — default
+values are not part of this comparison, see below). A trait impl may not
+contain methods beyond the trait's own surface — put those in a separate
+bare `impl TYPE { }` block instead.
+
+**Default parameter values are never redeclared in an impl.** If the trait
+method declares a default for a parameter, the impl's method must declare
+that parameter *without* a default — it's inherited automatically:
+
+```mirage
+type Allocator = trait {
+    fn alloc(self, size: usize, zero_memory: bool = true) -> (anyptr, Allocator_Error)
+}
+
+impl Allocator for MyAllocator {
+    fn alloc(self, size: usize, zero_memory: bool) -> (anyptr, Allocator_Error) {
+        # implementation
+    }
+}
+```
+
+Declaring a default in the impl that the trait method already has is a sema
+error ("redeclares a default value already declared by the trait"); declaring
+a default the trait method does *not* have is also a sema error ("defaults on
+trait implementations must match the trait declaration"). The default used
+to fill an omitted argument always comes from the trait's own method
+signature, never from any impl — this holds for a call through a concrete
+type's own method just as much as for a call through a `dyn Trait` handle,
+since an impl is never allowed to carry a default of its own to begin with.
 
 **Coherence**: an `impl TRAIT for TYPE` is only legal in the module that
 defines TRAIT or the module that defines TYPE. Implementing someone else's
@@ -1190,6 +1279,13 @@ doesn't need to know the concrete type.
 `try` on a fallible trait method works identically whether the call is
 static or dynamic. A multi-return trait method can be captured with a group
 declaration through a handle just like any other multi-return call.
+
+An omitted trailing argument on a defaulted trait-method parameter is
+resolved **before** the vtable call — the caller fills in the trait's
+default value itself, and the vtable slot always receives the full argument
+list. This is true for both static and dynamic dispatch, so it doesn't
+matter whether the compiler happens to know the concrete type behind the
+call.
 
 ### Handle Values
 
@@ -1496,6 +1592,7 @@ Creates a named type alias. The named type is structural: two declarations with 
 
 - `mut x := expr` infers the type of `x` from `expr`.
 - `const x := expr` infers the type from `expr`.
+- `name := expr` on a function/method parameter infers the parameter's type from its default expression `expr`, the same way — see [Default Parameter Values](#default-parameter-values).
 - Function parameter types, return types, and `const`/`mut` with an explicit type annotation always resolve exactly.
 - `default`, `undefined`, `.field` enum literals, and braced initializers require an expected type (from annotation or context) to be set.
 - When calling a function that takes a known type, argument expressions are type-checked against that expected type.
@@ -1700,6 +1797,9 @@ declared `...T`, dissolving to `[]T` inside the function body. Unlike C-style va
 - An existing `[]T` (or `[N]T`) can be forwarded directly with `expr...` spread, without
   allocating a new array (see [Function Call](#function-call)).
 - The function's address cannot be taken as a function pointer.
+- Cannot appear in the same parameter list as a [default parameter value](#default-parameter-values)
+  — a native variadic parameter has no default of its own, and the two features are not allowed to
+  coexist in one parameter list at all.
 
 ---
 

@@ -254,29 +254,34 @@ namespace sema {
             return info ? info->element_type : ResolvedType{.kind = TypeKind::Invalid};
         }
 
-        auto assignable_in_module(const ResolvedType &from, const ResolvedType &to, const std::string &module_path, Program &program) -> bool {
-            if (from.kind == TypeKind::Array && to.kind == TypeKind::Slice) {
-                return array_element_type(from, module_path, program) == slice_element_type(to, module_path, program);
-            }
-            if (from.kind == TypeKind::Slice && to.kind == TypeKind::Array) {
-                return slice_element_type(from, module_path, program) == array_element_type(to, module_path, program);
-            }
-            if (from.kind == TypeKind::Array && to.kind == TypeKind::Pointer) {
-                const auto *pointee = program.pointee_at(to.pointee_index);
-                return pointee && array_element_type(from, module_path, program) == *pointee;
-            }
-            // Bitset -> storage type is implicitly coercible ONLY in expected-type position
-            // (every call site of assignable_in_module — call args, '=', compound-assign
-            // result check, struct/array field literals, var-decl-with-annotation, return
-            // statements). The reverse (storage type -> bitset) is deliberately NOT allowed
-            // here, matching Part 4's asymmetric coercion rule; use an explicit cast instead.
-            if (from.kind == TypeKind::Bitset) {
-                const auto *info = program.bitset_at(from.bitset_index);
-                if (info && info->storage_type == to) return true;
-            }
-            return is_assignable(from, to);
-        }
+    } // anonymous namespace — reopened below; assignable_in_module needs external linkage
+      // (declared in sema.hpp) so sema.cpp's default-parameter-value checking can use it too.
 
+    auto assignable_in_module(const ResolvedType &from, const ResolvedType &to, const std::string &module_path, Program &program) -> bool {
+        if (from.kind == TypeKind::Array && to.kind == TypeKind::Slice) {
+            return array_element_type(from, module_path, program) == slice_element_type(to, module_path, program);
+        }
+        if (from.kind == TypeKind::Slice && to.kind == TypeKind::Array) {
+            return slice_element_type(from, module_path, program) == array_element_type(to, module_path, program);
+        }
+        if (from.kind == TypeKind::Array && to.kind == TypeKind::Pointer) {
+            const auto *pointee = program.pointee_at(to.pointee_index);
+            return pointee && array_element_type(from, module_path, program) == *pointee;
+        }
+        // Bitset -> storage type is implicitly coercible ONLY in expected-type position
+        // (every call site of assignable_in_module — call args, '=', compound-assign
+        // result check, struct/array field literals, var-decl-with-annotation, return
+        // statements, default parameter values). The reverse (storage type -> bitset) is
+        // deliberately NOT allowed here, matching Part 4's asymmetric coercion rule; use
+        // an explicit cast instead.
+        if (from.kind == TypeKind::Bitset) {
+            const auto *info = program.bitset_at(from.bitset_index);
+            if (info && info->storage_type == to) return true;
+        }
+        return is_assignable(from, to);
+    }
+
+    namespace {
         auto slice_cast_elements_match(const ResolvedType &from, const ResolvedType &to, const std::string &module_path, Program &program) -> bool {
             if (to.kind != TypeKind::Slice) return true;
             if (from.kind == TypeKind::Array) return array_element_type(from, module_path, program) == slice_element_type(to, module_path, program);
@@ -284,7 +289,7 @@ namespace sema {
             return true;
         }
 
-        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, int loop_depth, int defer_loop_base, const ResolvedType *fn_error_type, bool native_variadic = false) -> bool;
+        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, int loop_depth, int defer_loop_base, const ResolvedType *fn_error_type, bool native_variadic = false, std::optional<size_t> required_params = std::nullopt) -> bool;
         auto try_resolve_namespace_chain(const ast::Expr &expr, const std::string &module_path, LocalScope &locals, Program &program) -> std::optional<std::string>;
 
         // Tier-3 method-call resolution: 'receiver_type' is an actual dyn-handle
@@ -298,6 +303,23 @@ namespace sema {
         // to the same heap-allocated node) — NOT sema::get_expr_key's variant-slot
         // address, which check_group_call_returns has no way to reproduce since it
         // only receives the unwrapped CallExpr, not the outer Expr variant.
+        // A trait-impl method is never allowed to declare its own default parameter
+        // values (see resolve_trait_impl_signatures_for_program), so its own
+        // 'required_params' always equals its full param count. A call resolved
+        // via this MethodInfo (i.e. NOT through try_trait_handle_dispatch's dyn
+        // Trait handle path) must instead source the defaulted-arg count from the
+        // trait's own TraitMethodInfo when this method backs a trait impl.
+        auto method_required_params(const MethodInfo &method, const Program &program) -> size_t {
+            if (method.trait_name) {
+                if (const auto *trait_info = program.trait_at(method.trait_index);
+                    trait_info && method.trait_method_index >= 0 &&
+                    static_cast<size_t>(method.trait_method_index) < trait_info->methods.size()) {
+                    return trait_info->methods[method.trait_method_index].required_params;
+                }
+            }
+            return method.required_params;
+        }
+
         auto try_trait_handle_dispatch(const ResolvedType &receiver_type, const std::string &method_name,
                                         const std::vector<ast::Expr> &args, const void *dispatch_key,
                                         LocalScope &locals, const std::string &module_path, Program &program,
@@ -327,7 +349,7 @@ namespace sema {
                 return std::nullopt;
             }
 
-            check_call_args(args, trait_method->params, false, locals, module_path, program, diag, loc, method_name, loop_depth, defer_loop_base, fn_error_type);
+            check_call_args(args, trait_method->params, false, locals, module_path, program, diag, loc, method_name, loop_depth, defer_loop_base, fn_error_type, false, trait_method->required_params);
 
             program.modules.at(module_path).expr_trait_dispatch[dispatch_key] = TraitDispatchInfo{
                 .trait_index = receiver_type.trait_index,
@@ -389,7 +411,7 @@ namespace sema {
                         error(diag, call.location, std::format("no method '{}' on type", (*member)->member));
                         return {};
                     }
-                    check_call_args(call.args, method->param_types, false, locals, module_path, program, diag, call.location, (*member)->member, loop_depth, defer_loop_base, fn_error_type, method->is_variadic);
+                    check_call_args(call.args, method->param_types, false, locals, module_path, program, diag, call.location, (*member)->member, loop_depth, defer_loop_base, fn_error_type, method->is_variadic, method_required_params(*method, program));
                     return method->return_types;
                 }
             } else {
@@ -424,8 +446,9 @@ namespace sema {
                             error(diag, call.location, std::format("'{}' is not pub", name));
                             return {};
                         }
-                        check_call_args(call.args, sym.params, false, locals, module_path, program, diag, call.location, name, loop_depth, defer_loop_base, fn_error_type, sym.is_variadic);
-                        return sym.return_types;
+                        auto &resolved_fn = ensure_function_signature_resolved(target_module, name, program, diag);
+                        check_call_args(call.args, resolved_fn.params, false, locals, module_path, program, diag, call.location, name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
+                        return resolved_fn.return_types;
                     } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
                         if (check_pub && !sym.is_pub) {
                             error(diag, call.location, std::format("'{}' is not pub", name));
@@ -456,7 +479,7 @@ namespace sema {
             }
         }
 
-        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, const bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type, const bool native_variadic) -> bool {
+        auto check_call_args(const std::vector<ast::Expr> &args, const std::vector<ResolvedType> &params, const bool is_variadic, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const std::string &callee_desc, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type, const bool native_variadic, const std::optional<size_t> required_params) -> bool {
             if (native_variadic) {
                 // Last entry of 'params' is the dissolved '[]T' slot for the native '...T' parameter.
                 const size_t fixed_count = params.size() - 1;
@@ -502,20 +525,28 @@ namespace sema {
                 return ok;
             }
 
+            const size_t min_args = required_params.value_or(params.size());
+
             if (is_variadic) {
                 if (args.size() < params.size()) {
                     error(diag, loc, std::format("'{}' expects at least {} argument(s), got {}", callee_desc, params.size(), args.size()));
                     return false;
                 }
             } else {
-                if (args.size() != params.size()) {
-                    error(diag, loc, std::format("'{}' expects {} argument(s), got {}", callee_desc, params.size(), args.size()));
+                if (args.size() < min_args || args.size() > params.size()) {
+                    error(diag, loc, min_args == params.size()
+                        ? std::format("'{}' expects {} argument(s), got {}", callee_desc, params.size(), args.size())
+                        : std::format("'{}' expects {} to {} argument(s), got {}", callee_desc, min_args, params.size(), args.size()));
                     return false;
                 }
             }
 
+            // Omitted trailing args (args.size() < params.size(), only possible when
+            // min_args < params.size()) already had their default expressions checked
+            // once, at signature-resolution time — no re-check needed here; codegen
+            // reads the default expression directly off the callee's decl.
             bool ok = true;
-            for (size_t i = 0; i < params.size(); ++i) {
+            for (size_t i = 0; i < args.size(); ++i) {
                 if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, params[i], loop_depth, defer_loop_base, fn_error_type); !assignable_in_module(arg_ty, params[i], module_path, program)) {
                     error(diag, loc, std::format("'{}' argument {} type mismatch", callee_desc, i + 1));
                     ok = false;
@@ -907,14 +938,15 @@ namespace sema {
                             } else if constexpr (std::is_same_v<S, ImportSymbol>) {
                                 return ResolvedType{.kind = TypeKind::Namespace};
                             } else if constexpr (std::is_same_v<S, FunctionSymbol>) {
-                                if (sym.is_variadic) {
+                                auto &resolved_fn = ensure_function_signature_resolved(module_path, v.name, program, diag);
+                                if (resolved_fn.is_variadic) {
                                     return error(diag, v.location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v.name));
                                 }
                                 // Allow taking address when expected type is a matching function type
                                 if (expected && expected->kind == TypeKind::Function) {
                                     const auto &exp_sig = fn_sig(*expected, program);
-                                    if (function_params_compatible(sym.params, exp_sig.param_types) &&
-                                        sym.return_types == exp_sig.return_types &&
+                                    if (function_params_compatible(resolved_fn.params, exp_sig.param_types) &&
+                                        resolved_fn.return_types == exp_sig.return_types &&
                                         !exp_sig.is_variadic) {
                                         return *expected;
                                     }
@@ -1165,11 +1197,12 @@ namespace sema {
                                     using S = std::decay_t<T1>;
                                     if constexpr (std::is_same_v<S, FunctionSymbol>) {
                                         if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
-                                        check_call_args(v->args, sym.params, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, sym.is_variadic);
-                                        if (sym.return_types.size() > 1) {
+                                        auto &resolved_fn = ensure_function_signature_resolved(*target_module, fn_name, program, diag);
+                                        check_call_args(v->args, resolved_fn.params, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
+                                        if (resolved_fn.return_types.size() > 1) {
                                             return error(diag, v->location, "multi-value capture is not yet supported here");
                                         }
-                                        return sym.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sym.return_types.front();
+                                        return resolved_fn.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : resolved_fn.return_types.front();
                                     } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
                                         if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
                                         check_call_args(v->args, sym.params, sym.is_variadic, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type);
@@ -1220,7 +1253,7 @@ namespace sema {
                             }
                             return error(diag, v->location, std::format("no method '{}' on type", (*member_callee)->member));
                         }
-                        check_call_args(v->args, method->param_types, false, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type, method->is_variadic);
+                        check_call_args(v->args, method->param_types, false, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type, method->is_variadic, method_required_params(*method, program));
                         if (method->return_types.size() > 1) {
                             return error(diag, v->location, "multi-value capture is not yet supported here");
                         }
@@ -1270,11 +1303,12 @@ namespace sema {
                         [&]<typename T1>(const T1 &sym) -> ResolvedType {
                             using S = std::decay_t<T1>;
                             if constexpr (std::is_same_v<S, FunctionSymbol>) {
-                                check_call_args(v->args, sym.params, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, sym.is_variadic);
-                                if (sym.return_types.size() > 1) {
+                                auto &resolved_fn = ensure_function_signature_resolved(module_path, callee_ident->name, program, diag);
+                                check_call_args(v->args, resolved_fn.params, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
+                                if (resolved_fn.return_types.size() > 1) {
                                     return error(diag, v->location, "multi-value capture is not yet supported here");
                                 }
-                                return sym.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sym.return_types.front();
+                                return resolved_fn.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : resolved_fn.return_types.front();
                             } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
                                 check_call_args(v->args, sym.params, sym.is_variadic, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
                                 return sym.return_type.value_or(ResolvedType{.kind = TypeKind::Void});
@@ -1389,13 +1423,14 @@ namespace sema {
                                 const auto sym_it = mod_it->second.symbols.find(v->member);
                                 if (sym_it != mod_it->second.symbols.end()) {
                                     const auto &exp_sig = fn_sig(*expected, program);
-                                    if (const auto *fn = std::get_if<FunctionSymbol>(&sym_it->second)) {
-                                        if (!fn->is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
-                                        if (fn->is_variadic) {
+                                    if (std::holds_alternative<FunctionSymbol>(sym_it->second)) {
+                                        auto &fn = ensure_function_signature_resolved(*target_mod, v->member, program, diag);
+                                        if (!fn.is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
+                                        if (fn.is_variadic) {
                                             return error(diag, v->location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v->member));
                                         }
-                                        if (function_params_compatible(fn->params, exp_sig.param_types) &&
-                                            fn->return_types == exp_sig.return_types &&
+                                        if (function_params_compatible(fn.params, exp_sig.param_types) &&
+                                            fn.return_types == exp_sig.return_types &&
                                             !exp_sig.is_variadic) {
                                             return *expected;
                                         }

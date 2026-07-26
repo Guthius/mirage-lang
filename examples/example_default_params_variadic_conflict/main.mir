@@ -1,0 +1,16 @@
+# example_default_params_variadic_conflict — REJECTION CASE. A native
+# variadic parameter ('...T') cannot appear in the same parameter list as a
+# default parameter value — a variadic parameter can never itself carry a
+# default, and the two features aren't allowed to coexist at all.
+#
+# Expected: compilation fails with
+#   error: a parameter list cannot mix a native variadic parameter with
+#   default parameter values
+
+fn f(a: i32 = 1, b: ...i32) -> i32 {
+    return a
+}
+
+pub fn main() -> i32 {
+    return f(1)
+}

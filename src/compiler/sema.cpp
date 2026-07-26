@@ -9,6 +9,60 @@ namespace sema {
     void register_trait_impls_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag);
     void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag);
 
+    // Minimal human-readable rendering of a resolved type, used for trait conformance
+    // and default-parameter-value diagnostics (there is no general ResolvedType-to-string
+    // formatter elsewhere in sema).
+    auto describe_type(const ResolvedType &t, const Program &program) -> std::string {
+        switch (t.kind) {
+        case TypeKind::Invalid:  return "<invalid>";
+        case TypeKind::Void:     return "void";
+        case TypeKind::U8:       return "u8";
+        case TypeKind::U16:      return "u16";
+        case TypeKind::U32:      return "u32";
+        case TypeKind::U64:      return "u64";
+        case TypeKind::I8:       return "i8";
+        case TypeKind::I16:      return "i16";
+        case TypeKind::I32:      return "i32";
+        case TypeKind::I64:      return "i64";
+        case TypeKind::F32:      return "f32";
+        case TypeKind::F64:      return "f64";
+        case TypeKind::USize:    return "usize";
+        case TypeKind::Bool:     return "bool";
+        case TypeKind::Anyptr:   return "anyptr";
+        case TypeKind::Pointer: {
+            const auto *pointee = program.pointee_at(t.pointee_index);
+            return "*" + (pointee ? describe_type(*pointee, program) : std::string("?"));
+        }
+        case TypeKind::Slice: {
+            const auto *info = program.slice_at(t.slice_index);
+            return "[]" + (info ? describe_type(info->element_type, program) : std::string("?"));
+        }
+        case TypeKind::Array: {
+            const auto *info = program.array_at(t.array_index);
+            return info ? std::format("[{}]{}", info->count, describe_type(info->element_type, program)) : "[]?";
+        }
+        case TypeKind::Union: {
+            if (const auto *info = program.union_at(t.union_index); info && info->is_error_union) {
+                std::string out = "error(";
+                for (size_t i = 0; i < info->error_member_types.size(); ++i) {
+                    if (i > 0) out += " | ";
+                    out += describe_type(info->error_member_types[i], program);
+                }
+                return out + ")";
+            }
+            [[fallthrough]];
+        }
+        case TypeKind::Struct:
+        case TypeKind::Enum:
+        case TypeKind::Trait: {
+            const auto [mod, name] = find_type_module_and_name(t, program);
+            return name.empty() ? "<unknown type>" : name;
+        }
+        case TypeKind::Function: return "fn(...)";
+        default: return "<type>";
+        }
+    }
+
     namespace {
         void resolve_signatures_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
             for (auto &[name, sym] : module.symbols) {
@@ -18,24 +72,17 @@ namespace sema {
                 }
             }
 
-            for (auto &sym : module.symbols | std::views::values) {
-                if (auto *fn = std::get_if<FunctionSymbol>(&sym)) {
-                    for (auto &p : fn->decl->params) {
-                        const auto pt = resolve_type(p.type, module_path, program, diag);
-                        if (p.is_variadic) {
-                            fn->is_variadic = true;
-                            fn->variadic_element_type = pt;
-                            fn->params.push_back(intern_slice(program, pt));
-                        } else {
-                            fn->params.push_back(pt);
-                        }
-                    }
-                    for (auto &rt : fn->decl->return_types) {
-                        fn->return_types.push_back(resolve_type(rt, module_path, program, diag));
-                    }
+            for (auto &[name, sym] : module.symbols) {
+                if (std::holds_alternative<FunctionSymbol>(sym)) {
+                    ensure_function_signature_resolved(module_path, name, program, diag);
                 } else if (auto *ef = std::get_if<ExtFunctionSymbol>(&sym)) {
                     for (auto &p : ef->decl->params) {
                         const auto pt = resolve_type(p.type, module_path, program, diag);
+                        if (p.default_value) {
+                            diag.report_error(DiagnosticStage::Sema, p.location,
+                                "'ext fn' declarations may not have default parameter values. "
+                                "Default arguments have no C ABI representation.");
+                        }
                         if (pt.kind == TypeKind::Union) {
                             diag.report_error(DiagnosticStage::Sema, p.location, "union types are not yet supported in extern function signatures");
                         }
@@ -96,7 +143,14 @@ namespace sema {
                     info.self_type = self_type;
 
                     for (auto &p : info.decl->params) {
-                        const auto pt = resolve_type(p.type, module_path, program, diag);
+                        ResolvedType pt;
+                        if (p.type) {
+                            pt = resolve_type(*p.type, module_path, program, diag);
+                        } else {
+                            // ':=' inferred-type param — infer from the (required) default expr.
+                            LocalScope empty;
+                            pt = check_expr(*p.default_value, empty, module_path, program, diag, std::nullopt, 0);
+                        }
                         if (p.is_variadic) {
                             info.is_variadic = true;
                             info.variadic_element_type = pt;
@@ -109,62 +163,11 @@ namespace sema {
                         info.return_types.push_back(resolve_type(rt, module_path, program, diag));
                     }
 
+                    check_param_defaults(info.decl->params, info.param_types, info.required_params,
+                                          info.param_default_is_const, module_path, program, diag);
+
                     info.is_resolved = true;
                 }
-            }
-        }
-
-        // Minimal human-readable rendering of a resolved type, used only for trait
-        // conformance diagnostics (there is no general ResolvedType-to-string formatter
-        // elsewhere in sema).
-        auto describe_type(const ResolvedType &t, const Program &program) -> std::string {
-            switch (t.kind) {
-            case TypeKind::Invalid:  return "<invalid>";
-            case TypeKind::Void:     return "void";
-            case TypeKind::U8:       return "u8";
-            case TypeKind::U16:      return "u16";
-            case TypeKind::U32:      return "u32";
-            case TypeKind::U64:      return "u64";
-            case TypeKind::I8:       return "i8";
-            case TypeKind::I16:      return "i16";
-            case TypeKind::I32:      return "i32";
-            case TypeKind::I64:      return "i64";
-            case TypeKind::F32:      return "f32";
-            case TypeKind::F64:      return "f64";
-            case TypeKind::USize:    return "usize";
-            case TypeKind::Bool:     return "bool";
-            case TypeKind::Anyptr:   return "anyptr";
-            case TypeKind::Pointer: {
-                const auto *pointee = program.pointee_at(t.pointee_index);
-                return "*" + (pointee ? describe_type(*pointee, program) : std::string("?"));
-            }
-            case TypeKind::Slice: {
-                const auto *info = program.slice_at(t.slice_index);
-                return "[]" + (info ? describe_type(info->element_type, program) : std::string("?"));
-            }
-            case TypeKind::Array: {
-                const auto *info = program.array_at(t.array_index);
-                return info ? std::format("[{}]{}", info->count, describe_type(info->element_type, program)) : "[]?";
-            }
-            case TypeKind::Union: {
-                if (const auto *info = program.union_at(t.union_index); info && info->is_error_union) {
-                    std::string out = "error(";
-                    for (size_t i = 0; i < info->error_member_types.size(); ++i) {
-                        if (i > 0) out += " | ";
-                        out += describe_type(info->error_member_types[i], program);
-                    }
-                    return out + ")";
-                }
-                [[fallthrough]];
-            }
-            case TypeKind::Struct:
-            case TypeKind::Enum:
-            case TypeKind::Trait: {
-                const auto [mod, name] = find_type_module_and_name(t, program);
-                return name.empty() ? "<unknown type>" : name;
-            }
-            case TypeKind::Function: return "fn(...)";
-            default: return "<type>";
             }
         }
 
@@ -208,7 +211,13 @@ namespace sema {
                         info.self_type = self_type;
 
                         for (auto &p : info.decl->params) {
-                            const auto pt = resolve_type(p.type, impl_info.impl_module, program, diag);
+                            ResolvedType pt;
+                            if (p.type) {
+                                pt = resolve_type(*p.type, impl_info.impl_module, program, diag);
+                            } else {
+                                LocalScope empty;
+                                pt = check_expr(*p.default_value, empty, impl_info.impl_module, program, diag, std::nullopt, 0);
+                            }
                             if (p.is_variadic) {
                                 info.is_variadic = true;
                                 info.variadic_element_type = pt;
@@ -221,13 +230,21 @@ namespace sema {
                             info.return_types.push_back(resolve_type(rt, impl_info.impl_module, program, diag));
                         }
 
+                        // A trait-impl method must never declare its own defaults — see the
+                        // redeclare/add-without-trait validation below, matched against the
+                        // trait's own defaults. required_params is always the full count here;
+                        // all defaulting for a trait-backed method flows from TraitMethodInfo.
+                        info.required_params = info.param_types.size();
+                        info.param_default_is_const.assign(info.param_types.size(), false);
+
                         info.is_resolved = true;
                     }
 
                     const auto *trait_info = program.trait_at(impl_info.trait_index);
                     if (!trait_info) continue;
 
-                    for (const auto &trait_method : trait_info->methods) {
+                    for (size_t trait_method_index = 0; trait_method_index < trait_info->methods.size(); ++trait_method_index) {
+                        const auto &trait_method = trait_info->methods[trait_method_index];
                         const auto it = impl_info.methods.find(trait_method.name);
                         if (it == impl_info.methods.end()) {
                             diag.report_error(DiagnosticStage::Sema, impl_info.location,
@@ -236,7 +253,10 @@ namespace sema {
                             continue;
                         }
 
-                        const auto &impl_method = it->second;
+                        auto &impl_method = it->second;
+                        impl_method.trait_index = impl_info.trait_index;
+                        impl_method.trait_method_index = static_cast<int>(trait_method_index);
+
                         const bool mismatch = impl_method.is_mut_self != trait_method.is_mut_self ||
                                                impl_method.is_variadic ||
                                                impl_method.param_types != trait_method.params ||
@@ -248,6 +268,23 @@ namespace sema {
                                     trait_method.name, impl_info.trait_name,
                                     describe_signature(trait_method.is_mut_self, trait_method.params, trait_method.return_types, program),
                                     describe_signature(impl_method.is_mut_self, impl_method.param_types, impl_method.return_types, program)));
+                        }
+
+                        for (size_t i = 0; i < impl_method.decl->params.size() && i < trait_method.params.size(); ++i) {
+                            if (!impl_method.decl->params[i].default_value) continue;
+
+                            if (i >= trait_method.required_params) {
+                                diag.report_error(DiagnosticStage::Sema, impl_method.decl->params[i].location, std::format(
+                                    "parameter '{}' in '{}.{}' redeclares a default value already declared by the trait "
+                                    "'{}'. Remove the default from the implementation — it is inherited from the trait.",
+                                    impl_method.decl->params[i].name, impl_info.type_name, trait_method.name, impl_info.trait_name));
+                            } else {
+                                diag.report_error(DiagnosticStage::Sema, impl_method.decl->params[i].location, std::format(
+                                    "parameter '{}' in '{}.{}' declares a default value but the corresponding trait method "
+                                    "'{}.{}' does not. Defaults on trait implementations must match the trait declaration.",
+                                    impl_method.decl->params[i].name, impl_info.type_name, trait_method.name,
+                                    impl_info.trait_name, trait_method.name));
+                            }
                         }
                     }
 

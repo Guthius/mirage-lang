@@ -482,8 +482,16 @@ namespace codegen {
 
                 std::vector<llvm::Value *> args;
                 args.push_back(data_ptr);
-                for (size_t i = 0; i < call.args.size() && i < trait_method.params.size(); ++i) {
-                    args.push_back(emit_value_as(call.args[i], trait_method.params[i], *current_module_path_));
+                for (size_t i = 0; i < trait_method.params.size(); ++i) {
+                    if (i < call.args.size()) {
+                        args.push_back(emit_value_as(call.args[i], trait_method.params[i], *current_module_path_));
+                    } else {
+                        // Omitted trailing arg: the caller has no visibility into which
+                        // concrete impl will be dispatched to, so the default always
+                        // comes from the trait's own method signature.
+                        args.push_back(emit_default_arg(*trait_method.decl->params[i].default_value,
+                            trait_method.param_default_is_const[i], trait_info->module_path, trait_method.params[i]));
+                    }
                 }
 
                 return builder_.CreateCall(fn_type, fn_ptr, args);
@@ -892,6 +900,46 @@ namespace codegen {
                     return llvm::Constant::getNullValue(unions_.at(type.union_index));
                 }
                 return zero_value(type_module, type);
+            }
+
+            // Materializes an omitted trailing call argument from its default-parameter
+            // expression. Mirrors emit_default_value/emit_const_default_value's dual
+            // path: a compile-time-constant default folds via emit_constant_expr, no
+            // runtime evaluation code emitted; anything else is evaluated inline at the
+            // call site (same insertion point as the surrounding call) with
+            // current_module_path_/current_module_ swapped to the CALLEE's (or trait's)
+            // declaring module — not the caller's — since the default expression's AST
+            // node physically lives there and may reference symbols private to that
+            // module. 'declaring_module' must be a stable reference (e.g. a module_path
+            // field on a Program-owned info struct), not a temporary.
+            auto emit_default_arg(const ast::Expr &default_expr, bool is_const, const std::string &declaring_module, const sema::ResolvedType &param_type) -> llvm::Value * {
+                if (is_const) {
+                    return emit_constant_expr(default_expr);
+                }
+                const auto *saved_path = current_module_path_;
+                const auto *saved_module = current_module_;
+                current_module_path_ = &declaring_module;
+                current_module_ = &module_for(declaring_module);
+                auto *val = emit_value_as(default_expr, param_type, declaring_module);
+                current_module_path_ = saved_path;
+                current_module_ = saved_module;
+                return val;
+            }
+
+            // As emit_default_arg, but for a call resolved via MethodInfo (static/inherent
+            // dispatch, not a dyn Trait handle — see emit_trait_handle_dispatch for that
+            // path). A trait-impl method never declares its own defaults, so when this
+            // method backs a trait impl the default always comes from the trait's own
+            // TraitMethodInfo instead — mirrors sema's method_required_params.
+            auto emit_method_trailing_arg(const sema::MethodInfo &method, size_t i) -> llvm::Value * {
+                if (method.trait_name) {
+                    const auto *trait_info = sema_program_.trait_at(method.trait_index);
+                    const auto &trait_method = trait_info->methods[method.trait_method_index];
+                    return emit_default_arg(*trait_method.decl->params[i].default_value,
+                        trait_method.param_default_is_const[i], trait_info->module_path, trait_method.params[i]);
+                }
+                return emit_default_arg(*method.decl->params[i].default_value,
+                    method.param_default_is_const[i], method.impl_module, method.param_types[i]);
             }
 
             // Emit a struct value from an explicit StructExpr, filling in field defaults
@@ -1367,7 +1415,9 @@ namespace codegen {
                     locals_[param.name] = LocalValue{
                         .alloca = slot,
                         .type = info.param_types[index],
-                        .type_module = type_module_for_ast_type(param.type, module_path, info.param_types[index]),
+                        .type_module = param.type
+                                           ? type_module_for_ast_type(*param.type, module_path, info.param_types[index])
+                                           : module_path,
                     };
                 }
 
@@ -1524,7 +1574,9 @@ namespace codegen {
                     locals_[param.name] = LocalValue{
                         .alloca = slot,
                         .type = fn.params[index],
-                        .type_module = type_module_for_ast_type(param.type, module_path, fn.params[index]),
+                        .type_module = param.type
+                                           ? type_module_for_ast_type(*param.type, module_path, fn.params[index])
+                                           : module_path,
                     };
                     ++index;
                 }
@@ -2295,8 +2347,10 @@ namespace codegen {
                                 functions_.at(FunctionKey{method->impl_module, method_fn_key_for(*method)}),
                                 args);
                         }
-                        for (size_t i = 0; i < call.args.size(); ++i) {
-                            args.push_back(emit_value_as(call.args[i], method->param_types[i], *current_module_path_));
+                        for (size_t i = 0; i < method->param_types.size(); ++i) {
+                            args.push_back(i < call.args.size()
+                                ? emit_value_as(call.args[i], method->param_types[i], *current_module_path_)
+                                : emit_method_trailing_arg(*method, i));
                         }
                         return builder_.CreateCall(
                             functions_.at(FunctionKey{method->impl_module, method_fn_key_for(*method)}),
@@ -2360,8 +2414,10 @@ namespace codegen {
                         args.push_back(emit_variadic_tail_slice(call.args, fixed_count, slice_ty, target_module));
                         return builder_.CreateCall(functions_.at(FunctionKey{target_module, name}), args);
                     }
-                    for (size_t i = 0; i < call.args.size(); ++i) {
-                        args.push_back(emit_value_as(call.args[i], fn->params[i], *current_module_path_));
+                    for (size_t i = 0; i < fn->params.size(); ++i) {
+                        args.push_back(i < call.args.size()
+                            ? emit_value_as(call.args[i], fn->params[i], *current_module_path_)
+                            : emit_default_arg(*fn->decl->params[i].default_value, fn->param_default_is_const[i], target_module, fn->params[i]));
                     }
                     return builder_.CreateCall(functions_.at(FunctionKey{target_module, name}), args);
                 }

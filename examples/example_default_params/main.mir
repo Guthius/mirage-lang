@@ -1,0 +1,34 @@
+# Default parameter values: the spec's own alloc/repeat/main example, plus
+# calling with all arguments explicit.
+
+type Allocator_Error = enum {
+    Out_Of_Memory
+}
+
+fn alloc(size: usize, zero_memory: bool = true) -> (anyptr, error(Allocator_Error)) {
+    const ptr := zero_memory ? cast(size, anyptr) : cast(size + 1000, anyptr)
+    if ptr == nil { return_err .Out_Of_Memory }
+    return_ok ptr
+}
+
+# Inferred type form
+fn repeat(base: i32, times := 3) -> i32 {
+    return base * times
+}
+
+pub fn main() -> error(Allocator_Error) {
+    # Omitting the defaulted argument
+    const p1 := try alloc(1024)          # zero_memory = true -> ptr = 1024
+    const p2 := try alloc(1024, false)   # zero_memory = false -> ptr = 2024
+
+    # Runtime default
+    const s1 := repeat(2)      # times = 3 -> 6
+    const s2 := repeat(2, 5)   # times = 5 -> 10
+
+    if cast(p1, usize) != 1024 { return_err .Out_Of_Memory }
+    if cast(p2, usize) != 2024 { return_err .Out_Of_Memory }
+    if s1 != 6 { return_err .Out_Of_Memory }
+    if s2 != 10 { return_err .Out_Of_Memory }
+
+    return_ok
+}
