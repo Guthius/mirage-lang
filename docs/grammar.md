@@ -205,7 +205,7 @@ prefix.
 
 Note: Struct, enum, and union fields/variants need no separator token between them at all (see Notes on Syntax Conventions, note 1) — commas are not valid there.
 
-`bitset_type`'s first argument must resolve (in sema) to a named enum type with an explicit integer backing type (e.g. `enum(u8)`) — a plain `enum` with no parenthesized backing type is rejected. The second argument, if present, must resolve to one of `u8`/`u16`/`u32`/`u64`; if omitted it defaults to `u32`. Unlike `named_type` alone, a `bitset(...)` type always declares a new, distinct type — never an alias. See spec.md's "Bitset Types" section for the full semantics.
+`bitset_type`'s first argument must resolve (in sema) to a named enum type — a plain `enum {}` with no parenthesized backing type is fine and defaults to `i32`, same as an ordinary enum declaration. The second argument, if present, must resolve to one of `u8`/`u16`/`u32`/`u64`; if omitted it defaults to `u32`. Unlike `named_type` alone, a `bitset(...)` type always declares a new, distinct type — never an alias. See spec.md's "Bitset Types" section for the full semantics.
 
 ---
 

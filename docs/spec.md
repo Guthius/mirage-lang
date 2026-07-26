@@ -1727,12 +1727,13 @@ pub type Stream_Modes16 = bitset(Stream_Mode, u16)   # explicit storage type
 ```
 
 The first argument names the **member enum** and must resolve to an enum
-declared with an explicit integer backing type (`enum(u8)`, `enum(i32)`,
-etc.) — a plain `enum` with no parenthesized backing type is rejected:
+type (`enum(u8) {...}`, `enum(i32) {...}`, or a plain `enum {...}` with no
+parenthesized backing type — which, like any other enum declaration,
+defaults to an `i32` backing type). Naming a non-enum type is a sema
+error:
 
 ```
-error: bitset member type must be an enum with an explicit integer
-       backing type, e.g. 'enum(u8)'.
+error: bitset member type must be an enum type
 ```
 
 The optional second argument is the **storage type** and must be one of

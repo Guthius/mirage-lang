@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Structs &amp; Types — Mirage</title>
-  <meta name="description" content="Structs, enums, tagged and untagged unions, and impl blocks in Mirage.">
+  <meta name="description" content="Structs, enums, bitsets, tagged and untagged unions, and impl blocks in Mirage.">
   <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -55,7 +55,7 @@
     <div class="content">
 
       <h1>Structs &amp; Types</h1>
-      <p class="subtitle">Structs, enums, tagged and untagged unions, impl blocks.</p>
+      <p class="subtitle">Structs, enums, bitsets, tagged and untagged unions, impl blocks.</p>
 
       <h2>Type Declarations</h2>
       <p>Named types are declared with the <code>type</code> keyword:</p>
@@ -164,6 +164,88 @@
     .<span class="var">east</span>:  <span class="str">"E"</span>,
     .<span class="var">west</span>:  <span class="str">"W"</span>
 }</code></pre>
+
+      <hr>
+
+      <h2>Bitsets</h2>
+      <p>
+        A <code>bitset</code> is a distinct named type representing a set of enum members stored as bits
+        in an integer. It's built on top of an existing enum, and is always a new, distinct type —
+        never an alias, even if two bitsets share the same member enum and storage type.
+      </p>
+
+      <pre><code><span class="kw">pub type</span> <span class="ty">Stream_Mode</span> = <span class="kw">enum</span>(<span class="ty">u8</span>) {
+    <span class="var">Close</span>
+    <span class="var">Flush</span>
+    <span class="var">Read</span>
+    <span class="var">Write</span>
+    <span class="var">Seek</span>
+}
+
+<span class="kw">pub type</span> <span class="ty">Stream_Modes</span> = <span class="kw">bitset</span>(<span class="ty">Stream_Mode</span>)         <span class="cmt"># storage defaults to u32</span>
+<span class="kw">pub type</span> <span class="ty">Stream_Modes16</span> = <span class="kw">bitset</span>(<span class="ty">Stream_Mode</span>, <span class="ty">u16</span>)  <span class="cmt"># explicit storage type</span></code></pre>
+
+      <p>
+        The first argument names the member enum — a plain <code>enum {...}</code> with no backing type
+        works fine here too (it defaults to <code>i32</code>, same as any other enum). The optional
+        second argument is the storage type, one of <code>u8</code>/<code>u16</code>/<code>u32</code>/<code>u64</code>;
+        each member occupies bit <code>value + 1</code> of the storage integer, so the compiler
+        rejects a bitset declaration if any member's bit would overflow the chosen storage width.
+      </p>
+
+      <h3>Literals and Member Operations</h3>
+      <pre><code><span class="kw">mut</span> <span class="var">modes</span>: <span class="ty">Stream_Modes</span> = {.<span class="var">Close</span>, .<span class="var">Flush</span>}   <span class="cmt"># set containing Close and Flush</span>
+<span class="kw">const</span> <span class="var">empty</span>: <span class="ty">Stream_Modes</span> = {}                  <span class="cmt"># zero value — no bits set</span>
+
+<span class="var">modes</span> += .<span class="var">Write</span>   <span class="cmt"># set a member</span>
+<span class="var">modes</span> -= .<span class="var">Close</span>   <span class="cmt"># clear a member</span>
+<span class="var">modes</span> ~= .<span class="var">Flush</span>   <span class="cmt"># toggle a member</span></code></pre>
+
+      <h3>Set Operations and Membership</h3>
+      <pre><code><span class="kw">const</span> <span class="var">required</span>: <span class="ty">Stream_Modes</span> = {.<span class="var">Write</span>, .<span class="var">Seek</span>}
+<span class="kw">const</span> <span class="var">combined</span> := <span class="var">modes</span> + <span class="var">required</span>   <span class="cmt"># union</span>
+<span class="kw">const</span> <span class="var">common</span>   := <span class="var">modes</span> &amp; <span class="var">required</span>   <span class="cmt"># intersection</span>
+<span class="kw">const</span> <span class="var">flipped</span>  := ~<span class="var">modes</span>              <span class="cmt"># complement (all bits inverted)</span>
+
+<span class="kw">if</span> .<span class="var">Write</span> <span class="kw">in</span> <span class="var">modes</span> { }               <span class="cmt"># single-member test</span>
+<span class="kw">if</span> {.<span class="var">Write</span>, .<span class="var">Seek</span>} <span class="kw">in</span> <span class="var">modes</span> { }     <span class="cmt"># subset test</span></code></pre>
+
+      <table>
+        <tr><th>Operator</th><th>Meaning</th></tr>
+        <tr><td><code>+=</code> / <code>-=</code> / <code>~=</code></td><td>set / clear / toggle member(s)</td></tr>
+        <tr><td><code>+</code> / <code>|</code></td><td>union</td></tr>
+        <tr><td><code>-</code></td><td>difference</td></tr>
+        <tr><td><code>&amp;</code></td><td>intersection</td></tr>
+        <tr><td><code>~</code> / <code>^</code></td><td>symmetric difference (infix)</td></tr>
+        <tr><td><code>~</code></td><td>complement (unary/prefix)</td></tr>
+        <tr><td><code>==</code> / <code>!=</code></td><td>equality</td></tr>
+        <tr><td><code>in</code></td><td>membership testing</td></tr>
+      </table>
+
+      <h3>Coercion, Casting, and C Interop</h3>
+      <p>
+        A bitset implicitly coerces to its storage type only where an expected type makes that
+        conversion unambiguous (a typed variable declaration, a function argument, a return value) —
+        never inside a binary expression. Going the other way (a raw integer to a bitset) always
+        requires an explicit <code>cast</code>:
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">raw</span>: <span class="ty">u16</span> = <span class="var">modes</span>                    <span class="cmt"># OK — implicit, expected-type position</span>
+<span class="kw">const</span> <span class="var">modes2</span> := <span class="fn">cast</span>(<span class="var">raw</span>, <span class="ty">Stream_Modes</span>)   <span class="cmt"># OK — explicit cast back</span></code></pre>
+      <p>
+        Bitsets are ABI-transparent in <code>ext fn</code> signatures — a bitset value <em>is</em> its
+        storage integer at the C boundary, so no coercion is needed when calling into (or receiving a
+        value from) a C library:
+      </p>
+      <pre><code><span class="kw">ext fn</span> <span class="fn">SDL_SetWindowFlags</span>(<span class="var">window</span>: *<span class="ty">SDL_Window</span>, <span class="var">flags</span>: <span class="ty">WindowFlags</span>)
+<span class="ty">SDL_SetWindowFlags</span>(<span class="var">win</span>, <span class="var">modes</span>)   <span class="cmt"># flags passed as its storage integer, no cast needed</span></code></pre>
+
+      <div class="callout warning">
+        <div class="callout-title">Restrictions</div>
+        <ul>
+          <li>Two different bitset types can never mix, even with identical storage types — mixing a bitset with a raw integer, or with a <em>different</em> bitset type, is always a sema error. Go through an explicit integer cast: <code>cast(cast(a, u16), TypeB)</code>.</li>
+          <li>Ordering comparisons (<code>&lt;</code>, <code>&gt;</code>, <code>&lt;=</code>, <code>&gt;=</code>) and arithmetic other than the set operators above (<code>*</code>, <code>/</code>, <code>%</code>, <code>&lt;&lt;</code>, <code>&gt;&gt;</code>) are not supported on bitsets.</li>
+        </ul>
+      </div>
 
       <hr>
 

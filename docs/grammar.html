@@ -184,6 +184,7 @@ block_decl    ::= '{' { declaration } '}'
                | union_type
                | trait_type
                | error_type
+               | bitset_type
                | fn_type
                | named_type
                | builtin_type
@@ -214,6 +215,12 @@ trait_method_decl ::= 'fn' IDENT
 
 error_type    ::= 'error' '(' named_type { '|' named_type } ')'
                   <span class="bnf-cm">-- named_type must be an enum(i32) or union(enum) type; duplicate members are an error</span>
+
+bitset_type   ::= 'bitset' '(' named_type [ ',' builtin_type ] ')'
+                  <span class="bnf-cm">-- first arg must resolve to an enum type (a plain 'enum {}' with no backing
+                  -- type is fine — defaults to i32, like any enum); second arg, if present,
+                  -- must be u8/u16/u32/u64 (defaults to u32). Always a distinct type, never
+                  -- an alias — see the Structs &amp; Types page's "Bitsets" section.</span>
 
 fn_type       ::= 'fn' '(' [ fn_type_params ] ')'
                     [ '->' type | '->' '(' type { ',' type } ')' ]
@@ -302,7 +309,8 @@ import_expr   ::= 'import' '(' STRING ')' { '.' IDENT }
 assign_expr   ::= when_expr [ assign_op assign_expr ]   <span class="bnf-cm">-- right-associative</span>
 
 assign_op     ::= '=' | '+=' | '-=' | '*=' | '/='
-               | '&amp;=' | '|=' | '^=' | '&lt;&lt;=' | '&gt;&gt;='
+               | '&amp;=' | '|=' | '^=' | '&lt;&lt;=' | '&gt;&gt;=' | '~='
+                  <span class="bnf-cm">-- '~=' (toggle-assign) is legal only when the target is a bitset type</span>
 
 when_expr     ::= ternary_expr [ 'when' ternary_expr 'else' expr ]
 
@@ -318,11 +326,21 @@ ternary_expr  ::= logical_or_expr [ '?' expr ':' expr ]   <span class="bnf-cm">-
 
 logical_or_expr  ::= logical_and_expr { '||' logical_and_expr }
 
-logical_and_expr ::= bitwise_or_expr  { '&amp;&amp;' bitwise_or_expr }
+logical_and_expr ::= in_expr          { '&amp;&amp;' in_expr }
+
+in_expr          ::= bitwise_or_expr  [ 'in' bitwise_or_expr ]
+                  <span class="bnf-cm">-- bitset membership testing; non-chaining ('in's result is bool, not a
+                  -- bitset). Unrelated to 'for'-loop's 'in' — that one is consumed directly
+                  -- by the 'for' statement's own grammar and never reaches this production.
+                  -- See the Structs &amp; Types page's "Bitsets" section.</span>
 
 bitwise_or_expr  ::= bitwise_xor_expr { '|'  bitwise_xor_expr }
 
-bitwise_xor_expr ::= bitwise_and_expr { '^'  bitwise_and_expr }
+bitwise_xor_expr ::= bitwise_and_expr { ( '^' | '~' ) bitwise_and_expr }
+                  <span class="bnf-cm">-- infix '~' is accepted at the same precedence as '^' — same lowering
+                  -- (bitwise XOR for integers, symmetric difference for two bitsets). No
+                  -- ambiguity with prefix '~' (unary complement): precedence-climbing only
+                  -- reads '~' as prefix at the START of an operand, never here.</span>
 
 bitwise_and_expr ::= equality_expr    { '&amp;'  equality_expr }
 
@@ -404,7 +422,7 @@ env_expr      ::= '@env' '(' STRING [ ',' expr ] ')'
 sizeof_expr   ::= 'sizeof' '(' sizeof_operand ')'
 
 sizeof_operand ::= type   <span class="bnf-cm">-- whenever the next token(s) can only start a type
-                              (builtin keyword, '*', '[', 'struct', 'enum', 'union', 'fn', 'trait')</span>
+                              (builtin keyword, '*', '[', 'struct', 'enum', 'union', 'bitset', 'fn', 'trait')</span>
                | expr     <span class="bnf-cm">-- otherwise (may still simply name a type, e.g. module.TypeName)</span>
 
 len_expr      ::= 'len' '(' expr ')'
@@ -434,10 +452,17 @@ contextual_tagged_variant   ::= '.' IDENT '{.' field_init { ',' field_init } '}'
 
 field_init    ::= '.' IDENT '=' expr
 
+bitset_literal ::= '{' '.' IDENT { ',' '.' IDENT } '}'
+                  <span class="bnf-cm">-- a bitset member set; only legal where a bitset type is expected —
+                  -- see the Structs &amp; Types page's "Bitsets" section</span>
+
 braced_initializer ::= '{' '}'                                        <span class="bnf-cm">-- empty (full default)</span>
                | '{' field_init { ',' field_init } '}'             <span class="bnf-cm">-- struct fields</span>
+               | bitset_literal
                | '{' expr { ',' expr } [ '...' ] '}'                  <span class="bnf-cm">-- array values, optional trailing fill</span>
-               <span class="bnf-cm">-- Disambiguation: '{' IDENT '=' detects struct form; else array form</span></code></pre>
+               <span class="bnf-cm">-- Disambiguation: '.' IDENT '=' is struct form; '.' IDENT with no '='
+               -- (comma or '}' follows instead) is the bitset form; otherwise array form.
+               -- Mixing the two '.' IDENT forms in one initializer is a parse error.</span></code></pre>
 
       <h2>Literals</h2>
       <pre><code>INT_LITERAL   ::= decimal_int | hex_int | bin_int
@@ -512,7 +537,7 @@ LETTER        ::= 'a' .. 'z' | 'A' .. 'Z' | '_'</code></pre>
 
       <h3>Reserved Keywords</h3>
       <p>
-        <code>break</code> <code>byte</code> <code>cast</code> <code>const</code> <code>continue</code>
+        <code>bitset</code> <code>break</code> <code>byte</code> <code>cast</code> <code>const</code> <code>continue</code>
         <code>default</code> <code>defer</code> <code>else</code> <code>enum</code> <code>error</code>
         <code>ext</code> <code>false</code> <code>fn</code> <code>for</code> <code>if</code> <code>impl</code>
         <code>import</code> <code>import_bin</code> <code>in</code> <code>iota</code> <code>len</code>

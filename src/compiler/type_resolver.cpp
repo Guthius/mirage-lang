@@ -629,12 +629,6 @@ namespace sema {
                 program.enums[slot] = std::move(info);
             }
 
-            // Whether an enum's spelling of the source directly declared it with an
-            // explicit integer backing type ('enum(u8) {...}'), checked at the AST
-            // level (rather than via a stored EnumInfo flag) so this stays purely
-            // additive to enum layout. Note this only recognizes the enum type
-            // spelled directly at 'name' — an indirect alias to an enum is not
-            // unwrapped here.
             static auto storage_type_name(const TypeKind kind) -> const char * {
                 switch (kind) {
                 case TypeKind::U8:  return "u8";
@@ -651,22 +645,15 @@ namespace sema {
                     return;
                 }
 
-                auto &target_mod = program.modules.at(target->module_path);
-                const auto *ts = find_type_symbol(target_mod, target->name, target->location);
-                const auto *enum_decl_ast = ts && ts->decl ? std::get_if<std::unique_ptr<ast::EnumType>>(&ts->decl->type) : nullptr;
-                if (!enum_decl_ast) {
+                // No requirement that the enum spell out an explicit backing type here —
+                // an enum with no '(...)' backing already defaults to i32 (see layout_enum),
+                // and that resolved underlying_type is all layout_bitset actually needs.
+                const auto member_ty = resolve_final_full(target->module_path, target->name, target->crossed_boundary, target->location);
+                if (member_ty.kind != TypeKind::Enum) {
                     diag.report_error(DiagnosticStage::Sema, decl->location, "bitset member type must be an enum type");
                     program.bitsets[slot] = BitsetInfo{.layout_done = true};
                     return;
                 }
-                if (!(*enum_decl_ast)->underlying_type.has_value()) {
-                    diag.report_error(DiagnosticStage::Sema, decl->location,
-                        "bitset member type must be an enum with an explicit integer backing type, e.g. 'enum(u8)'.");
-                    program.bitsets[slot] = BitsetInfo{.layout_done = true};
-                    return;
-                }
-
-                const auto member_ty = resolve_final_full(target->module_path, target->name, target->crossed_boundary, target->location);
 
                 ResolvedType storage = decl->storage_type
                                             ? resolve_type_impl(*decl->storage_type, module_path)
