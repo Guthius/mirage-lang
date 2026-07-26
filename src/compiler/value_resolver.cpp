@@ -131,6 +131,8 @@ namespace sema {
                                         }
                                     }
                                     return true;
+                                } else if constexpr (std::is_same_v<BVT, ast::BitsetExpr>) {
+                                    return true; // member names are plain strings, always compile-time constant
                                 } else { // ast::StructExpr
                                     const auto mod_it = program.modules.find(module_path);
                                     if (mod_it == program.modules.end()) {
@@ -721,11 +723,47 @@ namespace sema {
                     const auto mod_it = program.modules.find(module_path);
                     if (mod_it == program.modules.end()) return std::nullopt;
                     const auto ty_it = mod_it->second.expr_types.find(get_expr_key(expr));
-                    if (ty_it == mod_it->second.expr_types.end() || ty_it->second.kind != TypeKind::Enum) return std::nullopt;
+                    if (ty_it == mod_it->second.expr_types.end()) return std::nullopt;
+                    if (ty_it->second.kind == TypeKind::Bitset) {
+                        // A '.Member' resolved against a bitset-expected type folds to its
+                        // one-bit MASK (1 << (value+1)), not the raw enum ordinal — see
+                        // BitsetInfo's bit-index formula.
+                        const auto *binfo = program.bitset_at(ty_it->second.bitset_index);
+                        if (!binfo) return std::nullopt;
+                        const auto *einfo = program.enum_at(binfo->member_enum_type.enum_index);
+                        if (!einfo) return std::nullopt;
+                        if (const auto *field = find_enum_field_by_name(*einfo, v.name)) {
+                            return int64_t{1} << (field->value + 1);
+                        }
+                        return std::nullopt;
+                    }
+                    if (ty_it->second.kind != TypeKind::Enum) return std::nullopt;
                     const auto *einfo = program.enum_at(ty_it->second.enum_index);
                     if (!einfo) return std::nullopt;
                     if (const auto *field = find_enum_field_by_name(*einfo, v.name)) return field->value;
                     return std::nullopt;
+                }
+
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
+                    // Only a bitset literal folds here; Empty/Struct/Array literals have no
+                    // pure-scalar constant form and are left to codegen's own emitters.
+                    const auto *bitset_expr = std::get_if<ast::BitsetExpr>(v.get());
+                    if (!bitset_expr) return std::nullopt;
+                    const auto mod_it = program.modules.find(module_path);
+                    if (mod_it == program.modules.end()) return std::nullopt;
+                    const auto ty_it = mod_it->second.expr_types.find(get_expr_key(expr));
+                    if (ty_it == mod_it->second.expr_types.end() || ty_it->second.kind != TypeKind::Bitset) return std::nullopt;
+                    const auto *binfo = program.bitset_at(ty_it->second.bitset_index);
+                    if (!binfo) return std::nullopt;
+                    const auto *einfo = program.enum_at(binfo->member_enum_type.enum_index);
+                    if (!einfo) return std::nullopt;
+                    int64_t folded = 0;
+                    for (const auto &name : bitset_expr->members) {
+                        const auto *field = find_enum_field_by_name(*einfo, name);
+                        if (!field) return std::nullopt;
+                        folded |= int64_t{1} << (field->value + 1);
+                    }
+                    return folded;
                 }
 
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {

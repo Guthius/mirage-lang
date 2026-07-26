@@ -264,6 +264,7 @@ namespace {
         case ast::BinaryOp::Less: return "<"; case ast::BinaryOp::Greater: return ">";
         case ast::BinaryOp::LessEqual: return "<="; case ast::BinaryOp::GreaterEqual: return ">=";
         case ast::BinaryOp::LogicalAnd: return "&&"; case ast::BinaryOp::LogicalOr: return "||";
+        case ast::BinaryOp::In: return "in";
         }
         return "?";
     }

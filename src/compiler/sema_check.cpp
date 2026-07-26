@@ -72,7 +72,36 @@ namespace sema {
             return &it->second;
         }
 
+        // Bitset operators are a curated, restricted set — not general scalar arithmetic
+        // (see ResolvedType::is_scalar(), which deliberately excludes Bitset so the
+        // ordinary arithmetic/comparison paths below never see one). Only two operands of
+        // the SAME bitset type are legal; mixing a bitset with a raw integer or a
+        // different bitset type must go through an explicit cast first.
+        auto bitset_binary_op_result(const ast::BinaryOp op, const ResolvedType &lhs, const ResolvedType &rhs, DiagnosticEngine &diag, const SourceLocation loc) -> ResolvedType {
+            if (lhs.kind != TypeKind::Bitset || rhs.kind != TypeKind::Bitset || lhs.bitset_index != rhs.bitset_index) {
+                return error(diag, loc, "bitset operators require two operands of the same bitset type "
+                                         "(cast to the storage type first to mix with a raw integer)");
+            }
+            switch (op) {
+            case ast::BinaryOp::Add:        // union
+            case ast::BinaryOp::Sub:        // difference
+            case ast::BinaryOp::BitwiseAnd: // intersection
+            case ast::BinaryOp::BitwiseXor: // symmetric difference — infix '~' desugars here, and raw '^' too
+            case ast::BinaryOp::BitwiseOr:  // union synonym for '+'
+                return lhs;
+            case ast::BinaryOp::Equal:
+            case ast::BinaryOp::NotEqual:
+                return ResolvedType{.kind = TypeKind::Bool};
+            default:
+                return error(diag, loc, "operator not supported on bitset types; use +/-/&/~/^/| for set operations, "
+                                         "==/!= for equality, or 'in' for membership testing");
+            }
+        }
+
         auto binary_op_result(const ast::BinaryOp op, const ResolvedType &lhs, const ResolvedType &rhs, DiagnosticEngine &diag, SourceLocation loc, const Program &program) -> ResolvedType {
+            if (lhs.kind == TypeKind::Bitset || rhs.kind == TypeKind::Bitset) {
+                return bitset_binary_op_result(op, lhs, rhs, diag, loc);
+            }
             // Function pointers do not support arithmetic; only equality comparison is allowed
             const bool is_cmp = op == ast::BinaryOp::Equal || op == ast::BinaryOp::NotEqual ||
                                  op == ast::BinaryOp::Less || op == ast::BinaryOp::Greater ||
@@ -128,6 +157,12 @@ namespace sema {
                 }
                 return ResolvedType{.kind = TypeKind::Bool};
             }
+
+            case ast::BinaryOp::In:
+                // check_expr's BinaryExpr case intercepts 'In' before ever calling
+                // binary_op_result (it needs RHS-then-LHS expected-type propagation, which
+                // this function's symmetric operand model can't express) — unreachable.
+                return error(diag, loc, "internal error: 'in' should be handled before binary_op_result");
             }
 
             return ResolvedType{.kind = TypeKind::Invalid};
@@ -188,6 +223,15 @@ namespace sema {
             // Enums are represented as their underlying integer type - allow casting to/from it
             if (from.kind == TypeKind::Enum && to.is_integer()) return true;
             if (from.is_integer() && to.kind == TypeKind::Enum) return true;
+            // Bitsets are likewise their storage integer type - explicit cast to/from any
+            // integer is always legal (no range check: the programmer is asserting the
+            // integer is a valid bitset value). Casting between two DIFFERENT bitset types
+            // is illegal even when their storage types match - distinct bitsets require an
+            // explicit integer intermediary (cast(cast(a, u16), TypeB)); a same-bitset cast
+            // is a legal no-op identity cast.
+            if (from.kind == TypeKind::Bitset && to.kind == TypeKind::Bitset) return from.bitset_index == to.bitset_index;
+            if (from.kind == TypeKind::Bitset && to.is_integer()) return true;
+            if (from.is_integer() && to.kind == TypeKind::Bitset) return true;
             return from.is_scalar() && to.is_scalar();
         }
 
@@ -220,6 +264,15 @@ namespace sema {
             if (from.kind == TypeKind::Array && to.kind == TypeKind::Pointer) {
                 const auto *pointee = program.pointee_at(to.pointee_index);
                 return pointee && array_element_type(from, module_path, program) == *pointee;
+            }
+            // Bitset -> storage type is implicitly coercible ONLY in expected-type position
+            // (every call site of assignable_in_module — call args, '=', compound-assign
+            // result check, struct/array field literals, var-decl-with-annotation, return
+            // statements). The reverse (storage type -> bitset) is deliberately NOT allowed
+            // here, matching Part 4's asymmetric coercion rule; use an explicit cast instead.
+            if (from.kind == TypeKind::Bitset) {
+                const auto *info = program.bitset_at(from.bitset_index);
+                if (info && info->storage_type == to) return true;
             }
             return is_assignable(from, to);
         }
@@ -644,6 +697,20 @@ namespace sema {
                     error(diag, m.location, std::format("no enum field named '{}'", m.member));
                     return {ResolvedType{.kind = TypeKind::Invalid}, false};
                 }
+                // Fully-qualified bitset member: e.g. BitsetType.field
+                if (type_ref->kind == TypeKind::Bitset) {
+                    if (const auto *bitset_info = program.bitset_at(type_ref->bitset_index)) {
+                        if (const auto *enum_info = program.enum_at(bitset_info->member_enum_type.enum_index)) {
+                            for (const auto &field : enum_info->fields) {
+                                if (field.name == m.member) {
+                                    return {*type_ref, false};
+                                }
+                            }
+                        }
+                    }
+                    error(diag, m.location, std::format("no bitset member named '{}'", m.member));
+                    return {ResolvedType{.kind = TypeKind::Invalid}, false};
+                }
             }
 
             const auto object_type = check_expr(m.object, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
@@ -895,7 +962,9 @@ namespace sema {
                     case ast::UnaryOp::BitwiseNot:
                         {
                             const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                            if (!operand.is_integer()) return error(diag, v->location, "unary '~' requires an integer operand");
+                            if (!operand.is_integer() && operand.kind != TypeKind::Bitset) {
+                                return error(diag, v->location, "unary '~' requires an integer or bitset operand");
+                            }
                             return operand;
                         }
                     case ast::UnaryOp::AddressOf:
@@ -925,6 +994,23 @@ namespace sema {
                     return ResolvedType{.kind = TypeKind::Invalid};
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
+                    if (v->op == ast::BinaryOp::In) {
+                        // RHS checked FIRST (no expected type), then its resolved type is used
+                        // as the expected type when checking LHS — this is what lets
+                        // '{.Close, .Flush} in modes' and '.Close in modes' resolve: the
+                        // braced-literal/dot-ident LHS needs a Bitset expected type to
+                        // disambiguate against, which only the RHS can supply.
+                        const ResolvedType rhs_ty = check_expr(v->rhs, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                        if (rhs_ty.kind != TypeKind::Bitset) {
+                            return error(diag, v->location, "'in' is only valid for bitset membership testing; right-hand side must be a bitset value");
+                        }
+                        const ResolvedType lhs_ty = check_expr(v->lhs, locals, module_path, program, diag, rhs_ty, loop_depth, defer_loop_base, fn_error_type);
+                        if (lhs_ty.kind != TypeKind::Bitset || lhs_ty.bitset_index != rhs_ty.bitset_index) {
+                            return error(diag, v->location, "left-hand side of 'in' must be a single bitset member or a value of the same bitset type");
+                        }
+                        return ResolvedType{.kind = TypeKind::Bool};
+                    }
+
                     ResolvedType lhs, rhs;
                     if (is_coercible_literal(v->lhs) && !is_coercible_literal(v->rhs)) {
                         rhs = check_expr(v->rhs, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
@@ -1013,6 +1099,25 @@ namespace sema {
                         return target.type;
                     }
 
+                    if (v->op == ast::AssignOp::ToggleAssign && target.type.kind != TypeKind::Bitset) {
+                        error(diag, v->location, "'~=' is only valid on bitset types; use '^=' for integer XOR-assign");
+                        return target.type;
+                    }
+                    if (target.type.kind == TypeKind::Bitset) {
+                        if (v->op != ast::AssignOp::AddAssign && v->op != ast::AssignOp::SubAssign && v->op != ast::AssignOp::ToggleAssign) {
+                            error(diag, v->location, "bitset types only support '+=', '-=', and '~=' compound assignment");
+                            return target.type;
+                        }
+                        // value_ty was already checked above with expected = target.type, so a
+                        // bare '.Member' RHS already resolved to this bitset type; this also
+                        // naturally rejects a raw-integer RHS (e.g. 'modes += 5').
+                        if (value_ty.kind != TypeKind::Bitset || value_ty.bitset_index != target.type.bitset_index) {
+                            error(diag, v->location, "right-hand side of bitset compound assignment must be a member of "
+                                                      "the bitset's enum or a value of the same bitset type");
+                        }
+                        return target.type;
+                    }
+
                     if (!target.type.is_scalar()) {
                         error(diag, v->location, "compound assignment requires a scalar left-hand side");
                         return target.type;
@@ -1030,6 +1135,7 @@ namespace sema {
                     case ast::AssignOp::XorAssign: equivalent_op = ast::BinaryOp::BitwiseXor; break;
                     case ast::AssignOp::ShlAssign: equivalent_op = ast::BinaryOp::ShiftLeft; break;
                     case ast::AssignOp::ShrAssign: equivalent_op = ast::BinaryOp::ShiftRight; break;
+                    case ast::AssignOp::ToggleAssign: equivalent_op = ast::BinaryOp::BitwiseXor; break; // unreachable: bitset targets return above, non-bitset targets error above
                     case ast::AssignOp::Assign:    break;
                     }
 
@@ -1361,6 +1467,23 @@ namespace sema {
                             }
                         }
                         return error_as(diag, v.location, std::format("no enum field named '{}'", v.name), *expected);
+                    }
+                    if (expected && expected->kind == TypeKind::Bitset) {
+                        // A bare '.Member' resolved against a bitset-expected type resolves
+                        // directly to the BITSET type (not the underlying enum) — this is what
+                        // makes '.Close' usable as a compound-assign RHS or 'in' operand with no
+                        // separate coercion step. Members ARE the underlying enum's variants;
+                        // bitset has no field list of its own.
+                        const auto *bitset_info = program.bitset_at(expected->bitset_index);
+                        if (!bitset_info) return error(diag, v.location, "internal error: invalid bitset index");
+                        const auto *enum_info = program.enum_at(bitset_info->member_enum_type.enum_index);
+                        if (!enum_info) return error(diag, v.location, "internal error: invalid bitset member enum index");
+                        for (const auto &field : enum_info->fields) {
+                            if (field.name == v.name) {
+                                return *expected;
+                            }
+                        }
+                        return error_as(diag, v.location, std::format("no bitset member named '{}'", v.name), *expected);
                     }
                     if (expected && expected->kind == TypeKind::Union) {
                         const auto *union_info = program.union_at(expected->union_index);
@@ -1864,6 +1987,31 @@ namespace sema {
                                     const bool provided = std::ranges::any_of(bv.fields, [&](const auto &sf) { return sf.name == f.name; });
                                     if (!provided) {
                                         error(diag, bv.location, std::format("missing field '{}' in struct initializer", f.name));
+                                    }
+                                }
+                                return *expected;
+
+                            } else if constexpr (std::is_same_v<BVT, ast::BitsetExpr>) {
+                                if (!expected || expected->kind != TypeKind::Bitset) {
+                                    return error(diag, bv.location, "bitset initializer requires an expected bitset type");
+                                }
+                                const auto *bitset_info = program.bitset_at(expected->bitset_index);
+                                if (!bitset_info) {
+                                    return error(diag, bv.location, "internal error: invalid bitset index");
+                                }
+                                const auto *enum_info = program.enum_at(bitset_info->member_enum_type.enum_index);
+                                if (!enum_info) {
+                                    return error(diag, bv.location, "internal error: invalid bitset member enum index");
+                                }
+                                std::unordered_set<std::string> seen;
+                                for (const auto &name : bv.members) {
+                                    if (!seen.insert(name).second) {
+                                        error(diag, bv.location, std::format("duplicate member '{}' in bitset initializer", name));
+                                        continue;
+                                    }
+                                    const auto it = std::ranges::find(enum_info->fields, name, &sema::EnumFieldInfo::name);
+                                    if (it == enum_info->fields.end()) {
+                                        error(diag, bv.location, std::format("no bitset member named '{}'", name));
                                     }
                                 }
                                 return *expected;

@@ -52,6 +52,7 @@ namespace ast {
     struct UnionType;
     struct TraitType;
     struct ErrorType;
+    struct BitsetType;
 
     using Type = std::variant<
         std::monostate,
@@ -65,7 +66,8 @@ namespace ast {
         std::unique_ptr<UnionType>,
         std::unique_ptr<FunctionType>,
         std::unique_ptr<TraitType>,
-        std::unique_ptr<ErrorType>>;
+        std::unique_ptr<ErrorType>,
+        std::unique_ptr<BitsetType>>;
 
     struct PointerType {
         Type pointee;
@@ -170,6 +172,15 @@ namespace ast {
         SourceLocation location;
     };
 
+    // '{.A, .B}' — a bitset literal: a set of member names (no '= expr'), only
+    // legal where the expected type is a bitset. Distinguished from StructExpr
+    // ('{.field = expr, ...}') at parse time by whether '=' follows the first
+    // '.IDENT'; see parse_braced_initializer.
+    struct BitsetExpr {
+        std::vector<std::string> members;
+        SourceLocation location;
+    };
+
     struct TaggedVariantExpr;
     struct TryExpr;
     struct RangeExpr;
@@ -187,7 +198,7 @@ namespace ast {
         SourceLocation location;
     };
 
-    using BracedInitializerExpr = std::variant<StructExpr, ArrayExpr, EmptyExpr>;
+    using BracedInitializerExpr = std::variant<StructExpr, ArrayExpr, EmptyExpr, BitsetExpr>;
 
     using Expr = std::variant<
         LiteralIntegerExpr,
@@ -270,6 +281,17 @@ namespace ast {
         SourceLocation location;
     };
 
+    // 'bitset(EnumName)' / 'bitset(EnumName, u16)' — a distinct nominal type
+    // representing a set of 'member_type' enum variants stored as bits in an
+    // integer. 'member_type' must resolve (in sema) to an enum with an
+    // explicit integer backing type. 'storage_type', if omitted, defaults to
+    // u32; when present it must resolve to u8/u16/u32/u64.
+    struct BitsetType {
+        NamedType member_type;
+        std::optional<Type> storage_type;
+        SourceLocation location;
+    };
+
     // 'error(A | B | C)' — a fallible-function return type. Each member must
     // resolve (in sema) to an enum(i32) or union(enum) type; members are
     // written in source order here, but the compiler treats them as a SET
@@ -336,6 +358,7 @@ namespace ast {
         GreaterEqual,
         LogicalAnd,
         LogicalOr,
+        In, // bitset membership testing: 'expr in expr' — see sema/codegen for legal shapes
     };
 
     struct BinaryExpr {
@@ -374,6 +397,7 @@ namespace ast {
         XorAssign,
         ShlAssign,
         ShrAssign,
+        ToggleAssign, // '~=' — bitset toggle-assign only; sema-rejected on any other target type
     };
 
     struct AssignExpr {

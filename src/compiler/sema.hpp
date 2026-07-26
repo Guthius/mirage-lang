@@ -52,6 +52,17 @@ namespace sema {
         bool layout_done = false;
     };
 
+    // 'bitset(EnumType, StorageType)' — a distinct nominal type over an integer,
+    // representing a set of 'member_enum_type' variants stored as bits.
+    // Bit index for variant v is 'v.value + 1' (see layout_bitset); this is
+    // validated to fit within 'storage_bits' at declaration time.
+    struct BitsetInfo {
+        ResolvedType member_enum_type;
+        ResolvedType storage_type;
+        uint32_t storage_bits = 0;
+        bool layout_done = false;
+    };
+
     struct UnionMember {
         std::string name;
         ResolvedType type;
@@ -241,6 +252,7 @@ namespace sema {
         std::set<std::pair<std::string, std::string>> alias_resolving;
         std::set<std::pair<std::string, std::string>> struct_resolving;
         std::set<std::pair<std::string, std::string>> union_resolving;
+        std::set<std::pair<std::string, std::string>> bitset_resolving;
         std::set<std::pair<std::string, std::string>> trait_resolving;
         std::set<std::pair<std::string, std::string>> value_resolving;
         // Cycle guard for the reentrant module-scope-'when' symbol declaration helper
@@ -275,6 +287,7 @@ namespace sema {
         std::vector<StructInfo> structs;          // global; struct_index is unique across all modules
         std::vector<EnumInfo> enums;
         std::vector<UnionInfo> unions;            // global; union_index is unique across all modules
+        std::vector<BitsetInfo> bitsets;          // global; bitset_index is unique across all modules
         std::vector<TraitInfo> traits;            // global; trait_index is unique across all modules
         std::vector<FunctionTypeInfo> fn_signatures; // global; fn_index is unique across all modules
         std::vector<ResolvedType> pointer_pointees; // global; pointee_index is unique across all modules
@@ -329,6 +342,9 @@ namespace sema {
         }
         [[nodiscard]] auto union_at(int index) const -> const UnionInfo * {
             return index >= 0 && static_cast<size_t>(index) < unions.size() ? &unions[index] : nullptr;
+        }
+        [[nodiscard]] auto bitset_at(int index) const -> const BitsetInfo * {
+            return index >= 0 && static_cast<size_t>(index) < bitsets.size() ? &bitsets[index] : nullptr;
         }
         [[nodiscard]] auto trait_at(int index) const -> const TraitInfo * {
             return index >= 0 && static_cast<size_t>(index) < traits.size() ? &traits[index] : nullptr;

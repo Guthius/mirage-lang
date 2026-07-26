@@ -38,6 +38,7 @@ namespace sema {
             int enum_slot = -1;
             int union_slot = -1;
             int trait_slot = -1;
+            int bitset_slot = -1;
             if (std::holds_alternative<std::unique_ptr<ast::StructType>>(decl.type)) {
                 struct_slot = static_cast<int>(sema_program.structs.size());
                 resolved = ResolvedType{
@@ -62,6 +63,12 @@ namespace sema {
                     .kind = TypeKind::Trait,
                     .trait_index = trait_slot,
                 };
+            } else if (std::holds_alternative<std::unique_ptr<ast::BitsetType>>(decl.type)) {
+                bitset_slot = static_cast<int>(sema_program.bitsets.size());
+                resolved = ResolvedType{
+                    .kind = TypeKind::Bitset,
+                    .bitset_index = bitset_slot,
+                };
             }
 
             if (!declare_symbol(module.symbols, decl.name, TypeSymbol{.decl = &decl, .resolved = resolved, .is_pub = decl.is_pub, .location = decl.location}, decl.location, diag)) {
@@ -80,6 +87,9 @@ namespace sema {
             }
             if (trait_slot >= 0) {
                 sema_program.traits.push_back(TraitInfo{.module_path = module_path});
+            }
+            if (bitset_slot >= 0) {
+                sema_program.bitsets.push_back(BitsetInfo{});
             }
         }
 

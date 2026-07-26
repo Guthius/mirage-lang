@@ -378,22 +378,29 @@ pub const max_size: usize = 4096
 
 | Level | Operators                        | Associativity |
 |-------|----------------------------------|---------------|
-| 1     | `=` `+=` `-=` `*=` `/=` `&=` `\|=` `^=` `<<=` `>>=` | right |
+| 1     | `=` `+=` `-=` `*=` `/=` `&=` `\|=` `^=` `<<=` `>>=` `~=` | right |
 | 2     | `when ... else ...`             | right         |
 | 3     | `?:` (ternary)                  | right         |
 | 4     | `\|\|`                           | left          |
 | 5     | `&&`                             | left          |
-| 6     | `\|`                             | left          |
-| 7     | `^`                              | left          |
-| 8     | `&`                              | left          |
-| 9     | `==` `!=`                        | left          |
-| 10    | `<` `>` `<=` `>=`               | left          |
-| 11    | `<<` `>>`                       | left          |
-| 12    | `+` `-`                          | left          |
-| 13    | `*` `/` `%`                      | left          |
-| 14    | Unary: `-` `!` `~` `&` `*` `++` `--` `try`| right         |
-| 15    | Postfix: call `()` `.member` `[idx]` `++` `--` | left |
-| 16    | Primary                          |               |
+| 6     | `in`                             | none (non-chaining) |
+| 7     | `\|`                             | left          |
+| 8     | `^` `~` (infix)                  | left          |
+| 9     | `&`                              | left          |
+| 10    | `==` `!=`                        | left          |
+| 11    | `<` `>` `<=` `>=`               | left          |
+| 12    | `<<` `>>`                       | left          |
+| 13    | `+` `-`                          | left          |
+| 14    | `*` `/` `%`                      | left          |
+| 15    | Unary: `-` `!` `~` `&` `*` `++` `--` `try`| right         |
+| 16    | Postfix: call `()` `.member` `[idx]` `++` `--` | left |
+| 17    | Primary                          |               |
+
+`~=` and infix `~` are legal on any bitset operand (see §18, "Bitset Types");
+infix `~` behaves identically to `^` (bitwise XOR / symmetric difference).
+`in` is bitset membership testing (§18) and is unrelated to `for ... in
+...`'s `in` keyword (§6, "For Loop") — the two never conflict since `for`
+consumes its `in` through a separate, restricted grammar.
 
 ### Arithmetic
 
@@ -438,6 +445,8 @@ a >> b   # shift right
 ```
 
 Both operands must have the same type.
+
+**Bitset exception**: between two operands of the same bitset type, `+`, `-`, `&`, `^`, and `~` (infix) are also legal, with set-operation semantics (union, difference, intersection, symmetric difference) rather than plain-integer bitwise semantics — see §18, "Bitset Types". Mixing a bitset with a raw integer via any of these operators is a sema error; cast to the storage type first.
 
 ### Unary
 
@@ -1504,8 +1513,9 @@ The following types are mutually assignable without explicit cast:
 | `anyptr`        | fn ptr type   | nil-to-fn-ptr coercion               |
 | fn ptr type     | `anyptr`      |                                      |
 | `[N]T`          | `[]T`         | array decays to slice                |
+| `bitset(...)`   | its storage type | expected-type position only — see §18, "Bitset Types" |
 
-Arithmetic, bitwise, and other binary operations require both operands to have the same type (except `anyptr ± integer`).
+Arithmetic, bitwise, and other binary operations require both operands to have the same type (except `anyptr ± integer`). The bitset → storage-type row above is deliberately **not** symmetric and does **not** apply during binary-operator type resolution: a raw integer never implicitly coerces to a bitset (use `cast`), and mixing a bitset with a raw integer in a binary operator is always a sema error regardless of expected type.
 
 ---
 
@@ -1693,11 +1703,256 @@ declared `...T`, dissolving to `[]T` inside the function body. Unlike C-style va
 
 ---
 
-## 18. Reserved Keywords
+## 18. Bitset Types
+
+A `bitset` is a distinct named type representing a set of enum members
+stored as bits in an integer. `bitset(...)` always declares a **new**
+type — never an alias, even when two bitsets share the same member enum
+and storage type.
+
+### Declaration
+
+```mirage
+pub type Stream_Mode = enum(u8) {
+    Close
+    Flush
+    Read
+    Write
+    Seek
+    Size
+}
+
+pub type Stream_Modes = bitset(Stream_Mode)          # storage defaults to u32
+pub type Stream_Modes16 = bitset(Stream_Mode, u16)   # explicit storage type
+```
+
+The first argument names the **member enum** and must resolve to an enum
+declared with an explicit integer backing type (`enum(u8)`, `enum(i32)`,
+etc.) — a plain `enum` with no parenthesized backing type is rejected:
+
+```
+error: bitset member type must be an enum with an explicit integer
+       backing type, e.g. 'enum(u8)'.
+```
+
+The optional second argument is the **storage type** and must be one of
+`u8`, `u16`, `u32`, `u64`; any other type (a signed integer, a float, a
+named type) is rejected. If omitted, the storage type defaults to `u32`.
+
+### Bit-Index Range Check
+
+Each member enum variant `v` occupies bit index `v.value + 1` (bit 0 is
+never assigned) in the storage integer. This is validated at the `bitset`
+declaration site — not at each use site — by requiring `bit_index <
+storage_bits` for every variant:
+
+```mirage
+type Small = enum(u8) { A B C D E F G Query }   # Query = 7
+type Bad = bitset(Small, u8)   # error: bit_index(Query) = 8, storage is only 8 bits
+```
+
+```
+error: bitset variant 'Small.Query' has value 7, producing bit index 8
+       (1 << 8 = 256), which does not fit in the storage type 'u8'
+       (8 bits). Use a wider storage type or reduce the enum variant
+       values.
+```
+
+### `sizeof` / `alignof`
+
+`sizeof(BitsetType)` and `alignof(BitsetType)` equal the storage type's
+size/alignment (e.g. 2 bytes for `bitset(E, u16)`).
+
+### Literals
+
+```mirage
+const modes: Stream_Modes = {.Close, .Flush}   # set containing Close and Flush
+const empty: Stream_Modes = {}                 # zero value — no bits set
+const also_empty: Stream_Modes = default       # same as {}
+```
+
+A bitset literal is a braced set of `.Member` names (no `= expr`) — this is
+what distinguishes it from a struct literal's `{.field = expr, ...}` form
+(see §3, "Braced Initializers", and grammar.md). Each member is looked up
+in the bitset's member enum; an unknown member name or a duplicate member
+within the same literal is a sema error. A bitset literal (and `{}`/
+`default` for a bitset-expected type) is only legal where an expected
+bitset type is known from context.
+
+### Operations
+
+**Member set/clear/toggle** (target must be a bitset; RHS must be a single
+`.Member` of the bitset's enum, or another value of the same bitset type):
+
+| Operator | Meaning | Lowering |
+|----------|---------|----------|
+| `+=` | set member(s)    | `lhs \| rhs_bits`   |
+| `-=` | clear member(s)  | `lhs & ~rhs_bits`  |
+| `~=` | toggle member(s) | `lhs ^ rhs_bits`   |
+
+Mixing a bitset with a raw integer on the right of any of these (e.g.
+`modes += 5`) is a sema error; no other compound-assignment operator
+(`*=`, `/=`, `&=`, `|=`, `^=`, `<<=`, `>>=`) is legal on a bitset target.
+`~=` on a non-bitset target is likewise a sema error — use `^=` for
+ordinary integer XOR-assign.
+
+**Binary set operations** (both operands must be the same bitset type):
+
+| Operator | Meaning | Lowering |
+|----------|---------|----------|
+| `+` | union               | `lhs \| rhs` |
+| `\|` | union (synonym for `+`) | `lhs \| rhs` |
+| `-` | difference          | `lhs & ~rhs` |
+| `&` | intersection        | `lhs & rhs`  |
+| `~` | symmetric difference | `lhs ^ rhs` |
+| `^` | symmetric difference (same as infix `~`) | `lhs ^ rhs` |
+
+`*`, `/`, `%`, `<<`, `>>`, and ordering comparisons (`<`, `>`, `<=`, `>=`)
+are never legal between two bitsets (sets have no natural order or
+magnitude).
+
+**Unary `~`**: flips every bit of the storage integer, returning a value
+of the same bitset type — `~a` where `a: Stream_Modes` is itself a
+`Stream_Modes`.
+
+**Equality**: `==`/`!=` compare the underlying storage integers directly
+and are legal between two values of the same bitset type. Comparing a
+bitset against a raw integer via `==`/`!=` (or any other operator) is a
+sema error — `cast` to the storage type first.
+
+**`in` — membership testing**:
+
+```mirage
+if .Close in modes { }               # single-member test
+if {.Close, .Flush} in modes { }     # subset test
+```
+
+The left-hand side is a single `.Member` of the bitset's enum, or a
+bitset value of the same type (including a braced literal); the
+right-hand side is a bitset value. Semantics:
+- single member `in` bitset: `(rhs & (1 << (member_value + 1))) != 0`
+- bitset `in` bitset: `(rhs & lhs) == lhs` (subset check — this is the
+  same formula the single-member case reduces to once the member is
+  represented as its one-bit mask, so both shapes share one lowering)
+
+When the left-hand side is a bare `.Member` or a braced literal, its
+expected type is taken from the right-hand side's (already-resolved)
+bitset type — `{.Close, .Flush} in modes` resolves the literal against
+`modes`'s type, not the other way around. `in` on a non-bitset right-hand
+side is a sema error ("`in` is only valid for bitset membership
+testing").
+
+### Coercion and Casting
+
+**Implicit coercion — bitset → storage type, expected-type position
+only**: a bitset value implicitly coerces to its storage type when (and
+only when) the *expected* type at that position is exactly the storage
+type — function arguments, a `const`/`mut` declaration with an explicit
+type annotation, return values, assignment to a storage-typed lvalue:
+
+```mirage
+const modes: Stream_Modes = {.Close, .Flush}
+const raw: u16 = modes            # OK — bitset -> its storage type, expected-type position
+```
+
+This coercion does **not** fire during binary-operator type resolution —
+`modes + raw_u16` is a type mismatch, not an implicit-coercion
+opportunity, even though `raw_u16`'s type is exactly the bitset's storage
+type.
+
+**No implicit coercion the other way** — a raw integer never implicitly
+becomes a bitset:
+
+```mirage
+const raw: u16 = 3
+const modes: Stream_Modes = raw            # error: type mismatch in assignment
+const modes2 := cast(raw, Stream_Modes)    # OK — explicit cast
+```
+
+**`cast` rules**:
+- `cast(bitset_value, storage_type)` — always legal, yields the raw integer.
+- `cast(bitset_value, other_int_type)` — legal if the two integer types are
+  cast-compatible per the ordinary integer cast rules; yields the integer.
+- `cast(integer_value, BitsetType)` — always legal, no range check; the
+  programmer is asserting the integer is a valid bitset value.
+- `cast(bitset_a, BitsetTypeB)` where `A` and `B` are **different** bitset
+  types — a sema error, **even if their storage types match**. Two
+  distinct bitset types always require an explicit integer intermediary:
+  ```mirage
+  const b := cast(cast(a, u16), TypeB)   # OK
+  const c := cast(a, TypeB)              # error: illegal cast between these types
+  ```
+  Casting a bitset to itself (`cast(a, TypeA)` where `a: TypeA`) is a
+  legal no-op identity cast.
+
+### `ext fn` Integration
+
+Bitset types are legal in `ext fn` parameter and return position and are
+**ABI-transparent**: at the C ABI boundary, a bitset value IS its storage
+integer — exactly like an enum value is its underlying integer — so no
+explicit coercion is needed at the call site in either direction:
+
+```mirage
+ext fn SDL_SetWindowFlags(window: *SDL_Window, flags: WindowFlags)
+ext fn SDL_GetWindowFlags(window: *SDL_Window) -> WindowFlags
+
+const flags: WindowFlags = {.Resizable, .Shown}
+SDL_SetWindowFlags(win, flags)          # OK — flags passed as its storage integer
+
+const current := SDL_GetWindowFlags(win)
+if .Resizable in current { }            # immediately usable — no cast needed
+```
+
+### Worked Example
+
+```mirage
+pub type Stream_Mode = enum(u8) {
+    Close
+    Flush
+    Read
+    Write
+    Seek
+    Size
+}
+
+pub type Stream_Modes = bitset(Stream_Mode, u16)
+
+ext fn apply_modes(flags: Stream_Modes)
+
+pub fn main() -> i32 {
+    mut modes: Stream_Modes = {.Close, .Flush}
+
+    modes += .Write        # set
+    modes -= .Close         # clear
+    modes ~= .Flush         # toggle
+
+    const required: Stream_Modes = {.Write, .Seek}
+    const combined := modes + required     # union
+    const common   := modes & required     # intersection
+
+    if .Write in modes {
+        modes += .Size
+    }
+    if {.Write, .Size} in modes {
+        modes += .Seek
+    }
+
+    const raw: u16 = modes                 # implicit coercion to storage type
+    const modes2 := cast(raw, Stream_Modes) # explicit cast from storage type
+
+    apply_modes(modes)                     # ABI-transparent 'ext fn' call
+
+    return cast(modes2, i32)
+}
+```
+
+---
+
+## 19. Reserved Keywords
 
 The following identifiers are reserved by the language:
 
-`break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `import_bin` `in` `iota` `len` `macro` `match` `mut` `nil` `pub` `return` `return_err` `return_ok` `sizeof` `stackalloc` `struct` `switch` `trait` `true` `try` `type` `undefined` `union` `when` `while`
+`bitset` `break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `import_bin` `in` `iota` `len` `macro` `match` `mut` `nil` `pub` `return` `return_err` `return_ok` `sizeof` `stackalloc` `struct` `switch` `trait` `true` `try` `type` `undefined` `union` `when` `while`
 
 `ext` is parsed as an identifier, not a keyword; it is used as the prefix
 for extern function declarations. `option`, `env`, `link`, and `warn` are

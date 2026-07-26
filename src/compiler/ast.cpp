@@ -60,6 +60,7 @@ namespace ast {
             case TokenKind::KwStruct:
             case TokenKind::KwEnum:
             case TokenKind::KwUnion:
+            case TokenKind::KwBitset:
             case TokenKind::KwFn:
             case TokenKind::KwTrait:
             case TokenKind::KwU8:
@@ -301,6 +302,31 @@ namespace ast {
 
             return std::make_unique<ErrorType>(ErrorType{
                 .members = std::move(members),
+                .location = location,
+            });
+        }
+
+        // 'bitset(NamedType [, builtin_type])' — the storage type argument is parsed
+        // generically here (like enum's underlying-type argument); sema validates it's
+        // one of u8/u16/u32/u64.
+        auto parse_bitset_type(Parser &parser) -> Type {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwBitset, "'bitset'");
+            parser.expect(TokenKind::LParen, "'('");
+
+            auto member_type = parse_named_type(parser);
+
+            std::optional<Type> storage_type;
+            if (parser.match(TokenKind::Comma)) {
+                storage_type = parse_type(parser);
+            }
+
+            parser.expect(TokenKind::RParen, "')'");
+
+            return std::make_unique<BitsetType>(BitsetType{
+                .member_type = std::move(member_type),
+                .storage_type = std::move(storage_type),
                 .location = location,
             });
         }
@@ -557,21 +583,48 @@ namespace ast {
                 });
             }
 
-            if (parser.check(TokenKind::Dot) && parser.peek().kind == TokenKind::Identifier) {
-                std::vector<StructExpr::Field> fields;
+            if (parser.check(TokenKind::Dot) && parser.peek().kind == TokenKind::Identifier &&
+                parser.peek_next().kind != TokenKind::LBrace) {
+                // Disambiguate '{.field = expr, ...}' (StructExpr) from '{.A, .B}' (a bitset
+                // literal, BitsetExpr) by whether '=' follows the first '.IDENT'. A later
+                // field of the "wrong" shape naturally trips the chosen loop's own expect(),
+                // producing a parse error for mixed '.IDENT' / '.IDENT = expr' forms.
+                if (parser.peek_next().kind == TokenKind::Equal) {
+                    std::vector<StructExpr::Field> fields;
+                    while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                        parser.expect(TokenKind::Dot, "'.'");
+                        const auto value_name = parser.expect_identifier();
+
+                        parser.expect(TokenKind::Equal, "'='");
+
+                        const auto value_location = parser.current_location();
+
+                        fields.push_back(StructExpr::Field{
+                            .name = value_name,
+                            .expr = parse_expr(parser),
+                            .location = value_location,
+                        });
+
+                        skip_semicolons(parser);
+                        if (parser.check(TokenKind::RBrace)) {
+                            break;
+                        }
+
+                        parser.expect(TokenKind::Comma, "','");
+                    }
+
+                    parser.expect(TokenKind::RBrace, "'}'");
+
+                    return std::make_unique<BracedInitializerExpr>(StructExpr{
+                        .fields = std::move(fields),
+                        .location = location,
+                    });
+                }
+
+                std::vector<std::string> members;
                 while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
                     parser.expect(TokenKind::Dot, "'.'");
-                    const auto value_name = parser.expect_identifier();
-
-                    parser.expect(TokenKind::Equal, "'='");
-
-                    const auto value_location = parser.current_location();
-
-                    fields.push_back(StructExpr::Field{
-                        .name = value_name,
-                        .expr = parse_expr(parser),
-                        .location = value_location,
-                    });
+                    members.push_back(parser.expect_identifier());
 
                     skip_semicolons(parser);
                     if (parser.check(TokenKind::RBrace)) {
@@ -583,8 +636,8 @@ namespace ast {
 
                 parser.expect(TokenKind::RBrace, "'}'");
 
-                return std::make_unique<BracedInitializerExpr>(StructExpr{
-                    .fields = std::move(fields),
+                return std::make_unique<BracedInitializerExpr>(BitsetExpr{
+                    .members = std::move(members),
                     .location = location,
                 });
             }
@@ -1442,7 +1495,14 @@ namespace ast {
         auto parse_bitwise_xor(Parser &parser) -> Expr {
             auto lhs = parse_bitwise_and(parser);
 
-            while (parser.match(TokenKind::Caret)) {
+            // 'Tilde' here is unambiguously infix (bitwise-xor precedence, and — between two
+            // bitsets — symmetric difference): once 'lhs' has been fully parsed as an operand,
+            // a '~' token can only be an operator, never a prefix unary. Prefix '~' is still
+            // handled separately by parse_unary, which only ever runs at the START of an
+            // operand parse (no lhs yet). Both desugar to the same BinaryOp::BitwiseXor node,
+            // so 'a ~ b' and 'a ^ b' are equivalent — see UnaryOp::BitwiseNot for the prefix form.
+            while (parser.check(TokenKind::Caret) || parser.check(TokenKind::Tilde)) {
+                parser.advance();
                 const auto location = parser.current_location();
 
                 lhs = make_expr(BinaryExpr{
@@ -1475,8 +1535,31 @@ namespace ast {
             return lhs;
         }
 
-        auto parse_logical_and(Parser &parser) -> Expr {
+        // 'expr in expr' — bitset membership testing. Binds looser than every
+        // arithmetic/bitwise/comparison operator, tighter than '&&'/'||'. Non-chaining
+        // ('if', not 'while'): the result of 'in' is Bool, not a bitset, so 'a in b in c'
+        // has no sensible left-associative reading. Distinct from the 'for pattern in
+        // iterable' statement form, which consumes 'in' directly via expect(KwIn) on a
+        // restricted loop-pattern path and never reaches general expression parsing.
+        auto parse_in_expr(Parser &parser) -> Expr {
             auto lhs = parse_bitwise_or(parser);
+
+            if (parser.match(TokenKind::KwIn)) {
+                const auto location = parser.current_location();
+
+                lhs = make_expr(BinaryExpr{
+                    .op = BinaryOp::In,
+                    .lhs = std::move(lhs),
+                    .rhs = parse_bitwise_or(parser),
+                    .location = location,
+                });
+            }
+
+            return lhs;
+        }
+
+        auto parse_logical_and(Parser &parser) -> Expr {
+            auto lhs = parse_in_expr(parser);
 
             while (parser.match(TokenKind::AmpAmp)) {
                 const auto location = parser.current_location();
@@ -1484,7 +1567,7 @@ namespace ast {
                 lhs = make_expr(BinaryExpr{
                     .op = BinaryOp::LogicalAnd,
                     .lhs = std::move(lhs),
-                    .rhs = parse_bitwise_or(parser),
+                    .rhs = parse_in_expr(parser),
                     .location = location,
                 });
             }
@@ -1575,6 +1658,7 @@ namespace ast {
                 case TokenKind::CaretEqual:      return AssignOp::XorAssign;
                 case TokenKind::ShiftLeftEqual:  return AssignOp::ShlAssign;
                 case TokenKind::ShiftRightEqual: return AssignOp::ShrAssign;
+                case TokenKind::TildeEqual:      return AssignOp::ToggleAssign;
                 default:                         return std::nullopt;
                 }
             };
@@ -2435,6 +2519,10 @@ namespace ast {
 
         if (parser.check(TokenKind::KwError)) {
             return parse_error_type(parser);
+        }
+
+        if (parser.check(TokenKind::KwBitset)) {
+            return parse_bitset_type(parser);
         }
 
         if (parser.check(TokenKind::KwFn)) {

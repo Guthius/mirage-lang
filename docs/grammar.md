@@ -167,11 +167,14 @@ type          ::= '*' type                              (* pointer *)
                  '}'
                | 'trait' '{' { trait_method_decl } '}'  (* trait handle; see Traits below *)
                | error_type
+               | bitset_type
                | fn_type
                | named_type
                | builtin_type
 
 error_type    ::= 'error' '(' named_type { '|' named_type } ')'
+
+bitset_type   ::= 'bitset' '(' named_type [ ',' builtin_type ] ')'
 
 fn_type       ::= 'fn' '(' [ fn_type_params ] ')' [ '->' type | '->' '(' type { ',' type } ')' ]
 
@@ -201,6 +204,8 @@ above, `trait_method_decl`'s non-self params do **not** accept a `mut`
 prefix.
 
 Note: Struct, enum, and union fields/variants need no separator token between them at all (see Notes on Syntax Conventions, note 1) — commas are not valid there.
+
+`bitset_type`'s first argument must resolve (in sema) to a named enum type with an explicit integer backing type (e.g. `enum(u8)`) — a plain `enum` with no parenthesized backing type is rejected. The second argument, if present, must resolve to one of `u8`/`u16`/`u32`/`u64`; if omitted it defaults to `u32`. Unlike `named_type` alone, a `bitset(...)` type always declares a new, distinct type — never an alias. See spec.md's "Bitset Types" section for the full semantics.
 
 ---
 
@@ -291,7 +296,7 @@ import_expr   ::= 'import' '(' STRING ')' { '.' IDENT }
 assign_expr   ::= when_expr [ assign_op assign_expr ]
 
 assign_op     ::= '=' | '+=' | '-=' | '*=' | '/='
-               | '&=' | '|=' | '^=' | '<<=' | '>>='
+               | '&=' | '|=' | '^=' | '<<=' | '>>=' | '~='
 
 when_expr     ::= ternary_expr [ 'when' ternary_expr 'else' expr ]
 
@@ -299,11 +304,13 @@ ternary_expr  ::= logical_or_expr [ '?' expr ':' expr ]
 
 logical_or_expr  ::= logical_and_expr { '||' logical_and_expr }
 
-logical_and_expr ::= bitwise_or_expr  { '&&' bitwise_or_expr }
+logical_and_expr ::= in_expr          { '&&' in_expr }
+
+in_expr          ::= bitwise_or_expr  [ 'in' bitwise_or_expr ]
 
 bitwise_or_expr  ::= bitwise_xor_expr { '|'  bitwise_xor_expr }
 
-bitwise_xor_expr ::= bitwise_and_expr { '^'  bitwise_and_expr }
+bitwise_xor_expr ::= bitwise_and_expr { ( '^' | '~' ) bitwise_and_expr }
 
 bitwise_and_expr ::= equality_expr    { '&'  equality_expr }
 
@@ -341,6 +348,10 @@ arg           ::= expr '...'                      (* spread — expr must be a s
                                                        sole, final argument of a native-variadic call *)
                | expr
 ```
+
+`~` is both a prefix `unary_expr` operator (bitwise/bitset complement, `~a`) and — as of `bitwise_xor_expr` above — an infix operator at the same precedence and with the same lowering as `^` (bitwise XOR for integers; symmetric difference for two operands of the same bitset type). There is no ambiguity: precedence-climbing means `~` is read as prefix only when no left operand has been parsed yet (the start of a `unary_expr`), and as infix once `bitwise_xor_expr`'s loop is looking for an operator after a complete left operand. `a ~ ~b` therefore parses as `a ^ (~b)`. Outside bitset operands, infix `~` behaves exactly like `^` (no separate meaning).
+
+`in_expr` (`expr in expr`) is bitset membership testing — see spec.md's "Bitset Types" section for the legal LHS/RHS shapes and semantics. It binds looser than every arithmetic/bitwise/comparison operator, tighter than `&&`/`||`, and does not chain (`a in b in c` is not meaningful, since the result of `in` is `bool`, not a bitset). This is a **different** `in` from the one in `for_binding ... 'in' for_iterable` (see Statements below): the `for` statement's `in` is consumed directly as part of its own restricted grammar and never reaches general expression parsing, so the two never conflict — a `for` loop's iterable expression may itself legally contain an `in_expr`, e.g. `for x in (a in b)`.
 
 `when_expr` (`then_val when cond else else_val`) binds looser than every
 binary operator including ternary `?:`, but tighter than assignment — it sits
@@ -400,7 +411,7 @@ env_expr      ::= '@env' '(' STRING [ ',' expr ] ')'
 sizeof_expr   ::= 'sizeof' '(' sizeof_operand ')'
 
 sizeof_operand ::= type    (* whenever the token(s) can only start a type: a builtin type
-                               keyword, '*', '[', 'struct', 'enum', 'union', 'fn', 'trait' *)
+                               keyword, '*', '[', 'struct', 'enum', 'union', 'bitset', 'fn', 'trait' *)
                | expr      (* otherwise — may still simply name a type, e.g. a module member *)
 
 len_expr      ::= 'len' '(' expr ')'
@@ -426,10 +437,22 @@ contextual_tagged_variant ::= '.' IDENT '{.' field_init { ',' field_init } '}'
 
 field_init    ::= '.' IDENT '=' expr
 
+bitset_literal ::= '{' '.' IDENT { ',' '.' IDENT } '}'           (* bitset member set; only legal
+                                                                      where a bitset type is expected *)
+
 braced_initializer ::= '{' '}'                                        (* empty *)
                | '{' field_init { ',' field_init } '}'             (* struct fields *)
+               | bitset_literal
                | '{' expr { ',' expr } [ '...' ] '}'                  (* array values, optional trailing fill *)
 ```
+
+`braced_initializer`'s struct-fields and bitset-member-set alternatives are
+disambiguated by whether `=` follows the first `.IDENT`: `{.field = expr,
+...}` is a struct literal, `{.A, .B}` (no `=`) is a bitset literal. Mixing
+the two forms in the same braced initializer (e.g. `{.A, .B = c}`) is a
+parse error. `{}` (empty) is shared: with a bitset-expected type it denotes
+the zero value (no bits set), exactly as `default` does for a bitset type
+(see spec.md).
 
 `@` is a sigil, not part of an identifier; `option`/`env` (like `link` in
 `link_decl` above) are parsed as plain identifiers immediately following it,

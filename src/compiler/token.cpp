@@ -40,6 +40,7 @@ auto token_kind_name(const TokenKind kind) -> const char * {
     case TokenKind::KwStackAlloc:    return "KW_STACKALLOC";
     case TokenKind::KwCast:          return "KW_CAST";
     case TokenKind::KwEnum:          return "KW_ENUM";
+    case TokenKind::KwBitset:        return "KW_BITSET";
     case TokenKind::KwIota:          return "KW_IOTA";
     case TokenKind::KwDefault:       return "KW_DEFAULT";
     case TokenKind::KwUndefined:     return "KW_UNDEFINED";
@@ -72,6 +73,7 @@ auto token_kind_name(const TokenKind kind) -> const char * {
     case TokenKind::Pipe:            return "PIPE";
     case TokenKind::Caret:           return "CARET";
     case TokenKind::Tilde:           return "TILDE";
+    case TokenKind::TildeEqual:      return "TILDE_EQ";
     case TokenKind::ShiftLeft:       return "SHL";
     case TokenKind::ShiftRight:      return "SHR";
     case TokenKind::EqualEqual:      return "EQ_EQ";

@@ -326,7 +326,8 @@ namespace codegen {
                 return llvm_type(
                     type.kind == sema::TypeKind::Struct || type.kind == sema::TypeKind::Array ||
                             type.kind == sema::TypeKind::Slice || type.kind == sema::TypeKind::Enum ||
-                            type.kind == sema::TypeKind::Union || type.kind == sema::TypeKind::Trait
+                            type.kind == sema::TypeKind::Union || type.kind == sema::TypeKind::Trait ||
+                            type.kind == sema::TypeKind::Bitset
                         ? type_module
                         : *current_module_path_,
                     type);
@@ -358,6 +359,9 @@ namespace codegen {
                 }
                 if (type.kind == sema::TypeKind::Union) {
                     return sema_program_.unions.at(type.union_index).size;
+                }
+                if (type.kind == sema::TypeKind::Bitset) {
+                    return primitive_size(sema_program_.bitsets.at(type.bitset_index).storage_type.kind);
                 }
                 return primitive_size(type.kind);
             }
@@ -399,10 +403,28 @@ namespace codegen {
                     }
                 case sema::TypeKind::Union:
                     return unions_.at(type.union_index);
+                case sema::TypeKind::Bitset:
+                    {
+                        const auto &bitset_info = sema_program_.bitsets.at(type.bitset_index);
+                        return llvm_type(module_path, bitset_info.storage_type);
+                    }
                 case sema::TypeKind::Function:
                     return llvm::PointerType::getUnqual(*context_);
                 default: return llvm::Type::getVoidTy(*context_);
                 }
+            }
+
+            // Bit mask for a single named member of a bitset's underlying enum:
+            // '1 << (variant.value + 1)' — see BitsetInfo's bit-index formula.
+            // Returns nullopt (and reports a codegen error) if 'name' isn't a member.
+            auto bitset_member_mask(const sema::BitsetInfo &bitset_info, const std::string &name, const SourceLocation &loc) -> std::optional<uint64_t> {
+                const auto &enum_info = sema_program_.enums.at(bitset_info.member_enum_type.enum_index);
+                const auto it = std::ranges::find(enum_info.fields, name, &sema::EnumFieldInfo::name);
+                if (it == enum_info.fields.end()) {
+                    report_codegen_error(diag_, loc, std::format("unknown bitset member '{}'", name));
+                    return std::nullopt;
+                }
+                return uint64_t{1} << (it->value + 1);
             }
 
             // Build an llvm::FunctionType for an indirect call through a sema function type.
@@ -563,6 +585,9 @@ namespace codegen {
                     return;
                 case sema::TypeKind::Enum:
                     collect_abi_leaves(sema_program_.enums.at(type.enum_index).underlying_type, base_offset, out, saw_union);
+                    return;
+                case sema::TypeKind::Bitset:
+                    collect_abi_leaves(sema_program_.bitsets.at(type.bitset_index).storage_type, base_offset, out, saw_union);
                     return;
                 default:
                     {
@@ -968,6 +993,16 @@ namespace codegen {
                     agg = builder_.CreateInsertValue(agg, elem, {static_cast<unsigned>(i)});
                 }
                 return agg;
+            }
+
+            // Emit a bitset literal '{.A, .B}': OR together each named member's one-bit mask.
+            auto emit_bitset_expr_value(const ast::BitsetExpr &be, const sema::ResolvedType &ty) -> llvm::Value * {
+                const auto &bitset_info = sema_program_.bitsets.at(ty.bitset_index);
+                uint64_t folded = 0;
+                for (const auto &name : be.members) {
+                    folded |= bitset_member_mask(bitset_info, name, be.location).value_or(0);
+                }
+                return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty), folded, false);
             }
 
             // Emit a union value from a single-member StructExpr initializer.
@@ -1552,6 +1587,16 @@ namespace codegen {
                     return emit_cast(value, from, sema_program_.enums.at(to.enum_index).underlying_type);
                 }
 
+                // Bitsets are likewise their storage integer type at the LLVM level (see
+                // llvm_type's TypeKind::Bitset case). Sema already rejects a cast between
+                // two different bitset types, so at most one side is ever Bitset here.
+                if (from.kind == sema::TypeKind::Bitset) {
+                    return emit_cast(value, sema_program_.bitsets.at(from.bitset_index).storage_type, to);
+                }
+                if (to.kind == sema::TypeKind::Bitset) {
+                    return emit_cast(value, from, sema_program_.bitsets.at(to.bitset_index).storage_type);
+                }
+
                 if (from.kind == sema::TypeKind::Bool && to.kind != sema::TypeKind::Bool && to.is_integer()) {
                     return builder_.CreateZExt(value, to_ty);
                 }
@@ -1675,6 +1720,31 @@ namespace codegen {
                 const auto rhs_type = current_module_->expr_types.at(sema::get_expr_key(expr.rhs));
                 auto *lhs = emit_expr(expr.lhs);
                 auto *rhs = emit_expr(expr.rhs);
+
+                if (expr.op == ast::BinaryOp::In) {
+                    // Single-member '.A in modes' and subset '{.A,.B} in modes' both reduce to
+                    // the same formula: a single member is itself emitted as its one-bit mask,
+                    // and '(rhs & mask) == mask' is equivalent to '(rhs & mask) != 0' whenever
+                    // mask has exactly one bit set — so no AST-shape branching is needed here.
+                    auto *anded = builder_.CreateAnd(rhs, lhs);
+                    return builder_.CreateICmpEQ(anded, lhs);
+                }
+
+                if (lhs_type.kind == sema::TypeKind::Bitset) {
+                    switch (expr.op) {
+                    case ast::BinaryOp::Add:
+                    case ast::BinaryOp::BitwiseOr: // union synonym
+                        return builder_.CreateOr(lhs, rhs);
+                    case ast::BinaryOp::Sub:
+                        return builder_.CreateAnd(lhs, builder_.CreateNot(rhs));
+                    case ast::BinaryOp::BitwiseAnd:
+                    case ast::BinaryOp::BitwiseXor: // infix '~' desugars here, and raw '^' too
+                        return emit_int_arith(expr.op, lhs, rhs, lhs_type);
+                    default:
+                        break; // Equal/NotEqual fall through to the generic comparison
+                               // handling below; sema rejects every other bitset binary op.
+                    }
+                }
 
                 if (is_pointer_like(lhs_type) && rhs_type.is_integer() && (expr.op == ast::BinaryOp::Add || expr.op == ast::BinaryOp::Sub)) {
                     return emit_pointer_offset(lhs, rhs, lhs_type, expr.op == ast::BinaryOp::Sub);
@@ -2781,6 +2851,12 @@ namespace codegen {
                                 report_codegen_error(diag_, v->location, std::format("unknown enum field '{}'", v->member));
                                 return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
                             }
+                            // Fully-qualified bitset member: e.g. BitsetType.field
+                            if (ty.kind == sema::TypeKind::Bitset && try_type_chain(v->object)) {
+                                const auto &bitset_info = sema_program_.bitsets.at(ty.bitset_index);
+                                const auto mask = bitset_member_mask(bitset_info, v->member, v->location);
+                                return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty), mask.value_or(0), false);
+                            }
                             const auto lv = emit_lvalue(expr);
                             return builder_.CreateLoad(lv.storage_type, lv.ptr);
                         } else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
@@ -2799,6 +2875,12 @@ namespace codegen {
                                                                         static_cast<uint64_t>(variant_it->tag_value), false);
                                 builder_.CreateStore(tag_val, slot);
                                 return builder_.CreateLoad(ll_ty, slot);
+                            }
+                            if (ty.kind == sema::TypeKind::Bitset) {
+                                // Bitset member literal: .field_name — folds to its one-bit mask
+                                const auto &bitset_info = sema_program_.bitsets.at(ty.bitset_index);
+                                const auto mask = bitset_member_mask(bitset_info, v.name, v.location);
+                                return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty), mask.value_or(0), false);
                             }
                             // Enum field literal: .field_name
                             // ty is the enum type; look up the field value
@@ -2844,6 +2926,8 @@ namespace codegen {
                                             return emit_union_expr_value(bv, ty);
                                         }
                                         return emit_struct_expr_value(bv, ty);
+                                    } else if constexpr (std::is_same_v<BVT, ast::BitsetExpr>) {
+                                        return emit_bitset_expr_value(bv, ty);
                                     } else {  // ast::ArrayExpr
                                         if (ty.kind == sema::TypeKind::Struct) {
                                             return emit_positional_struct_expr_value(bv, ty);
@@ -3379,6 +3463,7 @@ namespace codegen {
                 case ast::AssignOp::XorAssign: return ast::BinaryOp::BitwiseXor;
                 case ast::AssignOp::ShlAssign: return ast::BinaryOp::ShiftLeft;
                 case ast::AssignOp::ShrAssign: return ast::BinaryOp::ShiftRight;
+                case ast::AssignOp::ToggleAssign: return ast::BinaryOp::BitwiseXor;
                 case ast::AssignOp::Assign:    return ast::BinaryOp::Add;
                 }
                 return ast::BinaryOp::Add;
@@ -3391,7 +3476,17 @@ namespace codegen {
                 if (expr.op != ast::AssignOp::Assign) {
                     auto *old = builder_.CreateLoad(lv.storage_type, lv.ptr);
                     const auto op = compound_op(expr.op);
-                    if (is_pointer_like(lv.type) && (op == ast::BinaryOp::Add || op == ast::BinaryOp::Sub)) {
+                    if (lv.type.kind == sema::TypeKind::Bitset) {
+                        // '+=' (set) -> OR, '-=' (clear) -> AND-NOT; '~=' (toggle) already maps
+                        // to BitwiseXor via compound_op, which emit_int_arith lowers correctly.
+                        if (op == ast::BinaryOp::Add) {
+                            value = builder_.CreateOr(old, value);
+                        } else if (op == ast::BinaryOp::Sub) {
+                            value = builder_.CreateAnd(old, builder_.CreateNot(value));
+                        } else {
+                            value = emit_int_arith(op, old, value, lv.type);
+                        }
+                    } else if (is_pointer_like(lv.type) && (op == ast::BinaryOp::Add || op == ast::BinaryOp::Sub)) {
                         value = emit_pointer_offset(old, value, lv.type, op == ast::BinaryOp::Sub);
                     } else if (lv.type.is_float()) {
                         switch (op) {
@@ -3521,6 +3616,11 @@ namespace codegen {
                                 }
                                 report_codegen_error(diag_, v.location, std::format("unknown enum field '{}'", v.name));
                                 return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
+                            }
+                            if (ty.kind == sema::TypeKind::Bitset) {
+                                const auto &bitset_info = sema_program_.bitsets.at(ty.bitset_index);
+                                const auto mask = bitset_member_mask(bitset_info, v.name, v.location);
+                                return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty), mask.value_or(0), false);
                             }
                             // Payload-free tagged-union variant (.name where ty is a Union) needs
                             // alloca/store, which can't be constant-folded — falls through below.
@@ -3652,6 +3752,8 @@ namespace codegen {
                                         current_module_path_ = saved_path;
                                         current_module_ = saved_module;
                                         return llvm::cast<llvm::Constant>(agg);
+                                    } else if constexpr (std::is_same_v<BVT, ast::BitsetExpr>) {
+                                        return llvm::cast<llvm::Constant>(emit_bitset_expr_value(bv, ty));
                                     } else if (ty.kind == sema::TypeKind::Struct) { // positional struct init
                                         const auto &info = sema_program_.structs.at(ty.struct_index);
                                         const auto &struct_module = info.module_path;
@@ -3750,6 +3852,22 @@ namespace codegen {
 
             auto const_binary(const ast::BinaryExpr &expr, llvm::Constant *lhs, llvm::Constant *rhs) const -> llvm::Constant * {
                 const auto lhs_type = current_module_->expr_types.at(sema::get_expr_key(expr.lhs));
+                if (expr.op == ast::BinaryOp::In) {
+                    // See the runtime emit_binary_expr 'In' case: single-member and subset
+                    // membership both reduce to the same '(rhs & lhs) == lhs' formula.
+                    auto *anded = llvm::ConstantFoldBinaryInstruction(llvm::Instruction::And, rhs, lhs);
+                    return llvm::ConstantFoldCompareInstruction(llvm::CmpInst::ICMP_EQ, anded, lhs);
+                }
+                if (lhs_type.kind == sema::TypeKind::Bitset) {
+                    if (expr.op == ast::BinaryOp::Add || expr.op == ast::BinaryOp::BitwiseOr) {
+                        return llvm::ConstantFoldBinaryInstruction(llvm::Instruction::Or, lhs, rhs);
+                    }
+                    if (expr.op == ast::BinaryOp::Sub) {
+                        return llvm::ConstantFoldBinaryInstruction(llvm::Instruction::And, lhs, llvm::ConstantExpr::getNot(rhs));
+                    }
+                    // BitwiseAnd/BitwiseXor and Equal/NotEqual fall through to the generic
+                    // paths below/above, which already lower them correctly.
+                }
                 if (expr.op == ast::BinaryOp::Equal || expr.op == ast::BinaryOp::NotEqual ||
                     expr.op == ast::BinaryOp::Less || expr.op == ast::BinaryOp::Greater ||
                     expr.op == ast::BinaryOp::LessEqual || expr.op == ast::BinaryOp::GreaterEqual) {

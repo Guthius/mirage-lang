@@ -270,6 +270,25 @@ namespace sema {
                     return *ts->resolved;
                 }
 
+                if (ts->resolved && ts->resolved->kind == TypeKind::Bitset) {
+                    const int slot = ts->resolved->bitset_index;
+                    const auto *info = program.bitset_at(slot);
+                    if (!info) return error(diag, loc, std::format("internal error: invalid bitset index for '{}'", name));
+                    if (info->layout_done) return *ts->resolved;
+
+                    const auto key = std::make_pair(module_path, name);
+                    if (program.resolve_state.bitset_resolving.contains(key)) {
+                        return error(diag, loc, std::format("bitset cycle detected at '{}'", name));
+                    }
+
+                    program.resolve_state.bitset_resolving.insert(key);
+                    Resolver inner{program, diag};
+                    inner.layout_bitset(module_path, slot, std::get<std::unique_ptr<ast::BitsetType>>(ts->decl->type));
+                    program.resolve_state.bitset_resolving.erase(key);
+
+                    return *ts->resolved;
+                }
+
                 if (ts->resolved && ts->resolved->kind == TypeKind::Trait) {
                     const int slot = ts->resolved->trait_index;
                     const auto *info = program.trait_at(slot);
@@ -344,6 +363,7 @@ namespace sema {
                 if (t.kind == TypeKind::Slice) return 16;
                 if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_size(info->underlying_type.kind) : 0; }
                 if (t.kind == TypeKind::Union) { const auto *info = program.union_at(t.union_index); return info ? info->size : 0; }
+                if (t.kind == TypeKind::Bitset) { const auto *info = program.bitset_at(t.bitset_index); return info ? primitive_size(info->storage_type.kind) : 0; }
                 return primitive_size(t.kind);
             }
 
@@ -354,6 +374,7 @@ namespace sema {
                 if (t.kind == TypeKind::Trait) return 8; // primitive_align would wrongly forward to primitive_size's 16
                 if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_align(info->underlying_type.kind) : 1; }
                 if (t.kind == TypeKind::Union) { const auto *info = program.union_at(t.union_index); return info ? info->align : 1; }
+                if (t.kind == TypeKind::Bitset) { const auto *info = program.bitset_at(t.bitset_index); return info ? primitive_align(info->storage_type.kind) : 1; }
                 return primitive_align(t.kind);
             }
 
@@ -503,6 +524,7 @@ namespace sema {
                             case ast::BinaryOp::GreaterEqual: return *lhs >= *rhs ? 1 : 0;
                             case ast::BinaryOp::LogicalAnd:   return (*lhs != 0 && *rhs != 0) ? 1 : 0;
                             case ast::BinaryOp::LogicalOr:    return (*lhs != 0 || *rhs != 0) ? 1 : 0;
+                            case ast::BinaryOp::In:           return std::nullopt; // not a compile-time-constant-foldable operator here
                             }
                             return std::nullopt;
 
@@ -605,6 +627,78 @@ namespace sema {
 
                 info.layout_done = true;
                 program.enums[slot] = std::move(info);
+            }
+
+            // Whether an enum's spelling of the source directly declared it with an
+            // explicit integer backing type ('enum(u8) {...}'), checked at the AST
+            // level (rather than via a stored EnumInfo flag) so this stays purely
+            // additive to enum layout. Note this only recognizes the enum type
+            // spelled directly at 'name' — an indirect alias to an enum is not
+            // unwrapped here.
+            static auto storage_type_name(const TypeKind kind) -> const char * {
+                switch (kind) {
+                case TypeKind::U8:  return "u8";
+                case TypeKind::U16: return "u16";
+                case TypeKind::U64: return "u64";
+                default:            return "u32";
+                }
+            }
+
+            void layout_bitset(const std::string &module_path, const int slot, const std::unique_ptr<ast::BitsetType> &decl) {
+                const auto target = walk_namespace_chain(module_path, decl->member_type, program, diag);
+                if (!target) {
+                    program.bitsets[slot] = BitsetInfo{.layout_done = true};
+                    return;
+                }
+
+                auto &target_mod = program.modules.at(target->module_path);
+                const auto *ts = find_type_symbol(target_mod, target->name, target->location);
+                const auto *enum_decl_ast = ts && ts->decl ? std::get_if<std::unique_ptr<ast::EnumType>>(&ts->decl->type) : nullptr;
+                if (!enum_decl_ast) {
+                    diag.report_error(DiagnosticStage::Sema, decl->location, "bitset member type must be an enum type");
+                    program.bitsets[slot] = BitsetInfo{.layout_done = true};
+                    return;
+                }
+                if (!(*enum_decl_ast)->underlying_type.has_value()) {
+                    diag.report_error(DiagnosticStage::Sema, decl->location,
+                        "bitset member type must be an enum with an explicit integer backing type, e.g. 'enum(u8)'.");
+                    program.bitsets[slot] = BitsetInfo{.layout_done = true};
+                    return;
+                }
+
+                const auto member_ty = resolve_final_full(target->module_path, target->name, target->crossed_boundary, target->location);
+
+                ResolvedType storage = decl->storage_type
+                                            ? resolve_type_impl(*decl->storage_type, module_path)
+                                            : ResolvedType{.kind = TypeKind::U32};
+                if (storage.kind != TypeKind::U8 && storage.kind != TypeKind::U16 &&
+                    storage.kind != TypeKind::U32 && storage.kind != TypeKind::U64) {
+                    diag.report_error(DiagnosticStage::Sema, decl->location, "bitset storage type must be one of u8, u16, u32, u64");
+                    storage = ResolvedType{.kind = TypeKind::U32};
+                }
+                const uint32_t storage_bits = primitive_size(storage.kind) * 8;
+
+                if (const auto *enum_info = program.enum_at(member_ty.enum_index)) {
+                    for (const auto &field : enum_info->fields) {
+                        const int64_t bit_index = field.value + 1;
+                        if (bit_index < 0 || static_cast<uint64_t>(bit_index) >= storage_bits) {
+                            const int64_t mask = (bit_index >= 0 && bit_index < 63) ? (int64_t{1} << bit_index) : 0;
+                            diag.report_error(DiagnosticStage::Sema, decl->location, std::format(
+                                "bitset variant '{}.{}' has value {}, producing bit index {} (1 << {} = {}), "
+                                "which does not fit in the storage type '{}' ({} bits). "
+                                "Use a wider storage type or reduce the enum variant values.",
+                                target->name, field.name, field.value, bit_index, bit_index, mask,
+                                storage_type_name(storage.kind), storage_bits));
+                        }
+                    }
+                }
+
+                program.bitsets[slot] = BitsetInfo{
+                    .member_enum_type = member_ty,
+                    .storage_type = storage,
+                    .storage_bits = storage_bits,
+                    .layout_done = true,
+                };
             }
 
             void layout_union(const std::string &module_path, const int slot, const std::unique_ptr<ast::UnionType> &decl) {
@@ -1001,6 +1095,11 @@ namespace sema {
                             return error(diag, v->location, "trait types must be declared via 'type Name = trait { ... }'; anonymous trait types are not supported");
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ErrorType>>) {
                             return resolve_error_type(*v, module_path);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BitsetType>>) {
+                            const int slot = static_cast<int>(program.bitsets.size());
+                            program.bitsets.push_back(BitsetInfo{});
+                            layout_bitset(module_path, slot, v);
+                            return ResolvedType{.kind = TypeKind::Bitset, .bitset_index = slot};
                         } else {
                             return ResolvedType{.kind = TypeKind::Invalid};
                         }

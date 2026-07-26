@@ -97,7 +97,7 @@
           "name": "storage.modifier.mirage"
         },
         {
-          "match": "\\b(fn|type|trait|struct|impl|enum|union|error)\\b",
+          "match": "\\b(fn|type|trait|struct|impl|enum|union|error|bitset)\\b",
           "name": "storage.type.mirage"
         },
         {

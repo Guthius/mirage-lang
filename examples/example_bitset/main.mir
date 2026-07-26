@@ -1,0 +1,86 @@
+# example_bitset.mir — bitset(EnumType[, StorageType]): literal construction,
+# +=/-=/~= member operations, binary set operations (+/-/&/~/^), unary '~',
+# 'in' membership testing (single-member and subset), implicit coercion to
+# the storage type, explicit cast round-tripping, and 'ext fn' ABI
+# transparency (declaration only, not called, to keep this example
+# self-contained without an external library).
+
+pub type Stream_Mode = enum(u8) {
+    Close
+    Flush
+    Read
+    Write
+    Seek
+    Size
+}
+
+pub type Stream_Modes = bitset(Stream_Mode, u16)
+
+ext fn apply_modes(flags: Stream_Modes)
+
+pub fn main() -> i32 {
+    mut modes: Stream_Modes = {.Close, .Flush}
+
+    modes += .Write # set
+    modes -= .Close # clear
+    modes ~= .Flush # toggle (clears Flush, since it was set)
+
+    if modes != {.Write} {
+        return 1
+    }
+
+    const required: Stream_Modes = {.Write, .Seek}
+    const combined := modes + required # union
+    const common := modes & required   # intersection
+    const symdiff := modes ~ required  # symmetric difference (infix '~')
+    const symdiff2 := modes ^ required # symmetric difference (raw '^', same result)
+    const notmodes := ~modes           # unary complement
+
+    if combined != {.Write, .Seek} {
+        return 2
+    }
+    if common != {.Write} {
+        return 3
+    }
+    if symdiff != {.Seek} {
+        return 4
+    }
+    if symdiff2 != symdiff {
+        return 5
+    }
+    if cast(notmodes, u16) != 65519 {
+        return 6
+    }
+
+    if .Write in modes {
+        modes += .Size
+    } else {
+        return 7
+    }
+
+    if {.Write, .Size} in modes {
+        modes += .Seek
+    } else {
+        return 8
+    }
+
+    if .Close in modes {
+        return 9
+    }
+
+    const raw: u16 = modes # implicit coercion to storage type
+    if raw != 112 {
+        return 10
+    }
+
+    const modes2 := cast(raw, Stream_Modes) # explicit cast from storage type
+    if modes2 != modes {
+        return 11
+    }
+
+    if sizeof(Stream_Modes) != 2 {
+        return 12
+    }
+
+    return cast(modes2, i32) # should return 112
+}

@@ -42,6 +42,7 @@ namespace lexer {
             {"stackalloc",TokenKind::KwStackAlloc},
             {"cast",      TokenKind::KwCast     },
             {"enum",      TokenKind::KwEnum     },
+            {"bitset",    TokenKind::KwBitset   },
             {"iota",      TokenKind::KwIota     },
             {"default",   TokenKind::KwDefault  },
             {"undefined", TokenKind::KwUndefined},
@@ -481,7 +482,7 @@ namespace lexer {
                 case '[': return make_token(TokenKind::LBracket, start);
                 case ']': return make_token(TokenKind::RBracket, start);
                 case ',': return make_token(TokenKind::Comma, start);
-                case '~': return make_token(TokenKind::Tilde, start);
+                case '~': return match_double('=', TokenKind::TildeEqual, TokenKind::Tilde);
                 case '?': return make_token(TokenKind::Question, start);
                 case ';': return make_token(TokenKind::Semicolon, start);
                 case '@': return make_token(TokenKind::At, start);
