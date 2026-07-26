@@ -245,6 +245,7 @@ Multi-return function pointer types use `-> (T1, T2)` syntax.
 42          # decimal
 0xFF        # hexadecimal
 0b1010      # binary
+0o400       # octal
 1_000_000   # underscore separators allowed
 ```
 

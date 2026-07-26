@@ -411,6 +411,14 @@ namespace ast {
 
                     value = value * 2 + (lexeme[i] - '0');
                 }
+            } else if (lexeme.starts_with("0o") || lexeme.starts_with("0O")) {
+                for (size_t i = 2; i < lexeme.size(); ++i) {
+                    if (lexeme[i] == '_') {
+                        continue;
+                    }
+
+                    value = value * 8 + (lexeme[i] - '0');
+                }
             } else {
                 for (const char c : lexeme) {
                     if (c == '_') {

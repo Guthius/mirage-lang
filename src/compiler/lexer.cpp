@@ -330,6 +330,10 @@ namespace lexer {
                     if (next == 'b' || next == 'B') {
                         return lex_binary_number(start);
                     }
+
+                    if (next == 'o' || next == 'O') {
+                        return lex_octal_number(start);
+                    }
                 }
 
                 skip_digits();
@@ -393,6 +397,16 @@ namespace lexer {
                 advance();
 
                 while (!at_end() && (peek() == '0' || peek() == '1' || peek() == '_')) {
+                    advance();
+                }
+
+                return make_token(TokenKind::IntLiteral, start);
+            }
+
+            auto lex_octal_number(const size_t start) -> Token {
+                advance();
+
+                while (!at_end() && ((peek() >= '0' && peek() <= '7') || peek() == '_')) {
                     advance();
                 }
 

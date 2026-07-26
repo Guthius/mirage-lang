@@ -559,11 +559,12 @@ both).
 ## Literals
 
 ```ebnf
-INT_LITERAL   ::= decimal_int | hex_int | bin_int
+INT_LITERAL   ::= decimal_int | hex_int | bin_int | octal_int
 
 decimal_int   ::= DIGIT { DIGIT | '_' }
 hex_int       ::= '0x' HEX_DIGIT { HEX_DIGIT | '_' }
 bin_int       ::= '0b' BIN_DIGIT { BIN_DIGIT | '_' }
+octal_int     ::= '0o' OCTAL_DIGIT { OCTAL_DIGIT | '_' }
 
 FLOAT_LITERAL ::= DIGIT { DIGIT } '.' DIGIT { DIGIT }
 

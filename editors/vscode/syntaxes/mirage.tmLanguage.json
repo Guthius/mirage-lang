@@ -185,6 +185,10 @@
           "name": "constant.numeric.binary.mirage"
         },
         {
+          "match": "\\b0[oO][0-7_]+\\b",
+          "name": "constant.numeric.octal.mirage"
+        },
+        {
           "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9]+)?\\b",
           "name": "constant.numeric.float.mirage"
         },
