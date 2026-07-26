@@ -234,6 +234,24 @@ namespace sema {
     // '@option'/'@env'-backed const.
     using ConstFoldValue = std::variant<int64_t, std::string>;
 
+    // Sema's resolved view of one 'asm { ... }' instruction, computed by check_asm_stmt
+    // (sema_check.cpp) and consumed by codegen's emit_asm_stmt — parallel to
+    // ast::AsmInstruction::operands; populated only for ast::AsmVariableOperand entries
+    // (register/immediate operands carry std::nullopt here, their type being implicit in the
+    // AST node itself).
+    struct AsmInstructionInfo {
+        std::vector<std::optional<ResolvedType>> operand_types;
+    };
+
+    // Sema's resolved view of a whole 'asm { ... }' block: per-instruction operand types (for
+    // codegen's input/output classification) plus the clobber set computed from the Tier-1/
+    // Tier-2 operand-direction analysis and each mnemonic's implicit clobbers.
+    struct AsmStmtInfo {
+        std::vector<AsmInstructionInfo> instructions; // parallel to ast::AsmStmt::instructions
+        std::set<std::string> clobbered_families;     // 64-bit root register names, e.g. "rax"
+        bool clobbers_memory = false;
+    };
+
     struct ProgramModule {
         SymbolTable symbols;
         // type_name -> method_name -> MethodInfo
@@ -262,6 +280,9 @@ namespace sema {
         // try_resolve_namespace_chain only has access to sema::Program, not the
         // ast::Program::module_imports map the resolution needs.
         std::unordered_map<const ast::ImportExpr *, std::string> inline_import_paths;
+        // 'asm { ... }' node -> sema's resolved operand types + computed clobber set. Populated
+        // by check_asm_stmt (sema_check.cpp), consumed by codegen's emit_asm_stmt.
+        std::unordered_map<const ast::AsmStmt *, AsmStmtInfo> asm_stmt_info;
         bool ok = false;
     };
 

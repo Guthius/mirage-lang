@@ -552,10 +552,19 @@ namespace lexer {
                     return std::nullopt;
                 }
 
+                // Snapshot the opening brace's position now, before scanning through the body —
+                // line_/col_ advance past it below, and the emitted token's location must point
+                // at the opening '{' (per the asm-lexer's diagnostics, which report offsets
+                // relative to this token's start), not at wherever the scan happens to end.
                 const auto block_start = pos_;
+                const auto brace_line = line_;
+                const auto brace_col = col_;
 
                 advance();
 
+                // Comment/string-naive: a raw '{'/'}' inside an asm-body ';'/'#' comment could
+                // desync this counter. Acceptable for v1 — asm bodies are plain
+                // mnemonic/operand/comment lines with no string operands (out of scope for v1).
                 int depth = 1;
                 while (!at_end() && depth > 0) {
                     const auto ch = peek();
@@ -570,6 +579,20 @@ namespace lexer {
                     }
                 }
 
+                if (depth > 0) {
+                    diagnostics_.report_error(
+                        DiagnosticStage::Lexer,
+                        SourceLocation{
+                            .filename = filename_,
+                            .line = brace_line,
+                            .column = brace_col,
+                            .offset = block_start,
+                            .length = pos_ - block_start,
+                        },
+                        "unterminated asm block");
+                    return std::nullopt;
+                }
+
                 const auto body = source_.substr(block_start + 1, pos_ - block_start - 1);
                 auto tok = Token{
                     .kind = TokenKind::AsmBlock,
@@ -577,15 +600,14 @@ namespace lexer {
                     .location =
                         {
                                    .filename = filename_,
-                                   .line = line_,
-                                   .column = col_,
+                                   .line = brace_line,
+                                   .column = brace_col,
                                    .offset = block_start,
+                                   .length = pos_ - block_start,
                                    },
                 };
 
-                if (!at_end()) {
-                    advance();
-                }
+                advance(); // consume the matching '}'
 
                 return tok;
             }

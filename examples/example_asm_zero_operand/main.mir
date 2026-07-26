@@ -1,0 +1,17 @@
+# example_asm_zero_operand.mir — a zero-operand instruction ('nop') compiles and runs
+# correctly. 'nop' is in the Tier-1 operand-direction table with an empty operand list, so
+# no width/clobber diagnostics are expected here.
+#
+# Verify with:
+#   ./build/mirage run examples/example_asm_zero_operand
+# Expected: builds and runs silently, exits 0.
+
+pub fn touch_nop() {
+    asm {
+        nop
+    }
+}
+
+pub fn main() {
+    touch_nop()
+}

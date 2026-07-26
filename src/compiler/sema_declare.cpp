@@ -469,6 +469,12 @@ namespace sema {
                         declare_diagnostic_decl(v, module_path, sema_program, diag, /*live=*/true);
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenDecl>>) {
                         declare_when_decl(*v, program, module_path, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmStmt>>) {
+                        // The parser accepts 'asm {...}' here purely so this diagnostic can name
+                        // the exact construct, mirroring LinkDecl/DiagnosticDecl's mirror-image
+                        // rejection as a Stmt inside a function body (sema_check.cpp).
+                        diag.report_error(DiagnosticStage::Sema, v->location,
+                            "asm blocks are only legal inside function bodies");
                     }
                     // ast::TraitImplDecl: handled separately by register_trait_impls_for_program.
                 },

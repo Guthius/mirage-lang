@@ -2,11 +2,14 @@
 
 #include "token.hpp"
 
+class DiagnosticEngine;
+
 namespace ast {
     class Parser {
       public:
         virtual ~Parser() = default;
 
+        virtual auto diagnostics() -> DiagnosticEngine & = 0;
         virtual auto current() const -> const Token & = 0;
         virtual auto current_lexeme() const -> std::string_view = 0;
         virtual auto current_location() const -> SourceLocation = 0;

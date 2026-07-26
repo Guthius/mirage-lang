@@ -1,5 +1,8 @@
 #include "ast.hpp"
 
+#include "asm_lexer.hpp"
+#include "asm_parser.hpp"
+
 #include <format>
 #include <sstream>
 
@@ -2672,6 +2675,20 @@ namespace ast {
         });
     }
 
+    // 'asm { ... }' — the main lexer already captured the raw text between the braces as a
+    // single 'AsmBlock' token (see lexer.cpp's lex_asm_block), so parsing here is just
+    // handing that raw text off to the standalone asm_lexer/asm_parser pair, never
+    // reparsing it with the main Mirage grammar.
+    auto parse_asm_stmt(Parser &parser) -> std::unique_ptr<AsmStmt> {
+        parser.expect(TokenKind::KwAsm, "'asm'");
+        const auto block_tok = parser.expect(TokenKind::AsmBlock, "asm block body");
+
+        auto asm_tokens = asm_lexer::tokenize(block_tok.lexeme, block_tok.location, parser.diagnostics());
+        auto stmt = asm_parser::parse(asm_tokens, parser.diagnostics());
+
+        return std::make_unique<AsmStmt>(std::move(stmt));
+    }
+
     auto parse_stmt(Parser &parser) -> Stmt {
         if (parser.check(TokenKind::LBrace)) {
             return parse_block_stmt(parser);
@@ -2744,6 +2761,10 @@ namespace ast {
                 .body = parse_stmt(parser),
                 .location = location,
             });
+        }
+
+        if (parser.check(TokenKind::KwAsm)) {
+            return parse_asm_stmt(parser);
         }
 
         return parse_expr_stmt(parser);
@@ -3000,6 +3021,16 @@ namespace ast {
                         *directive_kind == DiagnosticDirectiveKind::Error ? "error" : "warn"));
             }
             return Decl{parse_diagnostic_decl(parser, *directive_kind)};
+        }
+
+        // 'asm' is never legal at module scope, but it parses successfully here too (exactly
+        // like '@link'/'@error'/'@warn' above parse successfully as a Stmt) purely so sema can
+        // reject it with a precise diagnostic instead of a raw parse error.
+        if (parser.check(TokenKind::KwAsm)) {
+            if (is_pub) {
+                parser.report_error(parser.current_location(), "'asm' blocks cannot be 'pub'");
+            }
+            return Decl{parse_asm_stmt(parser)};
         }
 
         parser.report_error(

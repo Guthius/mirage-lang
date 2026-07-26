@@ -25,6 +25,11 @@ endif ()
 # Shared compiler core (lexer, parser, module resolver, sema) - LLVM-free,
 # reused by both the `mirage` compiler and the `mirage-lsp` language server.
 add_library(mirage_core OBJECT
+        src/compiler/asm_lexer.cpp
+        src/compiler/asm_lexer.hpp
+        src/compiler/asm_parser.cpp
+        src/compiler/asm_parser.hpp
+        src/compiler/asm_registers.hpp
         src/compiler/ast.cpp
         src/compiler/ast.hpp
         src/compiler/ast_parser.cpp

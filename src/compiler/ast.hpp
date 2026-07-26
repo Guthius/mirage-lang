@@ -640,6 +640,43 @@ namespace ast {
     struct DeferStmt;
     struct ForInStmt;
 
+    // 'asm { ... }' — inline assembly, only legal inside a function body. Parses successfully
+    // as a Decl too (at module scope) purely so sema can reject it there with a precise
+    // diagnostic ("asm blocks are only legal inside function bodies"), mirroring how
+    // LinkDecl/DiagnosticDecl parse as a Stmt purely for the mirror-image rejection above.
+    // The raw asm body (an AsmBlock token's text) is lexed/parsed by the standalone
+    // asm_lexer/asm_parser (see asm_lexer.hpp/asm_parser.hpp), never by the main Mirage
+    // lexer/parser.
+    struct AsmRegisterOperand {
+        std::string name;      // normalized lowercase, e.g. "rax"
+        uint32_t width_bits;   // 8, 16, 32, or 64
+        SourceLocation location;
+    };
+
+    struct AsmImmediateOperand {
+        int64_t value;
+        SourceLocation location;
+    };
+
+    struct AsmVariableOperand {
+        std::string name;   // Mirage variable name
+        bool is_address;    // true if '&var', false if bare 'var'
+        SourceLocation location;
+    };
+
+    using AsmOperand = std::variant<AsmRegisterOperand, AsmImmediateOperand, AsmVariableOperand>;
+
+    struct AsmInstruction {
+        std::string mnemonic; // normalized lowercase; not validated by the parser — sema decides
+        std::vector<AsmOperand> operands;
+        SourceLocation location;
+    };
+
+    struct AsmStmt {
+        std::vector<AsmInstruction> instructions;
+        SourceLocation location;
+    };
+
     using Stmt = std::variant<
         std::unique_ptr<BlockStmt>,
         std::unique_ptr<IfStmt>,
@@ -657,7 +694,8 @@ namespace ast {
         std::unique_ptr<DeferStmt>,
         LinkDecl,
         DiagnosticDecl,
-        std::unique_ptr<WhenStmt>>;
+        std::unique_ptr<WhenStmt>,
+        std::unique_ptr<AsmStmt>>;
 
     struct DeferStmt {
         Stmt body;
@@ -828,7 +866,7 @@ namespace ast {
     struct WhenDecl;
 
     using Decl = std::variant<FunctionDecl, ExtFunctionDecl, VarDecl, MacroDecl, TypeDecl, ImplDecl, TraitImplDecl,
-                               LinkDecl, DiagnosticDecl, std::unique_ptr<WhenDecl>>;
+                               LinkDecl, DiagnosticDecl, std::unique_ptr<WhenDecl>, std::unique_ptr<AsmStmt>>;
 
     struct WhenDecl {
         Expr condition;

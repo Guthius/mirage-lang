@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Inline Assembly — Mirage</title>
+  <meta name="description" content="Raw x86-64 Intel-syntax assembly inside a function body: operands, registers, clobbers, and width checking.">
+  <script src="theme-init.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" aria-label="Toggle navigation"><span></span><span></span><span></span></button>
+  <a href="index.html" class="topbar-logo">mir<span>age</span></a>
+</div>
+<div class="sidebar-backdrop"></div>
+
+<div class="layout">
+
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+      <button class="theme-toggle" aria-label="Toggle color theme">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+    </div>
+    <nav>
+      <div class="sidebar-section">Introduction</div>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="getting-started.html">Getting Started</a></li>
+      </ul>
+      <div class="sidebar-section">Language</div>
+      <ul>
+        <li><a href="types.html">Types</a></li>
+        <li><a href="functions.html">Functions</a></li>
+        <li><a href="control-flow.html">Control Flow</a></li>
+        <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="traits.html">Traits</a></li>
+        <li><a href="error-handling.html">Error Handling</a></li>
+        <li><a href="modules.html">Modules</a></li>
+        <li><a href="comptime-config.html">Compile-Time Config</a></li>
+        <li><a href="inline-assembly.html" class="active">Inline Assembly</a></li>
+      </ul>
+      <div class="sidebar-section">Reference</div>
+      <ul>
+        <li><a href="grammar.html">Grammar</a></li>
+      </ul>
+    </nav>
+    <div class="sidebar-footer">Mirage Language<br>Documentation</div>
+  </aside>
+
+  <main class="main">
+    <div class="content">
+
+      <h1>Inline Assembly</h1>
+      <p class="subtitle">Raw x86-64 assembly inside a function body, for the rare case where no <code>ext fn</code> wrapper exists — like issuing a syscall directly.</p>
+
+      <p>
+        An <code>asm { ... }</code> block embeds raw x86-64 assembly, written in Intel syntax,
+        directly inside a function. It's an escape hatch: most programs never need it, but it's
+        there for the handful of cases — issuing a syscall with no libc wrapper, reading a specific
+        register — that no amount of ordinary Mirage code can express.
+      </p>
+
+      <div class="callout warning">
+        <div class="callout-title">Function bodies only</div>
+        <code>asm { ... }</code> is legal only inside a function body. Writing one at module scope
+        is a compile error:
+        <pre><code>error: asm blocks are only legal inside function bodies</code></pre>
+      </div>
+
+      <h2>A First Example</h2>
+      <p>
+        One instruction per line, mnemonic first, then zero or more comma-separated operands.
+        Mirage variables can be read by value or written through their address:
+      </p>
+      <pre><code><span class="kw">pub fn</span> <span class="fn">add_one</span>(<span class="var">x</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
+    <span class="kw">mut</span> <span class="var">result</span>: <span class="ty">i32</span> = <span class="kw">undefined</span>
+    <span class="kw">asm</span> {
+        mov eax, <span class="var">x</span>
+        add eax, <span class="num">1</span>
+        mov &amp;<span class="var">result</span>, eax
+    }
+    <span class="kw">return</span> <span class="var">result</span>
+}</code></pre>
+      <p>
+        <code>x</code> (read by value) and <code>&amp;result</code> (written through its address)
+        are Mirage variables; <code>eax</code> is a raw register; <code>1</code> is an immediate.
+        The lexer captures everything between the outer <code>{</code> <code>}</code> as raw text —
+        it is never tokenized as Mirage code, so mnemonics, registers, and comments inside an
+        <code>asm</code> block follow their own rules, described below.
+      </p>
+
+      <h2>Operands</h2>
+      <p>Each operand in an instruction is one of four forms:</p>
+      <table>
+        <tr><th>Form</th><th>Meaning</th></tr>
+        <tr><td><code>eax</code></td><td>A register (see the table below).</td></tr>
+        <tr><td><code>42</code>, <code>-5</code>, <code>0x2a</code></td><td>A decimal or hexadecimal integer immediate. Float immediates aren't supported.</td></tr>
+        <tr><td><code>flags</code></td><td>A Mirage variable, read by its current value.</td></tr>
+        <tr><td><code>&amp;fd</code></td><td>A Mirage variable's <em>address</em> — <code>&amp;</code> immediately followed by an identifier, no space — letting the instruction write through it.</td></tr>
+      </table>
+      <p>
+        Only scalar and pointer-typed variables can appear as operands — a struct, array, or slice
+        is a compile error. <code>const</code> and <code>mut</code> bindings both work as
+        <code>&amp;var</code> targets: taking a binding's address and writing through it is always
+        legal in Mirage, regardless of how the binding itself was declared. An unrecognized variable
+        name is a compile error:
+      </p>
+      <pre><code>error: unknown identifier 'fd' in asm block.</code></pre>
+      <p>
+        <code>;</code> and <code>#</code> both start a comment running to the end of the line.
+      </p>
+
+      <h2>Registers</h2>
+      <p>
+        All 64-bit general-purpose registers are available, at every width. Register names are
+        case-insensitive. Each one belongs to a <strong>family</strong> — its 64-bit root (e.g.
+        <code>eax</code>'s family is <code>rax</code>) — which matters for clobber tracking below:
+        writing to any width of a register clobbers the whole family.
+      </p>
+      <table>
+        <tr><th>Width</th><th>Registers</th></tr>
+        <tr><td>64-bit</td><td><code>rax rbx rcx rdx rdi rsi rsp rbp r8</code>–<code>r15</code></td></tr>
+        <tr><td>32-bit</td><td><code>eax ebx ecx edx edi esi esp ebp r8d</code>–<code>r15d</code></td></tr>
+        <tr><td>16-bit</td><td><code>ax bx cx dx di si sp bp r8w</code>–<code>r15w</code></td></tr>
+        <tr><td>8-bit</td><td><code>al bl cl dl dil sil spl bpl r8b</code>–<code>r15b</code></td></tr>
+      </table>
+      <div class="callout warning">
+        <div class="callout-title">Not supported in v1</div>
+        SSE/AVX/FPU registers (<code>xmm0</code>, <code>ymm0</code>, <code>st0</code>, ...), segment
+        registers (<code>cs</code>, <code>ds</code>, ...), control/debug registers (<code>cr0</code>,
+        <code>dr0</code>, ...), and memory operands with displacement/scale syntax
+        (<code>[rax + 8]</code>) are all recognized — so they produce a clear "not supported in v1"
+        error — rather than being silently misread as a Mirage variable name. Labels/local jumps,
+        string operands, and float immediates are also out of scope for v1.
+      </div>
+
+      <h2>Operand Direction and Clobbers</h2>
+      <p>
+        The compiler needs to know which operands an instruction reads versus writes, so it can
+        tell the surrounding function's own register allocator which registers the block disturbs.
+        It looks this up per mnemonic, in two tiers:
+      </p>
+      <table>
+        <tr><th>Mnemonic(s)</th><th>Reads / Writes</th></tr>
+        <tr><td><code>mov</code>, <code>lea</code></td><td>Write, Read</td></tr>
+        <tr><td><code>movzx</code></td><td>Write, Read — widths may differ; see below</td></tr>
+        <tr><td><code>add</code>, <code>sub</code>, <code>and</code>, <code>or</code>, <code>xor</code></td><td>Read/Write, Read</td></tr>
+        <tr><td><code>not</code>, <code>neg</code>, <code>inc</code>, <code>dec</code></td><td>Read/Write</td></tr>
+        <tr><td><code>cmp</code>, <code>test</code></td><td>Read, Read</td></tr>
+        <tr><td><code>push</code></td><td>Read</td></tr>
+        <tr><td><code>pop</code></td><td>Write</td></tr>
+        <tr><td><code>nop</code>, <code>ret</code>, <code>syscall</code></td><td>(no operands)</td></tr>
+        <tr><td><code>jmp</code>, <code>je</code>, <code>jne</code>, <code>jl</code>, <code>jg</code>, ... (all conditional jumps)</td><td>Read</td></tr>
+        <tr><td><code>call</code></td><td>Read</td></tr>
+      </table>
+      <p>
+        A mnemonic outside this table isn't a compile error — it's passed straight through to the
+        assembler, with a conservative guess (first operand read/write, the rest read) and a
+        warning:
+      </p>
+      <pre><code>warning: unknown mnemonic 'cpuid' — assuming first operand is read/write
+         and remaining operands are read. Verify clobbers manually.</code></pre>
+      <p>Some instructions also touch registers that never appear in their operand list at all:</p>
+      <ul>
+        <li><code>syscall</code> reads <code>rax</code>, <code>rdi</code>, <code>rsi</code>, <code>rdx</code>, <code>r10</code>, <code>r8</code>, <code>r9</code>; clobbers <code>rax</code> (the return value), <code>rcx</code>, <code>r11</code> (destroyed by the kernel).</li>
+        <li><code>call</code> clobbers every System V caller-saved register: <code>rax rcx rdx rsi rdi r8 r9 r10 r11</code>.</li>
+        <li><code>div</code>/<code>idiv</code> read <code>rdx:rax</code> and write <code>rax</code> (quotient) / <code>rdx</code> (remainder).</li>
+        <li><code>mul</code>/<code>imul</code>, in their one-operand form, read and write <code>rdx:rax</code>.</li>
+      </ul>
+      <p>
+        Every register an instruction writes, plus its implicit clobbers, plus a memory clobber
+        whenever any <code>&amp;var</code> operand appears anywhere in the block, all feed the
+        compiler's own register allocator — this is what keeps it from putting one of its own
+        values in a register your asm block is about to overwrite.
+      </p>
+
+      <h2>Width Checking</h2>
+      <p>
+        Where a register and a Mirage variable operand appear together in one instruction, their
+        widths normally have to match:
+      </p>
+      <table>
+        <tr><th>Mirage type</th><th>Register width</th></tr>
+        <tr><td><code>i8</code> / <code>u8</code></td><td>8-bit</td></tr>
+        <tr><td><code>i16</code> / <code>u16</code></td><td>16-bit</td></tr>
+        <tr><td><code>i32</code> / <code>u32</code></td><td>32-bit</td></tr>
+        <tr><td><code>i64</code> / <code>u64</code> / <code>usize</code> / any pointer / <code>anyptr</code></td><td>64-bit</td></tr>
+      </table>
+      <p>A mismatch is a <strong>warning</strong>, and it names the fix:</p>
+      <pre><code>warning: asm operand 'fd' has type 'i32' (32 bits) but register 'rax' is
+         64 bits. Consider using 'eax' instead.</code></pre>
+      <div class="callout warning">
+        <div class="callout-title">This warning isn't just cosmetic</div>
+        In Intel syntax with no explicit size specifier, the assembler infers a memory write's
+        size from the register's width. <code>mov &amp;fd, rax</code> where <code>fd</code> is
+        <code>i32</code> writes all 8 bytes of <code>rax</code> into a 4-byte stack slot — silently
+        corrupting whatever sits next to it. The same applies to a by-value operand: <code>mov
+        rsi, flags</code> with an <code>i32</code> <code>flags</code> doesn't just warn, it fails
+        to assemble outright, because the loaded value is sized to <code>flags</code>'s own type
+        and a mismatched register name next to it produces an invalid instruction. Use
+        <code>esi</code>, not <code>rsi</code>.
+      </div>
+
+      <div class="callout tip">
+        <div class="callout-title"><code>movzx</code> is the one exception</div>
+        Zero-extending a narrower source into a wider destination is <code>movzx</code>'s entire
+        purpose, so its two operands are <em>supposed</em> to differ in width — it's exempt from
+        the warning above. Instead it enforces its own real x86 constraints as compile errors:
+        <ul>
+          <li>
+            The <strong>source must be 8 or 16 bits</strong> — there's no <code>movzx</code>
+            encoding for a 32- or 64-bit source. Writing a 32-bit register already zero-extends
+            its parent 64-bit register for free, so a plain <code>mov</code> (into the matching
+            32-bit sub-register, e.g. <code>esi</code> not <code>rsi</code>) is what to use for
+            an <code>i32</code> value — not <code>movzx</code>:
+            <pre><code>error: 'movzx' source must be 8 or 16 bits (got 32 bits) — there is no
+       'movzx' encoding for a 32-bit or 64-bit source; use 'mov' instead,
+       which already zero-extends automatically when writing a 32-bit
+       register</code></pre>
+          </li>
+          <li>
+            The <strong>destination must be strictly wider than the source</strong>:
+            <pre><code>error: 'movzx' destination width (32 bits) must be wider than source
+       width (32 bits)</code></pre>
+          </li>
+        </ul>
+        <pre><code><span class="kw">asm</span> {
+    movzx eax, <span class="var">byte_value</span>   <span class="cmt"># byte_value: u8 -> zero-extended into eax</span>
+}</code></pre>
+      </div>
+
+      <h2>Full Example</h2>
+      <p>
+        Issuing the Linux <code>open</code> syscall directly, with no <code>ext fn</code> wrapper.
+        <code>filename</code> is a 64-bit pointer, so <code>rdi</code> is correct as-is —
+        <code>flags</code> and <code>mode</code> are <code>i32</code>, so they need the matching
+        32-bit registers, <code>esi</code>/<code>edx</code>, not <code>rsi</code>/<code>rdx</code>:
+      </p>
+      <pre><code><span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
+
+<span class="kw">pub fn</span> <span class="fn">open</span>(<span class="var">filename</span>: *<span class="ty">u8</span>, <span class="var">flags</span>: <span class="ty">i32</span>, <span class="var">mode</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
+    <span class="kw">mut</span> <span class="var">fd</span>: <span class="ty">i32</span> = <span class="kw">undefined</span>
+    <span class="kw">asm</span> {
+        mov rax, <span class="num">2</span>            <span class="cmt"># syscall number for open()</span>
+        mov rdi, <span class="var">filename</span>
+        mov esi, <span class="var">flags</span>
+        mov edx, <span class="var">mode</span>
+        syscall
+        mov &amp;<span class="var">fd</span>, eax        <span class="cmt"># eax, not rax: fd is i32</span>
+    }
+    <span class="kw">return</span> <span class="var">fd</span>
+}
+
+<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">i32</span> {
+    <span class="kw">const</span> <span class="var">fd</span>: <span class="ty">i32</span> = <span class="fn">open</span>(<span class="str">"/dev/null"</span>, <span class="num">0</span>, <span class="num">0</span>)
+    <span class="kw">if</span> <span class="var">fd</span> &lt; <span class="num">0</span> {
+        <span class="fn">printf</span>(<span class="str">"open failed: fd=%d\n"</span>, <span class="var">fd</span>)
+        <span class="kw">return</span> <span class="num">1</span>
+    }
+    <span class="fn">printf</span>(<span class="str">"open succeeded: fd=%d\n"</span>, <span class="var">fd</span>)
+    <span class="kw">return</span> <span class="num">0</span>
+}
+<span class="cmt"># Output:
+# open succeeded: fd=3</span></code></pre>
+
+      <div class="page-nav">
+        <a href="comptime-config.html" class="prev"><span class="label">Previous</span>Compile-Time Config</a>
+        <a href="grammar.html" class="next"><span class="label">Next</span>Grammar</a>
+      </div>
+
+    </div>
+  </main>
+
+</div>
+<script src="site.js" defer></script>
+</body>
+</html>

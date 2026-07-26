@@ -102,4 +102,33 @@ namespace sema {
             return !(*this == other);
         }
     };
+
+    // Bit width of a scalar TypeKind — used by sema's inline-asm width-mismatch check (comparing
+    // a Mirage variable operand's type against the asm register it's paired with). Returns 0 for
+    // any non-scalar kind. Deliberately not reused by codegen's own (already-correct, unrelated)
+    // int_bits() helper — see asm sema-check code for why the two are kept independent.
+    [[nodiscard]] inline auto scalar_bit_width(const TypeKind kind) -> unsigned {
+        switch (kind) {
+        case TypeKind::U8:
+        case TypeKind::I8:
+        case TypeKind::Bool:
+            return 8;
+        case TypeKind::U16:
+        case TypeKind::I16:
+            return 16;
+        case TypeKind::U32:
+        case TypeKind::I32:
+        case TypeKind::F32:
+            return 32;
+        case TypeKind::U64:
+        case TypeKind::I64:
+        case TypeKind::USize:
+        case TypeKind::Pointer:
+        case TypeKind::Anyptr:
+        case TypeKind::F64:
+            return 64;
+        default:
+            return 0;
+        }
+    }
 }

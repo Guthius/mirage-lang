@@ -43,6 +43,7 @@
         <li><a href="error-handling.html">Error Handling</a></li>
         <li><a href="modules.html">Modules</a></li>
         <li><a href="comptime-config.html">Compile-Time Config</a></li>
+        <li><a href="inline-assembly.html">Inline Assembly</a></li>
       </ul>
       <div class="sidebar-section">Reference</div>
       <ul>
@@ -117,6 +118,10 @@
         <div class="feature-card">
           <h3>Compile-Time Configuration</h3>
           <p><code>@option</code>, <code>@env</code>, <code>@link</code>, <code>@error</code>/<code>@warn</code>, and the <code>when</code> statement drive conditional compilation, linking, and configuration validation from build-time flags and environment variables.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Inline Assembly</h3>
+          <p>Raw x86-64 <code>asm { ... }</code> blocks inside a function body, for the rare case with no <code>ext fn</code> wrapper — like issuing a syscall directly.</p>
         </div>
       </div>
 

@@ -4069,6 +4069,8 @@ namespace codegen {
                             defer_scopes_.back().defers.push_back(v.get());
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenStmt>>) {
                             emit_when_stmt(*v);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmStmt>>) {
+                            emit_asm_stmt(*v);
                         }
                         // ast::LinkDecl/ast::DiagnosticDecl reaching here is a sema error (rejected
                         // in check_stmt) — nothing to emit even in an already-erroring program.
@@ -4120,6 +4122,150 @@ namespace codegen {
                             }
                         },
                         *stmt.else_branch);
+                }
+            }
+
+            struct AsmVarRef {
+                llvm::Value *ptr = nullptr;
+                llvm::Type *storage_type = nullptr;
+            };
+
+            // Resolves an asm operand's bare variable name the same way emit_lvalue's IdentExpr
+            // case does (locals first, then module-level globals) — sema's check_asm_stmt
+            // already validated the name resolves and is scalar/pointer, so this always
+            // succeeds for a program that reached codegen.
+            auto resolve_asm_variable(const std::string &name) -> AsmVarRef {
+                if (const auto it = locals_.find(name); it != locals_.end()) {
+                    return AsmVarRef{.ptr = it->second.alloca, .storage_type = llvm_type_for(it->second.type, it->second.type_module)};
+                }
+                if (const auto sym = current_module_->symbols.find(name); sym != current_module_->symbols.end()) {
+                    if (const auto *g = std::get_if<sema::GlobalSymbol>(&sym->second)) {
+                        const auto type_module = g->decl->type
+                                                     ? type_module_for_ast_type(*g->decl->type, *current_module_path_, g->type)
+                                                     : *current_module_path_;
+                        return AsmVarRef{.ptr = globals_.at(global_key(*current_module_path_, name)), .storage_type = llvm_type_for(g->type, type_module)};
+                    }
+                }
+                return AsmVarRef{};
+            }
+
+            // Lowers a resolved 'asm { ... }' block to a single LLVM InlineAsm call. Every
+            // instruction is rendered into one shared asm string (joined by "\n\t") and one
+            // shared constraint string, matching how sema's clobber-set computation
+            // (AsmStmtInfo) already aggregates across the whole block rather than per
+            // instruction.
+            //
+            // All of this design's outputs ('&var' operands) use LLVM's indirect memory
+            // constraint ("=*m"): the variable's alloca pointer is passed as an ordinary call
+            // argument (never as part of the call's return value — indirect outputs never
+            // consume a return-value slot), so the InlineAsm's return type is always void, and
+            // BOTH outputs and inputs are passed as call arguments, in that order — mirroring
+            // the constraint string, which likewise lists every "=*m" output before every "r"
+            // input. The '$N' placeholders written into the asm string use that same
+            // outputs-first-then-inputs numbering.
+            void emit_asm_stmt(const ast::AsmStmt &stmt) {
+                const auto &info = current_module_->asm_stmt_info.at(&stmt);
+
+                enum class RenderKind : uint8_t { Literal, Output, Input };
+                struct RenderedOperand {
+                    RenderKind kind;
+                    std::string literal_text;
+                    size_t index = 0; // meaningful for Output/Input, before the '$N' offset below
+                };
+
+                std::vector<llvm::Value *> output_args;
+                std::vector<llvm::Type *> output_elem_types; // parallel to output_args — the
+                                                              // pointee type, required by LLVM's
+                                                              // 'elementtype' attribute on every
+                                                              // indirect ("=*m") call argument
+                                                              // now that pointers are opaque
+                std::vector<llvm::Value *> input_args;
+                std::vector<std::vector<RenderedOperand>> rendered(stmt.instructions.size());
+
+                for (size_t ii = 0; ii < stmt.instructions.size(); ++ii) {
+                    const auto &instr = stmt.instructions[ii];
+                    auto &row = rendered[ii];
+                    row.reserve(instr.operands.size());
+
+                    for (const auto &operand : instr.operands) {
+                        std::visit(
+                            [&]<typename T>(const T &op) {
+                                using OpT = std::decay_t<T>;
+                                if constexpr (std::is_same_v<OpT, ast::AsmRegisterOperand>) {
+                                    row.push_back(RenderedOperand{.kind = RenderKind::Literal, .literal_text = op.name});
+                                } else if constexpr (std::is_same_v<OpT, ast::AsmImmediateOperand>) {
+                                    row.push_back(RenderedOperand{.kind = RenderKind::Literal, .literal_text = std::to_string(op.value)});
+                                } else { // ast::AsmVariableOperand
+                                    const auto ref = resolve_asm_variable(op.name);
+                                    if (op.is_address) {
+                                        output_args.push_back(ref.ptr);
+                                        output_elem_types.push_back(ref.storage_type);
+                                        row.push_back(RenderedOperand{.kind = RenderKind::Output, .index = output_args.size() - 1});
+                                    } else {
+                                        auto *value = builder_.CreateLoad(ref.storage_type, ref.ptr);
+                                        input_args.push_back(value);
+                                        row.push_back(RenderedOperand{.kind = RenderKind::Input, .index = input_args.size() - 1});
+                                    }
+                                }
+                            },
+                            operand);
+                    }
+                }
+
+                std::string asm_string;
+                for (size_t ii = 0; ii < stmt.instructions.size(); ++ii) {
+                    if (ii > 0) {
+                        asm_string += "\n\t";
+                    }
+                    asm_string += stmt.instructions[ii].mnemonic;
+                    const auto &row = rendered[ii];
+                    for (size_t oi = 0; oi < row.size(); ++oi) {
+                        asm_string += (oi == 0) ? " " : ", ";
+                        const auto &r = row[oi];
+                        if (r.kind == RenderKind::Literal) {
+                            asm_string += r.literal_text;
+                        } else if (r.kind == RenderKind::Output) {
+                            asm_string += "$" + std::to_string(r.index);
+                        } else { // Input — numbered after every output
+                            asm_string += "$" + std::to_string(output_args.size() + r.index);
+                        }
+                    }
+                }
+
+                std::vector<std::string> constraints;
+                constraints.reserve(output_args.size() + input_args.size() + info.clobbered_families.size() + 2);
+                for (size_t i = 0; i < output_args.size(); ++i) constraints.emplace_back("=*m");
+                for (size_t i = 0; i < input_args.size(); ++i) constraints.emplace_back("r");
+                for (const auto &family : info.clobbered_families) constraints.push_back("~{" + family + "}");
+                if (info.clobbers_memory) constraints.emplace_back("~{memory}");
+                constraints.emplace_back("~{dirflag}");
+
+                std::string constraint_string;
+                for (size_t i = 0; i < constraints.size(); ++i) {
+                    if (i > 0) constraint_string += ",";
+                    constraint_string += constraints[i];
+                }
+
+                auto *ptr_type = llvm::PointerType::getUnqual(*context_);
+                std::vector<llvm::Type *> param_types(output_args.size(), ptr_type);
+                for (auto *value : input_args) {
+                    param_types.push_back(value->getType());
+                }
+
+                auto *fn_type = llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), param_types, false);
+                auto *inline_asm = llvm::InlineAsm::get(fn_type, asm_string, constraint_string,
+                    /*hasSideEffects=*/true, /*isAlignStack=*/false, llvm::InlineAsm::AD_Intel);
+
+                std::vector<llvm::Value *> call_args = output_args;
+                call_args.insert(call_args.end(), input_args.begin(), input_args.end());
+                auto *call = builder_.CreateCall(inline_asm, call_args);
+
+                // Every indirect ("=*m") argument needs an explicit 'elementtype' attribute —
+                // opaque pointers no longer carry a pointee type, and LLVM's verifier rejects
+                // an indirect inline-asm operand without one ("Operand for indirect constraint
+                // must have elementtype attribute").
+                for (size_t i = 0; i < output_elem_types.size(); ++i) {
+                    call->addParamAttr(static_cast<unsigned>(i), llvm::Attribute::get(*context_, llvm::Attribute::ElementType, output_elem_types[i]));
                 }
             }
 

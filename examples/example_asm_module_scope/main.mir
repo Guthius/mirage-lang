@@ -1,0 +1,14 @@
+# example_asm_module_scope.mir — REJECTION CASE. 'asm { ... }' parses successfully at module
+# scope too (mirroring '@link'/'@error'/'@warn' parsing successfully as a Stmt inside a
+# function body) purely so sema can name the exact construct in its diagnostic instead of a
+# raw parse error.
+#
+# Expected: compilation fails with
+#   error: asm blocks are only legal inside function bodies
+
+asm {
+    nop
+}
+
+pub fn main() {
+}

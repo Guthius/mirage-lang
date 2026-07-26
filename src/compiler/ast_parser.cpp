@@ -17,6 +17,10 @@ namespace ast {
                 : tokens_(tokens), diagnostics_(diagnostics) {
             }
 
+            auto diagnostics() -> DiagnosticEngine & override {
+                return diagnostics_;
+            }
+
             [[nodiscard]] auto current() const -> const Token & override {
                 return tokens_[pos_];
             }

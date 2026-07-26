@@ -1,5 +1,7 @@
 #include "sema.hpp"
 
+#include "asm_registers.hpp"
+
 #include <algorithm>
 #include <format>
 #include <unordered_set>
@@ -545,8 +547,15 @@ namespace sema {
             // min_args < params.size()) already had their default expressions checked
             // once, at signature-resolution time — no re-check needed here; codegen
             // reads the default expression directly off the callee's decl.
+            //
+            // Pre-existing bug fixed here (unrelated to inline asm): this loop used to run
+            // 'i < args.size()' and index 'params[i]' unconditionally, which crashed (out-of-
+            // bounds vector access) for any variadic call site with more arguments than named
+            // parameters (e.g. 'printf("%d %d", a, b)', where 'params' has only the 'fmt'
+            // entry) — the trailing variadic arguments are handled by the dedicated loop just
+            // below, which type-checks 'args[params.size()..]' against no fixed parameter type.
             bool ok = true;
-            for (size_t i = 0; i < args.size(); ++i) {
+            for (size_t i = 0; i < std::min(args.size(), params.size()); ++i) {
                 if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, params[i], loop_depth, defer_loop_base, fn_error_type); !assignable_in_module(arg_ty, params[i], module_path, program)) {
                     error(diag, loc, std::format("'{}' argument {} type mismatch", callee_desc, i + 1));
                     ok = false;
@@ -2452,6 +2461,228 @@ namespace sema {
         }
     }
 
+    enum class AsmOperandDirection : uint8_t { Read, Write, ReadWrite };
+
+    // Tier-1: explicit per-mnemonic operand-direction table (see spec.md's "Inline Assembly"
+    // section). A mnemonic not listed here falls through to check_asm_stmt's Tier-2 fallback
+    // (first operand read/write, remaining operands read) with a warning. Deliberately does NOT
+    // include div/idiv/mul/imul — the spec lists those only under "implicit clobbers" below;
+    // their own explicit operand (if any) still goes through the Tier-2 fallback path, only
+    // the implicit rdx:rax reads/writes are unconditional.
+    auto asm_tier1_directions(const std::string &mnemonic) -> const std::vector<AsmOperandDirection> * {
+        static const std::unordered_map<std::string, std::vector<AsmOperandDirection>> table = {
+            {"mov", {AsmOperandDirection::Write, AsmOperandDirection::Read}},
+            // movzx deliberately allows (and expects) its two operands to have DIFFERENT
+            // widths — zero-extending a narrower source into a wider destination is the
+            // whole point of the instruction — so it's excluded from the generic
+            // width-must-match check below and given its own "destination strictly wider
+            // than source" validation instead.
+            {"movzx", {AsmOperandDirection::Write, AsmOperandDirection::Read}},
+            {"lea", {AsmOperandDirection::Write, AsmOperandDirection::Read}},
+            {"add", {AsmOperandDirection::ReadWrite, AsmOperandDirection::Read}},
+            {"sub", {AsmOperandDirection::ReadWrite, AsmOperandDirection::Read}},
+            {"and", {AsmOperandDirection::ReadWrite, AsmOperandDirection::Read}},
+            {"or", {AsmOperandDirection::ReadWrite, AsmOperandDirection::Read}},
+            {"xor", {AsmOperandDirection::ReadWrite, AsmOperandDirection::Read}},
+            {"not", {AsmOperandDirection::ReadWrite}},
+            {"neg", {AsmOperandDirection::ReadWrite}},
+            {"inc", {AsmOperandDirection::ReadWrite}},
+            {"dec", {AsmOperandDirection::ReadWrite}},
+            {"cmp", {AsmOperandDirection::Read, AsmOperandDirection::Read}},
+            {"test", {AsmOperandDirection::Read, AsmOperandDirection::Read}},
+            {"push", {AsmOperandDirection::Read}},
+            {"pop", {AsmOperandDirection::Write}},
+            {"nop", {}},
+            {"ret", {}},
+            {"jmp", {AsmOperandDirection::Read}},
+            {"je", {AsmOperandDirection::Read}},
+            {"jne", {AsmOperandDirection::Read}},
+            {"jl", {AsmOperandDirection::Read}},
+            {"jle", {AsmOperandDirection::Read}},
+            {"jg", {AsmOperandDirection::Read}},
+            {"jge", {AsmOperandDirection::Read}},
+            {"ja", {AsmOperandDirection::Read}},
+            {"jae", {AsmOperandDirection::Read}},
+            {"jb", {AsmOperandDirection::Read}},
+            {"jbe", {AsmOperandDirection::Read}},
+            {"jz", {AsmOperandDirection::Read}},
+            {"jnz", {AsmOperandDirection::Read}},
+            {"syscall", {}},
+            {"call", {AsmOperandDirection::Read}},
+        };
+        const auto it = table.find(mnemonic);
+        return it == table.end() ? nullptr : &it->second;
+    }
+
+    // Registers implicitly clobbered (or read) by a mnemonic, independent of its explicit
+    // operand list — see spec.md's "Implicit clobbers". Returns the 64-bit family names to add
+    // to the clobber set unconditionally.
+    auto asm_implicit_clobbers(const std::string &mnemonic, const size_t operand_count) -> std::vector<std::string> {
+        if (mnemonic == "syscall") return {"rax", "rcx", "r11"};
+        if (mnemonic == "call") return {"rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"};
+        if (mnemonic == "div" || mnemonic == "idiv") return {"rax", "rdx"};
+        if ((mnemonic == "mul" || mnemonic == "imul") && operand_count == 1) return {"rax", "rdx"};
+        return {};
+    }
+
+    // 'asm { ... }' inside a function body — resolves every variable operand against the
+    // enclosing scope, determines each instruction's per-operand read/write direction (Tier-1
+    // table, or Tier-2 conservative fallback with a warning), builds the clobber set (explicit
+    // writes + each mnemonic's implicit clobbers + any '&var' memory write), and checks operand
+    // register/variable width compatibility. Stores the result in the module's asm_stmt_info
+    // side table for codegen to consume. (Module-scope 'asm' is rejected entirely separately,
+    // in sema_declare.cpp's declare_one_decl — this function only ever runs on a function-body
+    // 'asm', since check_stmt is only ever invoked starting from a function/method body.)
+    void check_asm_stmt(const ast::AsmStmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag) {
+        AsmStmtInfo info;
+
+        for (const auto &instr : stmt.instructions) {
+            AsmInstructionInfo instr_info;
+            instr_info.operand_types.resize(instr.operands.size());
+
+            // Variable resolution + scalar-only check.
+            for (size_t i = 0; i < instr.operands.size(); ++i) {
+                const auto *var = std::get_if<ast::AsmVariableOperand>(&instr.operands[i]);
+                if (!var) {
+                    continue;
+                }
+
+                const auto it = locals.find(var->name);
+                if (it == locals.end()) {
+                    diag.report_error(DiagnosticStage::Sema, var->location,
+                        std::format("unknown identifier '{}' in asm block.", var->name));
+                    continue;
+                }
+
+                if (!it->second.type.is_scalar()) {
+                    diag.report_error(DiagnosticStage::Sema, var->location,
+                        std::format("asm operand '{}' has type '{}', but only scalar and pointer "
+                                    "types are supported in asm operands",
+                                    var->name, describe_type(it->second.type, program)));
+                    continue;
+                }
+
+                instr_info.operand_types[i] = it->second.type;
+            }
+
+            // Tier-1/Tier-2 operand direction + arity check.
+            std::vector<AsmOperandDirection> directions;
+            if (const auto *tier1 = asm_tier1_directions(instr.mnemonic)) {
+                if (tier1->size() != instr.operands.size()) {
+                    diag.report_error(DiagnosticStage::Sema, instr.location,
+                        std::format("'{}' expects {} operand(s), got {}", instr.mnemonic, tier1->size(), instr.operands.size()));
+                }
+                directions = *tier1;
+            } else {
+                diag.warn(DiagnosticStage::Sema, instr.location,
+                    std::format("unknown mnemonic '{}' — assuming first operand is read/write and "
+                                "remaining operands are read. Verify clobbers manually.",
+                                instr.mnemonic));
+                directions.assign(instr.operands.size(), AsmOperandDirection::Read);
+                if (!directions.empty()) {
+                    directions[0] = AsmOperandDirection::ReadWrite;
+                }
+            }
+
+            for (const auto &family : asm_implicit_clobbers(instr.mnemonic, instr.operands.size())) {
+                info.clobbered_families.insert(family);
+            }
+
+            // Clobber-set construction: explicit register writes + '&var' memory writes.
+            for (size_t i = 0; i < instr.operands.size() && i < directions.size(); ++i) {
+                const auto dir = directions[i];
+                if (const auto *reg = std::get_if<ast::AsmRegisterOperand>(&instr.operands[i])) {
+                    if (dir == AsmOperandDirection::Write || dir == AsmOperandDirection::ReadWrite) {
+                        if (const auto *reg_info = asm_registers::lookup_register(reg->name)) {
+                            info.clobbered_families.insert(std::string(reg_info->family));
+                        }
+                    }
+                } else if (const auto *var = std::get_if<ast::AsmVariableOperand>(&instr.operands[i]);
+                           var && var->is_address) {
+                    info.clobbers_memory = true;
+                }
+            }
+
+            if (instr.mnemonic == "movzx") {
+                // 'movzx dst, src' requires dst to be STRICTLY WIDER than src (that's the
+                // entire point of a zero-extending move) — the opposite of every other
+                // instruction's "widths must match" rule, so it gets its own check instead
+                // of the generic pairwise comparison below.
+                const auto operand_width = [&](const size_t idx) -> std::optional<uint32_t> {
+                    if (idx >= instr.operands.size()) {
+                        return std::nullopt;
+                    }
+                    if (const auto *reg = std::get_if<ast::AsmRegisterOperand>(&instr.operands[idx])) {
+                        return reg->width_bits;
+                    }
+                    if (instr_info.operand_types[idx]) {
+                        if (const auto w = scalar_bit_width(instr_info.operand_types[idx]->kind); w != 0) {
+                            return w;
+                        }
+                    }
+                    return std::nullopt;
+                };
+
+                const auto dst_width = operand_width(0);
+                const auto src_width = operand_width(1);
+                if (src_width && *src_width != 8 && *src_width != 16) {
+                    // Real x86 has no 'movzx' encoding for a 32- or 64-bit source — widening a
+                    // 32-bit value into a 64-bit register is what a plain 'mov' into the
+                    // destination's 32-bit sub-register already does for free (writing a
+                    // 32-bit register always zero-extends the upper 32 bits of its 64-bit
+                    // parent), so there's nothing for 'movzx' to do in that case.
+                    diag.report_error(DiagnosticStage::Sema, instr.location,
+                        std::format("'movzx' source must be 8 or 16 bits (got {} bits) — there is "
+                                    "no 'movzx' encoding for a 32-bit or 64-bit source; use 'mov' "
+                                    "instead, which already zero-extends automatically when "
+                                    "writing a 32-bit register",
+                                    *src_width));
+                } else if (dst_width && src_width && *dst_width <= *src_width) {
+                    diag.report_error(DiagnosticStage::Sema, instr.location,
+                        std::format("'movzx' destination width ({} bits) must be wider than source "
+                                    "width ({} bits)",
+                                    *dst_width, *src_width));
+                }
+            } else {
+                // Width-mismatch check: every register/variable operand pair within this
+                // instruction (normally exactly one of each, but this stays general).
+                for (size_t i = 0; i < instr.operands.size(); ++i) {
+                    const auto *var = std::get_if<ast::AsmVariableOperand>(&instr.operands[i]);
+                    if (!var || !instr_info.operand_types[i]) {
+                        continue;
+                    }
+
+                    const auto var_width = scalar_bit_width(instr_info.operand_types[i]->kind);
+                    if (var_width == 0) {
+                        continue;
+                    }
+
+                    for (size_t j = 0; j < instr.operands.size(); ++j) {
+                        const auto *reg = std::get_if<ast::AsmRegisterOperand>(&instr.operands[j]);
+                        if (!reg || reg->width_bits == var_width) {
+                            continue;
+                        }
+
+                        const auto *reg_info = asm_registers::lookup_register(reg->name);
+                        const auto *suggestion = reg_info
+                            ? asm_registers::lookup_register_by_family_and_width(reg_info->family, var_width)
+                            : nullptr;
+
+                        diag.warn(DiagnosticStage::Sema, var->location,
+                            std::format("asm operand '{}' has type '{}' ({} bits) but register '{}' is {} bits.{}",
+                                        var->name, describe_type(*instr_info.operand_types[i], program), var_width,
+                                        reg->name, reg->width_bits,
+                                        suggestion ? std::format(" Consider using '{}' instead.", suggestion->name) : ""));
+                    }
+                }
+            }
+
+            info.instructions.push_back(std::move(instr_info));
+        }
+
+        program.modules.at(module_path).asm_stmt_info[&stmt] = std::move(info);
+    }
+
     auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth, int defer_loop_base) -> void {
         const ResolvedType *fn_error_type = (!expected_returns.empty() && is_error_union_type(expected_returns.back(), program))
             ? &expected_returns.back() : nullptr;
@@ -3043,6 +3274,9 @@ namespace sema {
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenStmt>>) {
                     check_when_stmt(*v, locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base, fn_error_type);
+
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmStmt>>) {
+                    check_asm_stmt(*v, locals, module_path, program, diag);
                 }
             },
             stmt);

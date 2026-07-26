@@ -18,6 +18,9 @@ declaration   ::= [ 'pub' ] fn_decl
                | link_decl           (* cannot be pub *)
                | diagnostic_decl     (* cannot be pub *)
                | when_decl           (* cannot be pub *)
+               | asm_stmt            (* cannot be pub; always a SEMA error at module scope —
+                                         parses here (like link_decl/diagnostic_decl above)
+                                         purely so the diagnostic can name it precisely *)
 ```
 
 ---
@@ -263,6 +266,7 @@ stmt          ::= block_stmt
                | link_decl          (* legal anywhere a stmt is, but always a SEMA error here —
                                         see spec.md; parses so the diagnostic can name it precisely *)
                | diagnostic_decl    (* same as link_decl above — always a SEMA error as a stmt *)
+               | asm_stmt           (* legal only inside a function body — see below *)
                | expr_stmt
 
 block_stmt    ::= '{' { stmt } '}'
@@ -315,6 +319,55 @@ error otherwise — see spec.md). Both branches are always type-checked; only
 the selected branch's statements are emitted by codegen. The `then` branch
 (and each block in an `else`/`else when` chain) must be a literal
 `block_stmt`, unlike `if_stmt`'s `stmt` which accepts any statement.
+
+### Asm Statement
+
+```ebnf
+asm_stmt      ::= 'asm' '{' <raw text, brace-balanced> '}'
+```
+
+The lexer captures everything between the outer `{` `}` as one raw token —
+the body is never tokenized with the surrounding Mirage grammar above. It is
+instead lexed and parsed by a second, wholly independent grammar, given
+below, whose token vocabulary shares nothing with the rest of this document
+(no `IDENT`/`INT_LITERAL`/etc. from the main grammar apply inside an asm
+block):
+
+```ebnf
+asm_instr     ::= ASM_MNEMONIC [ asm_operand { ',' asm_operand } ]
+
+asm_operand   ::= ASM_REGISTER
+               | ASM_IMMEDIATE
+               | ASM_IDENTIFIER                     (* a Mirage variable, read by value *)
+               | '&' ASM_IDENTIFIER                 (* a Mirage variable, by address *)
+
+ASM_MNEMONIC  ::= LETTER { LETTER | DIGIT | '_' }    (* not validated by the parser — an
+                                                         instruction line's first word;
+                                                         unrecognized mnemonics are a sema
+                                                         warning, not a parse error *)
+
+ASM_REGISTER  ::= (* one of the 64 general-purpose x86-64 register names, case-insensitive —
+                     see spec.md's "Inline Assembly" section for the full table *)
+
+ASM_IMMEDIATE ::= [ '-' ] DIGIT { DIGIT }
+               | [ '-' ] '0x' HEX_DIGIT { HEX_DIGIT }
+
+ASM_IDENTIFIER ::= LETTER { LETTER | DIGIT | '_' }   (* any word that isn't a register name *)
+```
+
+One instruction per line; a newline (or a run of them, collapsing to one)
+separates instructions. `;` and `#` start a comment running to end of line,
+discarded. Zero, one, two, or three operands are all legal per instruction
+(arity legality per mnemonic is a sema concern, not a parse error). See
+spec.md's "Inline Assembly" section for the full semantics: variable
+resolution, the Tier-1/Tier-2 operand-direction analysis, implicit clobbers,
+clobber-set construction, and width-mismatch checking.
+
+`asm` is legal only inside a function body — a sema error otherwise (see
+the top-level `declaration` grammar above). SSE/AVX/FPU registers, segment
+registers, control/debug registers, and `[reg+disp]`-style memory operands
+are recognized (so they can be named precisely in a diagnostic) but are not
+supported in v1.
 
 ---
 

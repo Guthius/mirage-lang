@@ -1,0 +1,20 @@
+# example_asm_memory_operand.mir — REJECTION CASE. Memory operands with displacement/scale
+# syntax ('[rax+8]') are out of scope for v1 — the asm parser recognizes '[' specifically so
+# it can name this case precisely instead of a generic lex error. The '+' inside the
+# brackets is not part of any v1 token, so a secondary "unexpected character" lexer
+# diagnostic is also expected here, alongside the 'mov' arity error that follows from the
+# dropped operand — expected, not a bug; the important diagnostic is the memory-operand one.
+#
+# Expected: compilation fails, including
+#   error: memory operands with displacement/scale syntax (e.g. '[rax+8]') are not supported
+#          in inline asm (v1)
+
+pub fn use_memory_operand() {
+    asm {
+        mov rax, [rax+8]
+    }
+}
+
+pub fn main() {
+    use_memory_operand()
+}

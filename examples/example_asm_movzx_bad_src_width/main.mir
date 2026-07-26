@@ -1,0 +1,24 @@
+# example_asm_movzx_bad_src_width.mir — REJECTION CASE. Real x86 'movzx' has no encoding for
+# a 32-bit or 64-bit source — only 8 or 16-bit sources are valid, since writing a 32-bit
+# register already zero-extends its parent 64-bit register's upper half for free. Using
+# 'movzx' with an i32 source (instead of a plain 'mov' into the matching 32-bit register)
+# used to slip past sema entirely and surface as a confusing LLVM-level "invalid operand for
+# instruction" error pointing at generated assembly text, not the original source.
+#
+# Expected: compilation fails with
+#   error: 'movzx' source must be 8 or 16 bits (got 32 bits) — there is no 'movzx' encoding
+#          for a 32-bit or 64-bit source; use 'mov' instead, which already zero-extends
+#          automatically when writing a 32-bit register
+
+pub fn bad_movzx(flags: i32) -> i32 {
+    mut wide: i32 = undefined
+    asm {
+        movzx rsi, flags
+        mov &wide, esi
+    }
+    return wide
+}
+
+pub fn main() {
+    bad_movzx(1)
+}

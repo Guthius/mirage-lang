@@ -1,0 +1,29 @@
+# example_asm_movzx.mir — 'movzx' zero-extends a narrower source into a wider destination.
+# Unlike every other instruction in the Tier-1 table, its two operands are EXPECTED to
+# differ in width — the general width-mismatch warning does not apply to it; instead sema
+# checks the opposite property (destination strictly wider than source).
+#
+# Verify with:
+#   ./build/mirage run examples/example_asm_movzx
+# Expected: prints 200 and exits 0 (a u8 value of 200 zero-extended into an i32, not
+# sign-extended, so it stays 200 rather than becoming negative).
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub fn widen(byte_value: u8) -> i32 {
+    mut wide: i32 = undefined
+    asm {
+        movzx eax, byte_value
+        mov &wide, eax
+    }
+    return wide
+}
+
+pub fn main() -> i32 {
+    const result: i32 = widen(200)
+    printf("widened: %d\n", result)
+    if result != 200 {
+        return 1
+    }
+    return 0
+}

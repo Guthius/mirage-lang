@@ -2053,7 +2053,7 @@ pub fn main() -> i32 {
 
 The following identifiers are reserved by the language:
 
-`bitset` `break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `import_bin` `in` `iota` `len` `macro` `match` `mut` `nil` `pub` `return` `return_err` `return_ok` `sizeof` `stackalloc` `struct` `switch` `trait` `true` `try` `type` `undefined` `union` `when` `while`
+`asm` `bitset` `break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `import_bin` `in` `iota` `len` `macro` `match` `mut` `nil` `pub` `return` `return_err` `return_ok` `sizeof` `stackalloc` `struct` `switch` `trait` `true` `try` `type` `undefined` `union` `when` `while`
 
 `ext` is parsed as an identifier, not a keyword; it is used as the prefix
 for extern function declarations. `option`, `env`, `link`, and `warn` are
@@ -2070,5 +2070,212 @@ keyword, unlike its three siblings above.
 The lexer also reserves the following identifiers, but nothing in the language currently uses them — writing any of them (e.g. as a variable or function name) is a parse error today, even though no feature consumes them yet:
 
 - **`namespace`** — likely reserved for an explicit namespace-declaration feature; not implemented.
-- **`asm`** — the lexer already has special handling that scans a following `{ ... }` block as raw text, but the parser does not yet accept `asm` blocks anywhere. Inline assembly is not currently usable.
 - **`offsetof`** — likely reserved as a future sibling to `sizeof` for computing a struct field's byte offset; not implemented.
+
+`asm` is no longer in this list — see [Inline Assembly](#20-inline-assembly).
+
+---
+
+## 20. Inline Assembly
+
+```mirage
+pub fn open(filename: *u8, flags: i32, mode: i32) -> i32 {
+    mut fd: i32 = undefined
+    asm {
+        mov rax, 2
+        mov rdi, filename
+        mov esi, flags
+        mov edx, mode
+        syscall
+        mov &fd, eax
+    }
+    return fd
+}
+```
+
+`asm { ... }` embeds raw x86-64 assembly (Intel syntax) directly in a
+function body — for example, to issue a syscall with no `ext fn` wrapper
+available. It is legal **only inside a function body**; at module scope it
+is a sema error:
+
+```
+error: asm blocks are only legal inside function bodies
+```
+
+The lexer captures everything between the outer `{` `}` verbatim, tracking
+brace depth for nesting, without applying any Mirage tokenization rules to
+it — an asm block's body is lexed and parsed by an entirely separate,
+internal grammar (see grammar.md's "Asm Statement" section for the full
+EBNF).
+
+### Instructions and Operands
+
+One instruction per line: a mnemonic, followed by zero to three
+comma-separated operands. `;` and `#` start a comment running to end of
+line. An operand is one of:
+
+- **A register** — one of the names in the table below.
+- **An immediate** — a decimal or hexadecimal integer literal (`42`, `-5`,
+  `0x2a`). Float immediates are not supported.
+- **A Mirage variable, by value** — a bare identifier (`flags`) reads the
+  variable's current value.
+- **A Mirage variable, by address** — `&` immediately followed by an
+  identifier, no whitespace (`&fd`) passes the variable's address, letting
+  the instruction write through it. Only scalar and pointer-typed variables
+  are valid asm operands (a struct/array/slice operand is a sema error);
+  `const` and `mut` bindings are both valid — writing through `&const_var`
+  is legal, consistent with the language's general rule that taking a
+  binding's address and writing through it is always permitted.
+
+An unknown variable name is a sema error:
+
+```
+error: unknown identifier 'fd' in asm block.
+```
+
+### Registers
+
+| Width  | Registers |
+|--------|-----------|
+| 64-bit | `rax` `rbx` `rcx` `rdx` `rdi` `rsi` `rsp` `rbp` `r8`-`r15` |
+| 32-bit | `eax` `ebx` `ecx` `edx` `edi` `esi` `esp` `ebp` `r8d`-`r15d` |
+| 16-bit | `ax` `bx` `cx` `dx` `di` `si` `sp` `bp` `r8w`-`r15w` |
+| 8-bit  | `al` `bl` `cl` `dl` `dil` `sil` `spl` `bpl` `r8b`-`r15b` |
+
+Register names are case-insensitive. Each register belongs to a "family" —
+its 64-bit root (e.g. `eax`'s family is `rax`) — used for clobber analysis:
+writing to any width of a register clobbers the whole family.
+
+### Operand Direction and Clobbers
+
+Sema determines which operands an instruction reads versus writes using a
+two-tier lookup by mnemonic:
+
+**Tier 1** — an explicit table for common instructions:
+
+| Mnemonic(s) | Operand directions |
+|---|---|
+| `mov`, `lea` | Write, Read |
+| `movzx` | Write, Read (destination and source widths need **not** match — see below) |
+| `add`, `sub`, `and`, `or`, `xor` | Read/Write, Read |
+| `not`, `neg`, `inc`, `dec` | Read/Write |
+| `cmp`, `test` | Read, Read |
+| `push` | Read |
+| `pop` | Write |
+| `nop`, `ret`, `syscall` | (no operands) |
+| `jmp`, `je`, `jne`, `jl`, `jle`, `jg`, `jge`, `ja`, `jae`, `jb`, `jbe`, `jz`, `jnz` | Read |
+| `call` | Read |
+
+**Tier 2** — any mnemonic not listed above falls through to a conservative
+fallback: the first operand (if any) is assumed Read/Write, every
+subsequent operand Read, with a warning:
+
+```
+warning: unknown mnemonic 'cpuid' — assuming first operand is read/write
+         and remaining operands are read. Verify clobbers manually.
+```
+
+Sema is never blocked by an unrecognized mnemonic — it's passed through to
+codegen as-is, which emits it verbatim into the assembled instruction (LLVM
+may still accept or reject it).
+
+**Implicit clobbers**, added regardless of the operand-direction table
+above:
+
+- `syscall` reads `rax`, `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`; clobbers
+  `rax` (return value), `rcx`, `r11` (destroyed by the kernel).
+- `call` clobbers every System V caller-saved register: `rax`, `rcx`,
+  `rdx`, `rsi`, `rdi`, `r8`, `r9`, `r10`, `r11`.
+- `div`/`idiv` implicitly read `rdx:rax` and write `rax`
+  (quotient)/`rdx` (remainder).
+- `mul`/`imul` in their one-operand form implicitly read and write
+  `rdx:rax`.
+
+Every register clobbered by an instruction's Write/Read-Write operands,
+plus each mnemonic's implicit clobbers, plus a memory clobber whenever any
+`&var` operand appears anywhere in the block, are all threaded through to
+the underlying LLVM inline-asm clobber list — this is what keeps the
+surrounding function's own register allocation from colliding with the asm
+block's effects.
+
+### Width Checking
+
+Where a register operand and a Mirage variable operand appear together in
+one instruction, their widths must match:
+
+| Mirage type | Required register width |
+|---|---|
+| `i8` / `u8` | 8-bit |
+| `i16` / `u16` | 16-bit |
+| `i32` / `u32` | 32-bit |
+| `i64` / `u64` / `usize` / any pointer / `anyptr` | 64-bit |
+
+A mismatch is a **warning**, not an error, naming a same-family register of
+the correct width as the fix:
+
+```
+warning: asm operand 'fd' has type 'i32' (32 bits) but register 'rax' is
+         64 bits. Consider using 'eax' instead.
+```
+
+For a `&var` (address-of) operand, the check applies to the *pointee*'s
+width against the register used to write through it — the address itself
+is always 64-bit and isn't what's being checked. Getting this wrong is not
+just cosmetic: in Intel syntax without an explicit size specifier, LLVM
+infers the memory write's size from the register's width, so `mov &fd,
+rax` where `fd` is `i32` writes 8 bytes into a 4-byte slot, corrupting
+whatever sits adjacent to it on the stack — exactly what the warning is
+guarding against.
+
+The same rule applies when a register name is written next to a by-value
+variable operand of a different width (e.g. `mov rsi, flags` where `flags`
+is `i32`): the loaded value is sized to the variable's own type, so it
+must be paired with a register of that same width (`esi`, not `rsi`) for
+the instruction to assemble at all.
+
+**`movzx` is the one exception** to this whole section: zero-extending a
+narrower source into a wider destination is its entire purpose, so its two
+operands are *expected* to differ in width, and it is exempt from the
+mismatch warning above. Instead sema enforces `movzx`'s real x86 encoding
+constraints directly:
+
+- The **source must be 8 or 16 bits**. There is no `movzx` encoding for a
+  32-bit or 64-bit source — writing a 32-bit register already
+  zero-extends its parent 64-bit register's upper half for free, so a
+  plain `mov` (into the matching 32-bit sub-register) is what to use
+  instead of reaching for `movzx` on a 32-bit value:
+  ```
+  error: 'movzx' source must be 8 or 16 bits (got 32 bits) — there is no
+         'movzx' encoding for a 32-bit or 64-bit source; use 'mov' instead,
+         which already zero-extends automatically when writing a 32-bit
+         register
+  ```
+- The **destination must be strictly wider than the source**:
+  ```
+  error: 'movzx' destination width (32 bits) must be wider than source
+         width (32 bits)
+  ```
+
+```mirage
+mut wide: i32 = undefined
+asm {
+    movzx eax, byte_value   # byte_value: u8 -> zero-extended into eax (32-bit)
+    mov &wide, eax
+}
+```
+
+### Out of Scope for v1
+
+The following are recognized (so they can be named precisely in a
+diagnostic) but rejected as not supported in v1:
+
+- SSE/AVX/FPU registers (`xmm0`-`xmm15`, `ymm0`-`ymm15`, `zmm0`-`zmm31`,
+  `st0`-`st7`)
+- Segment registers (`cs`, `ds`, `ss`, `es`, `fs`, `gs`)
+- Control/debug registers (`cr0`-`cr4`, `cr8`, `dr0`-`dr3`, `dr6`, `dr7`)
+- Labels and local jumps inside an asm block
+- Memory operands with displacement/scale syntax (`[rsp + 8]`,
+  `[rax*4 + rbx]`)
+- Float immediate operands
+- String operands
+- Module-scope `asm` blocks (see above)
