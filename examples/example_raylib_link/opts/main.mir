@@ -1,6 +1,6 @@
-# A local stand-in for the (separately-maintained, out-of-repo) stdlib's
-# Core/Compiler/Options module, scoped to this example so the '@option'/'@link'/'when'
-# feature set can be exercised end-to-end without depending on an external stdlib checkout.
+// A local stand-in for the (separately-maintained, out-of-repo) stdlib's
+// Core/Compiler/Options module, scoped to this example so the '@option'/'@link'/'when'
+// feature set can be exercised end-to-end without depending on an external stdlib checkout.
 
 pub type OperatingSystem = enum(i32) {
     Linux = 0

@@ -106,7 +106,7 @@
       <h2>Boolean Type</h2>
       <p>The <code>bool</code> type has two values: <code>true</code> and <code>false</code>. It is 1 byte.</p>
       <pre><code><span class="kw">const</span> <span class="var">flag</span>: <span class="ty">bool</span> = <span class="lit">true</span>
-<span class="kw">const</span> <span class="var">result</span> := <span class="var">x</span> &gt; <span class="num">0</span>   <span class="cmt"># comparison produces bool</span></code></pre>
+<span class="kw">const</span> <span class="var">result</span> := <span class="var">x</span> &gt; <span class="num">0</span>   <span class="cmt">// comparison produces bool</span></code></pre>
 
       <h2>The <code>byte</code> Type</h2>
       <p><code>byte</code> is an alias for <code>u8</code>. It is conventionally used for raw byte buffers:</p>
@@ -121,7 +121,7 @@
       </p>
       <pre><code><span class="kw">mut</span> <span class="var">raw</span>: <span class="ty">anyptr</span> = <span class="lit">nil</span>
 <span class="var">raw</span> = <span class="kw">cast</span>(<span class="var">my_struct_ptr</span>, <span class="ty">anyptr</span>)
-<span class="kw">mut</span> <span class="var">next</span>: <span class="ty">anyptr</span> = <span class="var">raw</span> + <span class="num">16</span>    <span class="cmt"># pointer arithmetic</span></code></pre>
+<span class="kw">mut</span> <span class="var">next</span>: <span class="ty">anyptr</span> = <span class="var">raw</span> + <span class="num">16</span>    <span class="cmt">// pointer arithmetic</span></code></pre>
 
       <div class="callout">
         <div class="callout-title">Where's the <code>error</code> type?</div>
@@ -136,9 +136,9 @@
       <p>A pointer type <code>*T</code> points to a value of type <code>T</code>.</p>
 
       <pre><code><span class="kw">mut</span> <span class="var">x</span>: <span class="ty">i32</span> = <span class="num">42</span>
-<span class="kw">const</span> <span class="var">p</span>: *<span class="ty">i32</span> = &amp;<span class="var">x</span>    <span class="cmt"># address-of</span>
-<span class="kw">const</span> <span class="var">v</span>: <span class="ty">i32</span> = <span class="var">p</span>.*   <span class="cmt"># dereference</span>
-<span class="var">p</span>.* = <span class="num">99</span>              <span class="cmt"># write through pointer</span></code></pre>
+<span class="kw">const</span> <span class="var">p</span>: *<span class="ty">i32</span> = &amp;<span class="var">x</span>    <span class="cmt">// address-of</span>
+<span class="kw">const</span> <span class="var">v</span>: <span class="ty">i32</span> = <span class="var">p</span>.*   <span class="cmt">// dereference</span>
+<span class="var">p</span>.* = <span class="num">99</span>              <span class="cmt">// write through pointer</span></code></pre>
 
       <div class="callout warning">
         <div class="callout-title">Dereference is postfix: <code>p.*</code></div>
@@ -152,37 +152,37 @@
         the pointer is automatically dereferenced — you never need <code>.*</code> just to reach a field or method:
       </p>
       <pre><code><span class="kw">const</span> <span class="var">ptr</span>: *<span class="ty">Vec2</span> = &amp;<span class="var">v</span>
-<span class="fn">printf</span>(<span class="str">"%f\n"</span>, <span class="var">ptr</span>.<span class="var">x</span>)       <span class="cmt"># auto-deref: same as ptr.*.x, but no '.*' needed</span>
-<span class="var">ptr</span>.<span class="fn">length_sq</span>()              <span class="cmt"># method call through pointer</span></code></pre>
+<span class="fn">printf</span>(<span class="str">"%f\n"</span>, <span class="var">ptr</span>.<span class="var">x</span>)       <span class="cmt">// auto-deref: same as ptr.*.x, but no '.*' needed</span>
+<span class="var">ptr</span>.<span class="fn">length_sq</span>()              <span class="cmt">// method call through pointer</span></code></pre>
 
       <h2>Array Types</h2>
       <p>An array <code>[N]T</code> holds exactly <code>N</code> elements of type <code>T</code>. The size must be a compile-time constant.</p>
 
-      <pre><code><span class="kw">mut</span> <span class="var">arr</span>: [<span class="num">5</span>]<span class="ty">i32</span> = {<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>}   <span class="cmt"># partial init; remaining elements zeroed</span>
-<span class="kw">const</span> <span class="var">n</span>: <span class="ty">usize</span> = <span class="kw">len</span>(<span class="var">arr</span>)      <span class="cmt"># 5</span>
-<span class="kw">const</span> <span class="var">sz</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(<span class="var">arr</span>)   <span class="cmt"># 20 bytes</span>
-<span class="var">arr</span>[<span class="num">0</span>] = <span class="num">99</span>                      <span class="cmt"># index access</span></code></pre>
+      <pre><code><span class="kw">mut</span> <span class="var">arr</span>: [<span class="num">5</span>]<span class="ty">i32</span> = {<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>}   <span class="cmt">// partial init; remaining elements zeroed</span>
+<span class="kw">const</span> <span class="var">n</span>: <span class="ty">usize</span> = <span class="kw">len</span>(<span class="var">arr</span>)      <span class="cmt">// 5</span>
+<span class="kw">const</span> <span class="var">sz</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(<span class="var">arr</span>)   <span class="cmt">// 20 bytes</span>
+<span class="var">arr</span>[<span class="num">0</span>] = <span class="num">99</span>                      <span class="cmt">// index access</span></code></pre>
 
       <p>Arrays are <strong>value types</strong> — assigning an array copies all elements.</p>
 
       <h3>Array Initialization</h3>
-      <pre><code><span class="cmt"># No init: all elements default-initialized to 0</span>
+      <pre><code><span class="cmt">// No init: all elements default-initialized to 0</span>
 <span class="kw">mut</span> <span class="var">a</span>: [<span class="num">3</span>]<span class="ty">i32</span>
 
-<span class="cmt"># Partial: first 2 set, remaining zeroed</span>
+<span class="cmt">// Partial: first 2 set, remaining zeroed</span>
 <span class="kw">mut</span> <span class="var">b</span>: [<span class="num">3</span>]<span class="ty">i32</span> = {<span class="num">1</span>, <span class="num">2</span>}
 
-<span class="cmt"># Full</span>
+<span class="cmt">// Full</span>
 <span class="kw">mut</span> <span class="var">c</span>: [<span class="num">3</span>]<span class="ty">i32</span> = {<span class="num">10</span>, <span class="num">20</span>, <span class="num">30</span>}
 
-<span class="cmt"># Empty braces: same as no init</span>
+<span class="cmt">// Empty braces: same as no init</span>
 <span class="kw">mut</span> <span class="var">d</span>: [<span class="num">3</span>]<span class="ty">i32</span> = {}
 
-<span class="cmt"># Trailing '...' repeats the last value for the rest of the array</span>
-<span class="kw">mut</span> <span class="var">e</span>: [<span class="num">10</span>]<span class="ty">i32</span> = { <span class="op">-</span><span class="num">1</span>... }        <span class="cmt"># all 10 elements set to -1</span>
+<span class="cmt">// Trailing '...' repeats the last value for the rest of the array</span>
+<span class="kw">mut</span> <span class="var">e</span>: [<span class="num">10</span>]<span class="ty">i32</span> = { <span class="op">-</span><span class="num">1</span>... }        <span class="cmt">// all 10 elements set to -1</span>
 
-<span class="cmt"># Size inferred from the initializer with '[?]T'</span>
-<span class="kw">const</span> <span class="var">f</span>: [<span class="op">?</span>]<span class="ty">i32</span> = {<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>, <span class="num">4</span>}   <span class="cmt"># f: [4]i32</span></code></pre>
+<span class="cmt">// Size inferred from the initializer with '[?]T'</span>
+<span class="kw">const</span> <span class="var">f</span>: [<span class="op">?</span>]<span class="ty">i32</span> = {<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>, <span class="num">4</span>}   <span class="cmt">// f: [4]i32</span></code></pre>
 
       <h2>Slice Types</h2>
       <p>
@@ -192,39 +192,39 @@
 
       <pre><code><span class="kw">mut</span> <span class="var">arr</span>: [<span class="num">5</span>]<span class="ty">i32</span> = {<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>, <span class="num">4</span>, <span class="num">5</span>}
 
-<span class="cmt"># Slice from array (implicit coercion)</span>
+<span class="cmt">// Slice from array (implicit coercion)</span>
 <span class="kw">mut</span> <span class="var">s</span>: []<span class="ty">i32</span> = <span class="var">arr</span>
 
-<span class="cmt"># Slice sub-range</span>
-<span class="kw">const</span> <span class="var">sub</span> := <span class="var">arr</span>[<span class="num">1</span>..<span class="num">3</span>]     <span class="cmt"># elements [1] and [2]</span>
+<span class="cmt">// Slice sub-range</span>
+<span class="kw">const</span> <span class="var">sub</span> := <span class="var">arr</span>[<span class="num">1</span>..<span class="num">3</span>]     <span class="cmt">// elements [1] and [2]</span>
 
-<span class="cmt"># Slice from pointer + length</span>
+<span class="cmt">// Slice from pointer + length</span>
 <span class="kw">const</span> <span class="var">ps</span> := <span class="kw">cast</span>(<span class="var">ptr</span>, []<span class="ty">u8</span>, <span class="num">64</span>)
 
-<span class="kw">const</span> <span class="var">n</span>: <span class="ty">usize</span> = <span class="kw">len</span>(<span class="var">s</span>)    <span class="cmt"># length</span></code></pre>
+<span class="kw">const</span> <span class="var">n</span>: <span class="ty">usize</span> = <span class="kw">len</span>(<span class="var">s</span>)    <span class="cmt">// length</span></code></pre>
 
       <h2>Function Pointer Types</h2>
       <p>
         Function pointer types describe callable values. They are opaque 8-byte pointers internally.
       </p>
 
-      <pre><code><span class="cmt"># Type syntax</span>
+      <pre><code><span class="cmt">// Type syntax</span>
 <span class="ty">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; <span class="ty">i32</span>
-<span class="ty">fn</span>(<span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>(<span class="ty">MyError</span>))    <span class="cmt"># multi-return, fallible</span>
-<span class="ty">fn</span>(*<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>           <span class="cmt"># variadic</span>
-<span class="ty">fn</span>()                           <span class="cmt"># void, no params</span></code></pre>
+<span class="ty">fn</span>(<span class="ty">i32</span>) -&gt; (<span class="ty">i32</span>, <span class="ty">error</span>(<span class="ty">MyError</span>))    <span class="cmt">// multi-return, fallible</span>
+<span class="ty">fn</span>(*<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>           <span class="cmt">// variadic</span>
+<span class="ty">fn</span>()                           <span class="cmt">// void, no params</span></code></pre>
 
       <pre><code><span class="kw">fn</span> <span class="fn">add</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> { <span class="kw">return</span> <span class="var">a</span> + <span class="var">b</span> }
 <span class="kw">fn</span> <span class="fn">mul</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> { <span class="kw">return</span> <span class="var">a</span> * <span class="var">b</span> }
 
-<span class="cmt"># Store a function pointer</span>
+<span class="cmt">// Store a function pointer</span>
 <span class="kw">mut</span> <span class="var">fp</span>: <span class="ty">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> = <span class="var">add</span>
-<span class="var">fp</span>(<span class="num">3</span>, <span class="num">4</span>)   <span class="cmt"># returns 7</span>
+<span class="var">fp</span>(<span class="num">3</span>, <span class="num">4</span>)   <span class="cmt">// returns 7</span>
 
 <span class="var">fp</span> = <span class="var">mul</span>
-<span class="var">fp</span>(<span class="num">3</span>, <span class="num">4</span>)   <span class="cmt"># returns 12</span>
+<span class="var">fp</span>(<span class="num">3</span>, <span class="num">4</span>)   <span class="cmt">// returns 12</span>
 
-<span class="cmt"># nil / default are valid null function pointers</span>
+<span class="cmt">// nil / default are valid null function pointers</span>
 <span class="kw">mut</span> <span class="var">nullable</span>: <span class="ty">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> = <span class="lit">nil</span>
 <span class="kw">if</span> <span class="var">nullable</span> == <span class="lit">nil</span> {
     <span class="fn">printf</span>(<span class="str">"null\n"</span>)
@@ -238,7 +238,7 @@
 
 <span class="kw">mut</span> <span class="var">t</span>: <span class="ty">Transform</span>
 <span class="var">t</span>.<span class="var">f</span> = <span class="var">square</span>
-<span class="kw">const</span> <span class="var">result</span>: <span class="ty">i32</span> = <span class="var">t</span>.<span class="var">f</span>(<span class="num">5</span>)   <span class="cmt"># call via struct field</span></code></pre>
+<span class="kw">const</span> <span class="var">result</span>: <span class="ty">i32</span> = <span class="var">t</span>.<span class="var">f</span>(<span class="num">5</span>)   <span class="cmt">// call via struct field</span></code></pre>
 
       <h3>Casting Function Pointers</h3>
       <p>Function pointers can be cast to/from <code>anyptr</code> for C interop:</p>
@@ -253,7 +253,7 @@
         to a target type.
       </p>
       <pre><code><span class="kw">cast</span>(<span class="var">expr</span>, <span class="ty">TargetType</span>)
-<span class="kw">cast</span>(<span class="var">ptr</span>, []<span class="ty">T</span>, <span class="var">length</span>)    <span class="cmt"># pointer → slice</span></code></pre>
+<span class="kw">cast</span>(<span class="var">ptr</span>, []<span class="ty">T</span>, <span class="var">length</span>)    <span class="cmt">// pointer → slice</span></code></pre>
 
       <p>Valid cast combinations:</p>
       <ul>
@@ -265,10 +265,10 @@
       </ul>
 
       <h2>The <code>sizeof</code> and <code>len</code> Operators</h2>
-      <pre><code><span class="kw">const</span> <span class="var">sz</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(<span class="var">my_struct</span>)   <span class="cmt"># size of a value</span>
-<span class="kw">const</span> <span class="var">sz2</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(<span class="ty">u64</span>)      <span class="cmt"># size of a type keyword works too</span>
-<span class="kw">const</span> <span class="var">sz3</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(*<span class="ty">u8</span>)      <span class="cmt"># size of a pointer type</span>
-<span class="kw">const</span> <span class="var">n</span>:  <span class="ty">usize</span> = <span class="kw">len</span>(<span class="var">my_array</span>)        <span class="cmt"># element count of array or slice</span></code></pre>
+      <pre><code><span class="kw">const</span> <span class="var">sz</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(<span class="var">my_struct</span>)   <span class="cmt">// size of a value</span>
+<span class="kw">const</span> <span class="var">sz2</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(<span class="ty">u64</span>)      <span class="cmt">// size of a type keyword works too</span>
+<span class="kw">const</span> <span class="var">sz3</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(*<span class="ty">u8</span>)      <span class="cmt">// size of a pointer type</span>
+<span class="kw">const</span> <span class="var">n</span>:  <span class="ty">usize</span> = <span class="kw">len</span>(<span class="var">my_array</span>)        <span class="cmt">// element count of array or slice</span></code></pre>
 
       <div class="callout">
         <div class="callout-title">Note</div>

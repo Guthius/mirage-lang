@@ -1,6 +1,6 @@
-# example_tagged_union_scalar_payload.mir — tagged union variants with
-# non-struct (slice/scalar) payloads must bind the *declared* payload type
-# in match/switch arms, not the internal wrapper struct used for storage.
+// example_tagged_union_scalar_payload.mir — tagged union variants with
+// non-struct (slice/scalar) payloads must bind the *declared* payload type
+// in match/switch arms, not the internal wrapper struct used for storage.
 
 ext fn printf(fmt: *u8, ...) -> i32
 
@@ -34,7 +34,7 @@ pub fn main() -> i32 {
     print_arg(b)
     print_arg(c)
 
-    # match form with by-value capture used directly (non-struct payload)
+    // match form with by-value capture used directly (non-struct payload)
     const n: usize = match a {
         .str(s):    len(s),
         .uint8(v):  0,
@@ -44,9 +44,9 @@ pub fn main() -> i32 {
         return 1
     }
 
-    # by-ref capture of a non-struct payload: the capture must be typed
-    # as *u64 (pointer to the declared payload type), not a pointer to
-    # the internal wrapper struct.
+    // by-ref capture of a non-struct payload: the capture must be typed
+    // as *u64 (pointer to the declared payload type), not a pointer to
+    // the internal wrapper struct.
     mut d: Arg = .uint64{.v = 10}
     mut got: u64 = 0
     switch d {

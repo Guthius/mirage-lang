@@ -1,9 +1,9 @@
-# example_asm_struct_operand.mir — REJECTION CASE. Only scalar and pointer types are
-# supported as asm operands; a struct-typed local is a sema error.
-#
-# Expected: compilation fails with
-#   error: asm operand 'p' has type 'Point', but only scalar and pointer types are supported
-#          in asm operands
+// example_asm_struct_operand.mir — REJECTION CASE. Only scalar and pointer types are
+// supported as asm operands; a struct-typed local is a sema error.
+//
+// Expected: compilation fails with
+//   error: asm operand 'p' has type 'Point', but only scalar and pointer types are supported
+//          in asm operands
 
 type Point = struct {
     x: i32 = 0

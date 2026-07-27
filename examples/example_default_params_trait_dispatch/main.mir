@@ -1,6 +1,6 @@
-# Default parameter values on a trait method: the impl must NOT redeclare the
-# default (it's declared without it), and a dyn Trait handle call that omits
-# the argument uses the TRAIT's default, resolved before the vtable call.
+// Default parameter values on a trait method: the impl must NOT redeclare the
+// default (it's declared without it), and a dyn Trait handle call that omits
+// the argument uses the TRAIT's default, resolved before the vtable call.
 
 type Greeter = trait {
     fn greet(self, loud: bool = false) -> i32
@@ -20,8 +20,8 @@ pub fn main() -> i32 {
     const b: Bot = {.id = 7}
     const h: Greeter = &b
 
-    if h.greet() != 7 { return 1 }        # loud defaults to false -> self.id
-    if h.greet(true) != 100 { return 2 }  # explicit override
+    if h.greet() != 7 { return 1 }        // loud defaults to false -> self.id
+    if h.greet(true) != 100 { return 2 }  // explicit override
 
     return 0
 }

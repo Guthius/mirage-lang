@@ -1,19 +1,19 @@
-# example_asm_expr_open_forms.mir — the four Definition-of-Done shapes of the 'asm ->'
-# EXPRESSION form (see docs/spec.md's "Asm Expression" subsection), all built around the
-# same raw 'open()' syscall body as example_asm_syscall, but returning the fd directly
-# from the asm block via '-> eax' instead of writing to a '&fd' output variable.
-#
-#   open_inferred:   'return asm -> eax { ... }'         — result type inferred from the
-#                     function's declared return type.
-#   open_explicit:   'mut fd: i32 = asm -> eax: i32 {..}' — explicit ': type' annotation.
-#   open_var:        'mut fd: i32 = asm -> eax { ... }'   — result type inferred from the
-#                     variable's declared type.
-#   open_infer_var:  'mut fd := asm -> eax: i32 { ... }'  — ':=' (no declared type), so the
-#                     variable's type comes FROM the explicit ': type' annotation.
-#
-# Verify with:
-#   ./build/mirage run examples/example_asm_expr_open_forms
-# Expected: prints a confirming line and exits 0.
+// example_asm_expr_open_forms.mir — the four Definition-of-Done shapes of the 'asm ->'
+// EXPRESSION form (see docs/spec.md's "Asm Expression" subsection), all built around the
+// same raw 'open()' syscall body as example_asm_syscall, but returning the fd directly
+// from the asm block via '-> eax' instead of writing to a '&fd' output variable.
+//
+//   open_inferred:   'return asm -> eax { ... }'         — result type inferred from the
+//                     function's declared return type.
+//   open_explicit:   'mut fd: i32 = asm -> eax: i32 {..}' — explicit ': type' annotation.
+//   open_var:        'mut fd: i32 = asm -> eax { ... }'   — result type inferred from the
+//                     variable's declared type.
+//   open_infer_var:  'mut fd := asm -> eax: i32 { ... }'  — ':=' (no declared type), so the
+//                     variable's type comes FROM the explicit ': type' annotation.
+//
+// Verify with:
+//   ./build/mirage run examples/example_asm_expr_open_forms
+// Expected: prints a confirming line and exits 0.
 
 ext fn printf(fmt: *u8, ...) -> i32
 

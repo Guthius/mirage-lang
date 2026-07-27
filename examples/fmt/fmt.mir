@@ -3,9 +3,9 @@ const builder := import("../builder")
 
 ext fn write(fd: i32, buf: *u8, count: usize) -> i64
 
-# Every variant's payload struct has exactly one field of a distinct scalar/slice type — this is
-# what makes the sema's implicit-coercion rule (exact single-field-type match) unambiguous for
-# every variant, letting callers pass e.g. a bare 'usize' where an 'Arg' is expected.
+// Every variant's payload struct has exactly one field of a distinct scalar/slice type — this is
+// what makes the sema's implicit-coercion rule (exact single-field-type match) unambiguous for
+// every variant, letting callers pass e.g. a bare 'usize' where an 'Arg' is expected.
 pub type Arg = union(enum) {
     str:  struct { value: []u8 }
     ch:   struct { value: u8 }
@@ -66,9 +66,9 @@ pub type FormatError = enum(i32) {
     MissingArg = 1
 }
 
-# Scans 'template' for '{}' placeholders, substituting each with the corresponding positional
-# 'args' entry. The returned slice is backed by a freshly allocated builder buffer that the
-# caller owns (free it with 'mem.free' on the underlying pointer when done, if desired).
+// Scans 'template' for '{}' placeholders, substituting each with the corresponding positional
+// 'args' entry. The returned slice is backed by a freshly allocated builder buffer that the
+// caller owns (free it with 'mem.free' on the underlying pointer when done, if desired).
 pub fn format(template: []u8, args: ...Arg) -> ([]u8, error(FormatError)) {
     mut sb := builder.new_builder()
     mut i: usize = 0

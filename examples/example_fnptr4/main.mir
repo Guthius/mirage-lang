@@ -1,4 +1,4 @@
-# example_fnptr4.mir — optional argument names in function pointer types
+// example_fnptr4.mir — optional argument names in function pointer types
 
 ext fn printf(fmt: *u8, ...) -> i32
 
@@ -18,10 +18,10 @@ fn add(a: i32, b: i32) -> i32 {
 
 pub fn main() {
     mut fp: BinOp = add
-    printf("%d\n", fp(3, 4))          # 7
-    printf("%d\n", apply(add, 10, 5)) # 15
+    printf("%d\n", fp(3, 4))          // 7
+    printf("%d\n", apply(add, 10, 5)) // 15
 
     mut ops: Ops
     ops.add = add
-    printf("%d\n", ops.add(2, 2))     # 4
+    printf("%d\n", ops.add(2, 2))     // 4
 }

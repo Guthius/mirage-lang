@@ -1,21 +1,21 @@
-# example_asm_syscall.mir — the motivating inline-asm example: 'open()' issues the raw
-# Linux x86_64 'open' syscall directly (syscall number 2), bypassing libc entirely.
-# Demonstrates register operands, by-value Mirage variable operands (filename/flags/mode),
-# a zero-operand instruction (syscall), and address-of output (&fd).
-#
-# 'filename' is *u8 (64-bit), so 'rdi' is correct as-is. 'flags'/'mode' are i32 (32-bit) —
-# using the matching 32-bit registers 'esi'/'edx' here (rather than 'rsi'/'rdx') is
-# deliberate, not cosmetic: since a by-value asm input is loaded at its own Mirage type's
-# width, pairing it with a differently-sized register name in the same instruction is
-# exactly the mismatch example_asm_width_mismatch demonstrates — it produces a sema warning
-# *and* an invalid mixed-width instruction at the assembler level (LLVM sizes the
-# substituted register to the input value's actual type, not the literal text beside it;
-# real GCC/Clang inline asm has this identical constraint). 'eax' (not 'rax') for the '&fd'
-# output is correct the same way, since 'fd' is i32.
-#
-# Verify with:
-#   ./build/mirage run examples/example_asm_syscall
-# Expected: prints a non-negative file descriptor and exits 0.
+// example_asm_syscall.mir — the motivating inline-asm example: 'open()' issues the raw
+// Linux x86_64 'open' syscall directly (syscall number 2), bypassing libc entirely.
+// Demonstrates register operands, by-value Mirage variable operands (filename/flags/mode),
+// a zero-operand instruction (syscall), and address-of output (&fd).
+//
+// 'filename' is *u8 (64-bit), so 'rdi' is correct as-is. 'flags'/'mode' are i32 (32-bit) —
+// using the matching 32-bit registers 'esi'/'edx' here (rather than 'rsi'/'rdx') is
+// deliberate, not cosmetic: since a by-value asm input is loaded at its own Mirage type's
+// width, pairing it with a differently-sized register name in the same instruction is
+// exactly the mismatch example_asm_width_mismatch demonstrates — it produces a sema warning
+// *and* an invalid mixed-width instruction at the assembler level (LLVM sizes the
+// substituted register to the input value's actual type, not the literal text beside it;
+// real GCC/Clang inline asm has this identical constraint). 'eax' (not 'rax') for the '&fd'
+// output is correct the same way, since 'fd' is i32.
+//
+// Verify with:
+//   ./build/mirage run examples/example_asm_syscall
+// Expected: prints a non-negative file descriptor and exits 0.
 
 ext fn printf(fmt: *u8, ...) -> i32
 

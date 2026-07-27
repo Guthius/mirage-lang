@@ -1,9 +1,9 @@
-# example_when_fn_body.mir — demonstrates the 'when' statement inside a function body.
-#
-# The condition here is a compile-time constant (an '@option'-backed const), so only the
-# selected branch's code is emitted by codegen — but BOTH branches are always type-checked
-# (a hard sema requirement), which is why the unselected branch can't silently rot: try
-# flipping '--opt use_backslash=true' and both branches still have to compile cleanly.
+// example_when_fn_body.mir — demonstrates the 'when' statement inside a function body.
+//
+// The condition here is a compile-time constant (an '@option'-backed const), so only the
+// selected branch's code is emitted by codegen — but BOTH branches are always type-checked
+// (a hard sema requirement), which is why the unselected branch can't silently rot: try
+// flipping '--opt use_backslash=true' and both branches still have to compile cleanly.
 
 ext fn printf(fmt: *u8, ...) -> i32
 

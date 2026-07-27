@@ -1,12 +1,12 @@
-# example_asm_unknown_mnemonic.mir — 'cpuid' is not in the Tier-1 operand-direction table,
-# so it falls through to the Tier-2 conservative fallback: a warning is emitted, but
-# compilation still succeeds (warnings never fail the build).
-#
-# Verify with:
-#   ./build/mirage build examples/example_asm_unknown_mnemonic
-# Expected: builds successfully, with a warning on stderr:
-#   warning: unknown mnemonic 'cpuid' — assuming first operand is read/write and remaining
-#            operands are read. Verify clobbers manually.
+// example_asm_unknown_mnemonic.mir — 'cpuid' is not in the Tier-1 operand-direction table,
+// so it falls through to the Tier-2 conservative fallback: a warning is emitted, but
+// compilation still succeeds (warnings never fail the build).
+//
+// Verify with:
+//   ./build/mirage build examples/example_asm_unknown_mnemonic
+// Expected: builds successfully, with a warning on stderr:
+//   warning: unknown mnemonic 'cpuid' — assuming first operand is read/write and remaining
+//            operands are read. Verify clobbers manually.
 
 pub fn touch_cpuid() {
     asm {

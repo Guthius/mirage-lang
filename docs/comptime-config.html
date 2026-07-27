@@ -98,10 +98,10 @@
         value is resolved once from <code>--opt</code>/the default and cached, so it behaves as an
         ordinary compile-time-constant wherever it's written:
       </p>
-      <pre><code><span class="cmt"># no need to bind it to a const first</span>
+      <pre><code><span class="cmt">// no need to bind it to a const first</span>
 <span class="fn">@link</span>(<span class="var">lib</span>, <span class="kw">@option</span>(<span class="str">"wasm_lib"</span>, <span class="str">"libraylib.web.a"</span>))
 
-<span class="kw">mut</span> <span class="var">retries</span> := <span class="kw">@option</span>(<span class="str">"max_retries"</span>, <span class="num">3</span>) + <span class="num">1</span>   <span class="cmt"># retries is mut afterward</span></code></pre>
+<span class="kw">mut</span> <span class="var">retries</span> := <span class="kw">@option</span>(<span class="str">"max_retries"</span>, <span class="num">3</span>) + <span class="num">1</span>   <span class="cmt">// retries is mut afterward</span></code></pre>
 
       <h3>Target Type</h3>
       <p>The type <code>@option</code> coerces the raw <code>--opt</code> string into is chosen in this order:</p>
@@ -199,7 +199,7 @@
       </p>
       <pre><code><span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Windows</span> {
     <span class="kw">ext fn</span> <span class="fn">GetLastError</span>() -&gt; <span class="ty">u32</span>
-    <span class="kw">pub type</span> <span class="ty">long</span> = <span class="ty">i32</span>   <span class="cmt"># Windows' 'long' stays 32-bit even on x64</span>
+    <span class="kw">pub type</span> <span class="ty">long</span> = <span class="ty">i32</span>   <span class="cmt">// Windows' 'long' stays 32-bit even on x64</span>
 } <span class="kw">else</span> {
     <span class="kw">pub type</span> <span class="ty">long</span> = <span class="ty">i64</span>
 }</code></pre>
@@ -230,7 +230,7 @@
         and both branches are themselves constants, so it works fine anywhere a constant is required —
         like <code>@link</code>'s data argument:
       </p>
-      <pre><code><span class="fn">@link</span>(<span class="var">lib</span>, <span class="var">raylib_shared</span> ? <span class="str">"raylibdll.lib"</span> : <span class="str">"raylib.lib"</span>)   <span class="cmt"># folds fine</span></code></pre>
+      <pre><code><span class="fn">@link</span>(<span class="var">lib</span>, <span class="var">raylib_shared</span> ? <span class="str">"raylibdll.lib"</span> : <span class="str">"raylib.lib"</span>)   <span class="cmt">// folds fine</span></code></pre>
       <div class="callout tip">
         <div class="callout-title">Prefer <code>when</code>/<code>else</code> for platform-specific branches</div>
         The difference that survives is <em>where</em> the unselected branch's code gets skipped.
@@ -240,11 +240,11 @@
         Plain <code>?:</code> only skips emitting the unselected side when the whole expression sits
         somewhere a constant is required in the first place; used as an ordinary value it always
         builds a runtime branch, even with two literal operands.
-        <pre><code><span class="cmt"># right for a value that only needs to be constant-foldable</span>
+        <pre><code><span class="cmt">// right for a value that only needs to be constant-foldable</span>
 <span class="fn">@link</span>(<span class="var">lib</span>, <span class="str">"raylibdll.lib"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"raylib.lib"</span>)
 
-<span class="cmt"># right when a branch wouldn't even compile on the other target</span>
-<span class="kw">const</span> <span class="var">err_code</span> := <span class="fn">GetLastError</span>() <span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Windows</span> <span class="kw">else</span> <span class="num">0</span>   <span class="cmt"># GetLastError only exists on Windows</span></code></pre>
+<span class="cmt">// right when a branch wouldn't even compile on the other target</span>
+<span class="kw">const</span> <span class="var">err_code</span> := <span class="fn">GetLastError</span>() <span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Windows</span> <span class="kw">else</span> <span class="num">0</span>   <span class="cmt">// GetLastError only exists on Windows</span></code></pre>
       </div>
 
       <h2><code>@link</code></h2>
@@ -316,7 +316,7 @@
 
       <h2>Complete Example</h2>
       <p>A shared options module, imported and used to drive platform-specific linking for a raylib binding:</p>
-      <pre><code><span class="cmt"># Core/Build/Options/main.mir</span>
+      <pre><code><span class="cmt">// Core/Build/Options/main.mir</span>
 
 <span class="kw">pub type</span> <span class="ty">OperatingSystem</span> = <span class="kw">enum</span> {
     <span class="var">Linux</span>
@@ -335,13 +335,13 @@
 
 <span class="kw">pub const</span> <span class="var">target_os</span>:   <span class="ty">OperatingSystem</span> = <span class="kw">@option</span>(<span class="str">"build/target_os"</span>,   .<span class="var">Linux</span>)
 <span class="kw">pub const</span> <span class="var">target_arch</span>: <span class="ty">Architecture</span>    = <span class="kw">@option</span>(<span class="str">"build/target_arch"</span>, .<span class="var">X86_64</span>)</code></pre>
-      <pre><code><span class="cmt"># raylib_binding/main.mir</span>
+      <pre><code><span class="cmt">// raylib_binding/main.mir</span>
 
 <span class="kw">const</span> <span class="var">target_os</span>     := <span class="kw">import</span>(<span class="str">"../../Core/Build/Options"</span>).<span class="var">target_os</span>
 <span class="kw">const</span> <span class="var">target_arch</span>   := <span class="kw">import</span>(<span class="str">"../../Core/Build/Options"</span>).<span class="var">target_arch</span>
 <span class="kw">const</span> <span class="var">raylib_shared</span> := <span class="kw">@option</span>(<span class="str">"raylib/shared"</span>, <span class="lit">false</span>)
 
-<span class="cmt"># Windows</span>
+<span class="cmt">// Windows</span>
 <span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Windows</span> {
     <span class="kw">@link</span>(<span class="var">flag</span>, <span class="str">"/NODEFAULTLIB:msvcrt"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"/NODEFAULTLIB:libcmt"</span>)
     <span class="kw">@link</span>(<span class="var">lib</span>, <span class="str">"windows/raylibdll.lib"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"windows/raylib.lib"</span>)
@@ -352,7 +352,7 @@
     <span class="kw">@link</span>(<span class="var">system</span>, <span class="str">"Shell32"</span>)
 }
 
-<span class="cmt"># Linux</span>
+<span class="cmt">// Linux</span>
 <span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Linux</span> {
     <span class="kw">when</span> <span class="var">target_arch</span> == .<span class="var">X86_64</span> {
         <span class="kw">@link</span>(<span class="var">lib</span>, <span class="str">"linux_x86_64/libraylib.so.600"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"linux_x86_64/libraylib.a"</span>)
@@ -361,12 +361,12 @@
     }
 }
 
-<span class="cmt"># WebAssembly</span>
+<span class="cmt">// WebAssembly</span>
 <span class="kw">when</span> <span class="var">target_arch</span> == .<span class="var">Wasm32</span> || <span class="var">target_arch</span> == .<span class="var">Wasm64p32</span> {
     <span class="kw">@link</span>(<span class="var">lib</span>, <span class="kw">@option</span>(<span class="str">"raylib/wasm_lib"</span>, <span class="str">"wasm/libraylib.web.a"</span>))
 }
 
-<span class="cmt"># Windows has 32-bit 'long' even on x64...</span>
+<span class="cmt">// Windows has 32-bit 'long' even on x64...</span>
 <span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Windows</span> {
     <span class="kw">pub type</span> <span class="ty">long</span> = <span class="ty">i32</span>
 } <span class="kw">else</span> {

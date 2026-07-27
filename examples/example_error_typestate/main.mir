@@ -1,5 +1,5 @@
-# example_error_typestate.mir — sema-tracked error typestate: early-return
-# narrowing, mutation invalidation, and compound (&&/||) condition coercion.
+// example_error_typestate.mir — sema-tracked error typestate: early-return
+// narrowing, mutation invalidation, and compound (&&/||) condition coercion.
 
 pub type MemoryError = enum(i32) {
     OutOfMemory = 1
@@ -12,9 +12,9 @@ fn alloc(fail: bool) -> (i32, error(MemoryError)) {
     return_ok 42
 }
 
-# Early-return narrowing: after 'if !err { <always exits> }' with no else,
-# 'err' is known Failed in the following code — 'match' is legal there with
-# no further check.
+// Early-return narrowing: after 'if !err { <always exits> }' with no else,
+// 'err' is known Failed in the following code — 'match' is legal there with
+// no further check.
 fn narrowed_match(fail: bool) -> i32 {
     const v, err := alloc(fail)
     if !err {
@@ -25,11 +25,11 @@ fn narrowed_match(fail: bool) -> i32 {
     }
 }
 
-# Mutation invalidates typestate: taking the address of an error-tracked
-# local resets its sema-tracked state to Unknown (a conservative
-# over-approximation — the runtime value is untouched, so the re-check
-# below still observes the real Failed state, it's just no longer treated
-# as a "redundant" check by sema).
+// Mutation invalidates typestate: taking the address of an error-tracked
+// local resets its sema-tracked state to Unknown (a conservative
+// over-approximation — the runtime value is untouched, so the re-check
+// below still observes the real Failed state, it's just no longer treated
+// as a "redundant" check by sema).
 fn mutation_invalidates() -> i32 {
     const v, err := alloc(true)
     if err {
@@ -42,9 +42,9 @@ fn mutation_invalidates() -> i32 {
     return -2
 }
 
-# Compound conditions: 'err && x' / '!err && x' boolean-coerce correctly.
-# (v is only read on the branch where err is known Ok — reading it on the
-# Failed path would read the spec's documented 'undefined' non-error slot.)
+// Compound conditions: 'err && x' / '!err && x' boolean-coerce correctly.
+// (v is only read on the branch where err is known Ok — reading it on the
+// Failed path would read the spec's documented 'undefined' non-error slot.)
 fn compound_conditions(fail: bool) -> i32 {
     const v, err := alloc(fail)
     if err && true {

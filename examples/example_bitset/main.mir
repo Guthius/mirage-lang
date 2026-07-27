@@ -1,9 +1,9 @@
-# example_bitset.mir — bitset(EnumType[, StorageType]): literal construction,
-# +=/-=/~= member operations, binary set operations (+/-/&/~/^), unary '~',
-# 'in' membership testing (single-member and subset), implicit coercion to
-# the storage type, explicit cast round-tripping, and 'ext fn' ABI
-# transparency (declaration only, not called, to keep this example
-# self-contained without an external library).
+// example_bitset.mir — bitset(EnumType[, StorageType]): literal construction,
+// +=/-=/~= member operations, binary set operations (+/-/&/~/^), unary '~',
+// 'in' membership testing (single-member and subset), implicit coercion to
+// the storage type, explicit cast round-tripping, and 'ext fn' ABI
+// transparency (declaration only, not called, to keep this example
+// self-contained without an external library).
 
 pub type Stream_Mode = enum(u8) {
     Close
@@ -21,20 +21,20 @@ ext fn apply_modes(flags: Stream_Modes)
 pub fn main() -> i32 {
     mut modes: Stream_Modes = {.Close, .Flush}
 
-    modes += .Write # set
-    modes -= .Close # clear
-    modes ~= .Flush # toggle (clears Flush, since it was set)
+    modes += .Write // set
+    modes -= .Close // clear
+    modes ~= .Flush // toggle (clears Flush, since it was set)
 
     if modes != {.Write} {
         return 1
     }
 
     const required: Stream_Modes = {.Write, .Seek}
-    const combined := modes + required # union
-    const common := modes & required   # intersection
-    const symdiff := modes ~ required  # symmetric difference (infix '~')
-    const symdiff2 := modes ^ required # symmetric difference (raw '^', same result)
-    const notmodes := ~modes           # unary complement
+    const combined := modes + required // union
+    const common := modes & required   // intersection
+    const symdiff := modes ~ required  // symmetric difference (infix '~')
+    const symdiff2 := modes ^ required // symmetric difference (raw '^', same result)
+    const notmodes := ~modes           // unary complement
 
     if combined != {.Write, .Seek} {
         return 2
@@ -68,12 +68,12 @@ pub fn main() -> i32 {
         return 9
     }
 
-    const raw: u16 = modes # implicit coercion to storage type
+    const raw: u16 = modes // implicit coercion to storage type
     if raw != 112 {
         return 10
     }
 
-    const modes2 := cast(raw, Stream_Modes) # explicit cast from storage type
+    const modes2 := cast(raw, Stream_Modes) // explicit cast from storage type
     if modes2 != modes {
         return 11
     }
@@ -82,5 +82,5 @@ pub fn main() -> i32 {
         return 12
     }
 
-    return cast(modes2, i32) # should return 112
+    return cast(modes2, i32) // should return 112
 }

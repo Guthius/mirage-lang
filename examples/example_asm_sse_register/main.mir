@@ -1,13 +1,13 @@
-# example_asm_sse_register.mir — REJECTION CASE. SSE/AVX/FPU registers, segment registers,
-# and control/debug registers are recognized as real x86 register names but are explicitly
-# out of scope for v1 inline asm — referencing one produces a precise diagnostic rather than
-# a misleading "unknown identifier" error (xmm0 is not a Mirage variable, so it must not be
-# treated as one). This also triggers a secondary sema arity error for 'mov' (which expects
-# 2 operands but only got 1, since the unsupported operand is dropped rather than kept) —
-# expected, not a bug: one malformed operand can produce more than one diagnostic.
-#
-# Expected: compilation fails, including
-#   error: register 'xmm0' is not supported in inline asm (v1)
+// example_asm_sse_register.mir — REJECTION CASE. SSE/AVX/FPU registers, segment registers,
+// and control/debug registers are recognized as real x86 register names but are explicitly
+// out of scope for v1 inline asm — referencing one produces a precise diagnostic rather than
+// a misleading "unknown identifier" error (xmm0 is not a Mirage variable, so it must not be
+// treated as one). This also triggers a secondary sema arity error for 'mov' (which expects
+// 2 operands but only got 1, since the unsupported operand is dropped rather than kept) —
+// expected, not a bug: one malformed operand can produce more than one diagnostic.
+//
+// Expected: compilation fails, including
+//   error: register 'xmm0' is not supported in inline asm (v1)
 
 pub fn use_sse_register() {
     asm {

@@ -25,8 +25,13 @@
     "comments": {
       "patterns": [
         {
-          "match": "#.*$",
-          "name": "comment.line.number-sign.mirage"
+          "match": "//.*$",
+          "name": "comment.line.double-slash.mirage"
+        },
+        {
+          "begin": "/\\*",
+          "end": "\\*/",
+          "name": "comment.block.mirage"
         }
       ]
     },

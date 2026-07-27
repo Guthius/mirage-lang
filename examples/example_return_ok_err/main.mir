@@ -1,7 +1,7 @@
-# example_return_ok_err.mir — demonstrates return_err/return_ok, including
-# defer interaction, try propagation through a return_err-producing call, and
-# return_err re-propagating a captured error(...) value (same-union, widened-union,
-# and bare-member-value forms).
+// example_return_ok_err.mir — demonstrates return_err/return_ok, including
+// defer interaction, try propagation through a return_err-producing call, and
+// return_err re-propagating a captured error(...) value (same-union, widened-union,
+// and bare-member-value forms).
 
 mut g_cleanup_ran: i32 = 0
 
@@ -14,7 +14,7 @@ pub type OtherError = enum(i32) {
     Timeout = 1
 }
 
-# Single non-error value + error, success and failure paths
+// Single non-error value + error, success and failure paths
 fn single_ok(should_fail: bool) -> (i32, error(TestError)) {
     if should_fail {
         return_err .OutOfMemory
@@ -22,7 +22,7 @@ fn single_ok(should_fail: bool) -> (i32, error(TestError)) {
     return_ok 42
 }
 
-# Bare error return (fn returning only error(TestError))
+// Bare error return (fn returning only error(TestError))
 fn bare_ok() -> error(TestError) {
     return_ok
 }
@@ -31,12 +31,12 @@ fn bare_err() -> error(TestError) {
     return_err .BadInput
 }
 
-# Multi-value return_ok
+// Multi-value return_ok
 fn multi_ok() -> (i32, i32, error(TestError)) {
     return_ok 1, 2
 }
 
-# Defers must run before both return_err and return_ok
+// Defers must run before both return_err and return_ok
 fn defer_before_return_err() -> error(TestError) {
     defer {
         g_cleanup_ran = g_cleanup_ran + 1
@@ -51,14 +51,14 @@ fn defer_before_return_ok() -> error(TestError) {
     return_ok
 }
 
-# try must propagate an error produced via return_err just like any other error
+// try must propagate an error produced via return_err just like any other error
 fn try_propagates_return_err() -> error(TestError) {
     try bare_err()
     return_ok
 }
 
-# return_err's operand need not be '.Variant' sugar: a captured error(...) value can be
-# re-propagated as-is (same union here — no translation needed).
+// return_err's operand need not be '.Variant' sugar: a captured error(...) value can be
+// re-propagated as-is (same union here — no translation needed).
 fn propagate_captured_same_union() -> error(TestError) {
     const err := bare_err()
     if err {
@@ -67,15 +67,15 @@ fn propagate_captured_same_union() -> error(TestError) {
     return_ok
 }
 
-# ...or a bare value of one of the function's error member types, without going through
-# '.Variant' syntax at all.
+// ...or a bare value of one of the function's error member types, without going through
+// '.Variant' syntax at all.
 fn propagate_bare_member(m: TestError) -> error(TestError) {
     return_err m
 }
 
-# ...or a captured error(...) value whose member types are a subset of this function's
-# (here TestError is a subset of TestError | OtherError) — cross-union tag translation,
-# same rule 'try' uses.
+// ...or a captured error(...) value whose member types are a subset of this function's
+// (here TestError is a subset of TestError | OtherError) — cross-union tag translation,
+// same rule 'try' uses.
 fn propagate_captured_widened() -> error(TestError | OtherError) {
     const err := bare_err()
     if err {
@@ -85,7 +85,7 @@ fn propagate_captured_widened() -> error(TestError | OtherError) {
 }
 
 pub fn main() -> i32 {
-    # Test 1: return_ok single value, success path
+    // Test 1: return_ok single value, success path
     const v, e := single_ok(false)
     if e {
         return 1
@@ -94,7 +94,7 @@ pub fn main() -> i32 {
         return 2
     }
 
-    # Test 2: return_err on failure path, check the specific variant
+    // Test 2: return_err on failure path, check the specific variant
     const v2, e2 := single_ok(true)
     if !e2 {
         return 3
@@ -104,13 +104,13 @@ pub fn main() -> i32 {
         .BadInput: { return 3 }
     }
 
-    # Test 3: bare return_ok -> success
+    // Test 3: bare return_ok -> success
     const ok3 := bare_ok()
     if ok3 {
         return 4
     }
 
-    # Test 4: bare return_err
+    // Test 4: bare return_err
     const err4 := bare_err()
     if !err4 {
         return 5
@@ -120,7 +120,7 @@ pub fn main() -> i32 {
         .BadInput: {}
     }
 
-    # Test 5: multi-value return_ok
+    // Test 5: multi-value return_ok
     const a, b, e3 := multi_ok()
     if e3 {
         return 6
@@ -132,7 +132,7 @@ pub fn main() -> i32 {
         return 8
     }
 
-    # Test 6: defer runs before return_err
+    // Test 6: defer runs before return_err
     g_cleanup_ran = 0
     const e4 := defer_before_return_err()
     if !e4 {
@@ -142,7 +142,7 @@ pub fn main() -> i32 {
         return 10
     }
 
-    # Test 7: defer runs before return_ok
+    // Test 7: defer runs before return_ok
     g_cleanup_ran = 0
     const e5 := defer_before_return_ok()
     if e5 {
@@ -152,13 +152,13 @@ pub fn main() -> i32 {
         return 12
     }
 
-    # Test 8: try propagates an error produced by return_err
+    // Test 8: try propagates an error produced by return_err
     const e6 := try_propagates_return_err()
     if !e6 {
         return 13
     }
 
-    # Test 9: return_err re-propagating a captured error(...) value as-is
+    // Test 9: return_err re-propagating a captured error(...) value as-is
     const e7 := propagate_captured_same_union()
     if !e7 {
         return 14
@@ -168,7 +168,7 @@ pub fn main() -> i32 {
         .BadInput: {}
     }
 
-    # Test 10: return_err with a bare error-member value (no '.Variant' sugar)
+    // Test 10: return_err with a bare error-member value (no '.Variant' sugar)
     const e8 := propagate_bare_member(TestError.OutOfMemory)
     if !e8 {
         return 15
@@ -178,8 +178,8 @@ pub fn main() -> i32 {
         .BadInput: { return 15 }
     }
 
-    # Test 11: return_err re-propagating a captured error(...) value into a widened
-    # error(...) type (cross-union tag translation)
+    // Test 11: return_err re-propagating a captured error(...) value into a widened
+    // error(...) type (cross-union tag translation)
     const e9 := propagate_captured_widened()
     if !e9 {
         return 16

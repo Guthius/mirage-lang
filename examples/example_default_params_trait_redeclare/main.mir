@@ -1,11 +1,11 @@
-# example_default_params_trait_redeclare — REJECTION CASE. An impl method
-# must NOT redeclare a default value that the trait method already declares
-# — it's inherited automatically.
-#
-# Expected: compilation fails with
-#   error: parameter 'loud' in 'Bot.greet' redeclares a default value already
-#   declared by the trait 'Greeter'. Remove the default from the
-#   implementation — it is inherited from the trait.
+// example_default_params_trait_redeclare — REJECTION CASE. An impl method
+// must NOT redeclare a default value that the trait method already declares
+// — it's inherited automatically.
+//
+// Expected: compilation fails with
+//   error: parameter 'loud' in 'Bot.greet' redeclares a default value already
+//   declared by the trait 'Greeter'. Remove the default from the
+//   implementation — it is inherited from the trait.
 
 type Greeter = trait {
     fn greet(self, loud: bool = false) -> i32

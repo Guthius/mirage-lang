@@ -1,10 +1,10 @@
-# example_asm_expr_cannot_infer.mir — 'asm -> eax { ... }' used as a bare expression
-# statement: no expected-type context (not a return, not a var-decl initializer, not a
-# call argument) and no explicit ': type' suffix, so sema cannot infer a result type.
-#
-# Verify with:
-#   ./build/mirage build examples/example_asm_expr_cannot_infer
-# Expected: sema error "cannot infer result type for 'asm -> eax'".
+// example_asm_expr_cannot_infer.mir — 'asm -> eax { ... }' used as a bare expression
+// statement: no expected-type context (not a return, not a var-decl initializer, not a
+// call argument) and no explicit ': type' suffix, so sema cannot infer a result type.
+//
+// Verify with:
+//   ./build/mirage build examples/example_asm_expr_cannot_infer
+// Expected: sema error "cannot infer result type for 'asm -> eax'".
 
 pub fn main() -> i32 {
     asm -> eax {

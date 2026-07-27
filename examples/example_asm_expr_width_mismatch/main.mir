@@ -1,12 +1,12 @@
-# example_asm_expr_width_mismatch.mir — 'asm -> rax: i32 { ... }' pairs a 64-bit result
-# register with a 32-bit explicit result type. This is only a WARNING (not an error) —
-# mirrors the existing operand width-mismatch warning's severity — and suggests the
-# correctly-sized register ('eax').
-#
-# Verify with:
-#   ./build/mirage build examples/example_asm_expr_width_mismatch
-# Expected: build succeeds (exit 0); stderr contains the width-mismatch warning and the
-# "Consider using 'eax'" suggestion.
+// example_asm_expr_width_mismatch.mir — 'asm -> rax: i32 { ... }' pairs a 64-bit result
+// register with a 32-bit explicit result type. This is only a WARNING (not an error) —
+// mirrors the existing operand width-mismatch warning's severity — and suggests the
+// correctly-sized register ('eax').
+//
+// Verify with:
+//   ./build/mirage build examples/example_asm_expr_width_mismatch
+// Expected: build succeeds (exit 0); stderr contains the width-mismatch warning and the
+// "Consider using 'eax'" suggestion.
 
 pub fn main() -> i32 {
     mut x: i32 = asm -> rax: i32 {

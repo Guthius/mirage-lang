@@ -1,12 +1,12 @@
-# example_default_params_trait_extra — REJECTION CASE. An impl method must
-# NOT declare a default value for a parameter the trait method doesn't have
-# one for — defaults on trait implementations must match the trait
-# declaration exactly.
-#
-# Expected: compilation fails with
-#   error: parameter 'loud' in 'Bot.greet' declares a default value but the
-#   corresponding trait method 'Greeter.greet' does not. Defaults on trait
-#   implementations must match the trait declaration.
+// example_default_params_trait_extra — REJECTION CASE. An impl method must
+// NOT declare a default value for a parameter the trait method doesn't have
+// one for — defaults on trait implementations must match the trait
+// declaration exactly.
+//
+// Expected: compilation fails with
+//   error: parameter 'loud' in 'Bot.greet' declares a default value but the
+//   corresponding trait method 'Greeter.greet' does not. Defaults on trait
+//   implementations must match the trait declaration.
 
 type Greeter = trait {
     fn greet(self, loud: bool) -> i32

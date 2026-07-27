@@ -82,12 +82,12 @@
         that imports them, and put anything meant to be shared across unrelated projects under the
         directory pointed to by <code>MIRAGE_PATH</code>.
       </p>
-      <pre><code><span class="cmt"># project/
-#   main/
-#     main.mir        -- import("../lib/vector") reaches project/lib/vector
-#   lib/
-#     vector/
-#       main.mir</span></code></pre>
+      <pre><code><span class="cmt">// project/
+//   main/
+//     main.mir        -- import("../lib/vector") reaches project/lib/vector
+//   lib/
+//     vector/
+//       main.mir</span></code></pre>
 
       <h2>Accessing Module Symbols</h2>
       <p>
@@ -98,9 +98,9 @@
       <pre><code><span class="kw">const</span> <span class="var">mem</span> := <span class="kw">import</span>(<span class="str">"mem"</span>)
 
 <span class="kw">fn</span> <span class="fn">example</span>() {
-    <span class="kw">mut</span> <span class="var">ptr</span>: <span class="ty">anyptr</span> = <span class="var">mem</span>.<span class="fn">malloc</span>(<span class="num">64</span>)     <span class="cmt"># call a function</span>
+    <span class="kw">mut</span> <span class="var">ptr</span>: <span class="ty">anyptr</span> = <span class="var">mem</span>.<span class="fn">malloc</span>(<span class="num">64</span>)     <span class="cmt">// call a function</span>
     <span class="var">mem</span>.<span class="fn">free</span>(<span class="var">ptr</span>)
-    <span class="kw">mut</span> <span class="var">v</span>: <span class="var">mem</span>.<span class="ty">SomeType</span>                    <span class="cmt"># use a type</span>
+    <span class="kw">mut</span> <span class="var">v</span>: <span class="var">mem</span>.<span class="ty">SomeType</span>                    <span class="cmt">// use a type</span>
 }</code></pre>
 
       <h3 id="inline-member-access">Inline Member Access</h3>
@@ -126,11 +126,11 @@
         from other modules, add <code>pub</code>:
       </p>
 
-      <pre><code><span class="cmt"># vector/main.mir</span>
+      <pre><code><span class="cmt">// vector/main.mir</span>
 
 <span class="kw">const</span> <span class="var">mem</span> := <span class="kw">import</span>(<span class="str">"mem"</span>)
 
-<span class="cmt"># Public — visible outside this module</span>
+<span class="cmt">// Public — visible outside this module</span>
 <span class="kw">pub type</span> <span class="ty">vector</span> = <span class="kw">struct</span> {
     <span class="var">data</span>:         <span class="ty">anyptr</span>
     <span class="var">length</span>:       <span class="ty">usize</span>
@@ -146,9 +146,9 @@
     <span class="kw">return</span> <span class="lit">true</span>
 }
 
-<span class="cmt"># Private — not accessible from importing modules</span>
+<span class="cmt">// Private — not accessible from importing modules</span>
 <span class="kw">fn</span> <span class="fn">reserve</span>(<span class="var">v</span>: *<span class="ty">vector</span>, <span class="var">cap</span>: <span class="ty">usize</span>) -&gt; <span class="ty">bool</span> {
-    <span class="cmt"># ...</span>
+    <span class="cmt">// ...</span>
     <span class="kw">return</span> <span class="lit">true</span>
 }</code></pre>
 
@@ -170,18 +170,18 @@
         The <code>impl</code> block itself cannot be <code>pub</code>.
       </p>
 
-      <pre><code><span class="cmt"># vector/main.mir</span>
+      <pre><code><span class="cmt">// vector/main.mir</span>
 <span class="kw">impl</span> <span class="ty">vector</span> {
     <span class="kw">pub fn</span> <span class="fn">push</span>(<span class="var">self</span>, <span class="var">element</span>: <span class="ty">anyptr</span>) -&gt; <span class="ty">bool</span> {
-        <span class="cmt"># ...</span>
+        <span class="cmt">// ...</span>
     }
 
     <span class="kw">pub fn</span> <span class="fn">at</span>(<span class="var">self</span>, <span class="var">idx</span>: <span class="ty">usize</span>) -&gt; <span class="ty">anyptr</span> {
-        <span class="cmt"># ...</span>
+        <span class="cmt">// ...</span>
     }
 }
 
-<span class="cmt"># main/main.mir</span>
+<span class="cmt">// main/main.mir</span>
 <span class="kw">const</span> <span class="var">vec</span> := <span class="kw">import</span>(<span class="str">"vector"</span>)
 
 <span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">i32</span> {
@@ -189,7 +189,7 @@
     <span class="var">vec</span>.<span class="fn">create</span>(&amp;<span class="var">v</span>, <span class="kw">sizeof</span>(<span class="var">v</span>))
 
     <span class="kw">const</span> <span class="var">x</span>: <span class="ty">i32</span> = <span class="num">42</span>
-    <span class="var">v</span>.<span class="fn">push</span>(&amp;<span class="var">x</span>)   <span class="cmt"># method call on cross-module type</span>
+    <span class="var">v</span>.<span class="fn">push</span>(&amp;<span class="var">x</span>)   <span class="cmt">// method call on cross-module type</span>
 
     <span class="kw">const</span> <span class="var">result</span> := *<span class="kw">cast</span>(<span class="var">v</span>.<span class="fn">at</span>(<span class="num">0</span>), *<span class="ty">i32</span>)
     <span class="kw">return</span> <span class="var">result</span>
@@ -197,10 +197,10 @@
 
       <h2 id="chained-module-access">Chained Module Access</h2>
       <p>If a module re-exports another module via <code>pub const</code>, you can chain access:</p>
-      <pre><code><span class="cmt"># lib/main.mir</span>
+      <pre><code><span class="cmt">// lib/main.mir</span>
 <span class="kw">pub const</span> <span class="var">utils</span> := <span class="kw">import</span>(<span class="str">"utils"</span>)
 
-<span class="cmt"># main/main.mir</span>
+<span class="cmt">// main/main.mir</span>
 <span class="kw">const</span> <span class="var">lib</span> := <span class="kw">import</span>(<span class="str">"lib"</span>)
 
 <span class="kw">pub fn</span> <span class="fn">main</span>() {
@@ -214,7 +214,7 @@
         (or cross-module if <code>pub</code>).
       </p>
 
-      <pre><code><span class="cmt"># mem/main.mir</span>
+      <pre><code><span class="cmt">// mem/main.mir</span>
 <span class="kw">mut</span> <span class="var">heap_head</span>: *<span class="ty">block_header</span> = <span class="lit">nil</span>
 <span class="kw">mut</span> <span class="var">heap_tail</span>: *<span class="ty">block_header</span> = <span class="lit">nil</span>
 
@@ -231,7 +231,7 @@
         file's size in bytes. It's useful for baking small assets — shaders, icons, default config
         files — directly into the executable so there's nothing extra to ship at runtime.
       </p>
-      <pre><code><span class="kw">const</span> <span class="var">banner</span> := <span class="kw">import_bin</span>(<span class="str">"assets/banner.txt"</span>)   <span class="cmt"># banner: [N]u8</span>
+      <pre><code><span class="kw">const</span> <span class="var">banner</span> := <span class="kw">import_bin</span>(<span class="str">"assets/banner.txt"</span>)   <span class="cmt">// banner: [N]u8</span>
 
 <span class="fn">printf</span>(<span class="str">"%.*s\n"</span>, <span class="kw">cast</span>(<span class="kw">len</span>(<span class="var">banner</span>), <span class="ty">i32</span>), &amp;<span class="var">banner</span>[<span class="num">0</span>])</code></pre>
       <p>
@@ -244,7 +244,7 @@
       <h2>Complete Module Example</h2>
       <p>Here is a minimal two-module example. <code>math/main.mir</code> provides arithmetic utilities; <code>app/main.mir</code> imports and uses them.</p>
 
-      <pre><code><span class="cmt"># math/main.mir</span>
+      <pre><code><span class="cmt">// math/main.mir</span>
 
 <span class="kw">pub fn</span> <span class="fn">abs</span>(<span class="var">x</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
     <span class="kw">return</span> <span class="var">x</span> &lt; <span class="num">0</span> ? <span class="num">0</span> - <span class="var">x</span> : <span class="var">x</span>
@@ -256,14 +256,14 @@
     <span class="kw">return</span> <span class="var">x</span>
 }</code></pre>
 
-      <pre><code><span class="cmt"># app/main.mir</span>
+      <pre><code><span class="cmt">// app/main.mir</span>
 
 <span class="kw">ext fn</span> <span class="fn">printf</span>(<span class="var">fmt</span>: *<span class="ty">u8</span>, ...) -&gt; <span class="ty">i32</span>
 <span class="kw">const</span> <span class="var">math</span> := <span class="kw">import</span>(<span class="str">"../math"</span>)
 
 <span class="kw">pub fn</span> <span class="fn">main</span>() {
-    <span class="fn">printf</span>(<span class="str">"%d\n"</span>, <span class="var">math</span>.<span class="fn">abs</span>(<span class="op">-</span><span class="num">5</span>))           <span class="cmt"># 5</span>
-    <span class="fn">printf</span>(<span class="str">"%d\n"</span>, <span class="var">math</span>.<span class="fn">clamp</span>(<span class="num">15</span>, <span class="num">0</span>, <span class="num">10</span>))  <span class="cmt"># 10</span>
+    <span class="fn">printf</span>(<span class="str">"%d\n"</span>, <span class="var">math</span>.<span class="fn">abs</span>(<span class="op">-</span><span class="num">5</span>))           <span class="cmt">// 5</span>
+    <span class="fn">printf</span>(<span class="str">"%d\n"</span>, <span class="var">math</span>.<span class="fn">clamp</span>(<span class="num">15</span>, <span class="num">0</span>, <span class="num">10</span>))  <span class="cmt">// 10</span>
 }</code></pre>
 
       <div class="page-nav">

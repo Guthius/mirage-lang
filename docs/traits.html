@@ -149,7 +149,7 @@
         dispatch</strong> — resolved entirely at compile time, no vtable involved:
       </p>
       <pre><code><span class="kw">mut</span> <span class="var">circle</span>: <span class="ty">Circle</span> = {.<span class="var">x</span> = <span class="num">10.0</span>, .<span class="var">y</span> = <span class="num">10.0</span>, .<span class="var">radius</span> = <span class="num">5.0</span>}
-<span class="var">circle</span>.<span class="fn">draw</span>()          <span class="cmt"># static dispatch: calls Circle's draw() directly</span></code></pre>
+<span class="var">circle</span>.<span class="fn">draw</span>()          <span class="cmt">// static dispatch: calls Circle's draw() directly</span></code></pre>
       <p>
         A pointer to a type that implements a trait automatically <strong>coerces to that trait's
         handle</strong> wherever an expected type is known — variable initializers, assignment, return
@@ -157,11 +157,11 @@
       </p>
       <pre><code><span class="kw">mut</span> <span class="var">square</span>: <span class="ty">Square</span> = {.<span class="var">x</span> = <span class="num">0.0</span>, .<span class="var">y</span> = <span class="num">0.0</span>, .<span class="var">side</span> = <span class="num">4.0</span>}
 
-<span class="cmt"># &circle and &square (pointers) coerce to Drawable handles here</span>
+<span class="cmt">// &circle and &square (pointers) coerce to Drawable handles here</span>
 <span class="kw">mut</span> <span class="var">shapes</span>: [<span class="num">2</span>]<span class="ty">Drawable</span> = { &amp;<span class="var">circle</span>, &amp;<span class="var">square</span> }
 
 <span class="kw">for</span> <span class="var">shape</span> <span class="kw">in</span> <span class="var">shapes</span> {
-    <span class="var">shape</span>.<span class="fn">draw</span>()        <span class="cmt"># dynamic dispatch: resolved through the handle's vtable at runtime</span>
+    <span class="var">shape</span>.<span class="fn">draw</span>()        <span class="cmt">// dynamic dispatch: resolved through the handle's vtable at runtime</span>
     <span class="fn">printf</span>(<span class="str">"area = %.2f\n"</span>, <span class="var">shape</span>.<span class="fn">area</span>())
 }</code></pre>
       <p>
@@ -241,9 +241,9 @@
         <span class="var">shape</span>.<span class="fn">draw</span>()
     }
 }
-<span class="cmt"># Output:
-# ○ radius=2.0
-# □ side=3.0</span></code></pre>
+<span class="cmt">// Output:
+// ○ radius=2.0
+// □ side=3.0</span></code></pre>
 
       <div class="page-nav">
         <a href="structs-and-types.html" class="prev"><span class="label">Previous</span>Structs &amp; Types</a>

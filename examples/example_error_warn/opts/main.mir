@@ -1,6 +1,6 @@
-# A local stand-in for the (separately-maintained, out-of-repo) stdlib's compile-time
-# configuration module — scoped to this example so '@error'/'@warn' can be demonstrated
-# without depending on an external stdlib checkout (mirrors example_raylib_link/opts).
+// A local stand-in for the (separately-maintained, out-of-repo) stdlib's compile-time
+// configuration module — scoped to this example so '@error'/'@warn' can be demonstrated
+// without depending on an external stdlib checkout (mirrors example_raylib_link/opts).
 
 pub type Target = enum(i32) {
     Linux = 0

@@ -279,8 +279,25 @@ namespace lexer {
                     } else if (ch == '\n') {
                         crossed_newline = true;
                         advance();
-                    } else if (ch == '#') {
+                    } else if (ch == '/' && peek_next() == '/') {
                         while (!at_end() && peek() != '\n') {
+                            advance();
+                        }
+                    } else if (ch == '/' && peek_next() == '*') {
+                        advance();
+                        advance();
+
+                        while (!at_end() && !(peek() == '*' && peek_next() == '/')) {
+                            if (peek() == '\n') {
+                                crossed_newline = true;
+                            }
+                            advance();
+                        }
+
+                        if (at_end()) {
+                            diagnostics_.report_error(DiagnosticStage::Lexer, make_location(), "unterminated block comment");
+                        } else {
+                            advance();
                             advance();
                         }
                     } else {

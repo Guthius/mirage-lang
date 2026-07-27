@@ -1,12 +1,12 @@
-# example_asm_movzx.mir — 'movzx' zero-extends a narrower source into a wider destination.
-# Unlike every other instruction in the Tier-1 table, its two operands are EXPECTED to
-# differ in width — the general width-mismatch warning does not apply to it; instead sema
-# checks the opposite property (destination strictly wider than source).
-#
-# Verify with:
-#   ./build/mirage run examples/example_asm_movzx
-# Expected: prints 200 and exits 0 (a u8 value of 200 zero-extended into an i32, not
-# sign-extended, so it stays 200 rather than becoming negative).
+// example_asm_movzx.mir — 'movzx' zero-extends a narrower source into a wider destination.
+// Unlike every other instruction in the Tier-1 table, its two operands are EXPECTED to
+// differ in width — the general width-mismatch warning does not apply to it; instead sema
+// checks the opposite property (destination strictly wider than source).
+//
+// Verify with:
+//   ./build/mirage run examples/example_asm_movzx
+// Expected: prints 200 and exits 0 (a u8 value of 200 zero-extended into an i32, not
+// sign-extended, so it stays 200 rather than becoming negative).
 
 ext fn printf(fmt: *u8, ...) -> i32
 

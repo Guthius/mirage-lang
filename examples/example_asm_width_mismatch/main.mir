@@ -1,14 +1,14 @@
-# example_asm_width_mismatch.mir — 'mov &fd, rax' writes a 64-bit register through a 32-bit
-# ('i32') variable's address: a width mismatch is a WARNING (not an error) naming both the
-# register and the suggested narrower one. Deliberately not run (only built) — actually
-# executing this would perform an 8-byte write into a 4-byte stack slot, corrupting whatever
-# memory happens to sit adjacent to it, exactly as the warning describes.
-#
-# Verify with:
-#   ./build/mirage build examples/example_asm_width_mismatch
-# Expected: builds successfully, with a warning on stderr:
-#   warning: asm operand 'fd' has type 'i32' (32 bits) but register 'rax' is 64 bits.
-#            Consider using 'eax' instead.
+// example_asm_width_mismatch.mir — 'mov &fd, rax' writes a 64-bit register through a 32-bit
+// ('i32') variable's address: a width mismatch is a WARNING (not an error) naming both the
+// register and the suggested narrower one. Deliberately not run (only built) — actually
+// executing this would perform an 8-byte write into a 4-byte stack slot, corrupting whatever
+// memory happens to sit adjacent to it, exactly as the warning describes.
+//
+// Verify with:
+//   ./build/mirage build examples/example_asm_width_mismatch
+// Expected: builds successfully, with a warning on stderr:
+//   warning: asm operand 'fd' has type 'i32' (32 bits) but register 'rax' is 64 bits.
+//            Consider using 'eax' instead.
 
 pub fn width_mismatch_demo() -> i32 {
     mut fd: i32 = undefined

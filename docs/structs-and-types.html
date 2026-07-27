@@ -79,35 +79,35 @@
       <p>Structs are product types — they hold named fields of (potentially different) types. Fields are separated by newlines in the definition.</p>
 
       <pre><code><span class="kw">type</span> <span class="ty">Vec2</span> = <span class="kw">struct</span> {
-    <span class="var">x</span>: <span class="ty">f64</span> = <span class="num">0.0</span>    <span class="cmt"># field-level default</span>
+    <span class="var">x</span>: <span class="ty">f64</span> = <span class="num">0.0</span>    <span class="cmt">// field-level default</span>
     <span class="var">y</span>: <span class="ty">f64</span> = <span class="num">0.0</span>
 }</code></pre>
 
       <h3>Creating Struct Values</h3>
-      <pre><code><span class="cmt"># No init: all fields use their defaults (or zero)</span>
+      <pre><code><span class="cmt">// No init: all fields use their defaults (or zero)</span>
 <span class="kw">mut</span> <span class="var">a</span>: <span class="ty">Vec2</span>
 
-<span class="cmt"># Partial init: x overridden, y uses its default (0.0)</span>
+<span class="cmt">// Partial init: x overridden, y uses its default (0.0)</span>
 <span class="kw">mut</span> <span class="var">b</span>: <span class="ty">Vec2</span> = {.<span class="var">x</span> = <span class="num">5.0</span>}
 
-<span class="cmt"># Full init</span>
+<span class="cmt">// Full init</span>
 <span class="kw">mut</span> <span class="var">c</span>: <span class="ty">Vec2</span> = {.<span class="var">x</span> = <span class="num">3.0</span>, .<span class="var">y</span> = <span class="num">4.0</span>}
 
-<span class="cmt"># Empty braces: same as no init</span>
+<span class="cmt">// Empty braces: same as no init</span>
 <span class="kw">mut</span> <span class="var">d</span>: <span class="ty">Vec2</span> = {}
 
-<span class="cmt"># 'default' keyword: explicitly default-initialize</span>
+<span class="cmt">// 'default' keyword: explicitly default-initialize</span>
 <span class="kw">mut</span> <span class="var">e</span>: <span class="ty">Vec2</span> = <span class="kw">default</span>
 
-<span class="cmt"># 'undefined': allocates storage, no initialization at all (mut only, not const)</span>
+<span class="cmt">// 'undefined': allocates storage, no initialization at all (mut only, not const)</span>
 <span class="kw">mut</span> <span class="var">f</span>: <span class="ty">Vec2</span> = <span class="kw">undefined</span></code></pre>
 
       <h3>Accessing Fields</h3>
       <pre><code><span class="kw">const</span> <span class="var">len</span> := <span class="var">c</span>.<span class="var">x</span> * <span class="var">c</span>.<span class="var">x</span> + <span class="var">c</span>.<span class="var">y</span> * <span class="var">c</span>.<span class="var">y</span>
 
-<span class="cmt"># Through pointer: auto-dereference</span>
+<span class="cmt">// Through pointer: auto-dereference</span>
 <span class="kw">const</span> <span class="var">p</span>: *<span class="ty">Vec2</span> = &amp;<span class="var">c</span>
-<span class="fn">printf</span>(<span class="str">"%f\n"</span>, <span class="var">p</span>.<span class="var">x</span>)   <span class="cmt"># auto-deref: same as p.*.x, but no '.*' needed</span></code></pre>
+<span class="fn">printf</span>(<span class="str">"%f\n"</span>, <span class="var">p</span>.<span class="var">x</span>)   <span class="cmt">// auto-deref: same as p.*.x, but no '.*' needed</span></code></pre>
 
       <h3>Packed Structs</h3>
       <p>A packed struct has no alignment padding between fields:</p>
@@ -144,21 +144,21 @@
     <span class="var">exec</span>  = <span class="num">4</span>
 }
 
-<span class="cmt"># iota used as a power-of-two template</span>
+<span class="cmt">// iota used as a power-of-two template</span>
 <span class="kw">type</span> <span class="ty">Bits</span> = <span class="kw">enum</span>(<span class="ty">u32</span>) {
-    <span class="var">a</span> = <span class="num">1</span> &lt;&lt; <span class="var">iota</span>    <span class="cmt"># template: 1&lt;&lt;0=1, 1&lt;&lt;1=2, 1&lt;&lt;2=4</span>
+    <span class="var">a</span> = <span class="num">1</span> &lt;&lt; <span class="var">iota</span>    <span class="cmt">// template: 1&lt;&lt;0=1, 1&lt;&lt;1=2, 1&lt;&lt;2=4</span>
     <span class="var">b</span>
     <span class="var">c</span>
 }</code></pre>
 
       <h3>Using Enum Values</h3>
-      <pre><code><span class="cmt"># Contextual (type inferred from annotation)</span>
+      <pre><code><span class="cmt">// Contextual (type inferred from annotation)</span>
 <span class="kw">const</span> <span class="var">d</span>: <span class="ty">Direction</span> = .<span class="var">north</span>
 
-<span class="cmt"># Qualified</span>
+<span class="cmt">// Qualified</span>
 <span class="kw">const</span> <span class="var">d2</span> := <span class="ty">Direction</span>.<span class="var">south</span>
 
-<span class="cmt"># Match on enum</span>
+<span class="cmt">// Match on enum</span>
 <span class="kw">const</span> <span class="var">label</span> := <span class="kw">match</span> <span class="var">d</span> {
     .<span class="var">north</span>: <span class="str">"N"</span>,
     .<span class="var">south</span>: <span class="str">"S"</span>,
@@ -183,8 +183,8 @@
     <span class="var">Seek</span>
 }
 
-<span class="kw">pub type</span> <span class="ty">Stream_Modes</span> = <span class="kw">bitset</span>(<span class="ty">Stream_Mode</span>)         <span class="cmt"># storage defaults to u32</span>
-<span class="kw">pub type</span> <span class="ty">Stream_Modes16</span> = <span class="kw">bitset</span>(<span class="ty">Stream_Mode</span>, <span class="ty">u16</span>)  <span class="cmt"># explicit storage type</span></code></pre>
+<span class="kw">pub type</span> <span class="ty">Stream_Modes</span> = <span class="kw">bitset</span>(<span class="ty">Stream_Mode</span>)         <span class="cmt">// storage defaults to u32</span>
+<span class="kw">pub type</span> <span class="ty">Stream_Modes16</span> = <span class="kw">bitset</span>(<span class="ty">Stream_Mode</span>, <span class="ty">u16</span>)  <span class="cmt">// explicit storage type</span></code></pre>
 
       <p>
         The first argument names the member enum — a plain <code>enum {...}</code> with no backing type
@@ -195,21 +195,21 @@
       </p>
 
       <h3>Literals and Member Operations</h3>
-      <pre><code><span class="kw">mut</span> <span class="var">modes</span>: <span class="ty">Stream_Modes</span> = {.<span class="var">Close</span>, .<span class="var">Flush</span>}   <span class="cmt"># set containing Close and Flush</span>
-<span class="kw">const</span> <span class="var">empty</span>: <span class="ty">Stream_Modes</span> = {}                  <span class="cmt"># zero value — no bits set</span>
+      <pre><code><span class="kw">mut</span> <span class="var">modes</span>: <span class="ty">Stream_Modes</span> = {.<span class="var">Close</span>, .<span class="var">Flush</span>}   <span class="cmt">// set containing Close and Flush</span>
+<span class="kw">const</span> <span class="var">empty</span>: <span class="ty">Stream_Modes</span> = {}                  <span class="cmt">// zero value — no bits set</span>
 
-<span class="var">modes</span> += .<span class="var">Write</span>   <span class="cmt"># set a member</span>
-<span class="var">modes</span> -= .<span class="var">Close</span>   <span class="cmt"># clear a member</span>
-<span class="var">modes</span> ~= .<span class="var">Flush</span>   <span class="cmt"># toggle a member</span></code></pre>
+<span class="var">modes</span> += .<span class="var">Write</span>   <span class="cmt">// set a member</span>
+<span class="var">modes</span> -= .<span class="var">Close</span>   <span class="cmt">// clear a member</span>
+<span class="var">modes</span> ~= .<span class="var">Flush</span>   <span class="cmt">// toggle a member</span></code></pre>
 
       <h3>Set Operations and Membership</h3>
       <pre><code><span class="kw">const</span> <span class="var">required</span>: <span class="ty">Stream_Modes</span> = {.<span class="var">Write</span>, .<span class="var">Seek</span>}
-<span class="kw">const</span> <span class="var">combined</span> := <span class="var">modes</span> + <span class="var">required</span>   <span class="cmt"># union</span>
-<span class="kw">const</span> <span class="var">common</span>   := <span class="var">modes</span> &amp; <span class="var">required</span>   <span class="cmt"># intersection</span>
-<span class="kw">const</span> <span class="var">flipped</span>  := ~<span class="var">modes</span>              <span class="cmt"># complement (all bits inverted)</span>
+<span class="kw">const</span> <span class="var">combined</span> := <span class="var">modes</span> + <span class="var">required</span>   <span class="cmt">// union</span>
+<span class="kw">const</span> <span class="var">common</span>   := <span class="var">modes</span> &amp; <span class="var">required</span>   <span class="cmt">// intersection</span>
+<span class="kw">const</span> <span class="var">flipped</span>  := ~<span class="var">modes</span>              <span class="cmt">// complement (all bits inverted)</span>
 
-<span class="kw">if</span> .<span class="var">Write</span> <span class="kw">in</span> <span class="var">modes</span> { }               <span class="cmt"># single-member test</span>
-<span class="kw">if</span> {.<span class="var">Write</span>, .<span class="var">Seek</span>} <span class="kw">in</span> <span class="var">modes</span> { }     <span class="cmt"># subset test</span></code></pre>
+<span class="kw">if</span> .<span class="var">Write</span> <span class="kw">in</span> <span class="var">modes</span> { }               <span class="cmt">// single-member test</span>
+<span class="kw">if</span> {.<span class="var">Write</span>, .<span class="var">Seek</span>} <span class="kw">in</span> <span class="var">modes</span> { }     <span class="cmt">// subset test</span></code></pre>
 
       <table>
         <tr><th>Operator</th><th>Meaning</th></tr>
@@ -230,15 +230,15 @@
         never inside a binary expression. Going the other way (a raw integer to a bitset) always
         requires an explicit <code>cast</code>:
       </p>
-      <pre><code><span class="kw">const</span> <span class="var">raw</span>: <span class="ty">u16</span> = <span class="var">modes</span>                    <span class="cmt"># OK — implicit, expected-type position</span>
-<span class="kw">const</span> <span class="var">modes2</span> := <span class="fn">cast</span>(<span class="var">raw</span>, <span class="ty">Stream_Modes</span>)   <span class="cmt"># OK — explicit cast back</span></code></pre>
+      <pre><code><span class="kw">const</span> <span class="var">raw</span>: <span class="ty">u16</span> = <span class="var">modes</span>                    <span class="cmt">// OK — implicit, expected-type position</span>
+<span class="kw">const</span> <span class="var">modes2</span> := <span class="fn">cast</span>(<span class="var">raw</span>, <span class="ty">Stream_Modes</span>)   <span class="cmt">// OK — explicit cast back</span></code></pre>
       <p>
         Bitsets are ABI-transparent in <code>ext fn</code> signatures — a bitset value <em>is</em> its
         storage integer at the C boundary, so no coercion is needed when calling into (or receiving a
         value from) a C library:
       </p>
       <pre><code><span class="kw">ext fn</span> <span class="fn">SDL_SetWindowFlags</span>(<span class="var">window</span>: *<span class="ty">SDL_Window</span>, <span class="var">flags</span>: <span class="ty">WindowFlags</span>)
-<span class="ty">SDL_SetWindowFlags</span>(<span class="var">win</span>, <span class="var">modes</span>)   <span class="cmt"># flags passed as its storage integer, no cast needed</span></code></pre>
+<span class="ty">SDL_SetWindowFlags</span>(<span class="var">win</span>, <span class="var">modes</span>)   <span class="cmt">// flags passed as its storage integer, no cast needed</span></code></pre>
 
       <div class="callout warning">
         <div class="callout-title">Restrictions</div>
@@ -262,14 +262,14 @@
     <span class="var">as_u8</span>:  <span class="ty">u8</span>
 }
 
-<span class="cmt"># Initialize with exactly one member</span>
+<span class="cmt">// Initialize with exactly one member</span>
 <span class="kw">mut</span> <span class="var">u</span>: <span class="ty">NumUnion</span> = {.<span class="var">as_i64</span> = <span class="num">42</span>}
 
-<span class="cmt"># Read/write any member</span>
+<span class="cmt">// Read/write any member</span>
 <span class="var">u</span>.<span class="var">as_f64</span> = <span class="num">3.14</span>
-<span class="kw">const</span> <span class="var">bits</span>: <span class="ty">i64</span> = <span class="var">u</span>.<span class="var">as_i64</span>   <span class="cmt"># reinterpret bits</span>
+<span class="kw">const</span> <span class="var">bits</span>: <span class="ty">i64</span> = <span class="var">u</span>.<span class="var">as_i64</span>   <span class="cmt">// reinterpret bits</span>
 
-<span class="cmt"># Undefined init is legal</span>
+<span class="cmt">// Undefined init is legal</span>
 <span class="kw">mut</span> <span class="var">v</span>: <span class="ty">NumUnion</span> = <span class="kw">undefined</span>
 <span class="var">v</span>.<span class="var">as_i64</span> = <span class="num">100</span></code></pre>
 
@@ -298,7 +298,7 @@
         <span class="var">w</span>: <span class="ty">f64</span>
         <span class="var">h</span>: <span class="ty">f64</span>
     }
-    <span class="var">point</span>              <span class="cmt"># payload-free variant</span>
+    <span class="var">point</span>              <span class="cmt">// payload-free variant</span>
 }</code></pre>
 
       <h3>Layout</h3>
@@ -309,13 +309,13 @@
       </p>
 
       <h3>Constructing Tagged Union Values</h3>
-      <pre><code><span class="cmt"># Qualified form: TypeName.variant{.field = val}</span>
+      <pre><code><span class="cmt">// Qualified form: TypeName.variant{.field = val}</span>
 <span class="kw">const</span> <span class="var">c</span>: <span class="ty">Shape</span> = <span class="ty">Shape</span>.<span class="var">circle</span>{.<span class="var">radius</span> = <span class="num">3.0</span>}
 
-<span class="cmt"># Contextual form: .variant{.field = val} (type from annotation)</span>
+<span class="cmt">// Contextual form: .variant{.field = val} (type from annotation)</span>
 <span class="kw">mut</span> <span class="var">r</span>: <span class="ty">Shape</span> = .<span class="var">rect</span>{.<span class="var">w</span> = <span class="num">4.0</span>, .<span class="var">h</span> = <span class="num">5.0</span>}
 
-<span class="cmt"># Payload-free variant</span>
+<span class="cmt">// Payload-free variant</span>
 <span class="kw">const</span> <span class="var">p</span>: <span class="ty">Shape</span> = .<span class="var">point</span></code></pre>
 
       <div class="callout tip">
@@ -325,11 +325,11 @@
         an implicit field named <code>v</code>, and <code>.variant(expr)</code> is shorthand for
         <code>.variant{.v = expr}</code>:
         <pre><code><span class="kw">type</span> <span class="ty">IoError</span> = <span class="kw">union</span>(<span class="kw">enum</span>) {
-    <span class="var">not_found</span>: []<span class="ty">u8</span>    <span class="cmt"># non-struct payload — wrapped under 'v'</span>
+    <span class="var">not_found</span>: []<span class="ty">u8</span>    <span class="cmt">// non-struct payload — wrapped under 'v'</span>
     <span class="var">closed</span>
 }
 
-<span class="kw">const</span> <span class="var">e</span>: <span class="ty">IoError</span> = .<span class="var">not_found</span>(<span class="str">"missing.txt"</span>)   <span class="cmt"># sugar for .not_found{.v = "missing.txt"}</span></code></pre>
+<span class="kw">const</span> <span class="var">e</span>: <span class="ty">IoError</span> = .<span class="var">not_found</span>(<span class="str">"missing.txt"</span>)   <span class="cmt">// sugar for .not_found{.v = "missing.txt"}</span></code></pre>
       </div>
 
       <h3>Destructuring with Match</h3>
@@ -340,9 +340,9 @@
     .<span class="var">point</span>:     <span class="num">0.0</span>
 }
 
-<span class="cmt"># By-reference capture: c is *PayloadStruct (no copy)</span>
+<span class="cmt">// By-reference capture: c is *PayloadStruct (no copy)</span>
 <span class="kw">match</span> <span class="var">s</span> {
-    .<span class="var">circle</span>(&amp;<span class="var">c</span>): <span class="var">c</span>.<span class="var">radius</span> = <span class="num">10.0</span>,    <span class="cmt"># mutate in-place</span>
+    .<span class="var">circle</span>(&amp;<span class="var">c</span>): <span class="var">c</span>.<span class="var">radius</span> = <span class="num">10.0</span>,    <span class="cmt">// mutate in-place</span>
     .<span class="var">rect</span>(&amp;<span class="var">r</span>):   <span class="var">r</span>.<span class="var">w</span>    = <span class="num">0.0</span>,
     .<span class="var">point</span>:     <span class="num">0.0</span>
 }</code></pre>
@@ -360,12 +360,12 @@
 }
 
 <span class="kw">impl</span> <span class="ty">Counter</span> {
-    <span class="cmt"># Read-only method: self is implicitly *Counter (const view)</span>
+    <span class="cmt">// Read-only method: self is implicitly *Counter (const view)</span>
     <span class="kw">pub fn</span> <span class="fn">get</span>(<span class="var">self</span>) -&gt; <span class="ty">i32</span> {
         <span class="kw">return</span> <span class="var">self</span>.<span class="var">value</span>
     }
 
-    <span class="cmt"># Mutating method: mut self allows field writes</span>
+    <span class="cmt">// Mutating method: mut self allows field writes</span>
     <span class="kw">pub fn</span> <span class="fn">increment</span>(<span class="kw">mut</span> <span class="var">self</span>) {
         <span class="var">self</span>.<span class="var">value</span>++
     }
@@ -380,10 +380,10 @@
       <pre><code><span class="kw">mut</span> <span class="var">c</span>: <span class="ty">Counter</span>
 <span class="var">c</span>.<span class="var">value</span> = <span class="num">0</span>
 <span class="var">c</span>.<span class="fn">increment</span>()
-<span class="kw">const</span> <span class="var">v</span>: <span class="ty">i32</span> = <span class="var">c</span>.<span class="fn">get</span>()        <span class="cmt"># 1</span>
-<span class="kw">const</span> <span class="var">v2</span>: <span class="ty">i32</span> = <span class="var">c</span>.<span class="fn">add</span>(<span class="num">5</span>)      <span class="cmt"># 6</span>
+<span class="kw">const</span> <span class="var">v</span>: <span class="ty">i32</span> = <span class="var">c</span>.<span class="fn">get</span>()        <span class="cmt">// 1</span>
+<span class="kw">const</span> <span class="var">v2</span>: <span class="ty">i32</span> = <span class="var">c</span>.<span class="fn">add</span>(<span class="num">5</span>)      <span class="cmt">// 6</span>
 
-<span class="cmt"># Calling through a pointer: auto-deref</span>
+<span class="cmt">// Calling through a pointer: auto-deref</span>
 <span class="kw">const</span> <span class="var">ptr</span>: *<span class="ty">Counter</span> = &amp;<span class="var">c</span>
 <span class="var">ptr</span>.<span class="fn">increment</span>()</code></pre>
 
@@ -422,14 +422,14 @@
 
       <h3><code>default</code></h3>
       <p>Produces the type's default zero value. For structs with field defaults, those defaults are applied recursively.</p>
-      <pre><code><span class="kw">mut</span> <span class="var">x</span>: <span class="ty">i32</span>    = <span class="kw">default</span>   <span class="cmt"># 0</span>
-<span class="kw">mut</span> <span class="var">v</span>: <span class="ty">Vec2</span>   = <span class="kw">default</span>   <span class="cmt"># {x=0.0, y=0.0} (or field defaults)</span>
-<span class="kw">mut</span> <span class="var">fp</span>: <span class="ty">fn</span>(<span class="ty">i32</span>) -&gt; <span class="ty">i32</span> = <span class="kw">default</span>  <span class="cmt"># nil</span></code></pre>
+      <pre><code><span class="kw">mut</span> <span class="var">x</span>: <span class="ty">i32</span>    = <span class="kw">default</span>   <span class="cmt">// 0</span>
+<span class="kw">mut</span> <span class="var">v</span>: <span class="ty">Vec2</span>   = <span class="kw">default</span>   <span class="cmt">// {x=0.0, y=0.0} (or field defaults)</span>
+<span class="kw">mut</span> <span class="var">fp</span>: <span class="ty">fn</span>(<span class="ty">i32</span>) -&gt; <span class="ty">i32</span> = <span class="kw">default</span>  <span class="cmt">// nil</span></code></pre>
 
       <h3><code>undefined</code></h3>
       <p>Allocates storage but does not initialize it. Useful for performance-sensitive code where you immediately assign a value.</p>
       <pre><code><span class="kw">mut</span> <span class="var">buf</span>: [<span class="num">1024</span>]<span class="ty">byte</span> = <span class="kw">undefined</span>
-<span class="cmt"># Must initialize before reading buf!</span>
+<span class="cmt">// Must initialize before reading buf!</span>
 <span class="fn">fill_buffer</span>(&amp;<span class="var">buf</span>[<span class="num">0</span>], <span class="kw">len</span>(<span class="var">buf</span>))</code></pre>
 
       <div class="callout warning">

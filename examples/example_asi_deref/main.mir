@@ -1,11 +1,11 @@
-# Regression test for two related fixes:
-#   1. Automatic semicolon insertion (ASI): a newline now terminates a statement, so a
-#      line ending in a call no longer silently continues into the next line's leading token.
-#   2. Postfix pointer dereference 'expr.*' (replacing prefix '*expr'), which removes '*'
-#      from the prefix-unary/binary-infix ambiguity that originally motivated this fix.
-#
-# Mirrors the originally reported bug shape: a pointer variable is initialized from an
-# allocating call, and the very next line assigns through the pointer.
+// Regression test for two related fixes:
+//   1. Automatic semicolon insertion (ASI): a newline now terminates a statement, so a
+//      line ending in a call no longer silently continues into the next line's leading token.
+//   2. Postfix pointer dereference 'expr.*' (replacing prefix '*expr'), which removes '*'
+//      from the prefix-unary/binary-infix ambiguity that originally motivated this fix.
+//
+// Mirrors the originally reported bug shape: a pointer variable is initialized from an
+// allocating call, and the very next line assigns through the pointer.
 
 const mem := import("../mem")
 
@@ -34,7 +34,7 @@ pub fn main() -> i32 {
         return 1
     }
 
-    # Chained postfix deref + field access, both directions.
+    // Chained postfix deref + field access, both directions.
     mut chained: *Point = point_ptr
     chained.*.x = 42
     if chained.x != 42 {

@@ -477,10 +477,10 @@ the `ternary_expr` tier; `else_val` is a full `expr` (right-recursive, so
 branch does). Composition examples:
 
 ```mirage
-a + b when c else d        # parses as: (a + b) when (c) else (d)
-x when a && b else y       # parses as: x when (a && b) else y
-z = a when b else c        # parses as: z = (a when b else c)
-a when b else c when d else e   # parses as: a when b else (c when d else e)
+a + b when c else d        // parses as: (a + b) when (c) else (d)
+x when a && b else y       // parses as: x when (a && b) else y
+z = a when b else c        // parses as: z = (a when b else c)
+a when b else c when d else e   // parses as: a when b else (c when d else e)
 ```
 
 A bare, unparenthesized nested `when...else` in `cond` position does not
@@ -616,6 +616,25 @@ HEX_DIGIT     ::= '0'..'9' | 'a'..'f' | 'A'..'F'
 BIN_DIGIT     ::= '0' | '1'
 LETTER        ::= 'a'..'z' | 'A'..'Z' | '_'
 ```
+
+---
+
+## Comments
+
+```ebnf
+COMMENT       ::= line_comment | block_comment
+
+line_comment  ::= '//' { any_char_except_newline }
+
+block_comment ::= '/*' { any_char } '*/'      (* not nested; a newline inside still
+                                                  counts as a line break for ASI purposes *)
+```
+
+Comments are treated as whitespace: they may appear anywhere whitespace is
+allowed and carry no semantic meaning. An unterminated `/* ... */` is a
+lexer error. See spec.md's "Comments" section for the general syntax, and
+"Inline Assembly" (§20) for the asm mini-language's separate `;`/`#`
+comment convention used *inside* `asm { ... }` bodies.
 
 ---
 

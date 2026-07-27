@@ -241,8 +241,8 @@
         second, <strong>expression</strong> form additionally names an output register whose
         value at block-exit becomes the expression's value:
       </p>
-      <pre><code><span class="kw">asm</span> -&gt; eax { ... }              <span class="cmt"># result type inferred from context</span>
-<span class="kw">asm</span> -&gt; eax: <span class="ty">i32</span> { ... }         <span class="cmt"># result type explicit</span></code></pre>
+      <pre><code><span class="kw">asm</span> -&gt; eax { ... }              <span class="cmt">// result type inferred from context</span>
+<span class="kw">asm</span> -&gt; eax: <span class="ty">i32</span> { ... }         <span class="cmt">// result type explicit</span></code></pre>
       <p>
         Unlike the statement form, <code>asm -&gt; reg [: type] { ... }</code> is a normal
         expression: legal anywhere an expression is legal — <code>return</code>, a variable
@@ -328,8 +328,8 @@
     <span class="fn">printf</span>(<span class="str">"open succeeded: fd=%d\n"</span>, <span class="var">fd</span>)
     <span class="kw">return</span> <span class="num">0</span>
 }
-<span class="cmt"># Output:
-# open succeeded: fd=3</span></code></pre>
+<span class="cmt">// Output:
+// open succeeded: fd=3</span></code></pre>
 
       <div class="page-nav">
         <a href="comptime-config.html" class="prev"><span class="label">Previous</span>Compile-Time Config</a>

@@ -1,9 +1,9 @@
-# example_default_params_type_mismatch — REJECTION CASE. A default value's
-# type must match the parameter's declared type.
-#
-# Expected: compilation fails with
-#   error: default value for parameter 'x' has type 'i32' but parameter is
-#   declared as 'bool'
+// example_default_params_type_mismatch — REJECTION CASE. A default value's
+// type must match the parameter's declared type.
+//
+// Expected: compilation fails with
+//   error: default value for parameter 'x' has type 'i32' but parameter is
+//   declared as 'bool'
 
 fn f(x: bool = 42) -> i32 {
     return 0

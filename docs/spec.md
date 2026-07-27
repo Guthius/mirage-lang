@@ -4,6 +4,26 @@
 
 Mirage is a compiled, statically-typed systems language that targets native code via LLVM IR. It is designed for low-level programming with a clean, expression-oriented syntax. Mirage compiles to native executables and can interoperate with C libraries via `ext fn` declarations.
 
+### Comments
+
+```mirage
+// a line comment, runs to end of line
+
+/* a block comment,
+   may span multiple lines */
+
+const x: i32 = 1 /* inline */ + 2   // trailing
+```
+
+Line comments start with `//` and run to the end of the line. Block comments
+are delimited by `/*` and `*/`, may span multiple lines, and do not nest — the
+first `*/` closes the comment. An unterminated block comment is a compiler
+error. Comments carry no semantic meaning and are treated as whitespace.
+
+Note: the `asm { ... }` mini-language uses its own, separate comment
+convention (`;` and `#`) inside the assembly body — see §20, "Inline
+Assembly".
+
 ---
 
 ## 1. Primitive Types
@@ -61,9 +81,9 @@ Dereferenced with the **postfix** `.*` operator — `p.*` reads or writes the po
 
 ```mirage
 mut x: i32 = 42
-const p: *i32 = &x    # address-of
-const v: i32 = p.*    # dereference: reads x through p
-p.* = 99              # dereference: writes x through p
+const p: *i32 = &x    // address-of
+const v: i32 = p.*    // dereference: reads x through p
+p.* = 99              // dereference: writes x through p
 ```
 
 Auto-deref: accessing members or calling methods on a pointer-to-struct automatically dereferences the pointer, so `p.field` and `p.method()` never need an explicit `.*` — only reading/writing/matching the whole pointee value does.
@@ -163,13 +183,13 @@ Tagged unions combine a `u32` discriminant tag with a payload. Each variant may 
 
 **Construction:**
 ```mirage
-# Qualified form
+// Qualified form
 const c: Shape = Shape.circle{.radius = 3.0}
 
-# Contextual form (type inferred from annotation)
+// Contextual form (type inferred from annotation)
 mut r: Shape = .rect{.w = 4.0, .h = 5.0}
 
-# Payload-free
+// Payload-free
 const p: Shape = .point
 ```
 
@@ -187,7 +207,7 @@ type IoError = union(enum) {
     Closed
 }
 
-const e: IoError = .NotFound("missing.txt")   # sugar for .NotFound{.v = "missing.txt"}
+const e: IoError = .NotFound("missing.txt")   // sugar for .NotFound{.v = "missing.txt"}
 ```
 
 This never collides with an ordinary function call — a bare `.name` can
@@ -210,8 +230,8 @@ type Arg = union(enum) {
 fn take(a: Arg) -> i32 { ... }
 
 const n: usize = 42
-take(n)          # implicitly wrapped as Arg.size{.value = n}
-take("hello")    # implicitly wrapped as Arg.str{.value = "hello"}
+take(n)          // implicitly wrapped as Arg.size{.value = n}
+take("hello")    // implicitly wrapped as Arg.str{.value = "hello"}
 ```
 
 The match is exact (the argument's type must equal the variant's single payload-field type
@@ -228,7 +248,7 @@ error naming the union type and all matching variants — write an explicit
 fn(ParamType1, ParamType2) -> ReturnType
 fn(ParamType) -> (RetType1, RetType2)
 fn(*u8, ...) -> i32
-fn() -> void   # written as: fn()
+fn() -> void   // written as: fn()
 ```
 
 Function pointer types represent callable values. They are opaque pointers internally (8 bytes). The `nil` literal is assignable to any function pointer type; `default` produces a null function pointer.
@@ -242,11 +262,11 @@ Multi-return function pointer types use `-> (T1, T2)` syntax.
 ### Integer Literals
 
 ```mirage
-42          # decimal
-0xFF        # hexadecimal
-0b1010      # binary
-0o400       # octal
-1_000_000   # underscore separators allowed
+42          // decimal
+0xFF        // hexadecimal
+0b1010      // binary
+0o400       // octal
+1_000_000   // underscore separators allowed
 ```
 
 ### Float Literals
@@ -272,7 +292,7 @@ String literals have type `*u8` (null-terminated). The null terminator is append
 ```mirage
 'a'
 '\n'
-'\x41'      # 'A'
+'\x41'      // 'A'
 ```
 
 A character literal is a single byte in single quotes, with the same escape sequences as string
@@ -317,8 +337,8 @@ An enum value written contextually (`.field_name`) is valid anywhere the expecte
 
 ```mirage
 mut name: Type = expr
-mut name := expr          # type inferred from initializer
-mut name: Type            # default-initialized (struct fields, arrays, etc.)
+mut name := expr          // type inferred from initializer
+mut name: Type            // default-initialized (struct fields, arrays, etc.)
 ```
 
 `mut` declares a mutable local variable or module-level global.
@@ -348,8 +368,8 @@ mut val, _ := fallible_fn()
 ### The `default` Initializer
 
 ```mirage
-mut x: i32 = default      # zero
-mut p: Point = default    # each field default-initialized
+mut x: i32 = default      // zero
+mut p: Point = default    // each field default-initialized
 ```
 
 `default` initializes a value to its type-appropriate zero. For structs, each field is recursively default-initialized (using field-level default expressions if present).
@@ -357,7 +377,7 @@ mut p: Point = default    # each field default-initialized
 ### The `undefined` Initializer
 
 ```mirage
-mut x: i32 = undefined    # storage allocated, no initialization
+mut x: i32 = undefined    // storage allocated, no initialization
 ```
 
 `undefined` allocates storage but emits no initializer. Valid anywhere except `const` declarations. Use for performance-critical paths where initialization is immediately followed by an assignment.
@@ -406,8 +426,8 @@ consumes its `in` through a separate, restricted grammar.
 ### Arithmetic
 
 ```mirage
-a + b    # add (also: anyptr + integer)
-a - b    # subtract (also: anyptr - integer)
+a + b    // add (also: anyptr + integer)
+a - b    // subtract (also: anyptr - integer)
 a * b
 a / b
 a % b
@@ -418,8 +438,8 @@ Both operands must have the same type (no implicit promotion). `anyptr` supports
 ### Comparison
 
 ```mirage
-a == b   # equal
-a != b   # not equal
+a == b   // equal
+a != b   // not equal
 a < b
 a > b
 a <= b
@@ -431,18 +451,18 @@ Result type is `bool`. Both operands must be of assignable types.
 ### Logical
 
 ```mirage
-a && b   # logical AND (bool operands only)
-a || b   # logical OR (bool operands only)
+a && b   // logical AND (bool operands only)
+a || b   // logical OR (bool operands only)
 ```
 
 ### Bitwise
 
 ```mirage
-a & b    # bitwise AND
-a | b    # bitwise OR
-a ^ b    # bitwise XOR
-a << b   # shift left
-a >> b   # shift right
+a & b    // bitwise AND
+a | b    // bitwise OR
+a ^ b    // bitwise XOR
+a << b   // shift left
+a >> b   // shift right
 ```
 
 Both operands must have the same type.
@@ -452,10 +472,10 @@ Both operands must have the same type.
 ### Unary
 
 ```mirage
--x       # numeric negation
-!x       # logical NOT (bool only)
-~x       # bitwise NOT
-&x       # address-of (produces *T)
+-x       // numeric negation
+!x       // logical NOT (bool only)
+~x       // bitwise NOT
+&x       // address-of (produces *T)
 ```
 
 Note: dereference is **not** in this list — it is the postfix `.*` operator (`x.*`), not a prefix operator. See [Pointer Types](#pointer-types).
@@ -508,10 +528,10 @@ The target must be a mutable lvalue (a `mut` variable, a dereference, an array i
 ### Increment / Decrement
 
 ```mirage
-x++    # post-increment
-x--    # post-decrement
-++x    # pre-increment  (prefix form in unary)
---x    # pre-decrement  (prefix form in unary)
+x++    // post-increment
+x--    // post-decrement
+++x    // pre-increment  (prefix form in unary)
+--x    // pre-decrement  (prefix form in unary)
 ```
 
 Requires a mutable operand.
@@ -519,16 +539,16 @@ Requires a mutable operand.
 ### Member Access
 
 ```mirage
-value.field          # struct/union field
-pointer.field        # auto-deref through pointer
-module_name.symbol   # cross-module access
+value.field          // struct/union field
+pointer.field        // auto-deref through pointer
+module_name.symbol   // cross-module access
 ```
 
 ### Index and Slice
 
 ```mirage
-arr[i]            # array or slice index
-arr[start..end]   # slice expression (produces []T)
+arr[i]            // array or slice index
+arr[start..end]   // slice expression (produces []T)
 ```
 
 ### Function Call
@@ -536,8 +556,8 @@ arr[start..end]   # slice expression (produces []T)
 ```mirage
 fn_name(arg1, arg2)
 obj.method(arg1)
-fp(arg1)            # call through function pointer
-mod.fn_name(arg)    # cross-module call
+fp(arg1)            // call through function pointer
+mod.fn_name(arg)    // cross-module call
 ```
 
 **Spread argument:** `expr...` forwards an existing slice as the variadic argument of a call to a
@@ -560,7 +580,7 @@ and it is only legal when the callee's variadic parameter is native `...T` (not 
 
 ```mirage
 cast(expr, TargetType)
-cast(ptr, []T, length)   # create a slice from a pointer
+cast(ptr, []T, length)   // create a slice from a pointer
 ```
 
 Valid casts:
@@ -637,16 +657,16 @@ the callee can produce must also be a member of the caller's declared union.
 ### Braced Initializers
 
 ```mirage
-{.field = val, .field2 = val2} # struct initializer
-{val1, val2, val3}             # array initializer
-{}                             # empty (full default initialization)
+{.field = val, .field2 = val2} // struct initializer
+{val1, val2, val3}             // array initializer
+{}                             // empty (full default initialization)
 ```
 
 An array initializer's last value may end with `...` to fill all remaining elements with that same value (evaluated once):
 
 ```mirage
-mut npc_ids: [10]i32 = { -1... }              # all 10 elements set to -1
-const levels: [10]i32 = { 0, 1, 2, 3, 4, 5... } # 0, 1, 2, 3, 4, then five more 5s
+mut npc_ids: [10]i32 = { -1... }              // all 10 elements set to -1
+const levels: [10]i32 = { 0, 1, 2, 3, 4, 5... } // 0, 1, 2, 3, 4, then five more 5s
 ```
 
 ### Import Expression
@@ -703,11 +723,11 @@ Introduces a new scope. Variables declared inside are not visible outside.
 
 ```mirage
 if condition {
-    # then
+    // then
 } else if other_condition {
-    # else if
+    // else if
 } else {
-    # else
+    // else
 }
 ```
 
@@ -717,7 +737,7 @@ The `else` branch is optional. The condition must be `bool`. The body can be any
 
 ```mirage
 when condition {
-    # then — must be a compile-time constant expression
+    // then — must be a compile-time constant expression
 } else when other_condition {
     ...
 } else {
@@ -738,7 +758,7 @@ scope.
 
 ```mirage
 while condition {
-    # body
+    // body
 }
 ```
 
@@ -747,12 +767,12 @@ Loops while `condition` is `true`. The condition is `bool`. The body must be a b
 ### For Loop
 
 ```mirage
-for x in 0..10 { ... }        # range, exclusive upper bound
-for x in ..10 { ... }         # range with implicit lower bound of 0
-for x in some_slice { ... }   # element by value
-for i, x in some_slice { ... }  # index + element by value
-for &x in some_slice { ... }    # element by reference (*T)
-for i, &x in some_slice { ... } # index + element by reference
+for x in 0..10 { ... }        // range, exclusive upper bound
+for x in ..10 { ... }         // range with implicit lower bound of 0
+for x in some_slice { ... }   // element by value
+for i, x in some_slice { ... }  // index + element by value
+for &x in some_slice { ... }    // element by reference (*T)
+for i, &x in some_slice { ... } // index + element by reference
 ```
 
 Iterates a range (`lower..upper`, exclusive of `upper`), or a slice/fixed-size array. With a single
@@ -775,7 +795,7 @@ continue
 ```mirage
 return
 return value
-return val1, val2    # multi-return
+return val1, val2    // multi-return
 ```
 
 Returns from the current function. For multi-return functions, multiple values are returned separated by commas. Deferred statements run before the actual return.
@@ -828,7 +848,7 @@ fn alloc(n: usize) -> (anyptr, error(MemoryError)) {
 fn realloc(n: usize) -> (anyptr, error(MemoryError)) {
     const p, err := alloc(n)
     if err {
-        # 'err' is already an error(MemoryError) value; propagated as-is.
+        // 'err' is already an error(MemoryError) value; propagated as-is.
         return_err err
     }
     ...
@@ -860,9 +880,9 @@ values in order, matching the function's non-error return types exactly via
 the same checking rules as `return`.
 
 ```mirage
-return_ok named_type          # -> (*ast.NamedType, error(E))
-return_ok a, b                # -> (T1, T2, error(E))
-return_ok                     # -> error(E)  (bare error-only return)
+return_ok named_type          // -> (*ast.NamedType, error(E))
+return_ok a, b                // -> (T1, T2, error(E))
+return_ok                     // -> error(E)  (bare error-only return)
 ```
 
 Sema errors:
@@ -901,9 +921,9 @@ Statement-level counterpart to `match`. No exhaustiveness requirement. Arm bodie
 ```mirage
 mut x: i32 = 5
 mut x := 5
-mut x: i32           # default-initialized
+mut x: i32           // default-initialized
 const y := 10
-mut a, b := func()   # group declaration
+mut a, b := func()   // group declaration
 ```
 
 ---
@@ -914,11 +934,11 @@ mut a, b := func()   # group declaration
 
 ```mirage
 fn name(param1: Type1, mut param2: Type2) -> ReturnType {
-    # body
+    // body
 }
 
 pub fn name(p: Type) -> (T1, T2) {
-    # multi-return
+    // multi-return
 }
 ```
 
@@ -931,18 +951,18 @@ pub fn name(p: Type) -> (T1, T2) {
 
 ```mirage
 fn alloc(size: usize, zero_memory: bool = true) -> (anyptr, Allocator_Error)
-fn repeat(s: []u8, times := 3) -> []u8   # inferred type form
+fn repeat(s: []u8, times := 3) -> []u8   // inferred type form
 ```
 
 A parameter may declare a default value, used at call sites where the
 caller omits that argument (and every argument after it):
 
 ```mirage
-const p1 := try alloc(1024)          # zero_memory = true
-const p2 := try alloc(1024, false)   # zero_memory = false
+const p1 := try alloc(1024)          // zero_memory = true
+const p2 := try alloc(1024, false)   // zero_memory = false
 
-const s1 := repeat("hi")             # times = 3
-const s2 := repeat("hi", 5)          # times = 5
+const s1 := repeat("hi")             // times = 3
+const s2 := repeat("hi", 5)          // times = 5
 ```
 
 - **Two forms**: `name: Type = expr` declares the type explicitly; `name :=
@@ -991,8 +1011,8 @@ fn sum(base: i32, nums: ...i32) -> i32 {
     return total
 }
 
-sum(10)          # zero variadic args -> nums is an empty slice
-sum(10, 1, 2, 3) # nums is []i32{1, 2, 3}
+sum(10)          // zero variadic args -> nums is an empty slice
+sum(10, 1, 2, 3) // nums is []i32{1, 2, 3}
 ```
 
 The final parameter of a `fn` may be declared `name: ...T`, where `T` is any valid element type.
@@ -1006,7 +1026,7 @@ distinct from `ext fn`'s untyped C `...` varargs (see [Variadic Arguments](#17-v
 
 ```mirage
 ext fn puts(s: *u8) -> i32
-ext fn printf(fmt: *u8, ...) -> i32   # variadic
+ext fn printf(fmt: *u8, ...) -> i32   // variadic
 pub ext fn malloc(size: usize) -> anyptr
 ```
 
@@ -1029,9 +1049,9 @@ Declares an external C function. `ext fn` functions:
 
 The root module must define one of:
 ```mirage
-pub fn main()               # void; exits with code 0
-pub fn main() -> i32        # exits with this code
-pub fn main() -> error(E)   # exits 0 on Ok, 1 on Failed
+pub fn main()               // void; exits with code 0
+pub fn main() -> i32        // exits with this code
+pub fn main() -> error(E)   // exits 0 on Ok, 1 on Failed
 ```
 
 For freestanding builds (`--freestanding`), use `fn _start()` instead.
@@ -1070,8 +1090,8 @@ Both `match` (expression) and `switch` (statement) use the same arm pattern synt
 **Variant pattern** (for enum and tagged union operands):
 ```mirage
 .field_name
-.variant_name(capture)     # binds payload struct by value
-.variant_name(&capture)    # binds payload struct by reference (*PayloadType)
+.variant_name(capture)     // binds payload struct by value
+.variant_name(&capture)    // binds payload struct by reference (*PayloadType)
 ```
 
 **Literal pattern** (for integer and bool operands):
@@ -1113,7 +1133,7 @@ Matches any value. Must be the last arm. At most one `_` allowed per match/switc
 ```mirage
 impl TypeName {
     fn method_name(self) -> ReturnType {
-        # access self.field
+        // access self.field
     }
 
     pub fn mutable_method(mut self, arg: i32) -> i32 {
@@ -1182,7 +1202,7 @@ ABI representation.
 type Circle = struct { x: i32; y: i32; r: i32 }
 
 impl Drawable for Circle {
-    fn draw(self) { # draw the circle }
+    fn draw(self) { // draw the circle }
     fn bounding_box(self) -> (i32, i32, i32, i32) {
         return self.x - self.r, self.y - self.r,
                self.x + self.r, self.y + self.r
@@ -1215,7 +1235,7 @@ type Allocator = trait {
 
 impl Allocator for MyAllocator {
     fn alloc(self, size: usize, zero_memory: bool) -> (anyptr, Allocator_Error) {
-        # implementation
+        // implementation
     }
 }
 ```
@@ -1249,7 +1269,7 @@ involved:
 
 ```mirage
 mut circle: Circle = { .x = 10, .y = 10, .r = 5 }
-circle.draw()          # static dispatch: calls Circle's implementation directly
+circle.draw()          // static dispatch: calls Circle's implementation directly
 ```
 
 Method-call resolution on a concrete receiver checks the type's own bare
@@ -1264,10 +1284,10 @@ The source must be a pointer; coercing a bare (non-pointer) value is an
 error, as is coercing a pointer to a type that doesn't implement the trait.
 
 ```mirage
-mut shapes: [2]Drawable = { &circle, &rect }   # &circle, &rect coerce to Drawable handles
+mut shapes: [2]Drawable = { &circle, &rect }   // &circle, &rect coerce to Drawable handles
 
 for shape in shapes {
-    shape.draw()        # dynamic dispatch: resolved through the handle's vtable at runtime
+    shape.draw()        // dynamic dispatch: resolved through the handle's vtable at runtime
 }
 ```
 
@@ -1557,9 +1577,9 @@ default/operand.
 ### Example
 
 ```mirage
-# Core/Compiler/Options/main.mir
-const target_os   := import("Core/Compiler/Options").target_os     # chained '.field' shortcut
-const target_arch := import("Core/Compiler/Options").target_arch   # (see Import Expression)
+// Core/Compiler/Options/main.mir
+const target_os   := import("Core/Compiler/Options").target_os     // chained '.field' shortcut
+const target_arch := import("Core/Compiler/Options").target_arch   // (see Import Expression)
 
 const raylib_shared := @option("raylib_shared", false)
 
@@ -1637,9 +1657,9 @@ pub type MemoryError = enum(i32) {
 }
 
 pub type IoError = union(enum) {
-    NotFound:  []u8   # carries the path that wasn't found
-    Timeout:   u32     # carries the timeout value that elapsed
-    Closed             # no payload
+    NotFound:  []u8   // carries the path that wasn't found
+    Timeout:   u32     // carries the timeout value that elapsed
+    Closed             // no payload
 }
 ```
 
@@ -1667,10 +1687,10 @@ Fallible return values must be captured, propagated with `try`, or
 explicitly discarded with `_`; ignoring them is a sema error:
 
 ```mirage
-alloc(n)                      # sema error: ignored error result
-const ptr, _ := alloc(n)      # ok: explicitly discarded
-const ptr := try alloc(n)     # ok: propagated
-const ptr, err := alloc(n)    # ok: captured
+alloc(n)                      // sema error: ignored error result
+const ptr, _ := alloc(n)      // ok: explicitly discarded
+const ptr := try alloc(n)     // ok: propagated
+const ptr, err := alloc(n)    // ok: captured
 ```
 
 ### Internal Representation
@@ -1702,9 +1722,9 @@ block-scoped like any other local:
 ```mirage
 const data, err := load_file(path)
 if err {
-    # err is known Failed here
+    // err is known Failed here
 } else {
-    # err is known Ok here
+    // err is known Ok here
 }
 ```
 
@@ -1716,8 +1736,8 @@ definitely exits (`return`/`return_ok`/`return_err`/`break`/`continue`),
 ```mirage
 const data, err := load_file(path)
 if !err { return_ok data }
-# err is Failed here
-match err { ... }   # legal
+// err is Failed here
+match err { ... }   // legal
 ```
 
 Reassigning a `mut` error-tracked variable, or taking its address with
@@ -1823,8 +1843,8 @@ pub type Stream_Mode = enum(u8) {
     Size
 }
 
-pub type Stream_Modes = bitset(Stream_Mode)          # storage defaults to u32
-pub type Stream_Modes16 = bitset(Stream_Mode, u16)   # explicit storage type
+pub type Stream_Modes = bitset(Stream_Mode)          // storage defaults to u32
+pub type Stream_Modes16 = bitset(Stream_Mode, u16)   // explicit storage type
 ```
 
 The first argument names the **member enum** and must resolve to an enum
@@ -1849,8 +1869,8 @@ declaration site — not at each use site — by requiring `bit_index <
 storage_bits` for every variant:
 
 ```mirage
-type Small = enum(u8) { A B C D E F G Query }   # Query = 7
-type Bad = bitset(Small, u8)   # error: bit_index(Query) = 8, storage is only 8 bits
+type Small = enum(u8) { A B C D E F G Query }   // Query = 7
+type Bad = bitset(Small, u8)   // error: bit_index(Query) = 8, storage is only 8 bits
 ```
 
 ```
@@ -1868,9 +1888,9 @@ size/alignment (e.g. 2 bytes for `bitset(E, u16)`).
 ### Literals
 
 ```mirage
-const modes: Stream_Modes = {.Close, .Flush}   # set containing Close and Flush
-const empty: Stream_Modes = {}                 # zero value — no bits set
-const also_empty: Stream_Modes = default       # same as {}
+const modes: Stream_Modes = {.Close, .Flush}   // set containing Close and Flush
+const empty: Stream_Modes = {}                 // zero value — no bits set
+const also_empty: Stream_Modes = default       // same as {}
 ```
 
 A bitset literal is a braced set of `.Member` names (no `= expr`) — this is
@@ -1925,8 +1945,8 @@ sema error — `cast` to the storage type first.
 **`in` — membership testing**:
 
 ```mirage
-if .Close in modes { }               # single-member test
-if {.Close, .Flush} in modes { }     # subset test
+if .Close in modes { }               // single-member test
+if {.Close, .Flush} in modes { }     // subset test
 ```
 
 The left-hand side is a single `.Member` of the bitset's enum, or a
@@ -1954,7 +1974,7 @@ type annotation, return values, assignment to a storage-typed lvalue:
 
 ```mirage
 const modes: Stream_Modes = {.Close, .Flush}
-const raw: u16 = modes            # OK — bitset -> its storage type, expected-type position
+const raw: u16 = modes            // OK — bitset -> its storage type, expected-type position
 ```
 
 This coercion does **not** fire during binary-operator type resolution —
@@ -1967,8 +1987,8 @@ becomes a bitset:
 
 ```mirage
 const raw: u16 = 3
-const modes: Stream_Modes = raw            # error: type mismatch in assignment
-const modes2 := cast(raw, Stream_Modes)    # OK — explicit cast
+const modes: Stream_Modes = raw            // error: type mismatch in assignment
+const modes2 := cast(raw, Stream_Modes)    // OK — explicit cast
 ```
 
 **`cast` rules**:
@@ -1999,10 +2019,10 @@ ext fn SDL_SetWindowFlags(window: *SDL_Window, flags: WindowFlags)
 ext fn SDL_GetWindowFlags(window: *SDL_Window) -> WindowFlags
 
 const flags: WindowFlags = {.Resizable, .Shown}
-SDL_SetWindowFlags(win, flags)          # OK — flags passed as its storage integer
+SDL_SetWindowFlags(win, flags)          // OK — flags passed as its storage integer
 
 const current := SDL_GetWindowFlags(win)
-if .Resizable in current { }            # immediately usable — no cast needed
+if .Resizable in current { }            // immediately usable — no cast needed
 ```
 
 ### Worked Example
@@ -2024,13 +2044,13 @@ ext fn apply_modes(flags: Stream_Modes)
 pub fn main() -> i32 {
     mut modes: Stream_Modes = {.Close, .Flush}
 
-    modes += .Write        # set
-    modes -= .Close         # clear
-    modes ~= .Flush         # toggle
+    modes += .Write        // set
+    modes -= .Close         // clear
+    modes ~= .Flush         // toggle
 
     const required: Stream_Modes = {.Write, .Seek}
-    const combined := modes + required     # union
-    const common   := modes & required     # intersection
+    const combined := modes + required     // union
+    const common   := modes & required     // intersection
 
     if .Write in modes {
         modes += .Size
@@ -2039,10 +2059,10 @@ pub fn main() -> i32 {
         modes += .Seek
     }
 
-    const raw: u16 = modes                 # implicit coercion to storage type
-    const modes2 := cast(raw, Stream_Modes) # explicit cast from storage type
+    const raw: u16 = modes                 // implicit coercion to storage type
+    const modes2 := cast(raw, Stream_Modes) // explicit cast from storage type
 
-    apply_modes(modes)                     # ABI-transparent 'ext fn' call
+    apply_modes(modes)                     // ABI-transparent 'ext fn' call
 
     return cast(modes2, i32)
 }
@@ -2260,7 +2280,7 @@ constraints directly:
 ```mirage
 mut wide: i32 = undefined
 asm {
-    movzx eax, byte_value   # byte_value: u8 -> zero-extended into eax (32-bit)
+    movzx eax, byte_value   // byte_value: u8 -> zero-extended into eax (32-bit)
     mov &wide, eax
 }
 ```
@@ -2289,8 +2309,8 @@ second, **expression** form additionally names an output register whose
 value at block-exit becomes the expression's value:
 
 ```mirage
-asm -> eax { ... }              # result type inferred from context
-asm -> eax: i32 { ... }         # result type explicit
+asm -> eax { ... }              // result type inferred from context
+asm -> eax: i32 { ... }         // result type explicit
 ```
 
 Unlike the statement form, `asm -> reg [: type] { ... }` is a normal
@@ -2353,7 +2373,7 @@ same block:
 mut status: i32 = undefined
 const result: i32 = asm -> eax {
     mov eax, 42
-    mov &status, eax   # a second, independent output
+    mov &status, eax   // a second, independent output
 }
 ```
 

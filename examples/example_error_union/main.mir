@@ -1,6 +1,6 @@
-# example_error_union.mir — error(A | B) multi-member unions: unqualified and
-# qualified return_err, try crossing between differently-shaped (but
-# subset-compatible) error unions, and two-level match/switch dispatch.
+// example_error_union.mir — error(A | B) multi-member unions: unqualified and
+// qualified return_err, try crossing between differently-shaped (but
+// subset-compatible) error unions, and two-level match/switch dispatch.
 
 pub type MemoryError = enum(i32) {
     OutOfMemory = 1
@@ -25,9 +25,9 @@ fn open(path: []u8, fail: bool) -> error(IoError) {
     return_ok
 }
 
-# combo()'s error(MemoryError | IoError) is a strict superset of both
-# alloc()'s and open()'s own error types — 'try' must translate each
-# callee's Failed value into combo()'s own (differently tagged) union.
+// combo()'s error(MemoryError | IoError) is a strict superset of both
+// alloc()'s and open()'s own error types — 'try' must translate each
+// callee's Failed value into combo()'s own (differently tagged) union.
 fn combo(which: i32) -> error(MemoryError | IoError) {
     if which == 1 {
         const v := try alloc(true)
@@ -44,13 +44,13 @@ fn combo(which: i32) -> error(MemoryError | IoError) {
 }
 
 pub fn main() -> i32 {
-    # which=0: everything succeeds.
+    // which=0: everything succeeds.
     const ok_err := combo(0)
     if ok_err {
         return 1
     }
 
-    # which=1: single-member callee (alloc) translated into the wider union.
+    // which=1: single-member callee (alloc) translated into the wider union.
     const mem_err := combo(1)
     if !mem_err {
         return 2
@@ -64,7 +64,7 @@ pub fn main() -> i32 {
         .IoError(e): { return 3 }
     }
 
-    # which=2: multi-member callee (open) translated into the wider union.
+    // which=2: multi-member callee (open) translated into the wider union.
     const io_err := combo(2)
     if !io_err {
         return 4
@@ -79,7 +79,7 @@ pub fn main() -> i32 {
         }
     }
 
-    # which=3: return_err directly against the wider union (no translation).
+    // which=3: return_err directly against the wider union (no translation).
     const closed_err := combo(3)
     if !closed_err {
         return 7

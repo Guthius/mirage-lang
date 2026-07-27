@@ -1,7 +1,8 @@
 name = "Mirage"
 grammar = "mirage"
 path_suffixes = ["mir"]
-line_comments = ["# "]
+line_comments = ["// "]
+block_comment = ["/* ", " */"]
 autoclose_before = ";:.,=}])>"
 
 [[brackets]]

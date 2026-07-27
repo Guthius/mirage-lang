@@ -101,7 +101,7 @@ pub fn from_f64(buf: []u8, v: f64) -> ([]u8, error(StringError)) {
     tmp[pos] = '.'
     pos += 1
 
-    # fixed 6-digit fractional part
+    // fixed 6-digit fractional part
     mut scaled: u64 = cast(frac * 1000000.0, u64)
     mut digits: [6]u8
     mut k: usize = 6
