@@ -230,11 +230,11 @@ namespace sema {
                     LocalScope empty;
 
                     if constexpr (std::is_same_v<V, ast::ExtFunctionDecl>) {
-                        for (auto &p : v.params) resolve_type(p.type, module_path, sema_program, diag);
-                        if (v.return_type) resolve_type(*v.return_type, module_path, sema_program, diag);
+                        for (auto &p : v.params) resolve_type(p.type, module_path, sema_program, diag, &program);
+                        if (v.return_type) resolve_type(*v.return_type, module_path, sema_program, diag, &program);
                     } else if constexpr (std::is_same_v<V, ast::VarDecl>) {
                         std::optional<ResolvedType> declared_ty;
-                        if (v.type) declared_ty = resolve_type(*v.type, module_path, sema_program, diag);
+                        if (v.type) declared_ty = resolve_type(*v.type, module_path, sema_program, diag, &program);
                         if (v.init) {
                             check_expr(*v.init, empty, module_path, sema_program, diag, declared_ty, 0, -1, nullptr);
                         }
@@ -515,7 +515,7 @@ namespace sema {
         // the eventual real step 3 pass a no-op for a module already resolved here.
         for (auto &[name, sym] : module.symbols) {
             if (std::holds_alternative<TypeSymbol>(sym)) {
-                resolve_type_symbol(module_path, name, sema_program, diag, std::get<TypeSymbol>(sym).decl->location);
+                resolve_type_symbol(module_path, name, sema_program, diag, std::get<TypeSymbol>(sym).decl->location, &program);
             }
         }
 

@@ -443,7 +443,13 @@ namespace sema {
     }
 
     auto check_program(const ast::Program &program, DiagnosticEngine &diag, const Options &options = {}) -> Program;
-    auto resolve_type(const ast::Type &type, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType;
+    // 'ast_program' is only needed by callers that may run before every module is
+    // guaranteed to have been declared (the reentrant module-scope 'when' declare
+    // pass) — passing it lets a cross-module named type declare its target module
+    // on demand instead of failing with "module not found" purely because of
+    // Program::modules' unordered iteration order. Every other (post-declare-phase)
+    // caller safely omits it.
+    auto resolve_type(const ast::Type &type, const std::string &module_path, Program &program, DiagnosticEngine &diag, const ast::Program *ast_program = nullptr) -> ResolvedType;
     auto resolve_declared_type(const std::optional<ast::Type> &type, const std::optional<ast::Expr> &init,
                                 const std::string &module_path, Program &program, DiagnosticEngine &diag,
                                 const SourceLocation &decl_loc) -> std::optional<ResolvedType>;
@@ -463,7 +469,8 @@ namespace sema {
     auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType;
     auto intern_slice(Program &program, const ResolvedType &element) -> ResolvedType;
     auto intern_function_type(Program &program, FunctionTypeInfo sig) -> ResolvedType;
-    auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
+    // See resolve_type's 'ast_program' doc above — same on-demand-declare purpose.
+    auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const ast::Program *ast_program = nullptr) -> ResolvedType;
     auto resolve_global_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;
     // Lazily/reentrantly resolves a free function's full signature (param types —
     // inferring ':=' param types from their default expression — return types, and

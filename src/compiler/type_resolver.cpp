@@ -7,6 +7,13 @@
 #include <unordered_map>
 
 namespace sema {
+    // Ensures 'module_path' has been declared (build_symbol_table_for_module has run
+    // for it), declared in sema_declare.cpp — see its doc comment there. Called from
+    // this file so a cross-module named type reached before Program::modules'
+    // unordered iteration order gets to that module can declare it on demand instead
+    // of failing outright.
+    void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag);
+
     auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType {
         for (size_t i = 0; i < program.pointer_pointees.size(); ++i) {
             if (program.pointer_pointees[i] == pointee) {
@@ -116,13 +123,17 @@ namespace sema {
             SourceLocation location;
         };
 
-        auto walk_namespace_chain(const std::string &start_module, const ast::NamedType &named, Program &program, DiagnosticEngine &diag) -> std::optional<ChainTarget> {
+        auto walk_namespace_chain(const std::string &start_module, const ast::NamedType &named, Program &program, DiagnosticEngine &diag, const ast::Program *ast_program) -> std::optional<ChainTarget> {
             std::string current_module = start_module;
             const auto *current = &named;
             bool crossed = false;
 
             while (current->member != nullptr) {
                 auto mod_it = program.modules.find(current_module);
+                if (mod_it == program.modules.end() && ast_program) {
+                    ensure_module_declared(*ast_program, current_module, program, diag);
+                    mod_it = program.modules.find(current_module);
+                }
                 if (mod_it == program.modules.end()) {
                     diag.report_error(DiagnosticStage::Sema, current->location, std::format("internal error: module '{}' not found", current_module));
                     return std::nullopt;
@@ -156,6 +167,11 @@ namespace sema {
         struct Resolver {
             Program &program;
             DiagnosticEngine &diag;
+            // Non-null only when reached from a declare-phase call site that may run
+            // before every module is guaranteed declared — see resolve_type's doc
+            // comment in sema.hpp. Lets a cross-module reference declare its target
+            // module on demand instead of failing on iteration-order bad luck.
+            const ast::Program *ast_program = nullptr;
 
             auto find_type_symbol(ProgramModule &mod, const std::string &name, const SourceLocation &loc) const -> TypeSymbol * {
                 const auto it = mod.symbols.find(name);
@@ -174,7 +190,11 @@ namespace sema {
             }
 
             [[nodiscard]] auto resolve_final_shallow(const std::string &module_path, const std::string &name, const bool check_pub, const SourceLocation &loc) const -> ResolvedType {
-                const auto mod_it = program.modules.find(module_path);
+                auto mod_it = program.modules.find(module_path);
+                if (mod_it == program.modules.end() && ast_program) {
+                    ensure_module_declared(*ast_program, module_path, program, diag);
+                    mod_it = program.modules.find(module_path);
+                }
                 if (mod_it == program.modules.end()) {
                     return error(diag, loc, std::format("internal error: module '{}' not found", module_path));
                 }
@@ -200,7 +220,7 @@ namespace sema {
                 }
 
                 program.resolve_state.alias_resolving.insert(key);
-                Resolver inner{program, diag};
+                Resolver inner{program, diag, ast_program};
                 auto resolved = inner.resolve_type_impl(ts->decl->type, module_path);
                 program.resolve_state.alias_resolving.erase(key);
 
@@ -209,7 +229,11 @@ namespace sema {
             }
 
             [[nodiscard]] auto resolve_final_full(const std::string &module_path, const std::string &name, const bool check_pub, const SourceLocation &loc) const -> ResolvedType {
-                const auto mod_it = program.modules.find(module_path);
+                auto mod_it = program.modules.find(module_path);
+                if (mod_it == program.modules.end() && ast_program) {
+                    ensure_module_declared(*ast_program, module_path, program, diag);
+                    mod_it = program.modules.find(module_path);
+                }
                 if (mod_it == program.modules.end()) {
                     return error(diag, loc, std::format("internal error: module '{}' not found", module_path));
                 }
@@ -233,7 +257,7 @@ namespace sema {
                     }
 
                     program.resolve_state.struct_resolving.insert(key);
-                    Resolver inner{program, diag};
+                    Resolver inner{program, diag, ast_program};
                     inner.layout_struct(module_path, slot, std::get<std::unique_ptr<ast::StructType>>(ts->decl->type));
                     program.resolve_state.struct_resolving.erase(key);
 
@@ -246,7 +270,7 @@ namespace sema {
                     if (!info) return error(diag, loc, std::format("internal error: invalid enum index for '{}'", name));
                     if (info->layout_done) return *ts->resolved;
 
-                    Resolver inner{program, diag};
+                    Resolver inner{program, diag, ast_program};
                     inner.layout_enum(module_path, slot, std::get<std::unique_ptr<ast::EnumType>>(ts->decl->type));
                     return *ts->resolved;
                 }
@@ -263,7 +287,7 @@ namespace sema {
                     }
 
                     program.resolve_state.union_resolving.insert(key);
-                    Resolver inner{program, diag};
+                    Resolver inner{program, diag, ast_program};
                     inner.layout_union(module_path, slot, std::get<std::unique_ptr<ast::UnionType>>(ts->decl->type));
                     program.resolve_state.union_resolving.erase(key);
 
@@ -282,7 +306,7 @@ namespace sema {
                     }
 
                     program.resolve_state.bitset_resolving.insert(key);
-                    Resolver inner{program, diag};
+                    Resolver inner{program, diag, ast_program};
                     inner.layout_bitset(module_path, slot, std::get<std::unique_ptr<ast::BitsetType>>(ts->decl->type));
                     program.resolve_state.bitset_resolving.erase(key);
 
@@ -301,7 +325,7 @@ namespace sema {
                     }
 
                     program.resolve_state.trait_resolving.insert(key);
-                    Resolver inner{program, diag};
+                    Resolver inner{program, diag, ast_program};
                     inner.layout_trait(module_path, slot, std::get<std::unique_ptr<ast::TraitType>>(ts->decl->type));
                     program.resolve_state.trait_resolving.erase(key);
 
@@ -348,7 +372,7 @@ namespace sema {
 
             auto resolve_field_type(const std::string &module_path, const ast::Type &field_type, SourceLocation loc) -> ResolvedType {
                 if (auto *named = std::get_if<ast::NamedType>(&field_type)) {
-                    const auto target = walk_namespace_chain(module_path, *named, program, diag);
+                    const auto target = walk_namespace_chain(module_path, *named, program, diag, ast_program);
                     if (!target) {
                         return ResolvedType{.kind = TypeKind::Invalid};
                     }
@@ -389,7 +413,7 @@ namespace sema {
                 }
 
                 if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr.operand)) {
-                    if (const auto target = walk_namespace_chain(module_path, as_named_member(**member), program, diag)) {
+                    if (const auto target = walk_namespace_chain(module_path, as_named_member(**member), program, diag, ast_program)) {
                         const auto &mod = program.modules.at(target->module_path);
                         if (const auto it = mod.symbols.find(target->name); it != mod.symbols.end()) {
                             if (std::holds_alternative<TypeSymbol>(it->second)) {
@@ -639,7 +663,7 @@ namespace sema {
             }
 
             void layout_bitset(const std::string &module_path, const int slot, const std::unique_ptr<ast::BitsetType> &decl) {
-                const auto target = walk_namespace_chain(module_path, decl->member_type, program, diag);
+                const auto target = walk_namespace_chain(module_path, decl->member_type, program, diag, ast_program);
                 if (!target) {
                     program.bitsets[slot] = BitsetInfo{.layout_done = true};
                     return;
@@ -966,7 +990,7 @@ namespace sema {
                 members.reserve(decl.members.size());
 
                 for (const auto &named : decl.members) {
-                    const auto target = walk_namespace_chain(module_path, named, program, diag);
+                    const auto target = walk_namespace_chain(module_path, named, program, diag, ast_program);
                     if (!target) {
                         members.push_back(ResolvedType{.kind = TypeKind::Invalid});
                         continue;
@@ -1030,7 +1054,7 @@ namespace sema {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::PointerType>>) {
                             ResolvedType pointee;
                             if (auto *named = std::get_if<ast::NamedType>(&v->pointee)) {
-                                auto target = walk_namespace_chain(module_path, *named, program, diag);
+                                auto target = walk_namespace_chain(module_path, *named, program, diag, ast_program);
                                 pointee = target
                                               ? resolve_final_shallow(target->module_path, target->name, target->crossed_boundary, target->location)
                                               : ResolvedType{.kind = TypeKind::Invalid};
@@ -1040,7 +1064,7 @@ namespace sema {
                             return intern_pointer(program, pointee);
 
                         } else if constexpr (std::is_same_v<V, ast::NamedType>) {
-                            auto target = walk_namespace_chain(module_path, v, program, diag);
+                            auto target = walk_namespace_chain(module_path, v, program, diag, ast_program);
                             if (!target) return ResolvedType{.kind = TypeKind::Invalid};
                             return resolve_final_shallow(target->module_path, target->name, target->crossed_boundary, target->location);
 
@@ -1173,8 +1197,8 @@ namespace sema {
         return true;
     }
 
-    auto resolve_type(const ast::Type &type, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType {
-        Resolver resolver{program, diag};
+    auto resolve_type(const ast::Type &type, const std::string &module_path, Program &program, DiagnosticEngine &diag, const ast::Program *ast_program) -> ResolvedType {
+        Resolver resolver{program, diag, ast_program};
         return resolver.resolve_type_impl(type, module_path);
     }
 
@@ -1233,8 +1257,8 @@ namespace sema {
         return intern_array(program, ResolvedType{.kind = TypeKind::U8}, size, static_cast<uint32_t>(size), 1);
     }
 
-    auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType {
-        const Resolver resolver{program, diag};
+    auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const ast::Program *ast_program) -> ResolvedType {
+        const Resolver resolver{program, diag, ast_program};
         return resolver.resolve_final_full(module_path, name, false, loc);
     }
 }
