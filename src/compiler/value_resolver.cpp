@@ -501,6 +501,26 @@ namespace sema {
                     return evaluate_integer_constant(*g->decl->init, module_path, program);
                 }
 
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                    // Cross-module qualified const access, e.g. 'linux.EINVAL' or
+                    // 'import("...").EINVAL' — mirrors evaluate_const_value's identically-
+                    // shaped MemberExpr case (this evaluator has no DiagnosticEngine to call
+                    // resolve_global_symbol with, but by the time a match/switch arm pattern
+                    // reaches here it's already been through check_expr, which resolves the
+                    // referenced const's value as an ordinary side effect of type-checking it —
+                    // same reasoning as the IdentExpr case above not calling it either).
+                    const auto other_module_path = resolve_member_object_import_path(v->object, module_path, program);
+                    if (!other_module_path) return std::nullopt;
+
+                    const auto other_mod_it = program.modules.find(*other_module_path);
+                    if (other_mod_it == program.modules.end()) return std::nullopt;
+                    const auto other_sym_it = other_mod_it->second.symbols.find(v->member);
+                    if (other_sym_it == other_mod_it->second.symbols.end()) return std::nullopt;
+                    const auto *g = std::get_if<GlobalSymbol>(&other_sym_it->second);
+                    if (!g || g->is_mut || !g->decl->init) return std::nullopt;
+                    return evaluate_integer_constant(*g->decl->init, *other_module_path, program);
+                }
+
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
                     if (v->op == ast::UnaryOp::Negate) {
                         auto inner = evaluate_integer_constant(v->operand, module_path, program);
