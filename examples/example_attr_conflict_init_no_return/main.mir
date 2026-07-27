@@ -1,0 +1,14 @@
+// example_attr_conflict_init_no_return.mir — REJECTION CASE. '@init' + '@no_return' is a
+// conflicting attribute combination: an initializer must return control to the generated
+// '_init' so the next one can run, which is exactly what '@no_return' says never happens.
+//
+// Expected: compilation fails with
+//   error: '@init' and '@no_return' cannot be combined: an initializer must return control so
+//          the next one can run
+
+@(init, no_return)
+fn setup() {
+}
+
+pub fn main() {
+}

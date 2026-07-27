@@ -1,0 +1,13 @@
+// example_attr_init_bad_return.mir — REJECTION CASE. '@init' functions must return nothing or
+// 'error(...)' — any other return type is a sema error.
+//
+// Expected: compilation fails with
+//   error: '@init' functions must return nothing or 'error(...)'
+
+@init
+fn setup() -> i32 {
+    return 1
+}
+
+pub fn main() {
+}

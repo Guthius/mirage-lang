@@ -1,10 +1,10 @@
-// example_error_warn.mir — demonstrates '@error'/'@warn': compile-time diagnostic
+// example_error_warn.mir — demonstrates '#error'/'#warn': compile-time diagnostic
 // directives, normally guarded by a module-scope 'when' block (see example_raylib_link for
-// the full '@option'/'@link'/'when' pattern this borrows from, including 'target' living in
+// the full '#option'/'#link'/'when' pattern this borrows from, including 'target' living in
 // a separate 'opts' submodule rather than a local const — a local const initialized from
-// '@option' with an enum default, referenced by a module-scope 'when' in the SAME module,
-// currently hits a pre-existing sema bug unrelated to '@error'/'@warn'; see known_issues).
-// '@error' hard-fails the build the moment its branch is selected; '@warn' only emits a
+// '#option' with an enum default, referenced by a module-scope 'when' in the SAME module,
+// currently hits a pre-existing sema bug unrelated to '#error'/'#warn'; see known_issues).
+// '#error' hard-fails the build the moment its branch is selected; '#warn' only emits a
 // warning and compilation continues — both fully type-check their 'message' argument even
 // in the UNSELECTED branch, per the same "both branches always type-checked" rule 'when'
 // itself follows.
@@ -17,9 +17,9 @@
 const opts := import("opts")
 
 when opts.target == .BeOS {
-    @error("BeOS is not supported")
+    #error("BeOS is not supported")
 } else when opts.target == .Windows {
-    @warn("Windows support is experimental")
+    #warn("Windows support is experimental")
 }
 
 pub fn main() {

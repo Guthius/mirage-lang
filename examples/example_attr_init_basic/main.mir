@@ -1,0 +1,30 @@
+// example_attr_init_basic.mir — HAPPY PATH, multi-module. 'setup_a' (this module's '@init')
+// reads 'b.b_ready', a symbol from module 'b' — this is a real cross-module reference, so
+// sema's dependency graph (built from actual symbol references, not just the 'import' graph)
+// guarantees 'b's '@init' function runs first. If ordering were wrong (or '_init' weren't
+// called at all), 'a_ready' would still be 'false' by the time 'main' runs. Neither '@init'
+// function is 'pub' — that's deliberate: '_init' can call a private '@init' directly, since
+// it's emitted into the same compilation as everything else. Only 'a_ready'/'b_ready'
+// themselves need to be 'pub', since ordinary code (not just '_init') reads them cross-module.
+//
+// Expected: 'run' prints 'both ready' (proving b.setup_b() ran before a.setup_a(), which in
+// turn ran before main).
+
+const b := import("b")
+
+pub mut a_ready := false
+
+@init
+fn setup_a() {
+    a_ready = b.b_ready
+}
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub fn main() {
+    if a_ready && b.b_ready {
+        printf("both ready\n")
+    } else {
+        printf("NOT ready\n")
+    }
+}

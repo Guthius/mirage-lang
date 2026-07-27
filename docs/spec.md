@@ -505,7 +505,7 @@ ternary). Semantics depend on whether `condition` is a compile-time constant:
   branches are type-checked and emitted, and the result is chosen at runtime.
 
 See [Compile-Time Configuration](#compile-time-configuration) for how this
-combines with `@option` and `@link`, and the `when` *statement* (a related
+combines with `#option` and `#link`, and the `when` *statement* (a related
 but distinct construct — see [Statements](#6-statements)).
 
 ### Assignment
@@ -1079,6 +1079,12 @@ Macros are expression-level compile-time substitutions. They are called with the
 
 An optional `: Type` annotation between the parameter list and `->` declares the macro's result type explicitly. It's required when the body's type can't be inferred without context — for example a struct-literal body, which needs an expected type the same way a `const`/`mut` initializer does. When present, the body is checked against the declared type and a mismatch is reported on the macro declaration. When absent, the result type is inferred from the body, as before.
 
+### Declaration Attributes
+
+A `fn` declaration may be preceded by an `@name` attribute clause (`@naked`, `@no_return`,
+`@always_inline`, `@section("...")`, `@init`) — see [Declaration Attributes](#21-declaration-attributes)
+for the full syntax and semantics.
+
 ---
 
 ## 8. Match and Switch
@@ -1381,14 +1387,14 @@ Cross-module access uses dot notation. Only `pub` symbols are accessible from ou
 Seven coupled features let a module read compile-time-supplied
 configuration, conditionally compile declarations, statements, and linker
 inputs based on it, and surface configuration problems as sema
-diagnostics: `@option`, `@env`, `@link`, `@error`, `@warn`, the `when`
+diagnostics: `#option`, `#env`, `#link`, `#error`, `#warn`, the `when`
 statement, and the `when` expression.
 
-### `@option`
+### `#option`
 
 ```mirage
-@option(key)
-@option(key, default)
+#option(key)
+#option(key, default)
 ```
 
 A compile-time expression that reads a value supplied by the compiler
@@ -1402,9 +1408,9 @@ error: required option 'build/target_os' was not provided.
        Pass it with: --opt build/target_os=<value>
 ```
 
-`@option` is legal anywhere an expression is legal — nested inside
-arithmetic (`@option(...) + 1`), passed as a function argument (including
-`@link`'s `data` argument), as a `mut` variable's initializer, and so on.
+`#option` is legal anywhere an expression is legal — nested inside
+arithmetic (`#option(...) + 1`), passed as a function argument (including
+`#link`'s `data` argument), as a `mut` variable's initializer, and so on.
 Its value is always resolved once from `--opt`/the default and cached, so it
 behaves as an ordinary compile-time-constant expression wherever it appears.
 
@@ -1419,16 +1425,16 @@ behaves as an ordinary compile-time-constant expression wherever it appears.
 - Integer types (`i32`, `u32`, `usize`, ...): parsed as a decimal integer. Out-of-range or non-numeric is a sema error.
 - `[]u8`: the raw string, unconverted.
 - Enum types: matched first by variant name (case-sensitive), then by integer value (e.g. `--opt build/target_os=Windows` and `--opt build/target_os=1` can both select the same variant). Neither matching is a sema error naming the valid variant names.
-- Any other target type: a sema error — `@option` does not support it.
+- Any other target type: a sema error — `#option` does not support it.
 
-### `@env`
+### `#env`
 
 ```mirage
-@env(key)
-@env(key, default)
+#env(key)
+#env(key, default)
 ```
 
-Identical to `@option` in every respect — legality, target-type resolution,
+Identical to `#option` in every respect — legality, target-type resolution,
 value coercion, and the required-value error shape — except that `key`
 names an **environment variable** instead of a `--opt` key, and the value
 comes from `std::getenv(key)` (read once at compile time, on the machine
@@ -1440,14 +1446,14 @@ error: required environment variable 'MIRAGE_TARGET_ARCH' was not set.
 ```
 
 ```mirage
-pub const target_os:   OperatingSystem = @env("MIRAGE_TARGET_OS",   .Linux)
-pub const target_arch: Architecture    = @env("MIRAGE_TARGET_ARCH", .X86_64)
+pub const target_os:   OperatingSystem = #env("MIRAGE_TARGET_OS",   .Linux)
+pub const target_arch: Architecture    = #env("MIRAGE_TARGET_ARCH", .X86_64)
 ```
 
-### `@link`
+### `#link`
 
 ```mirage
-@link(category, data)
+#link(category, data)
 ```
 
 `category` is one of `lib`, `system`, or `flag` (bare identifiers, not
@@ -1458,56 +1464,56 @@ verbatim as a raw linker flag. `data` must be a compile-time constant
 `[]u8` expression — a `when` expression is legal here:
 
 ```mirage
-@link(lib, "raylibdll.lib" when raylib_shared else "raylib.lib")
+#link(lib, "raylibdll.lib" when raylib_shared else "raylib.lib")
 ```
 
-`@link` is legal only at module scope, or inside a module-scope `when`
+`#link` is legal only at module scope, or inside a module-scope `when`
 block; anywhere else (a function body, an `if`, etc.) it is a sema error:
 
 ```
-error: '@link' is a linker directive and may only appear at module scope
+error: '#link' is a linker directive and may only appear at module scope
        or inside a module-scope 'when' block.
 ```
 
-The compiler collects every `@link` directive reachable from a *live*
+The compiler collects every `#link` directive reachable from a *live*
 `when` branch (see below), across every compiled module, into a single
 list the driver can act on (the exact linking mechanism is driver-specific
 and out of the compiler's scope — collection only).
 
-### `@error` / `@warn`
+### `#error` / `#warn`
 
 ```mirage
-@error(message)
-@warn(message)
+#error(message)
+#warn(message)
 ```
 
-Compile-time diagnostic directives: `@error` emits a sema **error** at the
-directive's location; `@warn` emits a sema **warning**. `message` must be a
-compile-time constant `[]u8` expression, exactly like `@link`'s `data`
-argument. On their own, both are unconditional — `@error(...)` reached
+Compile-time diagnostic directives: `#error` emits a sema **error** at the
+directive's location; `#warn` emits a sema **warning**. `message` must be a
+compile-time constant `[]u8` expression, exactly like `#link`'s `data`
+argument. On their own, both are unconditional — `#error(...)` reached
 anywhere in a live position always fails the build. Their real use is
 inside a `when` block, to reject or flag configurations at the point
 they're selected instead of failing later with a less specific error:
 
 ```mirage
 when target_os == .Windows {
-    @error("Windows is not supported")
+    #error("Windows is not supported")
 } else when target_arch == .Wasm32 {
-    @warn("Wasm32 support is experimental")
+    #warn("Wasm32 support is experimental")
 }
 ```
 
-Like `@link`, `@error`/`@warn` are legal only at module scope, or inside a
+Like `#link`, `#error`/`#warn` are legal only at module scope, or inside a
 module-scope `when` block; anywhere else (a function body, an `if`, etc.)
 it is a sema error:
 
 ```
-error: '@error' is a compile-time diagnostic directive and may only appear
+error: '#error' is a compile-time diagnostic directive and may only appear
        at module scope or inside a module-scope 'when' block.
 ```
 
 The **unselected** branch of a `when` still fully type-checks an
-`@error`/`@warn` directive's `message` argument (per the "both branches
+`#error`/`#warn` directive's `message` argument (per the "both branches
 type-checked" rule below) — it just never actually emits the diagnostic.
 
 ### `when` Statement
@@ -1540,13 +1546,13 @@ emitted by codegen; the other branch is never executed and never even
 visited by codegen (an `ext fn` declared only in an unselected module-scope
 branch, for instance, never needs an LLVM declaration synthesized for it).
 
-**At module scope**, a `when` block may contain only `@link`, `@error`, and
-`@warn` declarations, `const` declarations initialized directly with
-`@option`/`@env`, `type` declarations, and `ext fn` declarations — anything
+**At module scope**, a `when` block may contain only `#link`, `#error`, and
+`#warn` declarations, `const` declarations initialized directly with
+`#option`/`#env`, `type` declarations, and `ext fn` declarations — anything
 else is a sema error:
 
 ```
-error: only '@link', '@error', '@warn', 'const' with '@option'/'@env',
+error: only '#link', '#error', '#warn', 'const' with '#option'/'#env',
        'type', and 'ext fn' declarations are permitted inside a
        module-scope 'when' block.
 ```
@@ -1563,15 +1569,15 @@ A name declared only inside a module-scope `when`'s selected branch is an
 ordinary symbol wherever it's visible; a name declared only in the
 *unselected* branch simply doesn't exist — referencing it (even from the
 other branch of the same `when`) is an ordinary "unknown identifier" error,
-not a special diagnostic. `@link` is collected only from the selected
-branch; the unselected branch's `@link` `data` expression is still fully
+not a special diagnostic. `#link` is collected only from the selected
+branch; the unselected branch's `#link` `data` expression is still fully
 type-checked (per the "both branches type-checked" rule above), just never
 collected.
 
 ### `when` Expression
 
 See [`when` Expression](#when-expression) under Expressions — same
-construct, used here as `@link`'s `data` argument or an `@option`/`@env`
+construct, used here as `#link`'s `data` argument or an `#option`/`#env`
 default/operand.
 
 ### Example
@@ -1581,16 +1587,16 @@ default/operand.
 const target_os   := import("Core/Compiler/Options").target_os     // chained '.field' shortcut
 const target_arch := import("Core/Compiler/Options").target_arch   // (see Import Expression)
 
-const raylib_shared := @option("raylib_shared", false)
+const raylib_shared := #option("raylib_shared", false)
 
 when target_os == .Windows {
-    @link(lib, "windows/raylibdll.lib" when raylib_shared else "windows/raylib.lib")
-    @link(system, "User32")
+    #link(lib, "windows/raylibdll.lib" when raylib_shared else "windows/raylib.lib")
+    #link(system, "User32")
 } else when target_os == .Linux {
-    @link(lib, "linux/libraylib.so.600" when raylib_shared else "linux/libraylib.a")
-    @link(system, "dl")
+    #link(lib, "linux/libraylib.so.600" when raylib_shared else "linux/libraylib.a")
+    #link(system, "dl")
 } else {
-    @link(lib, "raylib")
+    #link(lib, "raylib")
 }
 
 ext fn InitWindow(width: i32, height: i32, title: *u8)
@@ -2079,12 +2085,16 @@ The following identifiers are reserved by the language:
 `ext` is parsed as an identifier, not a keyword; it is used as the prefix
 for extern function declarations. `option`, `env`, `link`, and `warn` are
 likewise parsed as plain identifiers, not keywords — they're only
-meaningful immediately after the `@` sigil (`@option(...)`, `@env(...)`,
-`@link(...)`, `@warn(...)`, see
+meaningful immediately after the `#` sigil (`#option(...)`, `#env(...)`,
+`#link(...)`, `#warn(...)`, see
 [Compile-Time Configuration](#12-compile-time-configuration)) and remain
 ordinary, unreserved identifiers everywhere else. `error` (used both as the
-`error(T)` type syntax and after `@` in `@error(...)`) IS a reserved
-keyword, unlike its three siblings above.
+`error(T)` type syntax and after `#` in `#error(...)`) IS a reserved
+keyword, unlike its three siblings above. `no_return`, `naked`,
+`always_inline`, `section`, and `init` are likewise parsed as plain
+identifiers, not keywords — meaningful only immediately after the `@`
+sigil (`@no_return`, `@naked`, `@always_inline`, `@section(...)`,
+`@init`, see [Declaration Attributes](#21-declaration-attributes)).
 
 ### Reserved for Future Use
 
@@ -2385,3 +2395,154 @@ and "Out of Scope for v1" above):
 error: register 'xmm0' is not supported in inline asm (v1)
 error: expected a register name after 'asm ->'
 ```
+
+---
+
+## 21. Declaration Attributes
+
+`@name` / `@name(args)` precedes a `fn` declaration, attaching compiler-recognized metadata
+to it. Attributes are currently legal only on `fn` (not `ext fn`, methods inside `impl`
+blocks, or any other declaration kind), and `pub`, if present, comes before the attribute:
+
+```mirage
+pub @naked
+fn raw_entry() {
+    asm { ret }
+}
+```
+
+### Syntax
+
+```mirage
+@naked                        // single — no arguments
+@(naked, no_return)           // grouped — two or more attributes, no arguments
+@section(".text.init")        // single — with an argument
+```
+
+Only one attribute *clause* may precede a declaration. Two separate clauses
+(`@naked @no_return`) are a parse error; combine them with the grouped form
+(`@(naked, no_return)`) instead. A grouped-form member never takes its own argument list —
+`@(section(".text"))` is a parse error, since only the single `@name(args)` form takes
+arguments. `@(naked)` (a single-member grouped form) is legal — there's no reason to
+special-case it away.
+
+### Known Attributes
+
+`no_return`, `naked`, `always_inline`, `section`, and `init` are the only recognized names.
+Any other name is a sema error:
+
+```
+error: unknown attribute '@foo'. Known attributes: no_return, naked, always_inline, section, init.
+```
+
+Every attribute argument (`@section`'s string, once arguments are involved) must be a
+compile-time constant expression.
+
+### `@no_return`
+
+Declares that the function never returns control to its caller (it loops forever, calls a
+process-exit primitive, etc.). The prologue/epilogue are unaffected — the only difference is
+codegen marking the function (and every call to it) `noreturn` in the emitted LLVM IR, which
+lets LLVM omit the (unreachable) successor block after a call.
+
+A `@no_return` function whose return type is neither void nor `error(...)` is a warning, not
+an error — the function still compiles, but the value return type can never actually be
+returned:
+
+```
+warning: a '@no_return' function with a value return type will never return its value
+```
+
+### `@naked`
+
+Suppresses the compiler-generated prologue and epilogue entirely: no stack frame setup, no
+callee-saved register preservation, no implicit `ret`. The function body is expected to
+handle all of that itself via inline `asm`.
+
+If the body contains any statement other than an `asm { ... }` block, a warning is emitted
+(not an error — the function still compiles, but a naked function's non-asm statements
+implicitly assume a valid stack frame the compiler never set up):
+
+```
+warning: '@naked' function contains a non-'asm' statement; naked functions should contain
+         only inline 'asm' blocks, since the compiler emits no prologue/epilogue for them
+```
+
+### `@always_inline`
+
+Requests that the function be inlined at every direct call site (LLVM's `alwaysinline`
+attribute). If the function's address is ever taken — assigned to a function-pointer-typed
+variable, passed as a callback, returned, etc. — a warning is emitted, since calls made
+through that pointer can't be inlined (the function still exists as an ordinary callable
+symbol; only indirect calls lose the inlining):
+
+```
+warning: taking the address of '@always_inline' function 'f'. Calls through a function
+         pointer cannot be inlined. The function will still exist as a symbol but the
+         '@always_inline' attribute has no effect on indirect calls.
+```
+
+### `@section("name")`
+
+Places the function in the named ELF section instead of the default `.text`. The argument
+must be a non-empty compile-time-constant `[]u8` string; an empty string is a sema error.
+The section name is passed to the linker verbatim — Mirage does not validate ELF section
+naming conventions itself.
+
+### `@init`
+
+Marks the function as a module initializer, automatically called once before `main` (hosted
+builds) or via the generated `_init` (freestanding builds — see below). Restrictions:
+
+- Must take no parameters.
+- Must return nothing or `error(SomeEnum)` — any other return type is a sema error.
+- Is not allowed on a method inside an `impl` block (declare a module-scope function instead):
+
+```
+error: '@init' is not allowed on impl methods; declare a module-scope function instead
+```
+
+A module may declare more than one `@init` function; same-module `@init` functions always run
+in source declaration order. Unlike ordinary functions, `@init` does **not** need to be `pub`
+to be called from another module's ordering — the generated `_init` is emitted into the same
+compilation as every other function in the program, so it can call a private `@init` function
+directly. In fact, the common case is the opposite of `pub`: a module's initializer usually
+has no business being an ordinary externally-callable symbol at all.
+
+**Ordering.** If one module's `@init` function references a symbol (a variable read/write, or
+a function call) declared in another module, that other module's `@init` function(s) — if any
+— are guaranteed to run first. This dependency graph is built from actual symbol references
+made in `@init` function bodies, not merely from the `import` graph: an `@init` function that
+never touches a given imported module doesn't create an ordering dependency on it. A cycle in
+this graph is a sema error naming both modules:
+
+```
+error: circular '@init' dependency: module 'A' requires module 'B' to initialize first, but
+       'B' also (transitively) requires 'A' to initialize first
+```
+
+**Generated `_init`.** The compiler synthesizes a function named `_init` that calls every
+`@init` function across the program in the order described above. In hosted builds, `_init`
+is called from the generated `_start`, before `main`. If any `@init` function returns a
+non-Ok `error(...)`, `_init` immediately terminates the process with exit code `1` — a fixed
+sentinel, not the raw error value (which has no defined integer representation outside the
+function's own context) — and `main` never runs.
+
+In **freestanding builds** (`--freestanding`), `_init` is still generated, but `_start` is
+not (as today, freestanding builds provide their own `_start`) — the user's `_start` is
+responsible for calling `_init` itself at the appropriate time.
+
+**`--noinit`.** Passing `--noinit` to the driver skips generating `_init` entirely (and, in
+hosted builds, skips the `_start` call to it). Every `@init` function still compiles normally
+and remains individually callable — only the automatic invocation is suppressed.
+
+### Conflicting Attributes
+
+Some combinations are rejected outright:
+
+- `@naked` + `@always_inline` — a naked function has no compiler-generated body shape to
+  inline.
+- `@init` + `@naked` — init functions must be callable normally (from the generated `_init`).
+- `@init` + `@no_return` — an initializer must return control so the next one can run.
+- `@init` + `@always_inline` — init functions are called once, from generated code; inlining
+  them defeats the purpose.

@@ -1,0 +1,8 @@
+const a := import("..")
+
+pub mut b_state := 0
+
+@init
+fn init_b() {
+    a.a_state = 1
+}

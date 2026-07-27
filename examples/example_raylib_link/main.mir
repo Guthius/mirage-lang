@@ -1,4 +1,4 @@
-// example_raylib_link.mir — the raylib-binding-header shape from the @option/@link/when
+// example_raylib_link.mir — the raylib-binding-header shape from the #option/#link/when
 // task's definition of done. 'opts' is a local stand-in for the stdlib's
 // Core/Compiler/Options module (see opts/main.mir) since the real stdlib lives in a
 // separate repo, not this one.
@@ -11,27 +11,27 @@
 
 const opts := import("opts")
 
-const raylib_shared := @option("raylib_shared", false)
-const raylib_wasm_lib := @option("raylib_wasm_lib", "wasm/libraylib.web.a")
+const raylib_shared := #option("raylib_shared", false)
+const raylib_wasm_lib := #option("raylib_wasm_lib", "wasm/libraylib.web.a")
 
 when opts.target_os == .Windows {
-    @link(flag, "/NODEFAULTLIB:msvcrt" when raylib_shared else "/NODEFAULTLIB:libcmt")
-    @link(lib, "windows/raylibdll.lib" when raylib_shared else "windows/raylib.lib")
-    @link(system, "Winmm")
-    @link(system, "Gdi32")
-    @link(system, "User32")
-    @link(system, "Shell32")
+    #link(flag, "/NODEFAULTLIB:msvcrt" when raylib_shared else "/NODEFAULTLIB:libcmt")
+    #link(lib, "windows/raylibdll.lib" when raylib_shared else "windows/raylib.lib")
+    #link(system, "Winmm")
+    #link(system, "Gdi32")
+    #link(system, "User32")
+    #link(system, "Shell32")
 } else when opts.target_os == .Linux {
     when opts.target_arch == .Arm64 {
-        @link(lib, "linux-arm64/libraylib.so.600" when raylib_shared else "linux-arm64/libraylib.a")
+        #link(lib, "linux-arm64/libraylib.so.600" when raylib_shared else "linux-arm64/libraylib.a")
     } else {
-        @link(lib, "linux/libraylib.so.600" when raylib_shared else "linux/libraylib.a")
+        #link(lib, "linux/libraylib.so.600" when raylib_shared else "linux/libraylib.a")
     }
-    @link(system, "dl")
-    @link(system, "pthread")
-    @link(system, "X11")
+    #link(system, "dl")
+    #link(system, "pthread")
+    #link(system, "X11")
 } else {
-    @link(lib, raylib_wasm_lib when (opts.target_os == .Wasm32) else "raylib")
+    #link(lib, raylib_wasm_lib when (opts.target_os == .Wasm32) else "raylib")
 }
 
 ext fn InitWindow(width: i32, height: i32, title: *u8)

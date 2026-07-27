@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Declaration Attributes — Mirage</title>
+  <meta name="description" content="@naked, @no_return, @always_inline, @section, and @init: compiler-recognized metadata attached to a function declaration.">
+  <script src="theme-init.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" aria-label="Toggle navigation"><span></span><span></span><span></span></button>
+  <a href="index.html" class="topbar-logo">mir<span>age</span></a>
+</div>
+<div class="sidebar-backdrop"></div>
+
+<div class="layout">
+
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+      <button class="theme-toggle" aria-label="Toggle color theme">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+    </div>
+    <nav>
+      <div class="sidebar-section">Introduction</div>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="getting-started.html">Getting Started</a></li>
+      </ul>
+      <div class="sidebar-section">Language</div>
+      <ul>
+        <li><a href="types.html">Types</a></li>
+        <li><a href="functions.html">Functions</a></li>
+        <li><a href="control-flow.html">Control Flow</a></li>
+        <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="traits.html">Traits</a></li>
+        <li><a href="error-handling.html">Error Handling</a></li>
+        <li><a href="modules.html">Modules</a></li>
+        <li><a href="comptime-config.html">Compile-Time Config</a></li>
+        <li><a href="inline-assembly.html">Inline Assembly</a></li>
+        <li><a href="attributes.html" class="active">Declaration Attributes</a></li>
+      </ul>
+      <div class="sidebar-section">Reference</div>
+      <ul>
+        <li><a href="grammar.html">Grammar</a></li>
+      </ul>
+    </nav>
+    <div class="sidebar-footer">Mirage Language<br>Documentation</div>
+  </aside>
+
+  <main class="main">
+    <div class="content">
+
+      <h1>Declaration Attributes</h1>
+      <p class="subtitle">Compiler-recognized metadata attached to a function: <code>@naked</code>, <code>@no_return</code>, <code>@always_inline</code>, <code>@section("...")</code>, and <code>@init</code>.</p>
+
+      <p>
+        An <code>@name</code> attribute clause may precede a <code>fn</code> declaration, attaching
+        compiler-recognized behavior to it — suppressing the prologue/epilogue, forcing inlining,
+        placing it in a specific ELF section, or marking it as a module initializer. Attributes are
+        currently legal only on module-scope <code>fn</code> declarations — not <code>ext fn</code>,
+        not methods inside an <code>impl</code> block.
+      </p>
+
+      <div class="callout">
+        <div class="callout-title"><code>pub</code> comes first</div>
+        If a declaration is both <code>pub</code> and attributed, <code>pub</code> precedes the
+        attribute:
+        <pre><code><span class="kw">pub</span> <span class="kw">@naked</span>
+<span class="kw">fn</span> <span class="fn">raw_entry</span>() {
+    <span class="kw">asm</span> { ret }
+}</code></pre>
+        Never <code>@naked pub fn ...</code> — that order is a parse error.
+      </div>
+
+      <h2>Syntax</h2>
+      <pre><code><span class="kw">@naked</span>                        <span class="cmt">// single — no arguments</span>
+<span class="kw">@(naked, no_return)</span>           <span class="cmt">// grouped — two or more, no arguments</span>
+<span class="kw">@section</span>(<span class="str">".text.init"</span>)        <span class="cmt">// single — with an argument</span></code></pre>
+      <p>
+        Only one attribute <em>clause</em> may precede a declaration. Two separate clauses on the
+        same declaration are a parse error:
+      </p>
+      <pre><code><span class="cmt">// error: expected declaration, got '@'</span>
+<span class="kw">@naked</span> <span class="kw">@no_return</span>
+<span class="kw">fn</span> <span class="fn">f</span>() { }</code></pre>
+      <p>Use the grouped form instead, which accepts one or more names:</p>
+      <pre><code><span class="kw">@(naked, no_return)</span>   <span class="cmt">// legal — a single grouped clause</span>
+<span class="kw">fn</span> <span class="fn">f</span>() { <span class="kw">asm</span> { ret } }</code></pre>
+      <p>
+        A grouped-form member never takes its own argument list — only the ungrouped
+        <code>@name(args)</code> form takes arguments:
+      </p>
+      <pre><code><span class="cmt">// error: a grouped attribute ('@(...)') cannot take arguments;
+// use the single '@name(args)' form instead</span>
+<span class="kw">@(section</span>(<span class="str">".text"</span>)<span class="kw">)</span>
+<span class="kw">fn</span> <span class="fn">f</span>() { }</code></pre>
+
+      <h2>Known Attributes</h2>
+      <p>
+        <code>no_return</code>, <code>naked</code>, <code>always_inline</code>, <code>section</code>,
+        and <code>init</code> are the only recognized names. Anything else is a sema error:
+      </p>
+      <pre><code>error: unknown attribute '@foo'. Known attributes: no_return, naked, always_inline, section, init.</code></pre>
+
+      <h2><code>@no_return</code></h2>
+      <p>
+        Declares that the function never returns control to its caller — it loops forever, calls a
+        process-exit primitive, panics, etc. The prologue/epilogue are unaffected; the only
+        difference is codegen marking the function (and every call to it) LLVM <code>noreturn</code>,
+        letting LLVM omit the unreachable successor block after a call.
+      </p>
+      <p>
+        A <code>@no_return</code> function whose return type is neither void nor <code>error(...)</code>
+        still compiles — but produces a warning, since the value can never actually be returned:
+      </p>
+      <pre><code>warning: a '@no_return' function with a value return type will never return its value</code></pre>
+
+      <h2><code>@naked</code></h2>
+      <p>
+        Suppresses the compiler-generated prologue and epilogue entirely: no stack frame setup, no
+        callee-saved register preservation, no implicit <code>ret</code>. The function body is
+        expected to handle all of that itself, typically via inline <code>asm</code>.
+      </p>
+      <pre><code><span class="kw">@naked</span>
+<span class="kw">fn</span> <span class="fn">raw</span>() {
+    <span class="kw">asm</span> {
+        ret
+    }
+}</code></pre>
+      <p>
+        If the body contains any statement other than an <code>asm { ... }</code> block, a warning
+        (not an error — the function still compiles) is emitted, since a naked function's non-asm
+        code implicitly assumes a valid stack frame the compiler never set up:
+      </p>
+      <pre><code>warning: '@naked' function contains a non-'asm' statement; naked functions should contain
+         only inline 'asm' blocks, since the compiler emits no prologue/epilogue for them</code></pre>
+
+      <h2><code>@always_inline</code></h2>
+      <p>
+        Requests that the function be inlined at every direct call site (LLVM's
+        <code>alwaysinline</code>). If the function's address is ever taken — assigned to a
+        function-pointer-typed variable, passed as a callback, returned — a warning is emitted, since
+        calls made through that pointer can't be inlined:
+      </p>
+      <pre><code><span class="kw">@always_inline</span>
+<span class="kw">fn</span> <span class="fn">add</span>(<span class="var">a</span>: <span class="ty">i32</span>, <span class="var">b</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
+    <span class="kw">return</span> <span class="var">a</span> + <span class="var">b</span>
+}
+
+<span class="kw">pub fn</span> <span class="fn">main</span>() {
+    <span class="kw">const</span> <span class="var">fp</span>: <span class="kw">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> = <span class="fn">add</span>
+    <span class="cmt">// warning: taking the address of '@always_inline' function 'add'. ...</span>
+}</code></pre>
+      <p>
+        The function still exists as an ordinary callable symbol — only indirect calls through the
+        pointer lose the inlining; <code>@always_inline</code> has no effect on them.
+      </p>
+
+      <h2><code>@section("name")</code></h2>
+      <p>
+        Places the function in the named ELF section instead of the default <code>.text</code>. The
+        argument must be a non-empty compile-time-constant <code>[]u8</code> string:
+      </p>
+      <pre><code><span class="kw">@section</span>(<span class="str">".text.boot"</span>)
+<span class="kw">fn</span> <span class="fn">boot_entry</span>() {
+    <span class="kw">asm</span> { ret }
+}</code></pre>
+      <p>An empty string is a sema error:</p>
+      <pre><code>error: '@section' argument must not be an empty string</code></pre>
+      <p>
+        The section name is passed to the linker verbatim — Mirage does not validate ELF section
+        naming conventions itself.
+      </p>
+
+      <h2><code>@init</code></h2>
+      <p>
+        Marks the function as a module initializer, automatically called once before
+        <code>main</code> (hosted builds) or via the generated <code>_init</code> (freestanding
+        builds — see below).
+      </p>
+      <pre><code><span class="kw">@init</span>
+<span class="kw">fn</span> <span class="fn">setup</span>() {
+    <span class="cmt">// runs once, before main — no 'pub' needed</span>
+}</code></pre>
+
+      <h3>Restrictions</h3>
+      <ul>
+        <li>Must take no parameters.</li>
+        <li>Must return nothing or <code>error(SomeEnum)</code> — any other return type is a sema error.</li>
+        <li>Is not allowed on a method inside an <code>impl</code> block:</li>
+      </ul>
+      <pre><code>error: '@init' is not allowed on impl methods; declare a module-scope function instead</code></pre>
+      <p>
+        A module may declare more than one <code>@init</code> function; same-module
+        <code>@init</code> functions always run in source declaration order. Unlike ordinary
+        functions, <code>@init</code> does <strong>not</strong> need to be <code>pub</code> — the
+        generated <code>_init</code> is emitted into the same compilation as every other function
+        in the program, so it can call a private <code>@init</code> function directly. The common
+        case is the opposite of <code>pub</code>: a module's initializer usually has no business
+        being an ordinary externally-callable symbol at all.
+      </p>
+
+      <h3>Cross-Module Ordering</h3>
+      <p>
+        If one module's <code>@init</code> function references a symbol — a variable read/write, or a
+        function call — declared in another module, that other module's <code>@init</code>
+        function(s), if any, are guaranteed to run first:
+      </p>
+      <pre><code><span class="cmt">// b/main.mir</span>
+<span class="kw">pub mut</span> <span class="var">ready</span> := <span class="kw">false</span>
+
+<span class="kw">@init</span>
+<span class="kw">fn</span> <span class="fn">setup_b</span>() {
+    <span class="var">ready</span> = <span class="kw">true</span>
+}
+
+<span class="cmt">// main.mir — depends on b, so setup_b() is guaranteed to run first</span>
+<span class="kw">const</span> <span class="var">b</span> := <span class="fn">import</span>(<span class="str">"b"</span>)
+
+<span class="kw">@init</span>
+<span class="kw">fn</span> <span class="fn">setup_a</span>() {
+    <span class="fn">assert</span>(<span class="var">b</span>.<span class="var">ready</span>)   <span class="cmt">// always true</span>
+}</code></pre>
+      <p>
+        This dependency graph is built from actual symbol references made in <code>@init</code>
+        function bodies, not merely the <code>import</code> graph — an <code>@init</code> function
+        that never touches a given imported module doesn't create an ordering dependency on it. A
+        cycle in this graph is a sema error naming both modules:
+      </p>
+      <pre><code>error: circular '@init' dependency: module 'A' requires module 'B' to initialize first, but
+       'B' also (transitively) requires 'A' to initialize first</code></pre>
+
+      <h3>Failure Handling</h3>
+      <p>
+        If an <code>@init</code> function returns a non-<code>Ok</code> <code>error(...)</code>, the
+        process immediately terminates with exit code <code>1</code> — a fixed sentinel, not the raw
+        error value (which has no defined integer representation outside the function's own
+        context) — and <code>main</code> never runs:
+      </p>
+      <pre><code><span class="kw">type</span> <span class="ty">InitError</span> = <span class="kw">enum</span> { <span class="var">Failed</span> }
+
+<span class="kw">@init</span>
+<span class="kw">fn</span> <span class="fn">setup</span>() -&gt; <span class="kw">error</span>(<span class="ty">InitError</span>) {
+    <span class="kw">return_err</span> .<span class="var">Failed</span>
+}</code></pre>
+
+      <h3>Generated <code>_init</code> and <code>--noinit</code></h3>
+      <p>
+        The compiler synthesizes a function named <code>_init</code> that calls every
+        <code>@init</code> function across the program in the order described above. In hosted
+        builds, <code>_init</code> is called from the generated <code>_start</code>, before
+        <code>main</code>.
+      </p>
+      <div class="callout tip">
+        <div class="callout-title">Freestanding builds</div>
+        <code>_init</code> is still generated with <code>--freestanding</code>, but (as always) no
+        <code>_start</code> is synthesized — the user's own <code>_start</code> is responsible for
+        calling <code>_init</code> itself, at whatever point is appropriate.
+      </div>
+      <p>
+        Passing <code>--noinit</code> to the driver skips generating <code>_init</code> entirely
+        (and, in hosted builds, the <code>_start</code> call to it). Every <code>@init</code>
+        function still compiles normally and remains individually callable — only the automatic
+        invocation is suppressed.
+      </p>
+
+      <h2>Conflicting Attributes</h2>
+      <p>Some combinations are rejected outright, each with its own diagnostic:</p>
+      <table>
+        <tr><th>Combination</th><th>Why</th></tr>
+        <tr><td><code>@naked</code> + <code>@always_inline</code></td><td>a naked function has no compiler-generated body shape to inline</td></tr>
+        <tr><td><code>@init</code> + <code>@naked</code></td><td>init functions must be callable normally, from the generated <code>_init</code></td></tr>
+        <tr><td><code>@init</code> + <code>@no_return</code></td><td>an initializer must return control so the next one can run</td></tr>
+        <tr><td><code>@init</code> + <code>@always_inline</code></td><td>init functions are called once, from generated code — inlining defeats the purpose</td></tr>
+      </table>
+
+      <div class="page-nav">
+        <a href="inline-assembly.html" class="prev"><span class="label">Previous</span>Inline Assembly</a>
+        <a href="grammar.html" class="next"><span class="label">Next</span>Grammar</a>
+      </div>
+
+    </div>
+  </main>
+
+</div>
+<script src="site.js" defer></script>
+</body>
+</html>

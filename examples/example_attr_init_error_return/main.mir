@@ -1,0 +1,21 @@
+// example_attr_init_error_return.mir — a failing '@init' function (returns a non-Ok
+// 'error(...)') must abort the process with the fixed sentinel exit code 1 BEFORE 'main' ever
+// runs — not the raw error value, which has no defined integer representation outside the
+// function's own context.
+//
+// Expected: 'run' exits with code 1 and prints nothing (proving 'main' never executed).
+
+type InitError = enum {
+    Failed
+}
+
+@init
+fn setup() -> error(InitError) {
+    return_err .Failed
+}
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub fn main() {
+    printf("main ran\n")
+}

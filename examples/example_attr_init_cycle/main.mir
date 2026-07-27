@@ -1,0 +1,21 @@
+// example_attr_init_cycle.mir — REJECTION CASE. This module's '@init' references 'b.b_state'
+// (a real symbol reference, not just an 'import'), and 'b's own '@init' symmetrically
+// references this module's 'a_state' — a genuine circular dependency in the reference graph,
+// which must be rejected as a sema error naming both modules (not silently accepted with an
+// arbitrary tie-broken order).
+//
+// Expected: compilation fails with
+//   error: circular '@init' dependency: module '...' requires module '...' to initialize
+//          first, but '...' also (transitively) requires '...' to initialize first
+
+const b := import("b")
+
+pub mut a_state := 0
+
+@init
+fn init_a() {
+    b.b_state = 1
+}
+
+pub fn main() {
+}

@@ -552,9 +552,9 @@ namespace sema {
     }
 
     namespace {
-        // Coerces a raw '--opt key=value' (or '@env' environment-variable) string against
-        // @option's/@env's resolved target type. Reports its own diagnostic (naming 'key')
-        // and returns nullopt on failure. 'directive' ("@option"/"@env") and 'noun'
+        // Coerces a raw '--opt key=value' (or '#env' environment-variable) string against
+        // #option's/#env's resolved target type. Reports its own diagnostic (naming 'key')
+        // and returns nullopt on failure. 'directive' ("#option"/"#env") and 'noun'
         // ("option"/"environment variable") let the two callers share this logic while
         // keeping diagnostics accurate about where the value actually came from.
         auto coerce_option_string(const std::string &raw, const ResolvedType &target, const Program &program,
@@ -651,12 +651,12 @@ namespace sema {
 
         const auto opt_it = program.options.opt_values.find(opt.key);
         if (opt_it != program.options.opt_values.end()) {
-            resolved_value = coerce_option_string(opt_it->second, target, program, diag, opt.location, opt.key, "@option", "option");
+            resolved_value = coerce_option_string(opt_it->second, target, program, diag, opt.location, opt.key, "#option", "option");
         } else if (opt.default_value) {
             resolved_value = evaluate_const_value(*opt.default_value, module_path, program, diag);
             if (!resolved_value) {
                 diag.report_error(DiagnosticStage::Sema, opt.location,
-                    std::format("'@option' default value for '{}' is not a compile-time constant", opt.key));
+                    std::format("'#option' default value for '{}' is not a compile-time constant", opt.key));
             }
         } else {
             diag.report_error(DiagnosticStage::Sema, opt.location,
@@ -691,12 +691,12 @@ namespace sema {
         std::optional<ConstFoldValue> resolved_value;
 
         if (const char *env_value = std::getenv(opt.key.c_str()); env_value != nullptr) {
-            resolved_value = coerce_option_string(env_value, target, program, diag, opt.location, opt.key, "@env", "environment variable");
+            resolved_value = coerce_option_string(env_value, target, program, diag, opt.location, opt.key, "#env", "environment variable");
         } else if (opt.default_value) {
             resolved_value = evaluate_const_value(*opt.default_value, module_path, program, diag);
             if (!resolved_value) {
                 diag.report_error(DiagnosticStage::Sema, opt.location,
-                    std::format("'@env' default value for '{}' is not a compile-time constant", opt.key));
+                    std::format("'#env' default value for '{}' is not a compile-time constant", opt.key));
             }
         } else {
             diag.report_error(DiagnosticStage::Sema, opt.location,
@@ -761,7 +761,7 @@ namespace sema {
                     // A bare '.Variant' enum literal has no fixed value on its own — it only
                     // means something once check_expr has resolved it against an expected
                     // enum type, recorded in ITS OWN expr_types entry (populated whenever
-                    // check_expr visited this exact node, e.g. because it's a '@option'
+                    // check_expr visited this exact node, e.g. because it's a '#option'
                     // default checked directly against the declared target type, or an
                     // operand of '==' checked against the other side's type — see
                     // resolve_option_expr and check_expr's BinaryExpr case respectively).
@@ -915,7 +915,7 @@ namespace sema {
                     // Mirrors WhenExpr below - is_constant_expr_impl already treats a
                     // ternary-of-constants as eligible (same shape as WhenExpr's check), so
                     // this fold must exist too or that eligibility check is a dead end: any
-                    // constant-only context (e.g. '@link's data argument) that accepts a
+                    // constant-only context (e.g. '#link's data argument) that accepts a
                     // ternary here would hit an "internal error: could not resolve" instead
                     // of the correct diagnostic or value.
                     const auto cond = evaluate_const_value(v->condition, module_path, program, diag);

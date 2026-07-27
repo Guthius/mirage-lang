@@ -1,0 +1,24 @@
+// example_attr_init_private.mir — HAPPY PATH. '@init' does NOT need to be 'pub' — the
+// generated '_init' is emitted into the same compilation as every other function in the
+// program, so it can call a private '@init' function directly. In fact this is the common
+// case: a module's initializer usually has no business being an ordinary externally-callable
+// symbol at all.
+//
+// Expected: 'run' prints 'private init ran'.
+
+mut ran := false
+
+@init
+fn setup() {
+    ran = true
+}
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub fn main() {
+    if ran {
+        printf("private init ran\n")
+    } else {
+        printf("private init did NOT run\n")
+    }
+}

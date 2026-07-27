@@ -1,0 +1,15 @@
+// example_attr_no_return.mir — '@no_return' declares that a function never returns control
+// to its caller. Sema doesn't (and can't) verify that claim — the warning fires purely on the
+// declared return-type SHAPE: a value return type can never actually be produced by a
+// function that's claimed to never return, so it's almost certainly a mistake to declare one.
+//
+// Expected: compilation succeeds with
+//   warning: a '@no_return' function with a value return type will never return its value
+
+@no_return
+fn suspicious() -> i32 {
+    return 1
+}
+
+pub fn main() {
+}

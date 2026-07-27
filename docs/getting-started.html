@@ -43,6 +43,7 @@
         <li><a href="modules.html">Modules</a></li>
         <li><a href="comptime-config.html">Compile-Time Config</a></li>
         <li><a href="inline-assembly.html">Inline Assembly</a></li>
+        <li><a href="attributes.html">Declaration Attributes</a></li>
       </ul>
       <div class="sidebar-section">Reference</div>
       <ul>
@@ -92,6 +93,7 @@ just build</code></pre>
         <tr><td><code>--std=&lt;path&gt;</code></td><td>Override the standard library path (takes precedence over <code>MIRAGE_PATH</code>)</td></tr>
         <tr><td><code>--emit-ir</code></td><td>Print the generated LLVM IR to stdout instead of producing a binary</td></tr>
         <tr><td><code>--freestanding</code></td><td>Compile without the standard hosted entry point; the module must supply <code>fn _start()</code></td></tr>
+        <tr><td><code>--noinit</code></td><td>Skip generating/calling the synthesized <code>@init</code>-runner <code>_init</code></td></tr>
         <tr><td><code>--help</code></td><td>Show usage information</td></tr>
       </table>
 
@@ -250,8 +252,9 @@ just build</code></pre>
         <li><a href="traits.html">Traits</a> — dynamic dispatch via trait handles</li>
         <li><a href="error-handling.html">Error Handling</a> — error(T), try, defer</li>
         <li><a href="modules.html">Modules</a> — import and pub visibility</li>
-        <li><a href="comptime-config.html">Compile-Time Config</a> — @option, @env, @link, @error/@warn, and the when statement</li>
+        <li><a href="comptime-config.html">Compile-Time Config</a> — #option, #env, #link, #error/#warn, and the when statement</li>
         <li><a href="inline-assembly.html">Inline Assembly</a> — raw x86-64 asm blocks inside a function body</li>
+        <li><a href="attributes.html">Declaration Attributes</a> — @naked, @no_return, @always_inline, @section, @init</li>
       </ul>
 
       <div class="page-nav">

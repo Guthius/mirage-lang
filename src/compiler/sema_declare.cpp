@@ -173,7 +173,7 @@ namespace sema {
             }, decl);
         }
 
-        // Only '@link', 'const' with a direct '@option(...)'/'@env(...)' initializer,
+        // Only '#link', 'const' with a direct '#option(...)'/'#env(...)' initializer,
         // 'type', and 'ext fn' declarations are permitted inside a module-scope 'when'
         // block (spec). A nested 'when' is always structurally allowed here — its OWN
         // contents are checked recursively against this same allow-list wherever they're
@@ -199,7 +199,7 @@ namespace sema {
         void check_decl_unreachable(const ast::Decl &decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag);
         void check_when_decl_unreachable(const ast::WhenDecl &when_decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag);
 
-        // Declares (is_live=true, persists into the real symbol table / collects '@link'
+        // Declares (is_live=true, persists into the real symbol table / collects '#link'
         // directives) or merely type-checks-and-discards (is_live=false — the module-scope
         // 'when' spec requirement that BOTH branches are always type-checked, even though
         // only the live one has any lasting effect) a list of decls found inside a
@@ -208,7 +208,7 @@ namespace sema {
             for (const auto &decl : decls) {
                 if (!decl_allowed_in_module_scope_when(decl)) {
                     diag.report_error(DiagnosticStage::Sema, decl_location(decl),
-                        "only '@link', '@error', '@warn', 'const' with '@option'/'@env', 'type', "
+                        "only '#link', '#error', '#warn', 'const' with '#option'/'#env', 'type', "
                         "and 'ext fn' declarations are permitted inside a module-scope 'when' block.");
                     continue;
                 }
@@ -313,9 +313,9 @@ namespace sema {
                 expr);
         }
 
-        // Type-checks '@link's 'data' argument as a compile-time-constant '[]u8' expression
+        // Type-checks '#link's 'data' argument as a compile-time-constant '[]u8' expression
         // and, if 'collect' is true (a LIVE position), appends the resolved directive to
-        // Program::link_directives. A dead-branch '@link' is still fully type-checked here
+        // Program::link_directives. A dead-branch '#link' is still fully type-checked here
         // (per spec) — 'collect=false' just skips the final push_back.
         void declare_link_decl(const ast::LinkDecl &link_decl, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const bool collect) {
             LocalScope empty;
@@ -323,12 +323,12 @@ namespace sema {
             const auto data_ty = check_expr(link_decl.data, empty, module_path, sema_program, diag, u8_slice, 0);
             if (!is_assignable(data_ty, u8_slice)) {
                 diag.report_error(DiagnosticStage::Sema, link_decl.location,
-                    "'@link' data argument must be a compile-time constant '[]u8' expression");
+                    "'#link' data argument must be a compile-time constant '[]u8' expression");
                 return;
             }
             if (!is_constant_expr(link_decl.data, module_path, sema_program)) {
                 diag.report_error(DiagnosticStage::Sema, link_decl.location,
-                    "'@link' data argument must be a compile-time constant expression");
+                    "'#link' data argument must be a compile-time constant expression");
                 return;
             }
             if (!collect) return;
@@ -337,7 +337,7 @@ namespace sema {
             const auto *str = folded ? std::get_if<std::string>(&*folded) : nullptr;
             if (!str) {
                 diag.report_error(DiagnosticStage::Sema, link_decl.location,
-                    "internal error: could not resolve '@link' data to a constant string");
+                    "internal error: could not resolve '#link' data to a constant string");
                 return;
             }
 
@@ -353,14 +353,14 @@ namespace sema {
             });
         }
 
-        // Type-checks '@error'/'@warn's 'message' argument as a compile-time-constant '[]u8'
+        // Type-checks '#error'/'#warn's 'message' argument as a compile-time-constant '[]u8'
         // expression and, if 'live' is true, emits the corresponding sema diagnostic. A
-        // dead-branch '@error'/'@warn' (an unselected 'when' arm) is still fully type-checked
+        // dead-branch '#error'/'#warn' (an unselected 'when' arm) is still fully type-checked
         // here (per the module-scope 'when' rule every other directive follows) — 'live=false'
         // just skips the actual diag.report_error/diag.warn call, mirroring declare_link_decl's
         // 'collect' parameter above.
         void declare_diagnostic_decl(const ast::DiagnosticDecl &decl, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const bool live) {
-            const auto directive = decl.kind == ast::DiagnosticDirectiveKind::Error ? "@error" : "@warn";
+            const auto directive = decl.kind == ast::DiagnosticDirectiveKind::Error ? "#error" : "#warn";
 
             LocalScope empty;
             const auto u8_slice = intern_slice(sema_program, ResolvedType{.kind = TypeKind::U8});
@@ -393,7 +393,7 @@ namespace sema {
         }
 
         // Folds a module-scope 'when' declaration's condition and either declares its live
-        // branch for real (persisting symbols / collecting '@link') or scratch-checks it
+        // branch for real (persisting symbols / collecting '#link') or scratch-checks it
         // (dead branch — still fully type-checked, per spec, but never declared/collected).
         void declare_when_decl(const ast::WhenDecl &when_decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
             ensure_condition_modules_declared(when_decl.condition, program, module_path, module, sema_program, diag);
@@ -454,6 +454,10 @@ namespace sema {
                         // The target type name is the leaf of the named type chain.
                         const std::string &type_name = v.target.name;
                         for (auto &fn : v.functions) {
+                            if (find_attribute(fn.attributes, "init")) {
+                                diag.report_error(DiagnosticStage::Sema, fn.location,
+                                    "'@init' is not allowed on impl methods; declare a module-scope function instead");
+                            }
                             module.methods[type_name][fn.name] = MethodInfo{
                                 .decl = &fn,
                                 .impl_module = module_path,
@@ -510,7 +514,7 @@ namespace sema {
         // laid out immediately: resolve_type_impl's NamedType case only ever calls
         // resolve_final_SHALLOW (returns the pre-allocated handle without forcing layout),
         // so without this, a cross-module 'when' condition would see a referenced enum's
-        // 'fields' still empty (layout_done=false) when '@option' tries to coerce a
+        // 'fields' still empty (layout_done=false) when '#option' tries to coerce a
         // '--opt' string against it. Harmless to repeat later — layout_done guards make
         // the eventual real step 3 pass a no-op for a module already resolved here.
         for (auto &[name, sym] : module.symbols) {
@@ -678,6 +682,11 @@ namespace sema {
                     if (collided) {
                         ok = false;
                         continue;
+                    }
+
+                    if (find_attribute(fn.attributes, "init")) {
+                        diag.report_error(DiagnosticStage::Sema, fn.location,
+                            "'@init' is not allowed on impl methods; declare a module-scope function instead");
                     }
 
                     impl_info.methods[fn.name] = MethodInfo{

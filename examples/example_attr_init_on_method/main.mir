@@ -1,0 +1,18 @@
+// example_attr_init_on_method.mir — REJECTION CASE. '@init' is only meaningful on a
+// module-scope function; it can't be attached to a method inside an 'impl' block.
+//
+// Expected: compilation fails with
+//   error: '@init' is not allowed on impl methods; declare a module-scope function instead
+
+type Point = struct {
+    x: i32
+}
+
+impl Point {
+    pub @init
+    fn bad(self) {
+    }
+}
+
+pub fn main() {
+}

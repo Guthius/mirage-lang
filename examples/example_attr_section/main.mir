@@ -1,0 +1,13 @@
+// example_attr_section.mir — '@section("name")' places a function in the named ELF section
+// instead of the default '.text'. Verified via '--emit-ir' (see tests/attribute_codegen_test.py),
+// which greps the emitted 'define ...' line for 'section ".text.hot"'.
+//
+// Expected: builds successfully; '--emit-ir' output contains 'section ".text.hot"'.
+
+@section(".text.hot")
+fn hot_path() -> i32 {
+    return 1
+}
+
+pub fn main() {
+}

@@ -12,6 +12,7 @@
     { "include": "#impl-declaration" },
     { "include": "#asm-block" },
     { "include": "#directives" },
+    { "include": "#attributes" },
     { "include": "#keywords" },
     { "include": "#support-types" },
     { "include": "#ext-modifier" },
@@ -158,8 +159,16 @@
     "directives": {
       "patterns": [
         {
-          "match": "@(option|env|link|error|warn)\\b",
+          "match": "#(option|env|link|error|warn)\\b",
           "name": "keyword.other.directive.mirage"
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "match": "@(no_return|naked|always_inline|section|init)\\b",
+          "name": "storage.type.annotation.mirage"
         }
       ]
     },

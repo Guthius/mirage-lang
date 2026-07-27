@@ -1,0 +1,6 @@
+pub mut b_ready := false
+
+@init
+fn setup_b() {
+    b_ready = true
+}

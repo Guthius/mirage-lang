@@ -678,15 +678,15 @@ namespace ast {
             });
         }
 
-        // '@option(key)' / '@option(key, default)'. 'option' is parsed as a plain
-        // identifier after the '@' sigil (not a keyword) — mirrors 'ext fn's precedent of
+        // '#option(key)' / '#option(key, default)'. 'option' is parsed as a plain
+        // identifier after the '#' sigil (not a keyword) — mirrors 'ext fn's precedent of
         // dispatching on a bare identifier lexeme rather than reserving a new keyword.
         auto parse_option_expr(Parser &parser) -> Expr {
             const auto location = parser.current_location();
-            parser.expect(TokenKind::At, "'@'");
+            parser.expect(TokenKind::Hash, "'#'");
 
             if (!parser.check(TokenKind::Identifier) || parser.current_lexeme() != "option") {
-                parser.report_error(location, std::format("expected 'option' or 'env' after '@', got '{}'", parser.current_lexeme()));
+                parser.report_error(location, std::format("expected 'option' or 'env' after '#', got '{}'", parser.current_lexeme()));
 
                 return LiteralIntegerExpr{.value = 0, .location = location};
             }
@@ -709,13 +709,13 @@ namespace ast {
             });
         }
 
-        // '@env(key)' / '@env(key, default)' — reads 'key' as an environment variable
-        // instead of a '--opt key=value' driver flag. Parsed identically to '@option'
-        // above (see its comment); the caller (parse_primary) has already peeked past '@'
+        // '#env(key)' / '#env(key, default)' — reads 'key' as an environment variable
+        // instead of a '--opt key=value' driver flag. Parsed identically to '#option'
+        // above (see its comment); the caller (parse_primary) has already peeked past '#'
         // to confirm the identifier is 'env' before dispatching here.
         auto parse_env_expr(Parser &parser) -> Expr {
             const auto location = parser.current_location();
-            parser.expect(TokenKind::At, "'@'");
+            parser.expect(TokenKind::Hash, "'#'");
             parser.advance(); // consume 'env'
 
             parser.expect(TokenKind::LParen, "'('");
@@ -735,17 +735,17 @@ namespace ast {
             });
         }
 
-        // '@link(category, data)' — a linker directive. 'link' (like 'option' above) is a
-        // plain identifier after '@', not a keyword. Callable from both module-scope
+        // '#link(category, data)' — a linker directive. 'link' (like 'option' above) is a
+        // plain identifier after '#', not a keyword. Callable from both module-scope
         // declaration parsing and (permissively) statement parsing — see parse_stmt's
-        // dispatch, which peeks past '@' to distinguish '@link' from '@option' before
+        // dispatch, which peeks past '#' to distinguish '#link' from '#option' before
         // deciding whether to consume it here or fall through to an ordinary expr-stmt.
         auto parse_link_decl(Parser &parser) -> LinkDecl {
             const auto location = parser.current_location();
-            parser.expect(TokenKind::At, "'@'");
+            parser.expect(TokenKind::Hash, "'#'");
 
             if (!parser.check(TokenKind::Identifier) || parser.current_lexeme() != "link") {
-                parser.report_error(location, std::format("expected 'link' after '@', got '{}'", parser.current_lexeme()));
+                parser.report_error(location, std::format("expected 'link' after '#', got '{}'", parser.current_lexeme()));
 
                 return LinkDecl{
                     .category = LinkCategory::Lib,
@@ -780,13 +780,13 @@ namespace ast {
             };
         }
 
-        // '@error(message)' / '@warn(message)'. 'warn' (like 'option'/'link' above) is a
-        // plain identifier after '@', not a keyword — but 'error' already IS a keyword
+        // '#error(message)' / '#warn(message)'. 'warn' (like 'option'/'link' above) is a
+        // plain identifier after '#', not a keyword — but 'error' already IS a keyword
         // (KwError, for the 'error(T)' type syntax), so lookahead for these two can't share
         // a single 'Identifier' check; see peek_diagnostic_directive_kind below.
         auto parse_diagnostic_decl(Parser &parser, const DiagnosticDirectiveKind kind) -> DiagnosticDecl {
             const auto location = parser.current_location();
-            parser.expect(TokenKind::At, "'@'");
+            parser.expect(TokenKind::Hash, "'#'");
             parser.advance(); // consume 'error' or 'warn'
 
             parser.expect(TokenKind::LParen, "'('");
@@ -800,15 +800,97 @@ namespace ast {
             };
         }
 
-        // Returns which '@error'/'@warn' directive (if any) starts at the CURRENT token
-        // (the '@' itself, not yet consumed) — nullopt if the current token isn't '@' or the
+        // Returns which '#error'/'#warn' directive (if any) starts at the CURRENT token
+        // (the '#' itself, not yet consumed) — nullopt if the current token isn't '#' or the
         // following token doesn't name either directive. 'error' lexes as KwError, 'warn' as
         // a plain Identifier.
         auto peek_diagnostic_directive_kind(const Parser &parser) -> std::optional<DiagnosticDirectiveKind> {
-            if (!parser.check(TokenKind::At)) return std::nullopt;
+            if (!parser.check(TokenKind::Hash)) return std::nullopt;
             if (parser.peek().kind == TokenKind::KwError) return DiagnosticDirectiveKind::Error;
             if (parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "warn") return DiagnosticDirectiveKind::Warn;
             return std::nullopt;
+        }
+
+        // Reports a parser-stage "unknown attribute" error if 'name' isn't one of the five
+        // known declaration-attribute names (see Attribute's doc comment in ast.hpp) — a pure
+        // lexical fact, checked identically for both the bare/single-with-args form and the
+        // grouped '@(...)' form's members below.
+        void check_known_attribute_name(Parser &parser, const std::string &name, const SourceLocation &location) {
+            if (name == "no_return" || name == "naked" || name == "always_inline" ||
+                name == "section" || name == "init") {
+                return;
+            }
+            parser.report_error(location, std::format(
+                "unknown attribute '@{}'. Known attributes: no_return, naked, always_inline, "
+                "section, init.", name));
+        }
+
+        // '@name' / '@name(arg1, arg2, ...)' — a single (non-grouped) attribute. The '@' is
+        // known to be present (checked by the caller, parse_attribute_clause) but not yet
+        // consumed.
+        auto parse_single_attribute(Parser &parser) -> Attribute {
+            const auto location = parser.current_location();
+            parser.expect(TokenKind::At, "'@'");
+            const auto name = parser.expect_identifier();
+            check_known_attribute_name(parser, name, location);
+
+            std::vector<Expr> args;
+            if (parser.match(TokenKind::LParen)) {
+                if (!parser.check(TokenKind::RParen)) {
+                    args.push_back(parse_expr(parser));
+                    while (parser.match(TokenKind::Comma)) {
+                        args.push_back(parse_expr(parser));
+                    }
+                }
+                parser.expect(TokenKind::RParen, "')'");
+            }
+
+            return Attribute{.name = name, .args = std::move(args), .location = location};
+        }
+
+        // '@(name1, name2, ...)' — the grouped attribute-clause form: one or more bare
+        // attribute names, no per-name argument list (an argument list here, e.g.
+        // '@(section("..."))', is a parse error — only the single '@name(args)' form in
+        // parse_single_attribute takes arguments).
+        auto parse_grouped_attributes(Parser &parser) -> std::vector<Attribute> {
+            parser.expect(TokenKind::At, "'@'");
+            parser.expect(TokenKind::LParen, "'('");
+
+            std::vector<Attribute> attrs;
+            do {
+                const auto location = parser.current_location();
+                const auto name = parser.expect_identifier();
+                check_known_attribute_name(parser, name, location);
+
+                if (parser.check(TokenKind::LParen)) {
+                    parser.report_error(parser.current_location(),
+                        "a grouped attribute ('@(...)') cannot take arguments; use the single "
+                        "'@name(args)' form instead");
+                }
+
+                attrs.push_back(Attribute{.name = name, .args = {}, .location = location});
+            } while (parser.match(TokenKind::Comma));
+
+            parser.expect(TokenKind::RParen, "')'");
+            return attrs;
+        }
+
+        // Parses zero or one attribute clause preceding a declaration: a bare '@name', a
+        // single '@name(args)', or a grouped '@(name1, name2, ...)'. A second bare '@' after
+        // the first clause is simply not consumed here (there is no "stacking" of separate
+        // clauses) — the caller's own dispatch (expecting 'fn' next) naturally reports
+        // "expected 'fn', got '@'" for e.g. '@naked @no_return', with no special-casing
+        // needed.
+        auto parse_attribute_clause(Parser &parser) -> std::vector<Attribute> {
+            if (!parser.check(TokenKind::At)) return {};
+
+            if (parser.peek().kind == TokenKind::LParen) {
+                return parse_grouped_attributes(parser);
+            }
+
+            std::vector<Attribute> attrs;
+            attrs.push_back(parse_single_attribute(parser));
+            return attrs;
         }
 
         auto parse_primary(Parser &parser) -> Expr {
@@ -960,7 +1042,7 @@ namespace ast {
                 });
             }
 
-            if (parser.check(TokenKind::At)) {
+            if (parser.check(TokenKind::Hash)) {
                 if (parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "env") {
                     return parse_env_expr(parser);
                 }
@@ -2328,7 +2410,7 @@ namespace ast {
             });
         }
 
-        auto parse_function_decl(Parser &parser, const bool is_pub) -> FunctionDecl {
+        auto parse_function_decl(Parser &parser, const bool is_pub, std::vector<Attribute> attributes) -> FunctionDecl {
             const auto location = parser.current_location();
 
             parser.expect(TokenKind::KwFn, "'fn'");
@@ -2340,6 +2422,7 @@ namespace ast {
 
             return FunctionDecl{
                 .is_pub = is_pub,
+                .attributes = std::move(attributes),
                 .name = fn_name,
                 .params = std::move(fn_params),
                 .return_types = std::move(fn_return_types),
@@ -2764,16 +2847,16 @@ namespace ast {
             return parse_when_stmt(parser);
         }
 
-        // '@link(...)' parses successfully here (unlike anywhere else a runtime
+        // '#link(...)' parses successfully here (unlike anywhere else a runtime
         // statement is illegal) purely so sema can reject it with a precise
-        // "module scope only" diagnostic. '@option(...)' is NOT special-cased here —
+        // "module scope only" diagnostic. '#option(...)' is NOT special-cased here —
         // it falls through to parse_expr_stmt below, which reaches parse_primary's
-        // own '@' handling for the option-expression form.
-        if (parser.check(TokenKind::At) && parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "link") {
+        // own '#' handling for the option-expression form.
+        if (parser.check(TokenKind::Hash) && parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "link") {
             return parse_link_decl(parser);
         }
 
-        // '@error(...)'/'@warn(...)' parse here for the same reason '@link' does just
+        // '#error(...)'/'#warn(...)' parse here for the same reason '#link' does just
         // above — so sema can reject them inside a function body with a precise "module
         // scope only" diagnostic instead of a raw parse error.
         if (const auto directive_kind = peek_diagnostic_directive_kind(parser)) {
@@ -2835,6 +2918,17 @@ namespace ast {
             parser.report_error(
                 location,
                 "'pub' is not allowed on methods inside 'impl TRAIT for TYPE'; the trait's own visibility governs");
+        }
+
+        // Parsed permissively here (any of the five known attribute names) exactly like a
+        // free function's attribute clause — sema rejects '@init' specifically on a method
+        // (see sema_attributes.cpp) rather than the parser vetoing every attribute name
+        // uniformly, since the other four have no stated restriction against methods.
+        auto attributes = parse_attribute_clause(parser);
+        if (!attributes.empty()) {
+            // See parse_decl's identical skip: an attribute clause's last token is always an
+            // ASI trigger, so a virtual ';' separates it from 'fn' on the next line.
+            skip_semicolons(parser);
         }
 
         parser.expect(TokenKind::KwFn, "'fn'");
@@ -2908,6 +3002,7 @@ namespace ast {
 
         return ImplDecl::Function{
             .is_pub = is_pub,
+            .attributes = std::move(attributes),
             .is_mut_self = is_mut_self,
             .name = std::move(name),
             .params = std::move(params),
@@ -2999,8 +3094,8 @@ namespace ast {
 
     // 'when cond { decl... } [else (when ... | { decl... })]' — a module-scope
     // compile-time conditional declaration block. Parsed permissively (any Decl kind, via
-    // the ordinary parse_decl dispatcher) — the allow-list restriction to '@link'/'const'
-    // with '@option'/'type'/'ext fn' is a SEMA error (see spec), not a parse error, so
+    // the ordinary parse_decl dispatcher) — the allow-list restriction to '#link'/'const'
+    // with '#option'/'type'/'ext fn' is a SEMA error (see spec), not a parse error, so
     // parsing here must succeed for any decl kind and let sema reject the disallowed ones.
     auto parse_when_decl(Parser &parser) -> std::unique_ptr<WhenDecl> {
         const auto location = parser.current_location();
@@ -3029,6 +3124,24 @@ namespace ast {
     auto parse_decl(Parser &parser, const bool top_level) -> std::optional<Decl> {
         const auto is_pub = !top_level || parser.match(TokenKind::KwPub);
 
+        // Attributes are currently legal only immediately before a 'fn' declaration (see
+        // Attribute's doc comment in ast.hpp). Parsed unconditionally here, right after
+        // 'is_pub', and rejected-after-parse for every other decl kind below — the same
+        // "parse permissively, reject with a precise diagnostic" idiom this function already
+        // uses for 'is_pub' on 'impl'/'when'/'#link'/'#error'/'#warn'/'asm'.
+        //
+        // Every attribute clause's last token (an Identifier for '@name'/grouped members, an
+        // RParen for '@name(args)'/'@(...)') is an ASI trigger, so the idiomatic one-clause-
+        // per-line style (see spec.md's examples) leaves a virtual ';' between the clause and
+        // 'fn' on the next line — skip it here before checking what follows.
+        auto attributes = parse_attribute_clause(parser);
+        if (!attributes.empty()) {
+            skip_semicolons(parser);
+        }
+        if (!attributes.empty() && !parser.check(TokenKind::KwFn)) {
+            parser.report_error(attributes.front().location, "attributes are only allowed on 'fn' declarations");
+        }
+
         if (parser.check(TokenKind::Identifier) && parser.current_lexeme() == "ext") {
             parser.advance();
 
@@ -3036,7 +3149,7 @@ namespace ast {
         }
 
         if (parser.check(TokenKind::KwFn)) {
-            return parse_function_decl(parser, is_pub);
+            return parse_function_decl(parser, is_pub, std::move(attributes));
         }
 
         if (parser.check(TokenKind::KwType)) {
@@ -3065,9 +3178,9 @@ namespace ast {
             return Decl{parse_when_decl(parser)};
         }
 
-        if (parser.check(TokenKind::At) && parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "link") {
+        if (parser.check(TokenKind::Hash) && parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "link") {
             if (is_pub) {
-                parser.report_error(parser.current_location(), "'@link' directives cannot be 'pub'");
+                parser.report_error(parser.current_location(), "'#link' directives cannot be 'pub'");
             }
             return Decl{parse_link_decl(parser)};
         }
@@ -3075,14 +3188,14 @@ namespace ast {
         if (const auto directive_kind = peek_diagnostic_directive_kind(parser)) {
             if (is_pub) {
                 parser.report_error(parser.current_location(),
-                    std::format("'@{}' directives cannot be 'pub'",
+                    std::format("'#{}' directives cannot be 'pub'",
                         *directive_kind == DiagnosticDirectiveKind::Error ? "error" : "warn"));
             }
             return Decl{parse_diagnostic_decl(parser, *directive_kind)};
         }
 
         // 'asm' is never legal at module scope, but it parses successfully here too (exactly
-        // like '@link'/'@error'/'@warn' above parse successfully as a Stmt) purely so sema can
+        // like '#link'/'#error'/'#warn' above parse successfully as a Stmt) purely so sema can
         // reject it with a precise diagnostic instead of a raw parse error. A bare top-level
         // 'asm ->' (the expression form) is excluded from this gate — it isn't a legal
         // declaration shape at all, so it falls through to the generic "expected declaration"

@@ -219,6 +219,13 @@ namespace codegen {
                 emit_functions();
                 emit_methods();
                 emit_trait_methods();
+                // Generated in BOTH hosted and freestanding builds whenever at least one
+                // '@init' function exists (and '--noinit' wasn't passed) — freestanding just
+                // doesn't get a synthesized '_start' to call it from (unchanged below), so the
+                // user's own '_start' is responsible for calling '_init' itself.
+                if (!options_.noinit && !sema_program_.init_call_order.empty()) {
+                    emit_init();
+                }
                 if (!options_.freestanding && entry_main) {
                     emit_start(*entry_main);
                 }
@@ -747,6 +754,18 @@ namespace codegen {
                 return llvm::FunctionType::get(ret_type, param_types, is_vararg);
             }
 
+            // Maps a declaration attribute name to the plain LLVM function attribute it
+            // corresponds to. 'section' and 'init' aren't ordinary FnAttrs — 'section' calls
+            // llvm::Function::setSection directly (see declare_globals_and_functions below),
+            // and 'init' attaches no per-function attribute at all (it only affects which
+            // functions the synthesized '_init' calls — see emit_init).
+            static auto attribute_kind_for_name(const std::string_view name) -> std::optional<llvm::Attribute::AttrKind> {
+                if (name == "no_return") return llvm::Attribute::NoReturn;
+                if (name == "always_inline") return llvm::Attribute::AlwaysInline;
+                if (name == "naked") return llvm::Attribute::Naked;
+                return std::nullopt;
+            }
+
             void declare_globals_and_functions() {
                 for (const auto &[path, mod] : sema_program_.modules) {
                     for (const auto &[name, sym] : mod.symbols) {
@@ -764,6 +783,25 @@ namespace codegen {
                                 fn->is_pub || entry_symbol ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::InternalLinkage,
                                 fname, *module_);
                             functions_[FunctionKey{path, name}] = llvm_fn;
+
+                            if (fn->decl) {
+                                for (const auto &attr : fn->decl->attributes) {
+                                    if (const auto kind = attribute_kind_for_name(attr.name)) {
+                                        llvm_fn->addFnAttr(*kind);
+                                    } else if (attr.name == "section" && attr.args.size() == 1) {
+                                        // Re-folds the already-sema-validated constant '[]u8'
+                                        // argument (sema only validated it, it didn't stash
+                                        // the folded string anywhere) — evaluate_const_value
+                                        // is a pure fold with no side effects for a plain
+                                        // string literal, the only shape sema accepted here.
+                                        if (const auto folded = sema::evaluate_const_value(attr.args[0], path, const_cast<sema::Program &>(sema_program_), diag_)) {
+                                            if (const auto *str = std::get_if<std::string>(&*folded)) {
+                                                llvm_fn->setSection(*str);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         } else if (const auto *ef = std::get_if<sema::ExtFunctionSymbol>(&sym)) {
                             // External C symbols are process-global, not module-scoped: if another
                             // module already declared the same name, reuse that declaration instead
@@ -799,6 +837,18 @@ namespace codegen {
                             ext_functions_[path + "\n" + name] = llvm_fn;
                         }
                     }
+                }
+
+                // Declared here (not just in emit_init) so '_start', declared later in run(),
+                // can already reference it. Uses a sentinel empty module path as its
+                // FunctionKey since '_init' isn't scoped to any one Mirage module. Generated
+                // whenever at least one '@init' function exists AND '--noinit' wasn't passed —
+                // independent of '--freestanding' (a freestanding build still gets '_init', for
+                // the user's own '_start' to call; see run()'s emit_start gating, unchanged).
+                if (!options_.noinit && !sema_program_.init_call_order.empty()) {
+                    auto *init_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), {}, false);
+                    functions_[FunctionKey{"", "_init"}] = llvm::Function::Create(
+                        init_ty, llvm::GlobalValue::ExternalLinkage, "_init", *module_);
                 }
             }
 
@@ -1486,6 +1536,83 @@ namespace codegen {
                 }
             }
 
+            // Emits the process-exit sequence for 'exit_code_i32' (a raw syscall in
+            // freestanding builds, libc exit() otherwise) and terminates the current basic
+            // block with 'unreachable'. Shared by emit_start's main-return handling and
+            // emit_init's per-'@init'-function failure handling below.
+            void emit_process_exit(llvm::Value *exit_code_i32) {
+                if (options_.freestanding) {
+                    auto *exit_code_i64 = builder_.CreateSExt(exit_code_i32, llvm::Type::getInt64Ty(*context_));
+                    auto *syscall_ty = llvm::FunctionType::get(
+                        llvm::Type::getVoidTy(*context_),
+                        {llvm::Type::getInt64Ty(*context_), llvm::Type::getInt64Ty(*context_)},
+                        false);
+                    auto *syscall = llvm::InlineAsm::get(
+                        syscall_ty,
+                        "syscall",
+                        "{rax},{rdi},~{rcx},~{r11},~{memory}",
+                        true);
+                    builder_.CreateCall(syscall, {builder_.getInt64(231), exit_code_i64});
+                } else {
+                    // Call libc exit() so that stdio buffers are flushed and atexit handlers
+                    // run. Reuses an existing declaration if one's already been emitted (this
+                    // helper may run more than once per module, e.g. once per failing '@init'
+                    // check plus once for emit_start) rather than declaring 'exit' repeatedly.
+                    auto *exit_ty = llvm::FunctionType::get(
+                        llvm::Type::getVoidTy(*context_),
+                        {llvm::Type::getInt32Ty(*context_)},
+                        false);
+                    auto *exit_fn = module_->getFunction("exit");
+                    if (!exit_fn) {
+                        exit_fn = llvm::Function::Create(exit_ty, llvm::GlobalValue::ExternalLinkage, "exit", *module_);
+                        exit_fn->setDoesNotReturn();
+                    }
+                    builder_.CreateCall(exit_fn, {exit_code_i32});
+                }
+                builder_.CreateUnreachable();
+            }
+
+            // Synthesized initializer-runner: calls every '@init' function across the program
+            // in Program::init_call_order (already topologically sorted by
+            // validate_init_dependencies_for_program, sema_attributes.cpp). Generated in both
+            // hosted and freestanding builds (see run()'s gating) whenever at least one
+            // '@init' function exists and '--noinit' wasn't passed; already declared by
+            // declare_globals_and_functions so '_init' itself is a fully hoisted function.
+            void emit_init() {
+                auto *init_fn = functions_.at(FunctionKey{"", "_init"});
+                auto *entry = llvm::BasicBlock::Create(*context_, "entry", init_fn);
+                builder_.SetInsertPoint(entry);
+
+                for (const auto &[mod_path, fn_name] : sema_program_.init_call_order) {
+                    auto *target = functions_.at(FunctionKey{mod_path, fn_name});
+                    const auto &fn_sym = std::get<sema::FunctionSymbol>(sema_program_.modules.at(mod_path).symbols.at(fn_name));
+                    auto *call_result = builder_.CreateCall(target);
+
+                    if (!fn_sym.return_types.empty()) {
+                        // error(...): the outer Ok/Failed tag is a u32 at byte offset 0. A
+                        // failing initializer immediately terminates the process with the
+                        // fixed sentinel exit code 1 — not the raw error value, since
+                        // error(T) has no defined integer representation outside the
+                        // function's own context.
+                        auto *slot = builder_.CreateAlloca(call_result->getType());
+                        builder_.CreateStore(call_result, slot);
+                        auto *tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), slot);
+                        auto *is_failed = builder_.CreateICmpNE(tag, builder_.getInt32(0));
+
+                        auto *fail_block = llvm::BasicBlock::Create(*context_, "init_failed", init_fn);
+                        auto *ok_block = llvm::BasicBlock::Create(*context_, "init_ok", init_fn);
+                        builder_.CreateCondBr(is_failed, fail_block, ok_block);
+
+                        builder_.SetInsertPoint(fail_block);
+                        emit_process_exit(builder_.getInt32(1));
+
+                        builder_.SetInsertPoint(ok_block);
+                    }
+                }
+
+                builder_.CreateRetVoid();
+            }
+
             void emit_start(const sema::FunctionSymbol &main_fn) {
                 auto *start_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), {}, false);
                 auto *start = llvm::Function::Create(start_ty, llvm::GlobalValue::ExternalLinkage, "_start", *module_);
@@ -1501,6 +1628,13 @@ namespace codegen {
                 auto *align_asm = llvm::InlineAsm::get(align_ty, "and $$-16, %rsp",
                     "~{rsp},~{dirflag},~{fpsr},~{flags}", true);
                 builder_.CreateCall(align_asm);
+
+                // Call the synthesized '_init' (if any '@init' function exists and
+                // '--noinit' wasn't passed) before 'main', so module initializers have run by
+                // the time user code starts.
+                if (!options_.noinit && !sema_program_.init_call_order.empty()) {
+                    builder_.CreateCall(functions_.at(FunctionKey{"", "_init"}));
+                }
 
                 auto *main = functions_.at(FunctionKey{ast_program_.root_module_path, "main"});
                 llvm::Value *exit_code_i32 = nullptr;
@@ -1522,29 +1656,7 @@ namespace codegen {
                     exit_code_i32 = builder_.CreateCall(main);
                 }
 
-                if (options_.freestanding) {
-                    auto *exit_code_i64 = builder_.CreateSExt(exit_code_i32, llvm::Type::getInt64Ty(*context_));
-                    auto *syscall_ty = llvm::FunctionType::get(
-                        llvm::Type::getVoidTy(*context_),
-                        {llvm::Type::getInt64Ty(*context_), llvm::Type::getInt64Ty(*context_)},
-                        false);
-                    auto *syscall = llvm::InlineAsm::get(
-                        syscall_ty,
-                        "syscall",
-                        "{rax},{rdi},~{rcx},~{r11},~{memory}",
-                        true);
-                    builder_.CreateCall(syscall, {builder_.getInt64(231), exit_code_i64});
-                } else {
-                    // Call libc exit() so that stdio buffers are flushed and atexit handlers run.
-                    auto *exit_ty = llvm::FunctionType::get(
-                        llvm::Type::getVoidTy(*context_),
-                        {llvm::Type::getInt32Ty(*context_)},
-                        false);
-                    auto *exit_fn = llvm::Function::Create(exit_ty, llvm::GlobalValue::ExternalLinkage, "exit", *module_);
-                    exit_fn->setDoesNotReturn();
-                    builder_.CreateCall(exit_fn, {exit_code_i32});
-                }
-                builder_.CreateUnreachable();
+                emit_process_exit(exit_code_i32);
             }
 
             static auto create_entry_alloca(llvm::Function *fn, llvm::Type *type, llvm::StringRef name) -> llvm::AllocaInst * {
@@ -3440,14 +3552,14 @@ namespace codegen {
                 builder_.SetInsertPoint(after_bb);
             }
 
-            // Materializes an '@option(...)'/'@env(...)' expression's compile-time-resolved
+            // Materializes an '#option(...)'/'#env(...)' expression's compile-time-resolved
             // value (cached by sema in ProgramModule::expr_option_values — see
             // sema::resolve_option_expr/resolve_env_expr) as an LLVM constant of its
             // resolved type 'ty'.
             auto emit_option_value(const ast::Expr &expr, const sema::ResolvedType &ty) -> llvm::Value * {
                 const auto it = current_module_->expr_option_values.find(sema::get_expr_key(expr));
                 if (it == current_module_->expr_option_values.end()) {
-                    report_codegen_error(diag_, {}, "internal error: '@option'/'@env' value was not resolved by sema");
+                    report_codegen_error(diag_, {}, "internal error: '#option'/'#env' value was not resolved by sema");
                     return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
                 }
                 return std::visit(

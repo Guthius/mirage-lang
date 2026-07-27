@@ -227,11 +227,11 @@ namespace sema {
         ResolvedType effective_type;
     };
 
-    // A '--opt key=value' or environment-variable value coerced (per @option's/@env's
+    // A '--opt key=value' or environment-variable value coerced (per #option's/#env's
     // target-type coercion rules) or folded from a default expression: an integer/bool/
-    // enum-underlying value, or a []u8 string. Used for '@option'/'@env' themselves and for
-    // constant-folding 'when' conditions and '@link' data expressions that reference an
-    // '@option'/'@env'-backed const.
+    // enum-underlying value, or a []u8 string. Used for '#option'/'#env' themselves and for
+    // constant-folding 'when' conditions and '#link' data expressions that reference an
+    // '#option'/'#env'-backed const.
     using ConstFoldValue = std::variant<int64_t, std::string>;
 
     // Sema's resolved view of one 'asm { ... }' instruction, computed by check_asm_stmt
@@ -261,9 +261,9 @@ namespace sema {
         std::unordered_map<const void *, TraitCoercion> expr_trait_coercions;
         std::unordered_map<const void *, TraitDispatchInfo> expr_trait_dispatch;
         std::unordered_map<const void *, ErrorMatchUnwrap> expr_error_match_unwrap;
-        // '@option(...)'/'@env(...)' expression -> its resolved compile-time value, cached
+        // '#option(...)'/'#env(...)' expression -> its resolved compile-time value, cached
         // by check_expr's OptionExpr/EnvExpr cases so later constant-folding (when
-        // conditions, '@link' data) never re-runs coercion/diagnostics for the same node.
+        // conditions, '#link' data) never re-runs coercion/diagnostics for the same node.
         std::unordered_map<const void *, ConstFoldValue> expr_option_values;
         // 'when' EXPRESSION -> which branch (true=then_expr, false=else_expr) a
         // compile-time-constant condition folded to; absent if the condition is a runtime
@@ -306,7 +306,7 @@ namespace sema {
         std::set<std::string> when_module_declaring;
     };
 
-    // Compiler-driver-supplied configuration read by '@option' during sema. Threaded
+    // Compiler-driver-supplied configuration read by '#option' during sema. Threaded
     // through check_program the same way codegen::Options is threaded through
     // codegen::generate (see codegen.hpp) — a single defaulted struct parameter, copied
     // once into Program::options at check_program's entry, then read via the
@@ -344,9 +344,9 @@ namespace sema {
         ResolveState resolve_state;
         bool ok = false;
 
-        // '--opt key=value' values supplied by the driver, read by '@option'.
+        // '--opt key=value' values supplied by the driver, read by '#option'.
         Options options;
-        // Linker directives collected from '@link' declarations in live 'when' branches
+        // Linker directives collected from '#link' declarations in live 'when' branches
         // (or unconditional module scope) across every module. Driver-specific consumption
         // is out of scope for the compiler itself — this is collection only.
         std::vector<LinkDirective> link_directives;
@@ -354,6 +354,15 @@ namespace sema {
         // see ensure_module_declared (sema_declare.cpp) for why this must be reentrant
         // rather than a single flat loop over Program::modules.
         std::set<std::string> modules_declared;
+
+        // (module_path, function_name) pairs, in the exact order the synthesized '_init'
+        // (codegen.cpp) must call them: modules topologically sorted by actual cross-module
+        // symbol references made from '@init' function bodies (see
+        // validate_init_dependencies_for_program, sema_attributes.cpp), each module's own
+        // '@init' functions kept in source declaration order. Empty if no '@init' function
+        // exists anywhere in the program, or if a circular dependency was detected (in which
+        // case 'ok' is false regardless).
+        std::vector<std::pair<std::string, std::string>> init_call_order;
 
         // Trait-impl registries. Kept separate from ProgramModule::methods (which has
         // no trait dimension and would silently collide with same-named inherent
@@ -486,6 +495,13 @@ namespace sema {
     auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth, int defer_loop_base = -1) -> void;
     auto is_constant_expr(const ast::Expr &expr, const std::string &module_path, const Program &program) -> bool;
 
+    // Returns the attribute named 'name' in 'attrs' (see ast::Attribute), or nullptr if none
+    // matches. Shared by sema_attributes.cpp's own per-attribute validation, sema_declare.cpp
+    // (rejecting '@init' on impl methods, where it's registered), and sema_check.cpp (the
+    // '@always_inline' address-taken warning) — declared here rather than confined to
+    // sema_attributes.cpp's anonymous namespace since all three need it.
+    auto find_attribute(const std::vector<ast::Attribute> &attrs, std::string_view name) -> const ast::Attribute *;
+
     // Validates default parameter values, shared by free functions, inherent
     // methods, and trait method declarations (a template since those three each
     // have their own independent AST Param struct — see ast.hpp): forbids mixing a
@@ -559,11 +575,11 @@ namespace sema {
     auto evaluate_integer_constant(const ast::Expr &expr, const std::string &module_path, const Program &program) -> std::optional<int64_t>;
 
     // A more general compile-time evaluator than evaluate_integer_constant above: also
-    // folds string literals, cross-module qualified const access ('mod.NAME'), '@option'
+    // folds string literals, cross-module qualified const access ('mod.NAME'), '#option'
     // (via the cached expr_option_values side table), 'when' expressions, and enum-literal
     // (.Variant) equality comparisons (resolved via the sibling operand's expr_types entry,
     // since a bare '.Variant' has no fixed value without that context). Used to fold 'when'
-    // statement/declaration conditions and '@link' data expressions. Takes Program by
+    // statement/declaration conditions and '#link' data expressions. Takes Program by
     // non-const reference (unlike evaluate_integer_constant) because it may need to force
     // resolution of a referenced global's value (resolve_global_symbol) on demand.
     auto evaluate_const_value(const ast::Expr &expr, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> std::optional<ConstFoldValue>;
@@ -571,7 +587,7 @@ namespace sema {
     auto find_enum_field_by_name(const EnumInfo &info, std::string_view name) -> const EnumFieldInfo *;
     auto find_enum_field_by_value(const EnumInfo &info, int64_t value) -> const EnumFieldInfo *;
 
-    // Full '@option' resolution: target-type priority (expected > default's type > []u8),
+    // Full '#option' resolution: target-type priority (expected > default's type > []u8),
     // '--opt' string coercion or default-value folding, and the required/invalid-value
     // diagnostics. 'expr_key' is get_expr_key(...) of the ENCLOSING ast::Expr (for caching
     // into ProgramModule::expr_option_values) — see check_expr's OptionExpr case.

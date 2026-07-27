@@ -429,7 +429,7 @@ namespace ast {
         SourceLocation location;
     };
 
-    // '@option(key)' / '@option(key, default)' — a compile-time expression that reads a
+    // '#option(key)' / '#option(key, default)' — a compile-time expression that reads a
     // value supplied by the compiler driver via '--opt key=value'. Legal anywhere an
     // expression is legal (arithmetic, call arguments, 'mut' initializers, ...): its value
     // is always resolved once from '--opt'/the default and cached (ProgramModule::
@@ -441,9 +441,9 @@ namespace ast {
         SourceLocation location;
     };
 
-    // '@env(key)' / '@env(key, default)' — like '@option' above, but the value comes from
+    // '#env(key)' / '#env(key, default)' — like '#option' above, but the value comes from
     // an environment variable ('key') instead of a '--opt key=value' driver flag. Shares
-    // '@option''s resolution/caching/codegen machinery end-to-end (see resolve_env_expr,
+    // '#option''s resolution/caching/codegen machinery end-to-end (see resolve_env_expr,
     // ProgramModule::expr_option_values, codegen's emit_option_value) — only the value
     // source differs.
     struct EnvExpr {
@@ -568,7 +568,7 @@ namespace ast {
     struct SwitchStmt;
     struct WhenStmt;
 
-    // '@link(category, data)' — a linker directive. Legal at module scope (or inside a
+    // '#link(category, data)' — a linker directive. Legal at module scope (or inside a
     // module-scope 'when' block); parses successfully as a Stmt too (inside a function
     // body) purely so sema can reject it there with a precise diagnostic instead of the
     // parser silently failing to produce a node at all.
@@ -580,13 +580,13 @@ namespace ast {
         SourceLocation location;
     };
 
-    // '@error(message)' / '@warn(message)' — compile-time diagnostic directives. Emits a
+    // '#error(message)' / '#warn(message)' — compile-time diagnostic directives. Emits a
     // sema error/warning with 'message' (a compile-time constant '[]u8' expression) when
     // reached while declaring a LIVE branch — the intended use is guarding it with a
-    // module-scope 'when' block, e.g. 'when target_os == .Windows { @error("Windows is not
+    // module-scope 'when' block, e.g. 'when target_os == .Windows { #error("Windows is not
     // supported") } '. Legal at module scope (or inside a module-scope 'when' block); parses
     // successfully as a Stmt too (inside a function body) purely so sema can reject it there
-    // with a precise diagnostic instead of a raw parse error — mirrors '@link' exactly.
+    // with a precise diagnostic instead of a raw parse error — mirrors '#link' exactly.
     enum class DiagnosticDirectiveKind : uint8_t { Error, Warn };
 
     struct DiagnosticDecl {
@@ -774,6 +774,23 @@ namespace ast {
         SourceLocation location;
     };
 
+    // '@name' / '@name(arg1, arg2, ...)' — a declaration attribute. Currently legal only
+    // immediately preceding a module-scope 'fn' (see FunctionDecl::attributes) or an
+    // impl-block method (see ImplDecl::Function::attributes, parsed permissively there so
+    // sema can reject method-illegal attributes like '@init' with a precise diagnostic —
+    // mirrors '#link'/'#error'/'#warn's "parse anywhere, reject in sema" idiom). 'name' is
+    // validated against the fixed known-attribute-name set by the PARSER (a pure lexical
+    // fact, no semantic context needed — mirrors '#link's category-name validation);
+    // argument count/type/constant-ness and inter-attribute legality are sema's job (see
+    // sema_attributes.cpp). 'args' is empty for a bare '@name' or for a grouped-form member
+    // (grouped attributes never take their own argument list — only the single '@name(args)'
+    // form does).
+    struct Attribute {
+        std::string name;
+        std::vector<Expr> args;
+        SourceLocation location;
+    };
+
     struct FunctionDecl {
         struct Param {
             bool is_mut;
@@ -785,6 +802,7 @@ namespace ast {
         };
 
         bool is_pub;
+        std::vector<Attribute> attributes; // empty if none; see 'attribute_clause' in the parser
         std::string name;
         std::vector<Param> params;
         std::vector<Type> return_types;
@@ -851,6 +869,10 @@ namespace ast {
             };
 
             bool is_pub;
+            std::vector<Attribute> attributes; // empty if none; every attribute name here is
+                                                // sema-rejected for '@init' specifically (see
+                                                // sema_attributes.cpp) — the other four are
+                                                // validated identically to a free function's.
             bool is_mut_self;
             std::string name;
             std::vector<Param> params; // non-self params
@@ -876,7 +898,7 @@ namespace ast {
 
     // 'when cond { decl... } [else (when ... | { decl... })]' — a module-scope compile-time
     // conditional declaration block. Parsed permissively (any Decl kind inside), restricted
-    // to '@link'/'const' with '@option'/'type'/'ext fn' by sema. Boxed via unique_ptr (not
+    // to '#link'/'const' with '#option'/'type'/'ext fn' by sema. Boxed via unique_ptr (not
     // stored by value like Decl's other alternatives) because it holds a 'vector<Decl>' —
     // Decl isn't a complete type until this very 'using Decl = ...' declaration finishes, so
     // WhenDecl can only be fully DEFINED afterward; the variant itself only needs the

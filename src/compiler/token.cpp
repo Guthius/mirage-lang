@@ -113,6 +113,7 @@ auto token_kind_name(const TokenKind kind) -> const char * {
     case TokenKind::Dot:             return "DOT";
     case TokenKind::Semicolon:       return "SEMICOLON";
     case TokenKind::At:              return "AT";
+    case TokenKind::Hash:            return "HASH";
     case TokenKind::AsmBlock:        return "ASM_BLOCK";
     case TokenKind::Eof:             return "EOF";
     }

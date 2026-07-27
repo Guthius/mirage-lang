@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Compile-Time Configuration — Mirage</title>
-  <meta name="description" content="Conditional compilation and linking driven by build-time flags and environment variables: @option, @env, @link, @error, @warn, and the when statement.">
+  <meta name="description" content="Conditional compilation and linking driven by build-time flags and environment variables: #option, #env, #link, #error, #warn, and the when statement.">
   <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -43,6 +43,7 @@
         <li><a href="modules.html">Modules</a></li>
         <li><a href="comptime-config.html" class="active">Compile-Time Config</a></li>
         <li><a href="inline-assembly.html">Inline Assembly</a></li>
+        <li><a href="attributes.html">Declaration Attributes</a></li>
       </ul>
       <div class="sidebar-section">Reference</div>
       <ul>
@@ -56,7 +57,7 @@
     <div class="content">
 
       <h1>Compile-Time Configuration</h1>
-      <p class="subtitle">Reading build-time flags and environment variables, and conditionally compiling declarations, statements, and linker inputs with <code>@option</code>, <code>@env</code>, <code>@link</code>, <code>@error</code>/<code>@warn</code>, and <code>when</code>.</p>
+      <p class="subtitle">Reading build-time flags and environment variables, and conditionally compiling declarations, statements, and linker inputs with <code>#option</code>, <code>#env</code>, <code>#link</code>, <code>#error</code>/<code>#warn</code>, and <code>when</code>.</p>
 
       <p>
         Seven coupled features let a module read configuration supplied by the compiler driver or the
@@ -64,12 +65,12 @@
         left in the binary — and surface configuration problems as compiler diagnostics:
       </p>
       <ul>
-        <li><code>@option</code> — reads a value passed with <code>--opt key=value</code>.</li>
-        <li><code>@env</code> — reads a value from an environment variable, otherwise identical to <code>@option</code>.</li>
+        <li><code>#option</code> — reads a value passed with <code>--opt key=value</code>.</li>
+        <li><code>#env</code> — reads a value from an environment variable, otherwise identical to <code>#option</code>.</li>
         <li>the <code>when</code> <strong>statement</strong> — compiles only the selected branch's declarations or statements.</li>
         <li>the <code>when</code> <strong>expression</strong> — folds to one branch's value at compile time (or behaves like a runtime ternary otherwise).</li>
-        <li><code>@link</code> — declares a linker input (library, system library, or raw flag) conditionally.</li>
-        <li><code>@error</code>/<code>@warn</code> — emits a compile-time error/warning with a custom message, typically guarded by <code>when</code>.</li>
+        <li><code>#link</code> — declares a linker input (library, system library, or raw flag) conditionally.</li>
+        <li><code>#error</code>/<code>#warn</code> — emits a compile-time error/warning with a custom message, typically guarded by <code>when</code>.</li>
       </ul>
       <p>
         Together they replace what other languages solve with build scripts, <code>#ifdef</code>, or
@@ -77,9 +78,9 @@
         the compiler driver picks the target via <code>--opt</code>.
       </p>
 
-      <h2><code>@option</code></h2>
-      <pre><code><span class="kw">@option</span>(<span class="var">key</span>)
-<span class="kw">@option</span>(<span class="var">key</span>, <span class="var">default</span>)</code></pre>
+      <h2><code>#option</code></h2>
+      <pre><code><span class="kw">#option</span>(<span class="var">key</span>)
+<span class="kw">#option</span>(<span class="var">key</span>, <span class="var">default</span>)</code></pre>
       <p>
         A compile-time expression that reads a value supplied via <code>--opt key=value</code> on the
         command line (repeatable, one per flag). <code>key</code> is a string literal — by convention a
@@ -92,19 +93,19 @@
 
       <h3>Where It Can Appear</h3>
       <p>
-        <code>@option</code> is a normal expression — legal anywhere an expression is legal, including
-        nested inside arithmetic, passed straight as a function argument (<code>@link</code>'s
+        <code>#option</code> is a normal expression — legal anywhere an expression is legal, including
+        nested inside arithmetic, passed straight as a function argument (<code>#link</code>'s
         <code>data</code> argument included), or as a <code>mut</code> variable's initializer. Its
         value is resolved once from <code>--opt</code>/the default and cached, so it behaves as an
         ordinary compile-time-constant wherever it's written:
       </p>
       <pre><code><span class="cmt">// no need to bind it to a const first</span>
-<span class="fn">@link</span>(<span class="var">lib</span>, <span class="kw">@option</span>(<span class="str">"wasm_lib"</span>, <span class="str">"libraylib.web.a"</span>))
+<span class="fn">#link</span>(<span class="var">lib</span>, <span class="kw">#option</span>(<span class="str">"wasm_lib"</span>, <span class="str">"libraylib.web.a"</span>))
 
-<span class="kw">mut</span> <span class="var">retries</span> := <span class="kw">@option</span>(<span class="str">"max_retries"</span>, <span class="num">3</span>) + <span class="num">1</span>   <span class="cmt">// retries is mut afterward</span></code></pre>
+<span class="kw">mut</span> <span class="var">retries</span> := <span class="kw">#option</span>(<span class="str">"max_retries"</span>, <span class="num">3</span>) + <span class="num">1</span>   <span class="cmt">// retries is mut afterward</span></code></pre>
 
       <h3>Target Type</h3>
-      <p>The type <code>@option</code> coerces the raw <code>--opt</code> string into is chosen in this order:</p>
+      <p>The type <code>#option</code> coerces the raw <code>--opt</code> string into is chosen in this order:</p>
       <ol>
         <li>The expected type from context — e.g. a <code>const</code>'s declared type.</li>
         <li>If no expected type is known but a default is given, the default value's own type.</li>
@@ -135,8 +136,8 @@
     <span class="var">Other</span>
 }
 
-<span class="kw">pub const</span> <span class="var">target_os</span>:   <span class="ty">OperatingSystem</span> = <span class="kw">@option</span>(<span class="str">"build/target_os"</span>,   .<span class="var">Linux</span>)
-<span class="kw">pub const</span> <span class="var">target_arch</span>: <span class="ty">Architecture</span>    = <span class="kw">@option</span>(<span class="str">"build/target_arch"</span>, .<span class="var">X86_64</span>)</code></pre>
+<span class="kw">pub const</span> <span class="var">target_os</span>:   <span class="ty">OperatingSystem</span> = <span class="kw">#option</span>(<span class="str">"build/target_os"</span>,   .<span class="var">Linux</span>)
+<span class="kw">pub const</span> <span class="var">target_arch</span>: <span class="ty">Architecture</span>    = <span class="kw">#option</span>(<span class="str">"build/target_arch"</span>, .<span class="var">X86_64</span>)</code></pre>
       <p>
         Both consts default to <code>Linux</code>/<code>X86_64</code>, but building with
         <code>--opt build/target_os=Windows</code> (or <code>--opt build/target_os=1</code>, the enum's
@@ -144,11 +145,11 @@
         imported wherever target-specific decisions are made — see the full example below.
       </p>
 
-      <h2><code>@env</code></h2>
-      <pre><code><span class="kw">@env</span>(<span class="var">key</span>)
-<span class="kw">@env</span>(<span class="var">key</span>, <span class="var">default</span>)</code></pre>
+      <h2><code>#env</code></h2>
+      <pre><code><span class="kw">#env</span>(<span class="var">key</span>)
+<span class="kw">#env</span>(<span class="var">key</span>, <span class="var">default</span>)</code></pre>
       <p>
-        Identical to <code>@option</code> in every respect — legality, target-type resolution, value
+        Identical to <code>#option</code> in every respect — legality, target-type resolution, value
         coercion, and the required-value error shape — except <code>key</code> names an
         <strong>environment variable</strong> instead of a <code>--opt</code> key, and the value is read
         once at compile time (on the machine running the compiler) instead of coming from the command
@@ -156,15 +157,15 @@
       </p>
       <pre><code>error: required environment variable 'MIRAGE_TARGET_ARCH' was not set.
        Set it with: MIRAGE_TARGET_ARCH=&lt;value&gt;</code></pre>
-      <pre><code><span class="kw">pub const</span> <span class="var">target_os</span>:   <span class="ty">OperatingSystem</span> = <span class="kw">@env</span>(<span class="str">"MIRAGE_TARGET_OS"</span>,   .<span class="var">Linux</span>)
-<span class="kw">pub const</span> <span class="var">target_arch</span>: <span class="ty">Architecture</span>    = <span class="kw">@env</span>(<span class="str">"MIRAGE_TARGET_ARCH"</span>, .<span class="var">X86_64</span>)</code></pre>
+      <pre><code><span class="kw">pub const</span> <span class="var">target_os</span>:   <span class="ty">OperatingSystem</span> = <span class="kw">#env</span>(<span class="str">"MIRAGE_TARGET_OS"</span>,   .<span class="var">Linux</span>)
+<span class="kw">pub const</span> <span class="var">target_arch</span>: <span class="ty">Architecture</span>    = <span class="kw">#env</span>(<span class="str">"MIRAGE_TARGET_ARCH"</span>, .<span class="var">X86_64</span>)</code></pre>
       <p>
-        <code>@option</code> and <code>@env</code> can be mixed freely — including reading the same key
-        from both, e.g. an <code>@option</code> whose own default is an <code>@env</code> lookup, so a
+        <code>#option</code> and <code>#env</code> can be mixed freely — including reading the same key
+        from both, e.g. an <code>#option</code> whose own default is an <code>#env</code> lookup, so a
         <code>--opt</code> flag overrides an environment variable which in turn overrides a hardcoded
         default:
       </p>
-      <pre><code><span class="kw">const</span> <span class="var">retries</span> := <span class="kw">@option</span>(<span class="str">"max_retries"</span>, <span class="kw">@env</span>(<span class="str">"MIRAGE_MAX_RETRIES"</span>, <span class="num">3</span>))</code></pre>
+      <pre><code><span class="kw">const</span> <span class="var">retries</span> := <span class="kw">#option</span>(<span class="str">"max_retries"</span>, <span class="kw">#env</span>(<span class="str">"MIRAGE_MAX_RETRIES"</span>, <span class="num">3</span>))</code></pre>
 
       <h2>The <code>when</code> Statement</h2>
       <pre><code><span class="kw">when</span> <span class="var">condition</span> {
@@ -191,9 +192,9 @@
 
       <h3>At Module Scope</h3>
       <p>
-        A module-scope <code>when</code> block may only contain <code>@link</code>, <code>@error</code>,
-        and <code>@warn</code> declarations, <code>const</code> declarations initialized directly with
-        <code>@option</code>/<code>@env</code>, <code>type</code> declarations, and <code>ext fn</code>
+        A module-scope <code>when</code> block may only contain <code>#link</code>, <code>#error</code>,
+        and <code>#warn</code> declarations, <code>const</code> declarations initialized directly with
+        <code>#option</code>/<code>#env</code>, <code>type</code> declarations, and <code>ext fn</code>
         declarations. Anything else is a compile error. This restricted set is exactly what's needed for
         platform-specific externs, type aliases, and configuration validation:
       </p>
@@ -228,9 +229,9 @@
       <p>
         The ordinary ternary <code>?:</code> also folds to a compile-time constant when its condition
         and both branches are themselves constants, so it works fine anywhere a constant is required —
-        like <code>@link</code>'s data argument:
+        like <code>#link</code>'s data argument:
       </p>
-      <pre><code><span class="fn">@link</span>(<span class="var">lib</span>, <span class="var">raylib_shared</span> ? <span class="str">"raylibdll.lib"</span> : <span class="str">"raylib.lib"</span>)   <span class="cmt">// folds fine</span></code></pre>
+      <pre><code><span class="fn">#link</span>(<span class="var">lib</span>, <span class="var">raylib_shared</span> ? <span class="str">"raylibdll.lib"</span> : <span class="str">"raylib.lib"</span>)   <span class="cmt">// folds fine</span></code></pre>
       <div class="callout tip">
         <div class="callout-title">Prefer <code>when</code>/<code>else</code> for platform-specific branches</div>
         The difference that survives is <em>where</em> the unselected branch's code gets skipped.
@@ -241,14 +242,14 @@
         somewhere a constant is required in the first place; used as an ordinary value it always
         builds a runtime branch, even with two literal operands.
         <pre><code><span class="cmt">// right for a value that only needs to be constant-foldable</span>
-<span class="fn">@link</span>(<span class="var">lib</span>, <span class="str">"raylibdll.lib"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"raylib.lib"</span>)
+<span class="fn">#link</span>(<span class="var">lib</span>, <span class="str">"raylibdll.lib"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"raylib.lib"</span>)
 
 <span class="cmt">// right when a branch wouldn't even compile on the other target</span>
 <span class="kw">const</span> <span class="var">err_code</span> := <span class="fn">GetLastError</span>() <span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Windows</span> <span class="kw">else</span> <span class="num">0</span>   <span class="cmt">// GetLastError only exists on Windows</span></code></pre>
       </div>
 
-      <h2><code>@link</code></h2>
-      <pre><code><span class="kw">@link</span>(<span class="var">category</span>, <span class="var">data</span>)</code></pre>
+      <h2><code>#link</code></h2>
+      <pre><code><span class="kw">#link</span>(<span class="var">category</span>, <span class="var">data</span>)</code></pre>
       <table>
         <tr><th>Category</th><th>Meaning</th></tr>
         <tr><td><code>lib</code></td><td><code>data</code> is a library file path, relative to the current module file's directory</td></tr>
@@ -261,34 +262,34 @@
         <code>[]u8</code> expression — a <code>when</code> expression is legal here, which is how
         shared-vs-static or per-platform library names are usually selected:
       </p>
-      <pre><code><span class="kw">@link</span>(<span class="var">lib</span>, <span class="str">"raylibdll.lib"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"raylib.lib"</span>)</code></pre>
+      <pre><code><span class="kw">#link</span>(<span class="var">lib</span>, <span class="str">"raylibdll.lib"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"raylib.lib"</span>)</code></pre>
       <p>
-        <code>@link</code> is legal only at module scope, or inside a module-scope <code>when</code>
+        <code>#link</code> is legal only at module scope, or inside a module-scope <code>when</code>
         block — anywhere else (a function body, an <code>if</code>, etc.) it's a compile error. The
-        compiler collects every <code>@link</code> reachable from a <em>live</em> <code>when</code>
+        compiler collects every <code>#link</code> reachable from a <em>live</em> <code>when</code>
         branch, across every compiled module, into one list for the driver to act on; directives in an
         unselected branch are type-checked but never collected.
       </p>
 
-      <h2><code>@error</code> / <code>@warn</code></h2>
-      <pre><code><span class="kw">@error</span>(<span class="var">message</span>)
-<span class="kw">@warn</span>(<span class="var">message</span>)</code></pre>
+      <h2><code>#error</code> / <code>#warn</code></h2>
+      <pre><code><span class="kw">#error</span>(<span class="var">message</span>)
+<span class="kw">#warn</span>(<span class="var">message</span>)</code></pre>
       <p>
-        Compile-time diagnostic directives: <code>@error</code> emits a compiler <strong>error</strong>
-        at the directive's location, <code>@warn</code> a <strong>warning</strong>. <code>message</code>
-        must be a compile-time constant <code>[]u8</code> expression, exactly like <code>@link</code>'s
-        <code>data</code> argument. Used on their own they're unconditional — <code>@error(...)</code>
+        Compile-time diagnostic directives: <code>#error</code> emits a compiler <strong>error</strong>
+        at the directive's location, <code>#warn</code> a <strong>warning</strong>. <code>message</code>
+        must be a compile-time constant <code>[]u8</code> expression, exactly like <code>#link</code>'s
+        <code>data</code> argument. Used on their own they're unconditional — <code>#error(...)</code>
         reached anywhere in a live position always fails the build. Their real job is inside a
         <code>when</code> block, rejecting or flagging a bad configuration right where it's selected
         instead of failing later with a more confusing, indirect error:
       </p>
       <pre><code><span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Windows</span> {
-    <span class="kw">@error</span>(<span class="str">"Windows is not supported"</span>)
+    <span class="kw">#error</span>(<span class="str">"Windows is not supported"</span>)
 } <span class="kw">else when</span> <span class="var">target_arch</span> == .<span class="var">Wasm32</span> {
-    <span class="kw">@warn</span>(<span class="str">"Wasm32 support is experimental"</span>)
+    <span class="kw">#warn</span>(<span class="str">"Wasm32 support is experimental"</span>)
 }</code></pre>
       <p>
-        Like <code>@link</code>, <code>@error</code>/<code>@warn</code> are legal only at module scope,
+        Like <code>#link</code>, <code>#error</code>/<code>#warn</code> are legal only at module scope,
         or inside a module-scope <code>when</code> block — anywhere else it's a compile error. And like
         every other module-scope <code>when</code> directive, the <strong>unselected</strong> branch's
         <code>message</code> argument is still fully type-checked, it just never actually emits the
@@ -333,37 +334,37 @@
     <span class="var">Other</span>
 }
 
-<span class="kw">pub const</span> <span class="var">target_os</span>:   <span class="ty">OperatingSystem</span> = <span class="kw">@option</span>(<span class="str">"build/target_os"</span>,   .<span class="var">Linux</span>)
-<span class="kw">pub const</span> <span class="var">target_arch</span>: <span class="ty">Architecture</span>    = <span class="kw">@option</span>(<span class="str">"build/target_arch"</span>, .<span class="var">X86_64</span>)</code></pre>
+<span class="kw">pub const</span> <span class="var">target_os</span>:   <span class="ty">OperatingSystem</span> = <span class="kw">#option</span>(<span class="str">"build/target_os"</span>,   .<span class="var">Linux</span>)
+<span class="kw">pub const</span> <span class="var">target_arch</span>: <span class="ty">Architecture</span>    = <span class="kw">#option</span>(<span class="str">"build/target_arch"</span>, .<span class="var">X86_64</span>)</code></pre>
       <pre><code><span class="cmt">// raylib_binding/main.mir</span>
 
 <span class="kw">const</span> <span class="var">target_os</span>     := <span class="kw">import</span>(<span class="str">"../../Core/Build/Options"</span>).<span class="var">target_os</span>
 <span class="kw">const</span> <span class="var">target_arch</span>   := <span class="kw">import</span>(<span class="str">"../../Core/Build/Options"</span>).<span class="var">target_arch</span>
-<span class="kw">const</span> <span class="var">raylib_shared</span> := <span class="kw">@option</span>(<span class="str">"raylib/shared"</span>, <span class="lit">false</span>)
+<span class="kw">const</span> <span class="var">raylib_shared</span> := <span class="kw">#option</span>(<span class="str">"raylib/shared"</span>, <span class="lit">false</span>)
 
 <span class="cmt">// Windows</span>
 <span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Windows</span> {
-    <span class="kw">@link</span>(<span class="var">flag</span>, <span class="str">"/NODEFAULTLIB:msvcrt"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"/NODEFAULTLIB:libcmt"</span>)
-    <span class="kw">@link</span>(<span class="var">lib</span>, <span class="str">"windows/raylibdll.lib"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"windows/raylib.lib"</span>)
+    <span class="kw">#link</span>(<span class="var">flag</span>, <span class="str">"/NODEFAULTLIB:msvcrt"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"/NODEFAULTLIB:libcmt"</span>)
+    <span class="kw">#link</span>(<span class="var">lib</span>, <span class="str">"windows/raylibdll.lib"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"windows/raylib.lib"</span>)
 
-    <span class="kw">@link</span>(<span class="var">system</span>, <span class="str">"Winmm"</span>)
-    <span class="kw">@link</span>(<span class="var">system</span>, <span class="str">"Gdi32"</span>)
-    <span class="kw">@link</span>(<span class="var">system</span>, <span class="str">"User32"</span>)
-    <span class="kw">@link</span>(<span class="var">system</span>, <span class="str">"Shell32"</span>)
+    <span class="kw">#link</span>(<span class="var">system</span>, <span class="str">"Winmm"</span>)
+    <span class="kw">#link</span>(<span class="var">system</span>, <span class="str">"Gdi32"</span>)
+    <span class="kw">#link</span>(<span class="var">system</span>, <span class="str">"User32"</span>)
+    <span class="kw">#link</span>(<span class="var">system</span>, <span class="str">"Shell32"</span>)
 }
 
 <span class="cmt">// Linux</span>
 <span class="kw">when</span> <span class="var">target_os</span> == .<span class="var">Linux</span> {
     <span class="kw">when</span> <span class="var">target_arch</span> == .<span class="var">X86_64</span> {
-        <span class="kw">@link</span>(<span class="var">lib</span>, <span class="str">"linux_x86_64/libraylib.so.600"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"linux_x86_64/libraylib.a"</span>)
+        <span class="kw">#link</span>(<span class="var">lib</span>, <span class="str">"linux_x86_64/libraylib.so.600"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"linux_x86_64/libraylib.a"</span>)
     } <span class="kw">else</span> {
-        <span class="kw">@link</span>(<span class="var">system</span>, <span class="str">"raylib"</span>)
+        <span class="kw">#link</span>(<span class="var">system</span>, <span class="str">"raylib"</span>)
     }
 }
 
 <span class="cmt">// WebAssembly</span>
 <span class="kw">when</span> <span class="var">target_arch</span> == .<span class="var">Wasm32</span> || <span class="var">target_arch</span> == .<span class="var">Wasm64p32</span> {
-    <span class="kw">@link</span>(<span class="var">lib</span>, <span class="kw">@option</span>(<span class="str">"raylib/wasm_lib"</span>, <span class="str">"wasm/libraylib.web.a"</span>))
+    <span class="kw">#link</span>(<span class="var">lib</span>, <span class="kw">#option</span>(<span class="str">"raylib/wasm_lib"</span>, <span class="str">"wasm/libraylib.web.a"</span>))
 }
 
 <span class="cmt">// Windows has 32-bit 'long' even on x64...</span>

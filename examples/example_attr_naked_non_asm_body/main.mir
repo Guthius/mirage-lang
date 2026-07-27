@@ -1,0 +1,19 @@
+// example_attr_naked_non_asm_body.mir — a '@naked' function whose body mixes in an ordinary
+// (non-asm) statement. Still compiles (the compiler doesn't know the body is "wrong" in any
+// way it can reject outright), but warns: naked functions have no compiler-generated stack
+// frame, so ordinary Mirage statements assume something that isn't actually there.
+//
+// Expected: compilation succeeds with
+//   warning: '@naked' function contains a non-'asm' statement; naked functions should contain
+//            only inline 'asm' blocks, since the compiler emits no prologue/epilogue for them
+
+@naked
+fn f() {
+    const x := 1
+    asm {
+        ret
+    }
+}
+
+pub fn main() {
+}

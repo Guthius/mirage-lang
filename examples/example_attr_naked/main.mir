@@ -1,0 +1,15 @@
+// example_attr_naked.mir — HAPPY PATH. '@naked' suppresses the compiler-generated
+// prologue/epilogue; the body is pure inline asm, exactly as a naked function should be.
+//
+// Expected: builds and runs with no warning.
+
+@naked
+fn raw_add_one() {
+    asm {
+        add eax, 1
+        ret
+    }
+}
+
+pub fn main() {
+}

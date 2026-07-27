@@ -1,0 +1,11 @@
+// example_attr_init_params.mir — REJECTION CASE. '@init' functions may not take parameters.
+//
+// Expected: compilation fails with
+//   error: '@init' functions may not take parameters
+
+@init
+fn setup(x: i32) {
+}
+
+pub fn main() {
+}

@@ -43,6 +43,7 @@ add_library(mirage_core OBJECT
         src/compiler/resolved_type.hpp
         src/compiler/sema.cpp
         src/compiler/sema.hpp
+        src/compiler/sema_attributes.cpp
         src/compiler/sema_check.cpp
         src/compiler/sema_declare.cpp
         src/compiler/source_location.hpp

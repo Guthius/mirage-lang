@@ -32,6 +32,7 @@ namespace {
         Action action = Action::None;
         bool emit_ir = false;
         bool freestanding = false;
+        bool noinit = false;
         bool print_link_directives = false;
         bool dump_ast = false;
         std::string module_path;
@@ -54,8 +55,9 @@ namespace {
                      << "  --std=<path>         Override the standard library path (takes precedence over MIRAGE_PATH)\n"
                      << "  --emit-ir            Print LLVM IR to stdout instead of compiling\n"
                      << "  --freestanding       Compile without standard library\n"
-                     << "  --opt key=value      Set a compile-time '@option' value (may be repeated)\n"
-                     << "  --print-link-directives  Print collected '@link' directives and exit\n"
+                     << "  --noinit             Skip generating/calling the synthesized '@init'-runner '_init'\n"
+                     << "  --opt key=value      Set a compile-time '#option' value (may be repeated)\n"
+                     << "  --print-link-directives  Print collected '#link' directives and exit\n"
                      << "  --dump-ast           Print the parsed AST shape and exit\n"
                      << "  --help               Show this help message\n";
     }
@@ -72,6 +74,8 @@ namespace {
                 options.emit_ir = true;
             } else if (arg == "--freestanding") {
                 options.freestanding = true;
+            } else if (arg == "--noinit") {
+                options.noinit = true;
             } else if (arg == "--print-link-directives") {
                 options.print_link_directives = true;
             } else if (arg == "--dump-ast") {
@@ -176,10 +180,10 @@ namespace {
         return true;
     }
 
-    // Default 'build/target_os'/'build/target_arch' @option values derived from the host
+    // Default 'build/target_os'/'build/target_arch' #option values derived from the host
     // triple, used only when the user didn't pass an explicit '--opt' override — matching
     // OperatingSystem/Architecture's variant names in the (separately-maintained) stdlib
-    // Core/Compiler/Options module, so both name-based and value-based @option coercion work.
+    // Core/Compiler/Options module, so both name-based and value-based #option coercion work.
     auto default_target_os(const llvm::Triple &triple) -> std::string {
         if (triple.isOSLinux()) return "Linux";
         if (triple.isOSWindows()) return "Windows";
@@ -215,7 +219,7 @@ namespace {
             args.push_back("-l" + lib);
         }
 
-        // '@link' directives collected from the compiled program (module scope, or a live
+        // '#link' directives collected from the compiled program (module scope, or a live
         // 'when' branch). 'lib' paths are resolved relative to the directory of the module
         // file that declared them (source_module is a canonicalized module *directory*
         // path, matching import resolution) — not the current working directory.
@@ -304,9 +308,9 @@ namespace {
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                     dump_expr(v->object, out); out << "." << v->member;
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
-                    out << "@option(\"" << v->key << "\")";
+                    out << "#option(\"" << v->key << "\")";
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
-                    out << "@env(\"" << v->key << "\")";
+                    out << "#env(\"" << v->key << "\")";
                 } else if constexpr (std::is_same_v<V, ast::ImportExpr>) {
                     out << "import(\"" << v.module_name << "\")";
                 } else {
@@ -336,7 +340,7 @@ namespace {
                     for (auto &s : v->then_block.stmts) dump_stmt(s, out, indent + 1);
                     out << pad << "}\n";
                 } else if constexpr (std::is_same_v<V, ast::LinkDecl>) {
-                    out << pad << "@link(...)\n";
+                    out << pad << "#link(...)\n";
                 } else {
                     out << pad << "<stmt>\n";
                 }
@@ -357,9 +361,9 @@ namespace {
                     if (v.init) { out << " := "; dump_expr(*v.init, out); }
                     out << "\n";
                 } else if constexpr (std::is_same_v<V, ast::LinkDecl>) {
-                    out << "@link(...)\n";
+                    out << "#link(...)\n";
                 } else if constexpr (std::is_same_v<V, ast::DiagnosticDecl>) {
-                    out << (v.kind == ast::DiagnosticDirectiveKind::Error ? "@error(...)\n" : "@warn(...)\n");
+                    out << (v.kind == ast::DiagnosticDirectiveKind::Error ? "#error(...)\n" : "#warn(...)\n");
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenDecl>>) {
                     out << "when "; dump_expr(v->condition, out); out << " {\n";
                     for (auto &d : v->then_decls) dump_decl(d, out);
@@ -384,7 +388,7 @@ auto main(const int argc, char *argv[]) -> int {
         return 1;
     }
 
-    // Host-platform '@option' defaults ('build/target_os'/'build/target_arch'), used only
+    // Host-platform '#option' defaults ('build/target_os'/'build/target_arch'), used only
     // where the user didn't already pass an explicit '--opt' override.
     {
         const llvm::Triple host_triple(llvm::sys::getDefaultTargetTriple());
@@ -430,7 +434,7 @@ auto main(const int argc, char *argv[]) -> int {
     }
 
     const auto codegen_start = std::chrono::steady_clock::now();
-    const auto llvm_module = codegen::generate(ast, sema, diag, {.freestanding = options.freestanding});
+    const auto llvm_module = codegen::generate(ast, sema, diag, {.freestanding = options.freestanding, .noinit = options.noinit});
     if (!llvm_module || diag.has_errors()) {
         return 1;
     }

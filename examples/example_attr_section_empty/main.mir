@@ -1,0 +1,12 @@
+// example_attr_section_empty.mir — REJECTION CASE. '@section' requires a non-empty
+// compile-time constant '[]u8' string.
+//
+// Expected: compilation fails with
+//   error: '@section' argument must not be an empty string
+
+@section("")
+fn f() {
+}
+
+pub fn main() {
+}

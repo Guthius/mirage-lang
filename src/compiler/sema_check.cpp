@@ -963,6 +963,13 @@ namespace sema {
                                     if (function_params_compatible(resolved_fn.params, exp_sig.param_types) &&
                                         resolved_fn.return_types == exp_sig.return_types &&
                                         !exp_sig.is_variadic) {
+                                        if (resolved_fn.decl && find_attribute(resolved_fn.decl->attributes, "always_inline")) {
+                                            diag.warn(DiagnosticStage::Sema, v.location, std::format(
+                                                "taking the address of '@always_inline' function '{}'. Calls through a "
+                                                "function pointer cannot be inlined. The function will still exist as a "
+                                                "symbol but the '@always_inline' attribute has no effect on indirect calls.",
+                                                v.name));
+                                        }
                                         return *expected;
                                     }
                                     return error(diag, v.location, std::format("'{}' has a different signature from the expected function type", v.name));
@@ -1108,12 +1115,12 @@ namespace sema {
                         return error(diag, v->location, "'when' expression branches have different types");
                     }
 
-                    // The condition/branches may freely contain '@option(...)' (or anything
-                    // else) — '@option' is always a compile-time-constant expression (see
+                    // The condition/branches may freely contain '#option(...)' (or anything
+                    // else) — '#option' is always a compile-time-constant expression (see
                     // OptionExpr's doc comment in ast.hpp), so no special-casing is needed
                     // here beyond the ordinary is_constant_expr/evaluate_const_value fold
                     // below. The restriction to compile-time-constant conditions specifically
-                    // inside '@link' contexts is enforced at that call site instead
+                    // inside '#link' contexts is enforced at that call site instead
                     // (declare_link_decl's is_constant_expr check).
                     if (is_constant_expr(v->condition, module_path, program)) {
                         if (const auto folded = evaluate_const_value(v->condition, module_path, program, diag)) {
@@ -3360,17 +3367,17 @@ namespace sema {
                     check_stmt(v->body, locals, module_path, program, diag, expected_returns, loop_depth, loop_depth);
 
                 } else if constexpr (std::is_same_v<V, ast::LinkDecl>) {
-                    // The parser accepts '@link(...)' here purely so this diagnostic can name
+                    // The parser accepts '#link(...)' here purely so this diagnostic can name
                     // the exact construct; it is never legal inside a function body.
                     diag.report_error(DiagnosticStage::Sema, v.location,
-                        "'@link' is a linker directive and may only appear at module scope "
+                        "'#link' is a linker directive and may only appear at module scope "
                         "or inside a module-scope 'when' block.");
 
                 } else if constexpr (std::is_same_v<V, ast::DiagnosticDecl>) {
-                    // Same reasoning as '@link' just above: parses here only so this
+                    // Same reasoning as '#link' just above: parses here only so this
                     // diagnostic can name the exact construct.
                     diag.report_error(DiagnosticStage::Sema, v.location,
-                        std::format("'@{}' is a compile-time diagnostic directive and may only "
+                        std::format("'#{}' is a compile-time diagnostic directive and may only "
                                     "appear at module scope or inside a module-scope 'when' block.",
                                     v.kind == ast::DiagnosticDirectiveKind::Error ? "error" : "warn"));
 

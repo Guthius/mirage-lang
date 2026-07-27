@@ -1,4 +1,4 @@
-// example_env_invalid_enum.mir — REJECTION CASE. '@env' shares '@option's target-type
+// example_env_invalid_enum.mir — REJECTION CASE. '#env' shares '#option's target-type
 // coercion rules: when the target type is an enum, the environment variable's value must
 // match a variant name (case-sensitive) or a variant's integer value; anything else is a
 // sema error naming the valid variant names.
@@ -14,7 +14,7 @@ pub type Os = enum(i32) {
     Windows = 1
 }
 
-const x: Os = @env("MIRAGE_OS_CHOICE")
+const x: Os = #env("MIRAGE_OS_CHOICE")
 
 pub fn main() {
 }

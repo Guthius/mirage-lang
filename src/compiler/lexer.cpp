@@ -550,6 +550,7 @@ namespace lexer {
                 case '?': return make_token(TokenKind::Question, start);
                 case ';': return make_token(TokenKind::Semicolon, start);
                 case '@': return make_token(TokenKind::At, start);
+                case '#': return make_token(TokenKind::Hash, start);
 
                 case '.':
                     if (match('.')) {

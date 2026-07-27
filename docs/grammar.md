@@ -9,7 +9,7 @@ This grammar is derived directly from the parser in `src/compiler/ast.cpp`. Term
 ```ebnf
 program       ::= { declaration } EOF
 
-declaration   ::= [ 'pub' ] fn_decl
+declaration   ::= [ 'pub' ] [ attribute ] fn_decl   (* attribute: only legal here — see below *)
                | [ 'pub' ] ext_fn_decl
                | [ 'pub' ] type_decl
                | [ 'pub' ] var_decl
@@ -30,7 +30,7 @@ declaration   ::= [ 'pub' ] fn_decl
 ### Function Declaration
 
 ```ebnf
-fn_decl       ::= 'fn' IDENT '(' [ param { ',' param } ] ')' [ return_types ] stmt
+fn_decl       ::= [ attribute ] 'fn' IDENT '(' [ param { ',' param } ] ')' [ return_types ] stmt
 
 param         ::= [ 'mut' ] IDENT ':' type [ '=' expr ]  (* typed, optional default *)
                | [ 'mut' ] IDENT ':=' expr               (* inferred type, default required *)
@@ -39,6 +39,25 @@ param         ::= [ 'mut' ] IDENT ':' type [ '=' expr ]  (* typed, optional defa
 return_types  ::= '->' type                       (* single return *)
                | '->' '(' type { ',' type } ')'  (* multi-return *)
 ```
+
+`pub`, if present, precedes the attribute: `pub @naked fn f() { ... }`, never `@naked pub fn f() { ... }`.
+
+### Declaration Attributes
+
+```ebnf
+attribute     ::= '@' IDENT                                 (* single, no arguments *)
+               | '@' IDENT '(' expr { ',' expr } ')'       (* single, with arguments *)
+               | '@' '(' IDENT { ',' IDENT } ')'           (* grouped — one or more, no arguments *)
+```
+
+One attribute clause may precede a `fn_decl` — currently the only declaration kind attributes
+are legal on. Multiple separate clauses on the same declaration (`@naked @no_return`) are a
+parse error; use the grouped form instead (`@(naked, no_return)`). A grouped-form member never
+takes its own argument list — `@(section(".text"))` is a parse error; only the ungrouped
+`@name(args)` form takes arguments. `IDENT` here (`no_return`, `naked`, `always_inline`,
+`section`, `init`) is validated against the fixed known-attribute set by the parser, the same
+way `link_decl`'s category name is — see spec.md's "Declaration Attributes" section for each
+attribute's semantics.
 
 A parameter's `':=' expr` form infers the parameter's type from the default
 expression's type (same literal-defaulting rules as `var_decl_stmt`'s `:=`
@@ -129,12 +148,12 @@ not accept `mut` at all).
 ### Link Declaration
 
 ```ebnf
-link_decl     ::= '@link' '(' link_category ',' expr ')'
+link_decl     ::= '#link' '(' link_category ',' expr ')'
 
 link_category ::= 'lib' | 'system' | 'flag'
 ```
 
-`@` is a sigil, not part of an identifier; `link` (like `ext` above) is parsed
+`#` is a sigil, not part of an identifier; `link` (like `ext` above) is parsed
 as a plain identifier immediately following it, not a reserved keyword. A
 module-scope linker directive: `lib` links a library file (path relative to
 the directory of the current module file), `system` links a system library by
@@ -148,12 +167,12 @@ nowhere else (a sema error, not a parse error — see spec.md).
 ```ebnf
 diagnostic_decl ::= diagnostic_kw '(' expr ')'
 
-diagnostic_kw   ::= 'error' | 'warn'    (* '@error'/'@warn'; 'error' is the KwError
+diagnostic_kw   ::= 'error' | 'warn'    (* '#error'/'#warn'; 'error' is the KwError
                                             keyword, 'warn' a plain identifier *)
 ```
 
-`@` is a sigil, not part of the keyword/identifier that follows it. A
-compile-time diagnostic directive: `@error` emits a sema error, `@warn` a
+`#` is a sigil, not part of the keyword/identifier that follows it. A
+compile-time diagnostic directive: `#error` emits a sema error, `#warn` a
 sema warning, at the directive's location. `expr` must be a compile-time
 constant `[]u8` expression, exactly like `link_decl`'s `data` above. Legal
 at module scope or inside a module-scope `when` block; legal nowhere else
@@ -170,8 +189,8 @@ block_decl    ::= '{' { declaration } '}'
 
 A compile-time conditional declaration block. `expr` must be a compile-time
 constant expression. Parses any declaration kind inside `block_decl`; sema
-restricts the permitted kinds to `@link`, `@error`, `@warn`, `const` with
-`@option`/`@env`, `type`, and `ext fn` (see spec.md's "Compile-Time
+restricts the permitted kinds to `#link`, `#error`, `#warn`, `const` with
+`#option`/`#env`, `type`, and `ext fn` (see spec.md's "Compile-Time
 Configuration" section).
 
 ---
@@ -521,9 +540,9 @@ primary_expr  ::= INT_LITERAL
                | env_expr
                | asm_expr
 
-option_expr   ::= '@option' '(' STRING [ ',' expr ] ')'
+option_expr   ::= '#option' '(' STRING [ ',' expr ] ')'
 
-env_expr      ::= '@env' '(' STRING [ ',' expr ] ')'
+env_expr      ::= '#env' '(' STRING [ ',' expr ] ')'
 
 sizeof_expr   ::= 'sizeof' '(' sizeof_operand ')'
 
@@ -573,11 +592,11 @@ parse error. `{}` (empty) is shared: with a bitset-expected type it denotes
 the zero value (no bits set), exactly as `default` does for a bitset type
 (see spec.md).
 
-`@` is a sigil, not part of an identifier; `option`/`env` (like `link` in
+`#` is a sigil, not part of an identifier; `option`/`env` (like `link` in
 `link_decl` above) are parsed as plain identifiers immediately following it,
 not reserved keywords. `option_expr`/`env_expr` are legal anywhere
 `primary_expr` is legal — nested inside arithmetic, as a call argument
-(including `@link`'s `data`), as a `mut` initializer, etc. Their value is
+(including `#link`'s `data`), as a `mut` initializer, etc. Their value is
 resolved once — from `--opt`/the default for `option_expr`, from the named
 environment variable/the default for `env_expr` — and cached, so each
 composes as an ordinary compile-time-constant expression wherever it's
@@ -634,7 +653,11 @@ Comments are treated as whitespace: they may appear anywhere whitespace is
 allowed and carry no semantic meaning. An unterminated `/* ... */` is a
 lexer error. See spec.md's "Comments" section for the general syntax, and
 "Inline Assembly" (§20) for the asm mini-language's separate `;`/`#`
-comment convention used *inside* `asm { ... }` bodies.
+comment convention used *inside* `asm { ... }` bodies — that convention is
+handled entirely by the asm block's own raw-text lexer and is unrelated to
+the top-level `#` sigil `link_decl`/`diagnostic_decl`/`option_expr`/
+`env_expr` use above: outside an `asm { ... }` body, `#` never introduces a
+comment, it always starts a directive.
 
 ---
 

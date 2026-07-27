@@ -1,11 +1,11 @@
-// example_option_in_mut.mir — REJECTION CASE. '@option' is a compile-time expression;
+// example_option_in_mut.mir — REJECTION CASE. '#option' is a compile-time expression;
 // it's legal only as a 'const' declaration's initializer (or a 'when' operand), never as
 // the RHS of a 'mut' variable.
 //
 // Expected: compilation fails with
-//   error: '@option' is a compile-time expression and may only appear in
+//   error: '#option' is a compile-time expression and may only appear in
 //          const declarations or when conditions.
 
 pub fn main() {
-    mut x := @option("foo", 1)
+    mut x := #option("foo", 1)
 }

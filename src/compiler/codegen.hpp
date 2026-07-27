@@ -14,6 +14,11 @@ namespace llvm {
 namespace codegen {
     struct Options {
         bool freestanding = false;
+        // Suppresses generation (and, in hosted builds, the '_start' call) of the synthesized
+        // '@init'-runner '_init', even if the program declares '@init' functions. Those
+        // functions still compile normally and remain individually callable — only the
+        // automatic invocation is skipped; the user must call each one manually if needed.
+        bool noinit = false;
     };
 
     auto generate(

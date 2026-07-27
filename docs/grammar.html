@@ -53,6 +53,7 @@
         <li><a href="modules.html">Modules</a></li>
         <li><a href="comptime-config.html">Compile-Time Config</a></li>
         <li><a href="inline-assembly.html">Inline Assembly</a></li>
+        <li><a href="attributes.html">Declaration Attributes</a></li>
       </ul>
       <div class="sidebar-section">Reference</div>
       <ul>
@@ -75,7 +76,7 @@
       <h2>Top-Level Structure</h2>
       <pre><code>program       ::= { declaration } EOF
 
-declaration   ::= [ 'pub' ] fn_decl
+declaration   ::= [ 'pub' ] [ attribute ] fn_decl   <span class="bnf-cm">-- attribute: only legal here, see below</span>
                | [ 'pub' ] ext_fn_decl
                | [ 'pub' ] type_decl
                | [ 'pub' ] var_decl
@@ -88,13 +89,27 @@ declaration   ::= [ 'pub' ] fn_decl
       <h2>Declarations</h2>
 
       <h3>Function Declaration</h3>
-      <pre><code>fn_decl       ::= 'fn' IDENT '(' [ param { ',' param } ] ')' [ return_types ] stmt
+      <pre><code>fn_decl       ::= [ attribute ] 'fn' IDENT '(' [ param { ',' param } ] ')' [ return_types ] stmt
 
 param         ::= [ 'mut' ] IDENT ':' type
                | IDENT ':' '...' type   <span class="bnf-cm">-- native variadic; must be the last parameter</span>
 
 return_types  ::= '->' type
                | '->' '(' type { ',' type } ')'</code></pre>
+      <p><code>pub</code>, if present, precedes the attribute: <code>pub @naked fn f() { ... }</code>, never <code>@naked pub fn f() { ... }</code>.</p>
+
+      <h3>Declaration Attributes</h3>
+      <pre><code>attribute     ::= '@' IDENT                              <span class="bnf-cm">-- single, no arguments</span>
+               | '@' IDENT '(' expr { ',' expr } ')'    <span class="bnf-cm">-- single, with arguments</span>
+               | '@' '(' IDENT { ',' IDENT } ')'        <span class="bnf-cm">-- grouped, no arguments</span>
+
+<span class="bnf-cm">-- only one attribute clause may precede a declaration; '@naked @no_return' (two
+-- separate clauses) is a parse error, use the grouped form '@(naked, no_return)'
+-- instead. A grouped member never takes its own argument list —
+-- '@(section(".text"))' is a parse error; only the ungrouped '@name(args)' form
+-- takes arguments. Known names: no_return, naked, always_inline, section, init
+-- (see comptime-config.html's sibling page, attributes.html, for full semantics).
+-- Currently legal only immediately before 'fn' — no other declaration kind.</span></code></pre>
 
       <h3>Extern Function Declaration</h3>
       <pre><code>ext_fn_decl   ::= ext_kw 'fn' IDENT '(' [ ext_params ] ')' [ '->' type ]
@@ -140,11 +155,11 @@ method_decl   ::= [ 'pub' ] 'fn' IDENT
 -- the trait's own visibility governs which methods are externally callable</span></code></pre>
 
       <h3>Link Declaration</h3>
-      <pre><code>link_decl     ::= '@link' '(' link_category ',' expr ')'
+      <pre><code>link_decl     ::= '#link' '(' link_category ',' expr ')'
 
 link_category ::= 'lib' | 'system' | 'flag'
 
-<span class="bnf-cm">-- '@' is a sigil, not part of an identifier; 'link' (like 'ext' above) is parsed
+<span class="bnf-cm">-- '#' is a sigil, not part of an identifier; 'link' (like 'ext' above) is parsed
 -- as a plain identifier immediately following it, not a reserved keyword. A
 -- module-scope linker directive: 'lib' links a library file (path relative to the
 -- current module file's directory), 'system' links a system library by name,
@@ -155,11 +170,11 @@ link_category ::= 'lib' | 'system' | 'flag'
       <h3>Diagnostic Declaration</h3>
       <pre><code>diagnostic_decl ::= diagnostic_kw '(' expr ')'
 
-diagnostic_kw   ::= 'error' | 'warn'   <span class="bnf-cm">-- '@error'/'@warn'; 'error' is the KwError
+diagnostic_kw   ::= 'error' | 'warn'   <span class="bnf-cm">-- '#error'/'#warn'; 'error' is the KwError
                                            keyword, 'warn' a plain identifier</span>
 
-<span class="bnf-cm">-- '@' is a sigil, not part of the keyword/identifier that follows it. A
--- compile-time diagnostic directive: '@error' emits a sema error, '@warn' a
+<span class="bnf-cm">-- '#' is a sigil, not part of the keyword/identifier that follows it. A
+-- compile-time diagnostic directive: '#error' emits a sema error, '#warn' a
 -- sema warning, at the directive's location. 'expr' must be a compile-time
 -- constant '[]u8' expression, exactly like link_decl's 'data' above. Legal at
 -- module scope or inside a module-scope 'when' block; a sema error everywhere
@@ -172,8 +187,8 @@ block_decl    ::= '{' { declaration } '}'
 
 <span class="bnf-cm">-- a compile-time conditional declaration block; 'expr' must be a compile-time
 -- constant expression. Parses any declaration kind inside block_decl; sema
--- restricts the permitted kinds to '@link', '@error', '@warn', 'const' with
--- '@option'/'@env', 'type', and 'ext fn' — see the Compile-Time Configuration page.</span></code></pre>
+-- restricts the permitted kinds to '#link', '#error', '#warn', 'const' with
+-- '#option'/'#env', 'type', and 'ext fn' — see the Compile-Time Configuration page.</span></code></pre>
 
       <h2>Types</h2>
       <pre><code>type          ::= '*' type                              <span class="bnf-cm">-- pointer</span>
@@ -406,14 +421,14 @@ arg           ::= expr '...'    <span class="bnf-cm">-- spread; only legal as th
                | option_expr
                | env_expr
 
-option_expr   ::= '@option' '(' STRING [ ',' expr ] ')'
+option_expr   ::= '#option' '(' STRING [ ',' expr ] ')'
 
-env_expr      ::= '@env' '(' STRING [ ',' expr ] ')'
+env_expr      ::= '#env' '(' STRING [ ',' expr ] ')'
 
-<span class="bnf-cm">-- '@' is a sigil, not part of an identifier; 'option'/'env' (like 'link' above) are
+<span class="bnf-cm">-- '#' is a sigil, not part of an identifier; 'option'/'env' (like 'link' above) are
 -- parsed as plain identifiers immediately following it, not reserved
 -- keywords. Legal anywhere primary_expr is legal — nested inside arithmetic,
--- as a call argument (including '@link's data), as a 'mut' initializer, etc.
+-- as a call argument (including '#link's data), as a 'mut' initializer, etc.
 -- Each value is resolved once — from '--opt'/the default for option_expr, from
 -- the named environment variable/the default for env_expr — and cached, so it
 -- composes as an ordinary compile-time-constant expression wherever it's
@@ -559,7 +574,7 @@ LETTER        ::= 'a' .. 'z' | 'A' .. 'Z' | '_'</code></pre>
       </div>
 
       <div class="page-nav">
-        <a href="inline-assembly.html" class="prev"><span class="label">Previous</span>Inline Assembly</a>
+        <a href="attributes.html" class="prev"><span class="label">Previous</span>Declaration Attributes</a>
       </div>
 
     </div>

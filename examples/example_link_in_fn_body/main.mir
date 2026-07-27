@@ -1,11 +1,11 @@
-// example_link_in_fn_body.mir — REJECTION CASE. '@link' is a module-scope-only linker
+// example_link_in_fn_body.mir — REJECTION CASE. '#link' is a module-scope-only linker
 // directive; it parses successfully inside a function body purely so sema can name the
 // exact construct in its diagnostic, but it is always a sema error there.
 //
 // Expected: compilation fails with
-//   error: '@link' is a linker directive and may only appear at module scope
+//   error: '#link' is a linker directive and may only appear at module scope
 //          or inside a module-scope 'when' block.
 
 pub fn main() {
-    @link(lib, "foo.a")
+    #link(lib, "foo.a")
 }

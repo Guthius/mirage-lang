@@ -1,0 +1,18 @@
+// example_attr_always_inline_address_taken.mir — '@always_inline' requests inlining at every
+// direct call site, but taking the function's address (assigning it to a function-pointer
+// variable here) means SOME calls will go through the pointer instead, and those can't be
+// inlined. Still compiles — the function remains an ordinary callable symbol — but warns.
+//
+// Expected: compilation succeeds with
+//   warning: taking the address of '@always_inline' function 'add'. Calls through a function
+//            pointer cannot be inlined. The function will still exist as a symbol but the
+//            '@always_inline' attribute has no effect on indirect calls.
+
+@always_inline
+fn add(a: i32, b: i32) -> i32 {
+    return a + b
+}
+
+pub fn main() {
+    const fp: fn(i32, i32) -> i32 = add
+}
