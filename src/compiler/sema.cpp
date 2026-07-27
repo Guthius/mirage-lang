@@ -66,70 +66,118 @@ namespace sema {
     }
 
     namespace {
+        // Resolves 'ef's declared param/return types exactly once (idempotent via
+        // 'is_resolved'). Extracted out of resolve_signatures_for_module's inline body so
+        // a bare-import alias can force the TRUE ORIGIN'S ExtFunctionSymbol to resolve
+        // using the origin's own module_path as context (see resolve_signatures_for_module
+        // below), instead of resolving relative to whichever module's table happens to be
+        // iterating it — a param/return type naming another type local to the origin
+        // module must resolve there, not in the importer.
+        void resolve_ext_function_symbol(const std::string &module_path, ExtFunctionSymbol &ef, Program &program, DiagnosticEngine &diag) {
+            if (ef.is_resolved) return;
+
+            for (auto &p : ef.decl->params) {
+                const auto pt = resolve_type(p.type, module_path, program, diag);
+                if (p.default_value) {
+                    diag.report_error(DiagnosticStage::Sema, p.location,
+                        "'ext fn' declarations may not have default parameter values. "
+                        "Default arguments have no C ABI representation.");
+                }
+                if (pt.kind == TypeKind::Union) {
+                    diag.report_error(DiagnosticStage::Sema, p.location, "union types are not yet supported in extern function signatures");
+                }
+                if (pt.kind == TypeKind::Trait) {
+                    diag.report_error(DiagnosticStage::Sema, p.location, "trait handles have no C ABI representation and cannot appear in 'ext fn' signatures");
+                }
+                if (pt.kind == TypeKind::Function) {
+                    const auto *sig = program.fn_signature_at(pt.fn_index);
+                    if (sig && sig->return_types.size() > 1) {
+                        diag.report_error(DiagnosticStage::Sema, p.location, "multi-return function types cannot be used in extern function signatures (no C ABI representation)");
+                    }
+                }
+                ef.params.push_back(pt);
+            }
+
+            if (ef.decl->return_type) {
+                const auto rt = resolve_type(*ef.decl->return_type, module_path, program, diag);
+                if (rt.kind == TypeKind::Union) {
+                    diag.report_error(DiagnosticStage::Sema, ef.decl->location, "union types are not yet supported in extern function signatures");
+                }
+                if (rt.kind == TypeKind::Trait) {
+                    diag.report_error(DiagnosticStage::Sema, ef.decl->location, "trait handles have no C ABI representation and cannot appear in 'ext fn' signatures");
+                }
+                if (rt.kind == TypeKind::Function) {
+                    const auto *sig = program.fn_signature_at(rt.fn_index);
+                    if (sig && sig->return_types.size() > 1) {
+                        diag.report_error(DiagnosticStage::Sema, ef.decl->location, "multi-return function types cannot be used in extern function signatures (no C ABI representation)");
+                    }
+                }
+                ef.return_type = rt;
+            }
+
+            ef.is_variadic = ef.decl->is_variadic;
+            ef.is_resolved = true;
+        }
+
         void resolve_signatures_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
             for (auto &[name, sym] : module.symbols) {
-                if (std::holds_alternative<TypeSymbol>(sym)) {
-                    const auto loc = std::get<TypeSymbol>(sym).decl->location;
+                if (!std::holds_alternative<TypeSymbol>(sym)) continue;
+                const auto loc = std::get<TypeSymbol>(sym).decl->location;
+                // A bare-import alias's '.resolved' already shares the origin's GLOBAL
+                // struct/enum/union/bitset/trait index (copied verbatim at declare time),
+                // so no copy-back is needed here — forcing layout via the origin's own
+                // (module_path, name) just ensures that shared global-index entry gets laid
+                // out using the origin as the resolution context for its OWN field types,
+                // which becomes automatically visible through the alias too.
+                if (const auto origin = module.bare_import_origins.find(name); origin != module.bare_import_origins.end()) {
+                    resolve_type_symbol(origin->second.module_path, origin->second.symbol_name, program, diag, loc);
+                } else {
                     resolve_type_symbol(module_path, name, program, diag, loc);
                 }
             }
 
             for (auto &[name, sym] : module.symbols) {
-                if (std::holds_alternative<FunctionSymbol>(sym)) {
-                    ensure_function_signature_resolved(module_path, name, program, diag);
+                if (auto *fn = std::get_if<FunctionSymbol>(&sym)) {
+                    if (const auto origin = module.bare_import_origins.find(name); origin != module.bare_import_origins.end()) {
+                        auto &origin_sym = ensure_function_signature_resolved(origin->second.module_path, origin->second.symbol_name, program, diag);
+                        *fn = origin_sym;
+                        fn->is_pub = false; // never re-export through the alias
+                    } else {
+                        ensure_function_signature_resolved(module_path, name, program, diag);
+                    }
                 } else if (auto *ef = std::get_if<ExtFunctionSymbol>(&sym)) {
-                    for (auto &p : ef->decl->params) {
-                        const auto pt = resolve_type(p.type, module_path, program, diag);
-                        if (p.default_value) {
-                            diag.report_error(DiagnosticStage::Sema, p.location,
-                                "'ext fn' declarations may not have default parameter values. "
-                                "Default arguments have no C ABI representation.");
-                        }
-                        if (pt.kind == TypeKind::Union) {
-                            diag.report_error(DiagnosticStage::Sema, p.location, "union types are not yet supported in extern function signatures");
-                        }
-                        if (pt.kind == TypeKind::Trait) {
-                            diag.report_error(DiagnosticStage::Sema, p.location, "trait handles have no C ABI representation and cannot appear in 'ext fn' signatures");
-                        }
-                        if (pt.kind == TypeKind::Function) {
-                            const auto *sig = program.fn_signature_at(pt.fn_index);
-                            if (sig && sig->return_types.size() > 1) {
-                                diag.report_error(DiagnosticStage::Sema, p.location, "multi-return function types cannot be used in extern function signatures (no C ABI representation)");
-                            }
-                        }
-                        ef->params.push_back(pt);
+                    if (const auto origin = module.bare_import_origins.find(name); origin != module.bare_import_origins.end()) {
+                        auto &origin_sym = std::get<ExtFunctionSymbol>(program.modules.at(origin->second.module_path).symbols.at(origin->second.symbol_name));
+                        resolve_ext_function_symbol(origin->second.module_path, origin_sym, program, diag);
+                        *ef = origin_sym;
+                        ef->is_pub = false;
+                    } else {
+                        resolve_ext_function_symbol(module_path, *ef, program, diag);
                     }
-
-                    if (ef->decl->return_type) {
-                        const auto rt = resolve_type(*ef->decl->return_type, module_path, program, diag);
-                        if (rt.kind == TypeKind::Union) {
-                            diag.report_error(DiagnosticStage::Sema, ef->decl->location, "union types are not yet supported in extern function signatures");
-                        }
-                        if (rt.kind == TypeKind::Trait) {
-                            diag.report_error(DiagnosticStage::Sema, ef->decl->location, "trait handles have no C ABI representation and cannot appear in 'ext fn' signatures");
-                        }
-                        if (rt.kind == TypeKind::Function) {
-                            const auto *sig = program.fn_signature_at(rt.fn_index);
-                            if (sig && sig->return_types.size() > 1) {
-                                diag.report_error(DiagnosticStage::Sema, ef->decl->location, "multi-return function types cannot be used in extern function signatures (no C ABI representation)");
-                            }
-                        }
-                        ef->return_type = rt;
-                    }
-
-                    ef->is_variadic = ef->decl->is_variadic;
                 }
             }
         }
 
         void resolve_values_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
             for (auto &[name, sym] : module.symbols) {
-                if (std::holds_alternative<GlobalSymbol>(sym)) {
-                    const auto loc = std::get<GlobalSymbol>(sym).decl->location;
-                    resolve_global_symbol(module_path, name, program, diag, loc);
-                } else if (std::holds_alternative<MacroSymbol>(sym)) {
-                    const auto loc = std::get<MacroSymbol>(sym).decl->location;
-                    resolve_macro_symbol(module_path, name, program, diag, loc);
+                if (auto *g = std::get_if<GlobalSymbol>(&sym)) {
+                    const auto loc = g->decl->location;
+                    if (const auto origin = module.bare_import_origins.find(name); origin != module.bare_import_origins.end()) {
+                        resolve_global_symbol(origin->second.module_path, origin->second.symbol_name, program, diag, loc);
+                        *g = std::get<GlobalSymbol>(program.modules.at(origin->second.module_path).symbols.at(origin->second.symbol_name));
+                        g->is_pub = false;
+                    } else {
+                        resolve_global_symbol(module_path, name, program, diag, loc);
+                    }
+                } else if (auto *m = std::get_if<MacroSymbol>(&sym)) {
+                    const auto loc = m->decl->location;
+                    if (const auto origin = module.bare_import_origins.find(name); origin != module.bare_import_origins.end()) {
+                        auto &origin_sym = resolve_macro_symbol(origin->second.module_path, origin->second.symbol_name, program, diag, loc);
+                        *m = origin_sym;
+                        m->is_pub = false;
+                    } else {
+                        resolve_macro_symbol(module_path, name, program, diag, loc);
+                    }
                 }
             }
         }
@@ -304,7 +352,11 @@ namespace sema {
         }
 
         void check_struct_field_defaults_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
-            for (const auto &sym : module.symbols | std::views::values) {
+            for (const auto &[name, sym] : module.symbols) {
+                // A bare-import alias shares its struct's global index with the origin —
+                // the origin module's own pass over this loop already checks these field
+                // defaults once, correctly, under the origin's context.
+                if (module.bare_import_origins.contains(name)) continue;
                 const auto *ts = std::get_if<TypeSymbol>(&sym);
                 if (!ts || !ts->resolved || ts->resolved->kind != TypeKind::Struct) continue;
 
@@ -331,7 +383,14 @@ namespace sema {
         }
 
         void check_bodies_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
-            for (auto &sym : module.symbols | std::views::values) {
+            for (auto &[name, sym] : module.symbols) {
+                // A bare-import alias shares its 'decl' AST pointer with the origin — the
+                // origin module's own pass over this loop already type-checks that body
+                // once, correctly, under the origin's context. Re-checking it here (under
+                // the importer's context) would write into the WRONG per-module
+                // 'expr_types' side table and spuriously fail to resolve any private
+                // sibling the origin's body references.
+                if (module.bare_import_origins.contains(name)) continue;
                 const auto *fn = std::get_if<FunctionSymbol>(&sym);
                 if (!fn) {
                     continue;
@@ -481,14 +540,21 @@ namespace sema {
     }
 
     auto find_type_module_and_name(const ResolvedType &ty, const Program &program) -> std::pair<std::string, std::string> {
-        // For struct/union, the defining module is stored directly on the info struct.
-        // Use it to avoid accidentally matching a type alias in an importing module that
-        // resolves to the same ResolvedType.
+        // The defining module is stored directly on the info struct for every kind. Use
+        // it to avoid accidentally matching a bare-import TypeSymbol alias in an
+        // importing module that resolves to the same ResolvedType (an alias's '.resolved'
+        // is a verbatim copy of the origin's, sharing the same global index).
         const std::string *defining_module = nullptr;
         if (ty.kind == TypeKind::Struct) {
             if (const auto *info = program.struct_at(ty.struct_index)) defining_module = &info->module_path;
         } else if (ty.kind == TypeKind::Union) {
             if (const auto *info = program.union_at(ty.union_index)) defining_module = &info->module_path;
+        } else if (ty.kind == TypeKind::Enum) {
+            if (const auto *info = program.enum_at(ty.enum_index)) defining_module = &info->module_path;
+        } else if (ty.kind == TypeKind::Bitset) {
+            if (const auto *info = program.bitset_at(ty.bitset_index)) defining_module = &info->module_path;
+        } else if (ty.kind == TypeKind::Trait) {
+            if (const auto *info = program.trait_at(ty.trait_index)) defining_module = &info->module_path;
         }
 
         if (defining_module && !defining_module->empty()) {
@@ -502,7 +568,11 @@ namespace sema {
             }
         }
 
-        // Fallback for enums and other types that don't store a module_path.
+        // Fallback for any ResolvedType kind not covered above (or a not-yet-populated
+        // module_path). A bare-import alias TypeSymbol can in principle be matched here —
+        // acceptable only because every kind that actually needs precise origin
+        // attribution (struct/union/enum/bitset/trait, for find_method et al.) is already
+        // handled by the fast path above.
         for (const auto &[path, mod] : program.modules) {
             for (const auto &[name, sym] : mod.symbols) {
                 if (const auto *ts = std::get_if<TypeSymbol>(&sym))

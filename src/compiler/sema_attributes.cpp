@@ -127,7 +127,12 @@ namespace sema {
     // bodies, only resolved signatures and raw AST shape (attribute args, param/return lists,
     // the body's top-level statement list for '@naked').
     void validate_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
-        for (auto &sym : module.symbols | std::views::values) {
+        for (auto &[name, sym] : module.symbols) {
+            // A bare-import alias shares its 'decl' AST pointer with the origin — the
+            // origin module's own pass over this loop already validates its attributes
+            // once, correctly, under the origin's context (e.g. '@section's constant-fold
+            // must resolve relative to the origin, not the importer).
+            if (module.bare_import_origins.contains(name)) continue;
             auto *fn = std::get_if<FunctionSymbol>(&sym);
             if (!fn || !fn->decl || fn->decl->attributes.empty()) continue;
             const auto &attrs = fn->decl->attributes;

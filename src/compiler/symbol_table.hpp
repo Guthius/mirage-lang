@@ -32,6 +32,12 @@ namespace sema {
         std::optional<ResolvedType> return_type;
         bool is_pub = false;
         bool is_variadic = false;
+        // Guards resolve_signatures_for_module's per-param/return-type resolution loop
+        // (sema.cpp) against being run twice on the same symbol — needed once a bare
+        // import can cause the SAME underlying decl to be visited via two different
+        // symbol-table entries (the origin's own, and an alias's), unlike ordinary
+        // (non-aliased) 'ext fn's, which this loop previously only ever visited once.
+        bool is_resolved = false;
     };
 
     struct MacroSymbol {

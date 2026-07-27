@@ -610,6 +610,7 @@ namespace sema {
                 }
 
                 EnumInfo info;
+                info.module_path = module_path;
                 info.underlying_type = underlying;
 
                 uint64_t iota_counter = 0;
@@ -665,7 +666,7 @@ namespace sema {
             void layout_bitset(const std::string &module_path, const int slot, const std::unique_ptr<ast::BitsetType> &decl) {
                 const auto target = walk_namespace_chain(module_path, decl->member_type, program, diag, ast_program);
                 if (!target) {
-                    program.bitsets[slot] = BitsetInfo{.layout_done = true};
+                    program.bitsets[slot] = BitsetInfo{.module_path = module_path, .layout_done = true};
                     return;
                 }
 
@@ -675,7 +676,7 @@ namespace sema {
                 const auto member_ty = resolve_final_full(target->module_path, target->name, target->crossed_boundary, target->location);
                 if (member_ty.kind != TypeKind::Enum) {
                     diag.report_error(DiagnosticStage::Sema, decl->location, "bitset member type must be an enum type");
-                    program.bitsets[slot] = BitsetInfo{.layout_done = true};
+                    program.bitsets[slot] = BitsetInfo{.module_path = module_path, .layout_done = true};
                     return;
                 }
 
@@ -705,6 +706,7 @@ namespace sema {
                 }
 
                 program.bitsets[slot] = BitsetInfo{
+                    .module_path = module_path,
                     .member_enum_type = member_ty,
                     .storage_type = storage,
                     .storage_bits = storage_bits,

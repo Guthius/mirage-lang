@@ -50,6 +50,8 @@ namespace ast {
                     if (const auto *import_stmt = find_leaf_import(*var_decl->init)) {
                         found.emplace_back(import_stmt->module_name, import_stmt->location);
                     }
+                } else if (const auto *bare_import = std::get_if<BareImportDecl>(&decl)) {
+                    found.emplace_back(bare_import->path, bare_import->location);
                 }
             }
 

@@ -48,6 +48,7 @@ namespace sema {
     };
 
     struct EnumInfo {
+        std::string module_path; // module where this enum is declared — see find_type_module_and_name
         ResolvedType underlying_type;
         std::vector<EnumFieldInfo> fields;
         bool layout_done = false;
@@ -58,6 +59,7 @@ namespace sema {
     // Bit index for variant v is 'v.value + 1' (see layout_bitset); this is
     // validated to fit within 'storage_bits' at declaration time.
     struct BitsetInfo {
+        std::string module_path; // module where this bitset is declared — see find_type_module_and_name
         ResolvedType member_enum_type;
         ResolvedType storage_type;
         uint32_t storage_bits = 0;
@@ -252,10 +254,33 @@ namespace sema {
         bool clobbers_memory = false;
     };
 
+    // The true origin of a bare-import alias: 'module_path'/'symbol_name' (both resolved,
+    // canonical) are used by every redirect/skip site that needs to re-resolve/emit the
+    // real underlying decl in its correct context; 'source_path' is the raw string as
+    // written in the 'import("...")' call that introduced this alias, kept only so
+    // diagnostics (the bare-vs-bare collision message) can show the module path the way
+    // the user actually wrote it, not a resolved absolute filesystem path.
+    struct BareImportOrigin {
+        std::string module_path;
+        std::string symbol_name;
+        std::string source_path;
+    };
+
     struct ProgramModule {
         SymbolTable symbols;
         // type_name -> method_name -> MethodInfo
         std::unordered_map<std::string, std::unordered_map<std::string, MethodInfo>> methods;
+        // alias_name (as it appears, unqualified, in THIS module's own 'symbols' table)
+        // -> its true origin — populated only for names introduced by a bare import
+        // (sema_declare.cpp's declare_bare_import). An alias entry shares its underlying
+        // AST decl (and, for types, its global struct/enum/union/bitset/trait index) with
+        // the origin, so every per-module bulk pass below (signature/value resolution,
+        // body/attribute/field-default checking, codegen emission) must consult this map
+        // before processing a symbol generically — either to skip it (the origin's own
+        // natural pass already does the real work) or to redirect resolution to the
+        // origin's path/name — rather than accidentally re-resolving/re-checking/
+        // re-emitting the SAME decl under this module's (wrong) context.
+        std::unordered_map<std::string, BareImportOrigin> bare_import_origins;
         std::unordered_map<const void *, ResolvedType> expr_types;
         std::unordered_map<const void *, VariantCoercion> expr_variant_coercions;
         std::unordered_map<const void *, TraitCoercion> expr_trait_coercions;

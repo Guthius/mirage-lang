@@ -769,6 +769,22 @@ namespace codegen {
             void declare_globals_and_functions() {
                 for (const auto &[path, mod] : sema_program_.modules) {
                     for (const auto &[name, sym] : mod.symbols) {
+                        // A bare-import alias's GlobalSymbol/FunctionSymbol shares its
+                        // underlying decl (and, for a function, its already-checked body)
+                        // with the origin — declaring/emitting it again here would create a
+                        // SECOND llvm::GlobalVariable (two addresses for one 'mut' global)
+                        // or a SECOND llvm::Function whose body emission (emit_functions,
+                        // below) would read 'expr_types' that were only ever populated under
+                        // the origin's own ProgramModule. The second pass below (after this
+                        // loop) instead registers the origin's already-created LLVM value
+                        // under the importer's own key. ExtFunctionSymbol aliases need no
+                        // such guard: 'ext fn's are already deduplicated process-globally by
+                        // their raw C name via 'module_->getFunction()' below, so an alias
+                        // naturally converges on the same llvm::Function with no special-casing.
+                        if ((std::holds_alternative<sema::GlobalSymbol>(sym) || std::holds_alternative<sema::FunctionSymbol>(sym)) &&
+                            mod.bare_import_origins.contains(name)) {
+                            continue;
+                        }
                         if (const auto *global = std::get_if<sema::GlobalSymbol>(&sym)) {
                             const auto gname = symbol_name(path, name);
                             globals_[path + "\n" + name] = new llvm::GlobalVariable(
@@ -836,6 +852,36 @@ namespace codegen {
                             }
                             ext_functions_[path + "\n" + name] = llvm_fn;
                         }
+                    }
+                }
+
+                // Pass 2: register bare-import aliases' llvm::GlobalVariable*/Function* —
+                // created above under the ORIGIN's own key — a second time under each
+                // IMPORTING module's key too. Every unqualified use site inside an importer's
+                // own function bodies (emit_call's/emit_lvalue's plain-IdentExpr cases) looks
+                // its callee/lvalue up purely as FunctionKey{*current_module_path_, name} /
+                // global_key(*current_module_path_, name) — i.e. keyed off the CALL SITE'S OWN
+                // module, never off any "true origin" concept — so without this, those lookups
+                // would throw for any reference to a bare-imported fn/global.
+                for (const auto &[path, mod] : sema_program_.modules) {
+                    for (const auto &[alias_name, origin] : mod.bare_import_origins) {
+                        const auto &origin_path = origin.module_path;
+                        const auto &origin_name = origin.symbol_name;
+                        const auto &origin_sym = sema_program_.modules.at(origin_path).symbols.at(origin_name);
+                        if (std::holds_alternative<sema::GlobalSymbol>(origin_sym)) {
+                            globals_[global_key(path, alias_name)] = globals_.at(global_key(origin_path, origin_name));
+                        } else if (std::holds_alternative<sema::FunctionSymbol>(origin_sym)) {
+                            functions_[FunctionKey{path, alias_name}] = functions_.at(FunctionKey{origin_path, origin_name});
+                        }
+                        // TypeSymbol: no codegen table to alias — struct/enum/union/bitset/
+                        // trait layout is driven entirely by the GLOBAL, index-based
+                        // sema_program_.structs/enums/unions/etc. vectors (declare_structs()
+                        // et al.), never by ProgramModule::symbols.
+                        // MacroSymbol: no bulk emission pass exists — expanded inline at each
+                        // use site from whichever MacroSymbol the caller's own module lookup
+                        // found (the alias itself, already fully resolved by sema).
+                        // ExtFunctionSymbol: see the note in the main loop above — already
+                        // naturally deduplicated, no redirect needed here.
                     }
                 }
 
@@ -1300,6 +1346,9 @@ namespace codegen {
                     current_module_ = &mod;
 
                     for (const auto &[name, sym] : mod.symbols) {
+                        // A bare-import alias's storage was already initialized once, under
+                        // the origin's own key, by the origin module's own iteration.
+                        if (mod.bare_import_origins.contains(name)) continue;
                         const auto *global = std::get_if<sema::GlobalSymbol>(&sym);
                         if (!global) {
                             continue;
@@ -1317,6 +1366,14 @@ namespace codegen {
                     current_module_ = &mod;
 
                     for (const auto &[name, sym] : mod.symbols) {
+                        // A bare-import alias's body was already emitted once, under the
+                        // origin's own key, by the origin module's own iteration — emitting
+                        // it again here would read 'current_module_->expr_types' (this
+                        // importer's, populated only for names/expressions actually type-
+                        // checked in THIS module) for AST nodes that were only ever
+                        // type-checked under the origin's ProgramModule, crashing or
+                        // producing wrong code.
+                        if (mod.bare_import_origins.contains(name)) continue;
                         const auto *fn = std::get_if<sema::FunctionSymbol>(&sym);
                         if (!fn) {
                             continue;
@@ -2500,8 +2557,18 @@ namespace codegen {
                     }
                     const auto *saved_path = current_module_path_;
                     const auto *saved_module = current_module_;
-                    current_module_path_ = &target_module;
-                    current_module_ = &target;
+                    // A bare-import alias's 'expr_template' AST nodes were type-checked (and
+                    // their 'expr_types' entries populated) under the TRUE ORIGIN module (see
+                    // sema.cpp's resolve_values_for_module redirect-and-copy-back for
+                    // MacroSymbol), not 'target_module' — which, for an unqualified bare-import
+                    // call, defaults to the CALLING module, not the macro's declaring one.
+                    if (const auto origin = target.bare_import_origins.find(name); origin != target.bare_import_origins.end()) {
+                        current_module_path_ = &origin->second.module_path;
+                        current_module_ = &sema_program_.modules.at(origin->second.module_path);
+                    } else {
+                        current_module_path_ = &target_module;
+                        current_module_ = &target;
+                    }
                     auto *value = emit_expr(macro->decl->expr_template);
                     current_module_path_ = saved_path;
                     current_module_ = saved_module;
@@ -3859,8 +3926,16 @@ namespace codegen {
                                         }
                                         const auto *saved_path = current_module_path_;
                                         const auto *saved_module = current_module_;
-                                        current_module_path_ = &target_module;
-                                        current_module_ = &target;
+                                        // See the identical fix in emit_call's macro-expansion
+                                        // branch above for why a bare-import alias needs the
+                                        // TRUE ORIGIN module here, not 'target_module'.
+                                        if (const auto origin = target.bare_import_origins.find(name); origin != target.bare_import_origins.end()) {
+                                            current_module_path_ = &origin->second.module_path;
+                                            current_module_ = &sema_program_.modules.at(origin->second.module_path);
+                                        } else {
+                                            current_module_path_ = &target_module;
+                                            current_module_ = &target;
+                                        }
                                         auto *value = emit_const_or_runtime(macro->decl->expr_template, true);
                                         current_module_path_ = saved_path;
                                         current_module_ = saved_module;

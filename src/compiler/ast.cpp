@@ -1834,6 +1834,20 @@ namespace ast {
             };
         }
 
+        // 'import("path")' as a standalone module-scope declaration — reuses
+        // parse_import_expr for the shared '"import" "(" STRING ")"' grammar rather
+        // than duplicating it; only the wrapping (a BareImportDecl, not an ImportExpr
+        // handed back to a const initializer) differs.
+        auto parse_bare_import_decl(Parser &parser) -> BareImportDecl {
+            const auto location = parser.current_location();
+            auto expr = parse_import_expr(parser);
+
+            return BareImportDecl{
+                .path = std::get<ImportExpr>(expr).module_name,
+                .location = location,
+            };
+        }
+
         auto parse_block_stmt(Parser &parser) -> Stmt {
             const auto location = parser.current_location();
 
@@ -2847,6 +2861,23 @@ namespace ast {
             return parse_when_stmt(parser);
         }
 
+        // bare 'import(...)' is a module-scope declaration, not a statement — intercepted
+        // here (before the parse_expr_stmt fallthrough) so it gets this precise,
+        // actionable diagnostic instead of parse_expr's generic "'import()' can only be
+        // used to initialize a 'const'..." message (which fires for every OTHER illegal
+        // position, e.g. a call argument). Recovers by still parsing the ImportExpr into
+        // an ordinary ExprStmt (ImportExpr remains a legal Expr alternative) so parsing
+        // doesn't desync. This also covers a function-scope 'when {}' block for free,
+        // since WhenStmt's branches are parsed through this same per-statement loop.
+        if (parser.check(TokenKind::KwImport)) {
+            const auto location = parser.current_location();
+            parser.report_error(location,
+                "bare 'import(...)' is a module-scope declaration, not a statement.\n"
+                "       To use symbols from another module inline, bind it:\n"
+                "       'const mod := import(\"path\")'");
+            return ExprStmt{.expr = parse_import_expr(parser), .location = location};
+        }
+
         // '#link(...)' parses successfully here (unlike anywhere else a runtime
         // statement is illegal) purely so sema can reject it with a precise
         // "module scope only" diagnostic. '#option(...)' is NOT special-cased here —
@@ -3162,6 +3193,15 @@ namespace ast {
 
         if (parser.check(TokenKind::KwMacro)) {
             return parse_macro_decl(parser, is_pub);
+        }
+
+        if (parser.check(TokenKind::KwImport)) {
+            if (is_pub) {
+                parser.report_error(parser.current_location(),
+                    "bare imports cannot be 'pub'. All imported symbols are private\n"
+                    "       to this module and cannot be re-exported.");
+            }
+            return Decl{parse_bare_import_decl(parser)};
         }
 
         if (parser.check(TokenKind::KwImpl)) {

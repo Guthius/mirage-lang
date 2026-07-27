@@ -1380,6 +1380,107 @@ Cross-module access uses dot notation. Only `pub` symbols are accessible from ou
 - `pub fn`, `pub type`, `pub mut`, `pub const` are accessible to importing modules.
 - `impl` blocks: the block itself is not pub; use `pub` on individual method declarations.
 
+### Bare Import
+
+```mirage
+import("path/to/module")
+```
+
+A second, standalone form of `import(...)`: a bare module-scope *declaration*, as
+opposed to the bound form above (`const mod := import(...)`), which binds the
+target module to a namespace. A bare import instead makes every `pub` symbol of
+the target module — functions, types, `const`/`mut` globals, macros, and `ext fn`
+declarations — available in the current module as **private, unqualified local
+names**, as if each had been declared locally:
+
+```mirage
+// core/math.mir
+pub fn abs(x: i32) -> i32 { return x < 0 ? -x : x }
+pub fn max(a: i32, b: i32) -> i32 { return a > b ? a : b }
+pub const PI: f64 = 3.14159265358979
+
+// main.mir
+import("core/math")
+
+pub fn main() -> error {
+    const x := abs(-5)     // resolves to core/math.abs
+    const m := max(x, 10)  // resolves to core/math.max
+    const pi := PI         // resolves to core/math.PI
+    return_ok
+}
+```
+
+**No namespace binding is created** — unlike the bound form, `import("core/math")`
+does not introduce a name like `math`. `PI` is reachable as `PI`, never as
+`math.PI`; to also use qualified access, add a bound import alongside (see
+"Bare and bound together," below).
+
+**Restrictions**:
+- Legal only at module scope (top-level declaration position), including inside a
+  module-scope `when {}` block only if that block's own allow-list permits it —
+  it currently doesn't (see [Compile-Time Configuration](#12-compile-time-configuration)),
+  so a bare import inside a module-scope `when {}` block is a sema error.
+  Everywhere else a statement is legal — a function body, a `when {}` block at
+  function scope — a bare `import(...)` is a **parse** error, not a sema error:
+  ```
+  error: bare 'import(...)' is a module-scope declaration, not a statement.
+         To use symbols from another module inline, bind it:
+         'const mod := import("path")'
+  ```
+- `pub` is never legal on a bare import — a parse error:
+  ```
+  error: bare imports cannot be 'pub'. All imported symbols are private
+         to this module and cannot be re-exported.
+  ```
+  Every symbol it introduces is therefore private to the importing module,
+  regardless of the original's own visibility, and can never be re-exported.
+
+**What gets imported**: every symbol declared `pub` in the target module — `fn`,
+`type`, `const`/`mut`, `macro`, `ext fn`. `impl` blocks are never imported: method
+resolution on a value of a bare-imported type already works through the type's
+own defining module, with no extra step needed. Non-`pub` symbols are not
+imported — using one produces an ordinary "undefined identifier" error, not a
+"not pub" error, since it was never made visible in the first place.
+
+**Collisions**: registering an imported name follows the same rule as any other
+module-scope name — the first declaration wins. Two shapes of collision can occur:
+- **Against a local declaration** (in either order — the local declared before or
+  after the bare import): an ordinary redefinition error.
+- **Against a name already introduced by an earlier bare import in the same
+  module**: reported at the *second* bare import's own declaration site, naming
+  both source modules and suggesting a bound-import disambiguation:
+  ```
+  error: bare import of 'core/net' introduces symbol 'open' which
+         conflicts with 'open' already imported from 'core/os'.
+         Use bound imports to disambiguate:
+           const os  := import("core/os")
+           const net := import("core/net")
+           os.open(...)  net.open(...)
+  ```
+
+**Non-transitive**: if `core/os` itself uses a bare import to pull symbols from
+`core/io` into its own private namespace, those symbols stay private to `core/os`
+— `import("core/os")` elsewhere does not also expose them. Only what is
+explicitly `pub` in `core/os` itself propagates.
+
+**Bare and bound together**: importing the same module both ways is legal and
+does not conflict by itself — the bound form introduces a namespace binding
+(`os`), the bare form introduces individual unqualified aliases (`open`, `close`,
+...), and these live in different senses even though they share one symbol
+table:
+
+```mirage
+import("core/os")             // bare: unqualified names
+const os := import("core/os") // bound: the 'os' namespace, same module
+
+open(...)      // via the bare import
+os.open(...)   // via the bound import
+```
+
+The ordinary collision rule still applies to any individual bare-imported name
+that happens to collide with anything else in the module — including the bound
+import's own namespace name, if one happens to coincide.
+
 ---
 
 ## 12. Compile-Time Configuration

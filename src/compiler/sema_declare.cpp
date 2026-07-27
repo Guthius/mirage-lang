@@ -1,5 +1,6 @@
 #include "sema.hpp"
 
+#include <algorithm>
 #include <format>
 
 namespace sema {
@@ -79,7 +80,7 @@ namespace sema {
                 sema_program.structs.push_back(StructInfo{.module_path = module_path, .is_packed = std::get<std::unique_ptr<ast::StructType>>(decl.type)->is_packed});
             }
             if (enum_slot >= 0) {
-                sema_program.enums.push_back(EnumInfo{});
+                sema_program.enums.push_back(EnumInfo{.module_path = module_path});
             }
             if (union_slot >= 0) {
                 const auto &union_decl = std::get<std::unique_ptr<ast::UnionType>>(decl.type);
@@ -89,7 +90,7 @@ namespace sema {
                 sema_program.traits.push_back(TraitInfo{.module_path = module_path});
             }
             if (bitset_slot >= 0) {
-                sema_program.bitsets.push_back(BitsetInfo{});
+                sema_program.bitsets.push_back(BitsetInfo{.module_path = module_path});
             }
         }
 
@@ -159,6 +160,79 @@ namespace sema {
                     .is_resolved = false,
                 },
                 decl.location, diag);
+        }
+
+        // Builds the bare-import-vs-bare-import collision diagnostic: names both source
+        // modules (as the user actually wrote them, not their resolved absolute paths) and
+        // the conflicting symbol, and suggests disambiguating with bound imports using each
+        // module's leaf path segment as the suggested local alias (column-padded so the two
+        // 'const NAME := import(...)' lines line up).
+        void report_bare_import_collision(DiagnosticEngine &diag, const SourceLocation &loc, const std::string &name,
+                                           const std::string &new_source, const std::string &prior_source) {
+            const auto leaf = [](const std::string &path) {
+                const auto slash = path.find_last_of('/');
+                return slash == std::string::npos ? path : path.substr(slash + 1);
+            };
+            const auto prior_short = leaf(prior_source);
+            const auto new_short = leaf(new_source);
+            const auto width = std::max(prior_short.size(), new_short.size());
+            const auto pad = [&](const std::string &s) { return s + std::string(width - s.size(), ' '); };
+
+            diag.report_error(DiagnosticStage::Sema, loc, std::format(
+                "bare import of '{}' introduces symbol '{}' which\n"
+                "       conflicts with '{}' already imported from '{}'.\n"
+                "       Use bound imports to disambiguate:\n"
+                "         const {} := import(\"{}\")\n"
+                "         const {} := import(\"{}\")\n"
+                "         {}.{}(...)  {}.{}(...)",
+                new_source, name, name, prior_source,
+                pad(prior_short), prior_source, pad(new_short), new_source,
+                prior_short, name, new_short, name));
+        }
+
+        // 'import("path")' as a standalone module-scope declaration (BareImportDecl):
+        // registers a PRIVATE local alias — sharing the target's 'decl' AST pointer (and,
+        // for a TypeSymbol, its global struct/enum/union/bitset/trait index) rather than a
+        // duplicate — for every symbol declared 'pub' in the target module, named
+        // identically to its unqualified name there. 'impl' blocks are never aliased
+        // (method resolution on a bare-imported type already works through the type's own
+        // defining module — see find_method/find_type_module_and_name in sema.cpp).
+        // ImportSymbol entries (a target module's OWN 'pub const mod := import(...)'
+        // namespace bindings) are also excluded — a namespace binding isn't one of the
+        // value/fn/type/macro/ext-fn kinds this feature imports.
+        void declare_bare_import(const ast::BareImportDecl &decl, const ast::Program &program, const std::string &module_path,
+                                  ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
+            const auto target_path = resolve_import(program, module_path, decl.path);
+            if (target_path.empty()) {
+                return; // module_resolver.cpp already reported the unresolved-path error
+            }
+
+            // Force the target's own symbol table (and transitively anything IT depends on
+            // — its own bare imports / module-scope 'when' conditions) to exist before
+            // reading its 'pub' symbols, regardless of Program::modules' unordered
+            // iteration order. Also detects/reports mutual-dependency cycles via the
+            // shared cycle guard (see ensure_module_declared's generalized message below).
+            ensure_module_declared(program, target_path, sema_program, diag);
+
+            const auto target_it = sema_program.modules.find(target_path);
+            if (target_it == sema_program.modules.end()) return; // unresolved-sentinel module etc.
+
+            for (const auto &[name, target_sym] : target_it->second.symbols) {
+                const bool is_pub = std::visit([](const auto &s) { return s.is_pub; }, target_sym);
+                if (!is_pub) continue;
+                if (std::holds_alternative<ImportSymbol>(target_sym)) continue;
+
+                if (const auto prior = module.bare_import_origins.find(name); prior != module.bare_import_origins.end()) {
+                    report_bare_import_collision(diag, decl.location, name, decl.path, prior->second.source_path);
+                    continue;
+                }
+
+                if (!declare_symbol(module.symbols, name, target_sym, decl.location, diag)) {
+                    continue; // generic "redefinition of 'name'" — collides with a local decl
+                }
+                std::visit([](auto &s) { s.is_pub = false; }, module.symbols.at(name));
+                module.bare_import_origins.emplace(name, BareImportOrigin{.module_path = target_path, .symbol_name = name, .source_path = decl.path});
+            }
         }
 
         // Location of any Decl variant alternative — mirrors sema.hpp's get_expr_location
@@ -295,6 +369,16 @@ namespace sema {
                                     ensure_module_declared(program, imp->module_path, sema_program, diag);
                                 }
                             }
+                        } else if (const auto *inline_import = std::get_if<ast::ImportExpr>(&v->object)) {
+                            // 'import("...").field' used directly as the object (no bound name)
+                            // — same shape resolve_member_object_import_path (value_resolver.cpp)
+                            // and try_resolve_namespace_chain (sema_check.cpp) already resolve via
+                            // inline_import_paths; declare_global caches this entry before a
+                            // module-scope 'when' is ever reached, since consts are always
+                            // declared before it in source order.
+                            if (const auto path_it = module.inline_import_paths.find(inline_import); path_it != module.inline_import_paths.end()) {
+                                ensure_module_declared(program, path_it->second, sema_program, diag);
+                            }
                         }
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
                         ensure_condition_modules_declared(v->lhs, program, module_path, module, sema_program, diag);
@@ -307,8 +391,24 @@ namespace sema {
                         ensure_condition_modules_declared(v->condition, program, module_path, module, sema_program, diag);
                         ensure_condition_modules_declared(v->then_expr, program, module_path, module, sema_program, diag);
                         ensure_condition_modules_declared(v->else_expr, program, module_path, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, ast::IdentExpr>) {
+                        // A bare identifier naming a SAME-module const whose own initializer
+                        // itself crosses into another module — e.g. 'target_os' where
+                        // 'const target_os := import("build/options").target_os' — needs that
+                        // module force-declared too, exactly like a direct 'mod.field' reference
+                        // above, since resolving 'target_os' itself will reentrantly need it.
+                        // Recurses into the referenced const's own init expression to catch this
+                        // transitively (a chain of several same-module consts deep). Previously
+                        // a no-op here ("same-module IdentExpr: nothing to do"), which happened
+                        // to be masked by Program::modules' unordered iteration order usually
+                        // reaching the referenced module some other way first — not guaranteed.
+                        if (const auto sym_it = module.symbols.find(v.name); sym_it != module.symbols.end()) {
+                            if (const auto *g = std::get_if<GlobalSymbol>(&sym_it->second); g && g->decl->init) {
+                                ensure_condition_modules_declared(*g->decl->init, program, module_path, module, sema_program, diag);
+                            }
+                        }
                     }
-                    // literals, same-module IdentExpr, DotIdentExpr, etc: nothing to do.
+                    // literals, DotIdentExpr, etc: nothing to do.
                 },
                 expr);
         }
@@ -449,6 +549,8 @@ namespace sema {
                         declare_symbol(module.symbols, v.name, MacroSymbol{.decl = &v, .is_pub = v.is_pub, .is_resolved = false}, v.location, diag);
                     } else if constexpr (std::is_same_v<V, ast::TypeDecl>) {
                         declare_type(v, module_path, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, ast::BareImportDecl>) {
+                        declare_bare_import(v, program, module_path, module, sema_program, diag);
                     } else if constexpr (std::is_same_v<V, ast::ImplDecl>) {
                         // Pre-register each method as unresolved in the module's method table.
                         // The target type name is the leaf of the named type chain.
@@ -496,7 +598,9 @@ namespace sema {
         if (sema_program.modules_declared.contains(module_path)) return;
         if (sema_program.resolve_state.when_module_declaring.contains(module_path)) {
             diag.report_error(DiagnosticStage::Sema, {},
-                std::format("circular module-scope 'when' dependency involving '{}'", module_path));
+                std::format("circular dependency between modules' declarations involving '{}' "
+                            "(caused by a module-scope 'when' condition or a bare import forced "
+                            "to declare a module that, transitively, depends back on this one)", module_path));
             return;
         }
         const auto ast_mod_it = program.modules.find(module_path);

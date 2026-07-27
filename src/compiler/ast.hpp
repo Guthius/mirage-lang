@@ -595,6 +595,17 @@ namespace ast {
         SourceLocation location;
     };
 
+    // 'import("path")' as a standalone module-scope declaration (as opposed to
+    // 'const x := import("path")', which binds a namespace) — injects every 'pub'
+    // symbol of the target module into this module as private, unqualified local
+    // names. Never legal in statement position (a PARSE error there, handled directly
+    // in parse_stmt — unlike LinkDecl/DiagnosticDecl/AsmStmt above, this is
+    // deliberately NOT dual-registered into the Stmt variant) and never 'pub' itself.
+    struct BareImportDecl {
+        std::string path;
+        SourceLocation location;
+    };
+
     struct ExprStmt {
         Expr expr;
         SourceLocation location;
@@ -906,7 +917,7 @@ namespace ast {
     struct WhenDecl;
 
     using Decl = std::variant<FunctionDecl, ExtFunctionDecl, VarDecl, MacroDecl, TypeDecl, ImplDecl, TraitImplDecl,
-                               LinkDecl, DiagnosticDecl, std::unique_ptr<WhenDecl>, std::unique_ptr<AsmStmt>>;
+                               LinkDecl, DiagnosticDecl, BareImportDecl, std::unique_ptr<WhenDecl>, std::unique_ptr<AsmStmt>>;
 
     struct WhenDecl {
         Expr condition;

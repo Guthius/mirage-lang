@@ -18,9 +18,16 @@ declaration   ::= [ 'pub' ] [ attribute ] fn_decl   (* attribute: only legal her
                | link_decl           (* cannot be pub *)
                | diagnostic_decl     (* cannot be pub *)
                | when_decl           (* cannot be pub *)
+               | bare_import_decl    (* cannot be pub; module scope only — unlike
+                                         link_decl/diagnostic_decl/asm_stmt above, a bare
+                                         'import(...)' in statement position is a PARSE
+                                         error, not a sema error, so it is NOT part of
+                                         'stmt' below *)
                | asm_stmt            (* cannot be pub; always a SEMA error at module scope —
                                          parses here (like link_decl/diagnostic_decl above)
                                          purely so the diagnostic can name it precisely *)
+
+bare_import_decl ::= 'import' '(' STRING ')'
 ```
 
 ---
@@ -427,7 +434,11 @@ expr          ::= assign_expr
                | import_expr          (* only in const := position *)
 
 import_expr   ::= 'import' '(' STRING ')' { '.' IDENT }
+```
 
+There are two distinct, unrelated-looking-but-textually-identical uses of `'import' '(' STRING ')'` in this grammar: `import_expr` above (only reachable as a `const` initializer — `const mod := import("path")` — binding the target module as a namespace) and `bare_import_decl` (a standalone module-scope *declaration* — `import("path")` with no `const`/binding at all), which instead injects every `pub` symbol of the target module into the current module as private, unqualified local names, with no namespace binding created. The parser distinguishes them purely by position: `import(...)` right after `const NAME :=` parses as `import_expr`; `import(...)` at the start of a declaration parses as `bare_import_decl`. See spec.md's "Bare Import" section (under Modules) for the full semantics.
+
+```ebnf
 assign_expr   ::= when_expr [ assign_op assign_expr ]
 
 assign_op     ::= '=' | '+=' | '-=' | '*=' | '/='
