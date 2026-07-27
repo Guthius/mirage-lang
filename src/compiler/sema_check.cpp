@@ -2240,13 +2240,46 @@ namespace sema {
         return ty;
     }
 
+    // Recursively looks for a bare, unqualified '.Variant' / '.Variant(payload)' reachable in
+    // VALUE POSITION inside a 'return_err' operand — directly, or nested inside 'match' arm
+    // bodies, or 'when'/ternary branches (recursively, so e.g. a match-in-a-when-branch also
+    // works) — since all three already forward their incoming 'expected' type down into their
+    // value sub-expressions (see their 'check_expr' cases). Returns nullptr if none is
+    // reachable at all, meaning <expr> carries no return_err sugar for the caller to resolve.
+    auto find_bare_return_err_variant_name(const ast::Expr &expr) -> const std::string * {
+        if (const auto *di = std::get_if<ast::DotIdentExpr>(&expr)) {
+            return &di->name;
+        }
+        if (const auto *tv = std::get_if<std::unique_ptr<ast::TaggedVariantExpr>>(&expr); tv && *tv && !(*tv)->type_path) {
+            return &(*tv)->variant_name;
+        }
+        if (const auto *me = std::get_if<std::unique_ptr<ast::MatchExpr>>(&expr); me && *me) {
+            for (const auto &arm : (*me)->arms) {
+                if (const auto *name = find_bare_return_err_variant_name(arm.value)) {
+                    return name;
+                }
+            }
+        }
+        if (const auto *te = std::get_if<std::unique_ptr<ast::TernaryExpr>>(&expr); te && *te) {
+            if (const auto *name = find_bare_return_err_variant_name((*te)->then_expr)) return name;
+            return find_bare_return_err_variant_name((*te)->else_expr);
+        }
+        if (const auto *we = std::get_if<std::unique_ptr<ast::WhenExpr>>(&expr); we && *we) {
+            if (const auto *name = find_bare_return_err_variant_name((*we)->then_expr)) return name;
+            return find_bare_return_err_variant_name((*we)->else_expr);
+        }
+        return nullptr;
+    }
+
     // Resolves a '.Variant' / '.Variant(payload)' 'return_err' operand against the enclosing
     // function's error(...) type, returning the concrete error MEMBER type (e.g. MemoryError)
     // that <expr> denotes a variant of. The caller then passes this back into check_expr as
     // 'expected' — DotIdentExpr and TaggedVariantExpr resolve against it with no changes of
-    // their own, exactly as they would for an ordinary bare enum/tagged-union return. Returns
-    // nullopt (with no diagnostic) if <expr> isn't one of these two sugar forms at all; the
-    // caller falls back to the general expression path in that case.
+    // their own, exactly as they would for an ordinary bare enum/tagged-union return. Also looks
+    // through 'match'/'when'/ternary wrapping via 'find_bare_return_err_variant_name' above, so
+    // 'return_err match x { _: .Variant }' resolves the same way a bare 'return_err .Variant'
+    // would. Returns nullopt (with no diagnostic) if <expr> doesn't reach a bare '.Variant' form
+    // at all; the caller falls back to the general expression path in that case.
     auto resolve_return_err_member_type(const ast::Expr &error_value, const ResolvedType &fn_error_type,
                                          const std::string &module_path, Program &program, DiagnosticEngine &diag,
                                          const SourceLocation &loc) -> std::optional<ResolvedType> {
@@ -2267,17 +2300,13 @@ namespace sema {
             return qualified_ty;
         }
 
-        std::string variant_name;
-        if (const auto *di = std::get_if<ast::DotIdentExpr>(&error_value)) {
-            variant_name = di->name;
-        } else if (const auto *tv = std::get_if<std::unique_ptr<ast::TaggedVariantExpr>>(&error_value)) {
-            variant_name = (*tv)->variant_name;
-        } else {
-            // Not '.Variant' sugar — the caller (check_stmt's ReturnErrStmt case) only
-            // reaches here for those two forms; anything else goes through the general
-            // expression path instead. See there for why.
+        const auto *name_ptr = find_bare_return_err_variant_name(error_value);
+        if (!name_ptr) {
+            // No bare '.Variant' reachable anywhere in <expr> — the caller falls back to the
+            // general expression path instead.
             return std::nullopt;
         }
+        const std::string &variant_name = *name_ptr;
 
         std::vector<ResolvedType> matches;
         for (const auto &member : members) {
@@ -3254,19 +3283,20 @@ namespace sema {
                         check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         return;
                     }
-                    // '.Variant' / '.Variant(payload)' need the expected member type fed in to
-                    // resolve at all (see resolve_return_err_member_type); anything else is an
-                    // ordinary expression that already carries its own type, so check it with
-                    // no expected type and classify what came back.
+                    // '.Variant' / '.Variant(payload)' — bare, or reachable through 'match'/
+                    // 'when'/ternary wrapping — need the expected member type fed in to resolve
+                    // at all (see resolve_return_err_member_type / find_bare_return_err_variant_name);
+                    // anything else is an ordinary expression that already carries its own type,
+                    // so check it with no expected type and classify what came back.
                     if (const auto member_type = resolve_return_err_member_type(v.error_value, *fn_error_type, module_path, program, diag, v.location)) {
                         auto ty = check_expr(v.error_value, locals, module_path, program, diag, *member_type, loop_depth, defer_loop_base, fn_error_type);
                         if (!assignable_in_module(ty, *member_type, module_path, program)) {
                             diag.report_error(DiagnosticStage::Sema, v.location, "'return_err' operand does not match the resolved error member type");
                         }
-                    } else if (std::holds_alternative<ast::DotIdentExpr>(v.error_value) ||
-                               std::holds_alternative<std::unique_ptr<ast::TaggedVariantExpr>>(v.error_value)) {
+                    } else if (find_bare_return_err_variant_name(v.error_value)) {
                         // resolve_return_err_member_type already reported a diagnostic for this
-                        // sugar form (unknown/ambiguous variant, etc).
+                        // sugar form (unknown/ambiguous variant, etc), whether bare at the top
+                        // level or nested inside e.g. a 'match' arm.
                         check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     } else {
                         auto ty = check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
