@@ -190,6 +190,8 @@ namespace ast {
     // all other legality is enforced in sema (see check_expr's default rejection for this node).
     struct SpreadExpr;
 
+    struct AsmExpr;
+
     struct DefaultExpr {
         SourceLocation location;
     };
@@ -236,7 +238,8 @@ namespace ast {
         UndefinedExpr,
         std::unique_ptr<TryExpr>,
         std::unique_ptr<RangeExpr>,
-        std::unique_ptr<SpreadExpr>>;
+        std::unique_ptr<SpreadExpr>,
+        std::unique_ptr<AsmExpr>>;
 
     struct StructType {
         struct Field {
@@ -674,6 +677,21 @@ namespace ast {
 
     struct AsmStmt {
         std::vector<AsmInstruction> instructions;
+        SourceLocation location;
+    };
+
+    // 'asm -> reg { ... }' / 'asm -> reg: type { ... }' — the expression form of inline
+    // assembly: legal anywhere an expression is legal (return, var-decl initializers, call
+    // arguments, ...), unlike AsmStmt which is statement-only. 'result_register' names the
+    // register whose value at block-exit becomes the expression's value; 'result_type' is
+    // present only when the explicit ': type' suffix was written, otherwise the result type
+    // is inferred from the surrounding expected-type context (see check_asm_expr). Shares
+    // AsmInstruction/AsmOperand with AsmStmt and the same asm_lexer/asm_parser raw-body
+    // pipeline — only the header ('-> reg [: type]') is parsed by the main parser.
+    struct AsmExpr {
+        std::vector<AsmInstruction> instructions;
+        AsmRegisterOperand result_register;
+        std::optional<Type> result_type;
         SourceLocation location;
     };
 

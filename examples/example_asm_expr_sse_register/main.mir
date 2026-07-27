@@ -1,0 +1,13 @@
+# example_asm_expr_sse_register.mir — 'asm -> xmm0 { ... }' names a recognized-but-out-
+# of-scope-for-v1 register (SSE), reusing the same diagnostic as the statement form's
+# operand-position check (see example_asm_sse_register).
+#
+# Verify with:
+#   ./build/mirage build examples/example_asm_expr_sse_register
+# Expected: parse error "register 'xmm0' is not supported in inline asm (v1)".
+
+pub fn main() -> i32 {
+    mut x: i32 = asm -> xmm0 {
+    }
+    return x
+}

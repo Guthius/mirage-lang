@@ -2280,3 +2280,88 @@ diagnostic) but rejected as not supported in v1:
 - Float immediate operands
 - String operands
 - Module-scope `asm` blocks (see above)
+
+### Asm Expression
+
+Everything above describes `asm { ... }` as a **statement** — useful for
+side effects (`&var` writes) but unable to produce a value directly. A
+second, **expression** form additionally names an output register whose
+value at block-exit becomes the expression's value:
+
+```mirage
+asm -> eax { ... }              # result type inferred from context
+asm -> eax: i32 { ... }         # result type explicit
+```
+
+Unlike the statement form, `asm -> reg [: type] { ... }` is a normal
+expression: legal anywhere an expression is legal — `return`, a variable
+declaration's initializer, a function-call argument, and so on — not just
+as a bare statement. Its instruction body uses exactly the same asm-body
+grammar (registers, immediates, Mirage variable operands, Tier-1/Tier-2
+operand-direction analysis, clobbers, `movzx`'s exception, width checking)
+as the statement form; only the header (`-> reg [: type]`) is new.
+
+```mirage
+pub fn open(filename: *u8, flags: i32, mode: i32) -> i32 {
+    return asm -> eax {
+        mov rax, 2
+        mov rdi, filename
+        mov esi, flags
+        mov edx, mode
+        syscall
+    }
+}
+```
+
+**Result type inference.** When `: type` is written explicitly, that is the
+result type, full stop. Otherwise the result type is inferred from the
+surrounding expected-type context — the same channel used for integer
+literal defaulting, `.variant` resolution, and trait-handle coercion
+elsewhere in the language: a `return` statement's declared return type, a
+`var_decl_stmt`'s declared type, and so on. If neither an explicit `: type`
+nor an expected-type context is available, it's a sema error:
+
+```
+error: cannot infer result type for 'asm -> eax'; add an explicit type
+       annotation: 'asm -> eax: i32 { ... }' or annotate the variable
+       receiving the result.
+```
+
+**Result register width checking.** The result register's width and the
+resolved result type's width are compared using the same table as the
+operand width check above. A mismatch is a **warning**, naming a
+same-family register of the correct width as the fix:
+
+```
+warning: asm result register 'rax' is 64 bits but result type 'i32' is 32
+         bits. Consider using 'eax' to avoid implicit truncation.
+```
+
+**Implicit clobber.** The result register is always implicitly read as the
+block's output — its family is added to the clobber set even when no
+instruction in the block explicitly writes it (e.g. a block that only
+reads/computes into `eax` via instructions the Tier-1 table already
+tracks needs no special handling; a block that never touches `eax` at all
+still implicitly clobbers it, since the surrounding code cannot assume its
+prior value survives).
+
+**Composes with `&var` writes.** The register-return mechanism and `&var`
+memory writes are completely independent and may be used together in the
+same block:
+
+```mirage
+mut status: i32 = undefined
+const result: i32 = asm -> eax {
+    mov eax, 42
+    mov &status, eax   # a second, independent output
+}
+```
+
+**Unsupported/unknown registers** after `->` produce the same diagnostics
+as an unsupported/unknown register operand inside the body (see "Registers"
+and "Out of Scope for v1" above):
+
+```
+error: register 'xmm0' is not supported in inline asm (v1)
+error: expected a register name after 'asm ->'
+```

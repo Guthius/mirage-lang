@@ -1,0 +1,76 @@
+# example_asm_expr_open_forms.mir — the four Definition-of-Done shapes of the 'asm ->'
+# EXPRESSION form (see docs/spec.md's "Asm Expression" subsection), all built around the
+# same raw 'open()' syscall body as example_asm_syscall, but returning the fd directly
+# from the asm block via '-> eax' instead of writing to a '&fd' output variable.
+#
+#   open_inferred:   'return asm -> eax { ... }'         — result type inferred from the
+#                     function's declared return type.
+#   open_explicit:   'mut fd: i32 = asm -> eax: i32 {..}' — explicit ': type' annotation.
+#   open_var:        'mut fd: i32 = asm -> eax { ... }'   — result type inferred from the
+#                     variable's declared type.
+#   open_infer_var:  'mut fd := asm -> eax: i32 { ... }'  — ':=' (no declared type), so the
+#                     variable's type comes FROM the explicit ': type' annotation.
+#
+# Verify with:
+#   ./build/mirage run examples/example_asm_expr_open_forms
+# Expected: prints a confirming line and exits 0.
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub fn open_inferred(filename: *u8, flags: i32, mode: i32) -> i32 {
+    return asm -> eax {
+        mov rax, 2
+        mov rdi, filename
+        mov esi, flags
+        mov edx, mode
+        syscall
+    }
+}
+
+pub fn open_explicit(filename: *u8, flags: i32, mode: i32) -> i32 {
+    mut fd: i32 = asm -> eax: i32 {
+        mov rax, 2
+        mov rdi, filename
+        mov esi, flags
+        mov edx, mode
+        syscall
+    }
+    return fd
+}
+
+pub fn open_var(filename: *u8, flags: i32, mode: i32) -> i32 {
+    mut fd: i32 = asm -> eax {
+        mov rax, 2
+        mov rdi, filename
+        mov esi, flags
+        mov edx, mode
+        syscall
+    }
+    return fd
+}
+
+pub fn open_infer_var(filename: *u8, flags: i32, mode: i32) -> i32 {
+    mut fd := asm -> eax: i32 {
+        mov rax, 2
+        mov rdi, filename
+        mov esi, flags
+        mov edx, mode
+        syscall
+    }
+    return fd
+}
+
+pub fn main() -> i32 {
+    const a: i32 = open_inferred("/dev/null", 0, 0)
+    const b: i32 = open_explicit("/dev/null", 0, 0)
+    const c: i32 = open_var("/dev/null", 0, 0)
+    const d: i32 = open_infer_var("/dev/null", 0, 0)
+
+    if a < 0 || b < 0 || c < 0 || d < 0 {
+        printf("FAILED: a=%d b=%d c=%d d=%d\n", a, b, c, d)
+        return 1
+    }
+
+    printf("all four asm-expr forms succeeded\n")
+    return 0
+}

@@ -234,6 +234,69 @@
 }</code></pre>
       </div>
 
+      <h2>Asm Expression</h2>
+      <p>
+        Everything above is <code>asm { ... }</code> as a <strong>statement</strong> — useful for
+        side effects (<code>&amp;var</code> writes) but unable to produce a value directly. A
+        second, <strong>expression</strong> form additionally names an output register whose
+        value at block-exit becomes the expression's value:
+      </p>
+      <pre><code><span class="kw">asm</span> -&gt; eax { ... }              <span class="cmt"># result type inferred from context</span>
+<span class="kw">asm</span> -&gt; eax: <span class="ty">i32</span> { ... }         <span class="cmt"># result type explicit</span></code></pre>
+      <p>
+        Unlike the statement form, <code>asm -&gt; reg [: type] { ... }</code> is a normal
+        expression: legal anywhere an expression is legal — <code>return</code>, a variable
+        declaration's initializer, a function-call argument, and so on — not just as a bare
+        statement. Its instruction body uses exactly the same grammar (registers, immediates,
+        Mirage variable operands, operand-direction analysis, clobbers, <code>movzx</code>'s
+        exception, width checking) as the statement form above; only the header
+        (<code>-&gt; reg [: type]</code>) is new.
+      </p>
+      <pre><code><span class="kw">pub fn</span> <span class="fn">open</span>(<span class="var">filename</span>: *<span class="ty">u8</span>, <span class="var">flags</span>: <span class="ty">i32</span>, <span class="var">mode</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
+    <span class="kw">return</span> <span class="kw">asm</span> -&gt; eax {
+        mov rax, <span class="num">2</span>
+        mov rdi, <span class="var">filename</span>
+        mov esi, <span class="var">flags</span>
+        mov edx, <span class="var">mode</span>
+        syscall
+    }
+}</code></pre>
+      <p>
+        <strong>Result type inference.</strong> When <code>: type</code> is written explicitly,
+        that is the result type, full stop. Otherwise the result type is inferred from the
+        surrounding expected-type context — a <code>return</code> statement's declared return
+        type, a variable declaration's declared type, and so on. If neither an explicit
+        <code>: type</code> nor an expected-type context is available, it's a sema error:
+      </p>
+      <pre><code>error: cannot infer result type for 'asm -&gt; eax'; add an explicit type
+       annotation: 'asm -&gt; eax: i32 { ... }' or annotate the variable
+       receiving the result.</code></pre>
+      <p>
+        <strong>Result register width checking</strong> compares the result register's width
+        against the resolved result type's width, using the same table as ordinary operand width
+        checking above. A mismatch is a <strong>warning</strong>, naming a same-family register of
+        the correct width as the fix:
+      </p>
+      <pre><code>warning: asm result register 'rax' is 64 bits but result type 'i32' is 32
+         bits. Consider using 'eax' to avoid implicit truncation.</code></pre>
+      <div class="callout tip">
+        <div class="callout-title">The result register is always an implicit clobber</div>
+        Its family is added to the clobber set even when no instruction in the block explicitly
+        writes it — the surrounding code cannot assume the register's prior value survives an
+        <code>asm -&gt; reg</code> block, whether or not the body's own instructions happened to
+        touch it.
+      </div>
+      <p>
+        <strong>Composes with <code>&amp;var</code> writes.</strong> The register-return
+        mechanism and <code>&amp;var</code> memory writes are completely independent and may be
+        used together in the same block:
+      </p>
+      <pre><code><span class="kw">mut</span> <span class="var">status</span>: <span class="ty">i32</span> = <span class="kw">undefined</span>
+<span class="kw">const</span> <span class="var">result</span>: <span class="ty">i32</span> = <span class="kw">asm</span> -&gt; eax {
+    mov eax, <span class="num">42</span>
+    mov &amp;<span class="var">status</span>, eax   <span class="cmt"># a second, independent output</span>
+}</code></pre>
+
       <h2>Full Example</h2>
       <p>
         Issuing the Linux <code>open</code> syscall directly, with no <code>ext fn</code> wrapper.

@@ -111,6 +111,14 @@ namespace lexer {
             uint32_t line_ = 1;
             uint32_t col_ = 1;
             std::optional<TokenKind> last_real_kind_ = std::nullopt;
+            // Set right after a 'KwAsm' token whose immediate lex_asm_block() attempt failed
+            // (i.e. the next real char is '-' '>' — the expression form's header, not the
+            // statement form's immediate '{') — arms a bounded retry of lex_asm_block() at the
+            // top of the main loop so the '{' that eventually follows the header ('-> reg
+            // [: type]', ordinary tokens lexed normally by lex_token()) gets raw-captured
+            // instead of being lexed as an ordinary LBrace. See tokenize()'s two call sites.
+            bool awaiting_asm_expr_body_ = false;
+            int asm_header_budget_ = 0; // remaining header tokens before giving up (safety valve)
             // Whether the last real token could legally end a statement/expression. Usually
             // just is_asi_trigger(last_real_kind_), but 'Star' is dual-purpose: it's the
             // binary-multiply operator (never a trigger — 'a *\n b' must keep continuing) AND
@@ -126,6 +134,23 @@ namespace lexer {
                 std::vector<Token> tokens;
 
                 while (true) {
+                    // Bounded retry for the expression form's header ('asm -> reg [: type]'):
+                    // once armed below, try raw-capturing at every loop iteration until either
+                    // the real '{' is reached (success) or the budget runs out (malformed
+                    // input — give up and let normal tokenization/parsing report its own error).
+                    if (awaiting_asm_expr_body_) {
+                        if (auto asm_token = lex_asm_block(); asm_token.has_value()) {
+                            awaiting_asm_expr_body_ = false;
+                            tokens.push_back(std::move(*asm_token));
+                            last_real_kind_ = TokenKind::AsmBlock;
+                            last_token_is_asi_trigger_ = false;
+                            continue;
+                        }
+                        if (--asm_header_budget_ <= 0) {
+                            awaiting_asm_expr_body_ = false;
+                        }
+                    }
+
                     auto token = lex_token();
 
                     // Go-style ASI also fires before EOF, so the last statement in a file
@@ -150,6 +175,14 @@ namespace lexer {
                             tokens.push_back(std::move(*asm_token));
                             last_real_kind_ = TokenKind::AsmBlock;
                             last_token_is_asi_trigger_ = false;
+                        } else if (peek() == '-' && peek_next() == '>') {
+                            // 'asm -> reg [: type] { ... }' — the header is ordinary Mirage
+                            // grammar (Arrow, an identifier, an optional ':' + type), lexed
+                            // token-by-token below; only the raw body needs lex_asm_block()'s
+                            // brace-balanced capture, so arm the retry above for once the
+                            // header has been lexed through.
+                            awaiting_asm_expr_body_ = true;
+                            asm_header_budget_ = 16;
                         }
                     }
 

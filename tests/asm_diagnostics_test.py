@@ -120,6 +120,50 @@ CASES = [
         ["memory operands with displacement/scale syntax", "not supported in inline asm (v1)"],
         [],
     ),
+    # 'asm -> reg [: type] { ... }' — the expression form (see docs/spec.md's
+    # "Asm Expression" subsection).
+    (
+        "example_asm_expr_open_forms",
+        "run",
+        True,
+        [],
+        ["all four asm-expr forms succeeded"],
+    ),
+    (
+        "example_asm_expr_cannot_infer",
+        "build",
+        False,
+        ["cannot infer result type for 'asm -> eax'"],
+        [],
+    ),
+    (
+        "example_asm_expr_width_mismatch",
+        "build",
+        True,
+        ["asm result register 'rax' is 64 bits but result type 'i32' is 32 bits", "Consider using 'eax' to avoid implicit truncation"],
+        [],
+    ),
+    (
+        "example_asm_expr_unknown_register",
+        "build",
+        False,
+        ["expected a register name after 'asm ->'"],
+        [],
+    ),
+    (
+        "example_asm_expr_sse_register",
+        "build",
+        False,
+        ["register 'xmm0' is not supported in inline asm (v1)"],
+        [],
+    ),
+    (
+        "example_asm_expr_mixed_output",
+        "run",
+        True,
+        [],
+        ["mixed output ok: 42 42"],
+    ),
 ]
 
 

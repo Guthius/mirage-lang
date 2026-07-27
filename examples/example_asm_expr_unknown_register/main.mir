@@ -1,0 +1,14 @@
+# example_asm_expr_unknown_register.mir — 'asm -> notaregister { ... }' names something
+# that isn't a recognized x86_64 register at all (unlike xmm0, which IS recognized but
+# explicitly out of scope for v1 — see example_asm_expr_sse_register).
+#
+# Verify with:
+#   ./build/mirage build examples/example_asm_expr_unknown_register
+# Expected: parse error "expected a register name after 'asm ->'".
+
+pub fn main() -> i32 {
+    mut x: i32 = asm -> notaregister {
+        mov eax, 1
+    }
+    return x
+}

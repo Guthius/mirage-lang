@@ -1,0 +1,35 @@
+# example_asm_expr_mixed_output.mir — combines BOTH asm output mechanisms in a single
+# block: a '&var' memory write (the pre-existing mechanism, indirect "=*m" constraint)
+# AND the new register-return ('-> eax', a direct-value output constraint). These are
+# independent and compose freely. This is also the sharpest regression check for the
+# '$N' constraint-numbering scheme: emit_asm_expr must shift the '&status' output's
+# template placeholder from '$0' (what it would be in a plain 'asm {}' block) to '$1',
+# to make room for the prepended fixed-register output constraint — an off-by-one here
+# would produce wrong codegen (or an LLVM verifier failure) rather than a compile error,
+# so this fixture is checked by RUNNING it and verifying both outputs hold the expected
+# value, not just by a successful build.
+#
+# Verify with:
+#   ./build/mirage run examples/example_asm_expr_mixed_output
+# Expected: prints "mixed output ok: 42 42" and exits 0.
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub fn combo() -> (i32, i32) {
+    mut status: i32 = undefined
+    const result: i32 = asm -> eax {
+        mov eax, 42
+        mov &status, eax
+    }
+    return result, status
+}
+
+pub fn main() -> i32 {
+    const result, status := combo()
+    if result != 42 || status != 42 {
+        printf("FAILED: result=%d status=%d\n", result, status)
+        return 1
+    }
+    printf("mixed output ok: %d %d\n", result, status)
+    return 0
+}

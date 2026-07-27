@@ -283,6 +283,10 @@ namespace sema {
         // 'asm { ... }' node -> sema's resolved operand types + computed clobber set. Populated
         // by check_asm_stmt (sema_check.cpp), consumed by codegen's emit_asm_stmt.
         std::unordered_map<const ast::AsmStmt *, AsmStmtInfo> asm_stmt_info;
+        // 'asm -> reg [: type] { ... }' EXPRESSION node -> the same AsmStmtInfo shape as above,
+        // in a separate map (an AsmExpr never shares a key with any AsmStmt). Populated by
+        // check_asm_expr, consumed by codegen's emit_asm_expr.
+        std::unordered_map<const ast::AsmExpr *, AsmStmtInfo> asm_expr_info;
         bool ok = false;
     };
 

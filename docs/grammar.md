@@ -369,6 +369,34 @@ registers, control/debug registers, and `[reg+disp]`-style memory operands
 are recognized (so they can be named precisely in a diagnostic) but are not
 supported in v1.
 
+### Asm Expression
+
+```ebnf
+asm_expr      ::= 'asm' '->' ASM_REGISTER [ ':' type ] '{' <raw text, brace-balanced> '}'
+```
+
+Unlike `asm_stmt` above, `asm_expr` is a `primary_expr` — legal anywhere an
+expression is legal (`return`, a `var_decl_stmt` initializer, a call
+argument, ...), not just as a bare statement. `ASM_REGISTER` here is parsed
+by the MAIN parser (not the standalone asm-body grammar) using the same
+register table as `asm_stmt`'s body; an unrecognized identifier is a parse
+error naming the construct. The raw body between `{` `}` is captured and
+parsed by the exact same standalone asm-body grammar given above for
+`asm_stmt` — only the header (`'->' ASM_REGISTER [':' type]`) differs.
+
+`ASM_REGISTER` names the register whose value at the end of the block
+becomes the expression's value. The optional `': type'` gives the result
+type explicitly; when absent, the result type is inferred from the
+surrounding expected-type context (the declared type of a `var_decl_stmt`
+being initialized, the enclosing function's declared return type, etc.) —
+a sema error if neither is available. See spec.md's "Inline Assembly"
+section for the exact diagnostics (cannot-infer error, result-register
+width-mismatch warning) and the rule that the result register is always an
+implicit clobber, even when no instruction in the block explicitly writes
+it. A `'&' ASM_IDENTIFIER` memory-write operand may appear in the same
+block as the register-return mechanism — the two outputs are independent
+and compose freely.
+
 ---
 
 ## Expressions
@@ -491,6 +519,7 @@ primary_expr  ::= INT_LITERAL
                | contextual_tagged_variant
                | option_expr
                | env_expr
+               | asm_expr
 
 option_expr   ::= '@option' '(' STRING [ ',' expr ] ')'
 
@@ -507,6 +536,8 @@ len_expr      ::= 'len' '(' expr ')'
 cast_expr     ::= 'cast' '(' expr ',' type [ ',' expr ] ')'
 
 stackalloc_expr ::= 'stackalloc' '(' expr ')'
+
+asm_expr      ::= 'asm' '->' ASM_REGISTER [ ':' type ] '{' <raw text, brace-balanced> '}'
 
 import_bin_expr ::= 'import_bin' '(' STRING ')'
 

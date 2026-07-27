@@ -899,6 +899,12 @@ namespace sema {
         }
     }
 
+    // Forward-declared: defined alongside check_asm_stmt further down (both build on the shared
+    // check_asm_instructions driver), but check_expr's AsmExpr case (below) needs to call it.
+    auto check_asm_expr(const ast::AsmExpr &expr, LocalScope &locals, const std::string &module_path,
+                         Program &program, DiagnosticEngine &diag,
+                         const std::optional<ResolvedType> &expected) -> ResolvedType;
+
     auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
         const auto ty = std::visit(
             [&]<typename T0>(const T0 &v) -> ResolvedType {
@@ -1399,6 +1405,9 @@ namespace sema {
                         return error(diag, v->location, "stackalloc() requires an integer size expression");
                     }
                     return ResolvedType{.kind = TypeKind::Anyptr};
+
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmExpr>>) {
+                    return check_asm_expr(*v, locals, module_path, program, diag, expected);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                     // cast(expr, Type) - value first, target type second.
@@ -2525,18 +2534,17 @@ namespace sema {
         return {};
     }
 
-    // 'asm { ... }' inside a function body — resolves every variable operand against the
-    // enclosing scope, determines each instruction's per-operand read/write direction (Tier-1
-    // table, or Tier-2 conservative fallback with a warning), builds the clobber set (explicit
-    // writes + each mnemonic's implicit clobbers + any '&var' memory write), and checks operand
-    // register/variable width compatibility. Stores the result in the module's asm_stmt_info
-    // side table for codegen to consume. (Module-scope 'asm' is rejected entirely separately,
-    // in sema_declare.cpp's declare_one_decl — this function only ever runs on a function-body
-    // 'asm', since check_stmt is only ever invoked starting from a function/method body.)
-    void check_asm_stmt(const ast::AsmStmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag) {
+    // Shared per-instruction-list driver for both the 'asm { ... }' STATEMENT (check_asm_stmt,
+    // keyed by AsmStmt) and the 'asm -> reg [: type] { ... }' EXPRESSION (check_asm_expr, keyed
+    // by AsmExpr) forms — variable resolution, Tier-1/Tier-2 operand-direction + arity checking,
+    // clobber-set construction, the 'movzx' exception, and the generic width-mismatch warning.
+    // Does not touch any side table itself; callers store the returned AsmStmtInfo under
+    // whichever key (AsmStmt*/AsmExpr*) is appropriate for their own node.
+    auto check_asm_instructions(const std::vector<ast::AsmInstruction> &instructions, LocalScope &locals,
+                                 const std::string &module_path, Program &program, DiagnosticEngine &diag) -> AsmStmtInfo {
         AsmStmtInfo info;
 
-        for (const auto &instr : stmt.instructions) {
+        for (const auto &instr : instructions) {
             AsmInstructionInfo instr_info;
             instr_info.operand_types.resize(instr.operands.size());
 
@@ -2680,7 +2688,71 @@ namespace sema {
             info.instructions.push_back(std::move(instr_info));
         }
 
-        program.modules.at(module_path).asm_stmt_info[&stmt] = std::move(info);
+        return info;
+    }
+
+    // 'asm { ... }' inside a function body — delegates the entire per-instruction analysis to
+    // check_asm_instructions above; only stores the result under this AsmStmt's key. (Module-scope
+    // 'asm' is rejected entirely separately, in sema_declare.cpp's declare_one_decl — this
+    // function only ever runs on a function-body 'asm', since check_stmt is only ever invoked
+    // starting from a function/method body.)
+    void check_asm_stmt(const ast::AsmStmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag) {
+        program.modules.at(module_path).asm_stmt_info[&stmt] = check_asm_instructions(stmt.instructions, locals, module_path, program, diag);
+    }
+
+    // 'asm -> reg { ... }' / 'asm -> reg: type { ... }' — the expression form. Runs the same
+    // instruction analysis as check_asm_stmt, then resolves the result type (explicit ': type'
+    // wins; otherwise the surrounding 'expected' context; otherwise a hard error), checks the
+    // result register's width against that type, and implicitly clobbers the register's family
+    // even if no instruction in the block explicitly wrote it (the block's caller reads it as
+    // the output, whether or not the body's instructions did).
+    auto check_asm_expr(const ast::AsmExpr &expr, LocalScope &locals, const std::string &module_path,
+                         Program &program, DiagnosticEngine &diag,
+                         const std::optional<ResolvedType> &expected) -> ResolvedType {
+        AsmStmtInfo info = check_asm_instructions(expr.instructions, locals, module_path, program, diag);
+
+        ResolvedType result_ty{.kind = TypeKind::Invalid};
+        if (expr.result_type) {
+            result_ty = resolve_type(*expr.result_type, module_path, program, diag);
+            if (result_ty.kind != TypeKind::Invalid && !result_ty.is_scalar()) {
+                diag.report_error(DiagnosticStage::Sema, expr.location,
+                    "asm result type must be a scalar or pointer type");
+                result_ty = ResolvedType{.kind = TypeKind::Invalid};
+            }
+        } else if (expected) {
+            result_ty = *expected;
+        } else {
+            diag.report_error(DiagnosticStage::Sema, expr.location,
+                std::format("cannot infer result type for 'asm -> {}'; add an explicit type "
+                            "annotation: 'asm -> {}: i32 {{ ... }}' or annotate the variable "
+                            "receiving the result.",
+                            expr.result_register.name, expr.result_register.name));
+        }
+
+        if (result_ty.kind != TypeKind::Invalid) {
+            if (const auto ty_width = scalar_bit_width(result_ty.kind);
+                ty_width != 0 && ty_width != expr.result_register.width_bits) {
+                const auto *reg_info = asm_registers::lookup_register(expr.result_register.name);
+                const auto *suggestion = reg_info
+                    ? asm_registers::lookup_register_by_family_and_width(reg_info->family, ty_width)
+                    : nullptr;
+                diag.warn(DiagnosticStage::Sema, expr.location,
+                    std::format("asm result register '{}' is {} bits but result type '{}' is {} bits.{}",
+                                expr.result_register.name, expr.result_register.width_bits,
+                                describe_type(result_ty, program), ty_width,
+                                suggestion ? std::format(" Consider using '{}' to avoid implicit truncation.", suggestion->name) : ""));
+            }
+        }
+
+        // The result register is always implicitly read as the block's output, whether or not
+        // any instruction explicitly wrote it — std::set::insert on an already-present family
+        // is a no-op, so no "was it already written?" check is needed here.
+        if (const auto *reg_info = asm_registers::lookup_register(expr.result_register.name)) {
+            info.clobbered_families.insert(std::string(reg_info->family));
+        }
+
+        program.modules.at(module_path).asm_expr_info[&expr] = std::move(info);
+        return result_ty;
     }
 
     auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth, int defer_loop_base) -> void {

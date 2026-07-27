@@ -2,6 +2,7 @@
 
 #include "asm_lexer.hpp"
 #include "asm_parser.hpp"
+#include "asm_registers.hpp"
 
 #include <format>
 #include <sstream>
@@ -365,6 +366,7 @@ namespace ast {
             case TokenKind::KwIota:
             case TokenKind::Dot:
             case TokenKind::LBrace:
+            case TokenKind::KwAsm:
                 return true;
             default:
                 return false;
@@ -910,6 +912,50 @@ namespace ast {
 
                 return std::make_unique<StackAllocExpr>(StackAllocExpr{
                     .size = std::move(size),
+                    .location = location,
+                });
+            }
+
+            // 'asm -> reg { ... }' / 'asm -> reg: type { ... }' — the expression form of
+            // inline assembly (see parse_asm_stmt above for the statement form's raw-body
+            // pipeline, reused verbatim here). 'parse_stmt' only reaches this branch when
+            // 'asm' is NOT immediately followed by '{' (the statement form dispatches
+            // directly there instead).
+            if (parser.check(TokenKind::KwAsm)) {
+                parser.advance(); // 'asm'
+                parser.expect(TokenKind::Arrow, "'->'");
+
+                const auto reg_location = parser.current_location();
+                const auto reg_name = parser.expect_identifier();
+                const auto *reg_info = asm_registers::lookup_register(reg_name);
+                if (!reg_info) {
+                    if (asm_registers::is_unsupported_register(reg_name)) {
+                        parser.report_error(reg_location,
+                            std::format("register '{}' is not supported in inline asm (v1)", reg_name));
+                    } else {
+                        parser.report_error(reg_location, "expected a register name after 'asm ->'");
+                    }
+                }
+
+                auto result_register = AsmRegisterOperand{
+                    .name = reg_name,
+                    .width_bits = reg_info ? reg_info->width_bits : 0,
+                    .location = reg_location,
+                };
+
+                std::optional<Type> result_type;
+                if (parser.match(TokenKind::Colon)) {
+                    result_type = parse_type(parser);
+                }
+
+                const auto block_tok = parser.expect(TokenKind::AsmBlock, "asm block body");
+                auto asm_tokens = asm_lexer::tokenize(block_tok.lexeme, block_tok.location, parser.diagnostics());
+                auto stmt = asm_parser::parse(asm_tokens, parser.diagnostics());
+
+                return std::make_unique<AsmExpr>(AsmExpr{
+                    .instructions = std::move(stmt.instructions),
+                    .result_register = std::move(result_register),
+                    .result_type = std::move(result_type),
                     .location = location,
                 });
             }
@@ -2771,7 +2817,11 @@ namespace ast {
             });
         }
 
-        if (parser.check(TokenKind::KwAsm)) {
+        // Only the statement form ('asm { ... }') dispatches here directly. The expression
+        // form ('asm -> reg [: type] { ... }') falls through to parse_expr_stmt below, which
+        // reaches parse_primary's own 'asm ->' handling — it's a normal expression, usable
+        // anywhere one is legal, not just as a bare statement.
+        if (parser.check(TokenKind::KwAsm) && !parser.check_next(TokenKind::Arrow)) {
             return parse_asm_stmt(parser);
         }
 
@@ -3033,8 +3083,12 @@ namespace ast {
 
         // 'asm' is never legal at module scope, but it parses successfully here too (exactly
         // like '@link'/'@error'/'@warn' above parse successfully as a Stmt) purely so sema can
-        // reject it with a precise diagnostic instead of a raw parse error.
-        if (parser.check(TokenKind::KwAsm)) {
+        // reject it with a precise diagnostic instead of a raw parse error. A bare top-level
+        // 'asm ->' (the expression form) is excluded from this gate — it isn't a legal
+        // declaration shape at all, so it falls through to the generic "expected declaration"
+        // error below instead of the confusing "expected asm block body, got '->'" this branch
+        // would otherwise produce.
+        if (parser.check(TokenKind::KwAsm) && !parser.check_next(TokenKind::Arrow)) {
             if (is_pub) {
                 parser.report_error(parser.current_location(), "'asm' blocks cannot be 'pub'");
             }
