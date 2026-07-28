@@ -169,6 +169,24 @@
         {
           "match": "@(no_return|naked|always_inline|section|init)\\b",
           "name": "storage.type.annotation.mirage"
+        },
+        {
+          "begin": "@(\\()",
+          "beginCaptures": {
+            "1": { "name": "storage.type.annotation.mirage" }
+          },
+          "end": "(\\))",
+          "endCaptures": {
+            "1": { "name": "storage.type.annotation.mirage" }
+          },
+          "name": "meta.attribute-group.mirage",
+          "patterns": [
+            {
+              "match": "\\b(no_return|naked|always_inline|section|init)\\b",
+              "name": "storage.type.annotation.mirage"
+            },
+            { "include": "#punctuation" }
+          ]
         }
       ]
     },
