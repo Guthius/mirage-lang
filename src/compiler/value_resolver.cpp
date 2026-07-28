@@ -43,6 +43,9 @@ namespace sema {
                 if (mod_it->second.expr_trait_coercions.contains(get_expr_key(expr))) {
                     return false; // implicit pointer-to-trait-handle coercion has runtime stores
                 }
+                if (mod_it->second.expr_any_coercions.contains(get_expr_key(expr))) {
+                    return false; // implicit any-coercion materializes a runtime {id, data} value
+                }
             }
 
             return std::visit(
@@ -98,6 +101,25 @@ namespace sema {
 
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                         return true;
+                    }
+
+                    // Compile-time constant for every operand EXCEPT one whose resolved type is
+                    // 'any' — that case lowers to a runtime load of the any value's 'id' field
+                    // (see codegen.cpp's TypeOfExpr case).
+                    if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
+                        if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
+                            if (const auto ty_it = mod_it->second.expr_types.find(get_expr_key(v->operand)); ty_it != mod_it->second.expr_types.end()) {
+                                return ty_it->second.kind != TypeKind::Any;
+                            }
+                        }
+                        return true;
+                    }
+
+                    // Never a compile-time constant: always materializes to a pointer value at
+                    // codegen time (either the address of a specific '__type_info_<id>' global,
+                    // or the result of a runtime binary-search table lookup).
+                    if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeInfoOfExpr>>) {
+                        return false;
                     }
 
                     if constexpr (std::is_same_v<V, ast::ImportBinExpr>) {

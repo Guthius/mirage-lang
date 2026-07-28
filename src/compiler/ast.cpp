@@ -47,6 +47,7 @@ namespace ast {
             case TokenKind::KwByte:   return BuiltinTypeKind::Byte;
             case TokenKind::KwAnyptr: return BuiltinTypeKind::Anyptr;
             case TokenKind::KwType:   return BuiltinTypeKind::Type;
+            case TokenKind::KwAny:    return BuiltinTypeKind::Any;
             default:                  return std::nullopt;
             }
         }
@@ -83,6 +84,7 @@ namespace ast {
             case TokenKind::KwError:
             case TokenKind::KwAnyptr:
             case TokenKind::KwType:
+            case TokenKind::KwAny:
                 return true;
             default:
                 return false;
@@ -356,6 +358,8 @@ namespace ast {
             case TokenKind::Ampersand:
             case TokenKind::KwCast:
             case TokenKind::KwSizeOf:
+            case TokenKind::KwTypeOf:
+            case TokenKind::KwTypeInfoOf:
             case TokenKind::KwStackAlloc:
             case TokenKind::KwLen:
             case TokenKind::KwImportBin:
@@ -969,6 +973,45 @@ namespace ast {
                 parser.expect(TokenKind::RParen, "')'");
 
                 return std::make_unique<SizeOfExpr>(SizeOfExpr{
+                    .operand = std::move(operand),
+                    .location = location,
+                });
+            }
+
+            if (parser.check(TokenKind::KwTypeOf)) {
+                parser.advance();
+                parser.expect(TokenKind::LParen, "'('");
+
+                auto operand = starts_type_only(parser)
+                    ? [&]() -> Expr {
+                          const auto type_location = parser.current_location();
+                          return std::make_unique<TypeExpr>(TypeExpr{
+                              .type = parse_type(parser),
+                              .location = type_location,
+                          });
+                      }()
+                    : parse_expr(parser);
+
+                parser.expect(TokenKind::RParen, "')'");
+
+                return std::make_unique<TypeOfExpr>(TypeOfExpr{
+                    .operand = std::move(operand),
+                    .location = location,
+                });
+            }
+
+            if (parser.check(TokenKind::KwTypeInfoOf)) {
+                parser.advance();
+                parser.expect(TokenKind::LParen, "'('");
+
+                // Unlike sizeof/type_of, the operand is always a plain expr — 'type_of(i32)'
+                // itself parses as an ordinary primary expression here, no starts_type_only
+                // gating needed.
+                auto operand = parse_expr(parser);
+
+                parser.expect(TokenKind::RParen, "')'");
+
+                return std::make_unique<TypeInfoOfExpr>(TypeInfoOfExpr{
                     .operand = std::move(operand),
                     .location = location,
                 });

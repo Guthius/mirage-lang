@@ -53,6 +53,10 @@ pub fn from_u32(buf: []u8, v: u32) -> ([]u8, error(StringError)) {
     return from_u64(buf, cast(v, u64))
 }
 
+pub fn from_u8(buf: []u8, v: u8) -> ([]u8, error(StringError)) {
+    return from_u64(buf, cast(v, u64))
+}
+
 pub fn from_usize(buf: []u8, v: usize) -> ([]u8, error(StringError)) {
     return from_u64(buf, cast(v, u64))
 }

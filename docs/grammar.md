@@ -245,6 +245,7 @@ builtin_type  ::= 'u8' | 'u16' | 'u32' | 'u64'
                | 'i8' | 'i16' | 'i32' | 'i64'
                | 'f32' | 'f64'
                | 'usize' | 'bool' | 'byte' | 'anyptr'
+               | 'type' | 'any'
 
 trait_method_decl ::= 'fn' IDENT
                       '(' ( 'self' | 'mut' 'self' )
@@ -539,6 +540,8 @@ primary_expr  ::= INT_LITERAL
                | 'undefined'
                | '(' expr ')'
                | sizeof_expr
+               | type_of_expr
+               | type_info_of_expr
                | len_expr
                | cast_expr
                | stackalloc_expr
@@ -560,6 +563,11 @@ sizeof_expr   ::= 'sizeof' '(' sizeof_operand ')'
 sizeof_operand ::= type    (* whenever the token(s) can only start a type: a builtin type
                                keyword, '*', '[', 'struct', 'enum', 'union', 'bitset', 'fn', 'trait' *)
                | expr      (* otherwise — may still simply name a type, e.g. a module member *)
+
+type_of_expr  ::= 'type_of' '(' sizeof_operand ')'   (* same type-vs-expr disambiguation as sizeof *)
+
+type_info_of_expr ::= 'type_info_of' '(' expr ')'    (* operand is always a plain expr, e.g.
+                                                          'type_info_of(type_of(i32))' *)
 
 len_expr      ::= 'len' '(' expr ')'
 
@@ -704,3 +712,5 @@ comment, it always starts a directive.
 12. **`sizeof`'s operand may be a type or an expression**: the parser looks ahead to decide — a built-in type keyword, or a token that can *only* begin a type (`*`, `[`, `struct`, `enum`, `union`, `fn`, `trait`), is parsed as `type`; anything else is parsed as an ordinary `expr` (which may itself simply name a type, e.g. `sizeof(module.TypeName)`). `sizeof(u64)`, `sizeof(*u8)`, and `sizeof([]T)` are all valid.
 
 13. **`stackalloc` vs. `import_bin`**: both are primary expressions shaped like a builtin call (`'ident' '(' ... ')'`), same as `sizeof`/`len`/`cast`, but neither takes a type argument: `stackalloc` takes a single size `expr` and evaluates to `anyptr`; `import_bin` takes a single `STRING` path and evaluates to a compile-time `[N]u8` constant.
+
+14. **`type_of`'s operand disambiguation matches `sizeof`**: `type_of(u64)`, `type_of(*u8)`, and `type_of(SomeStruct)` are all valid, using the exact same type-vs-expr lookahead rule as note 12. `type_of`'s result is always the builtin `type` — a compile-time-unique identifier for the operand's type. It is a compile-time constant for every operand except one whose resolved type is `any`, which lowers to a runtime load of the `any` value's `.id` field instead. `type_info_of`'s operand, by contrast, is always parsed as a plain `expr` (never type-disambiguated) — it must resolve to `type` or `any`, and always evaluates to `anyptr` (nil if no `Type_Info` exists for the referenced type, e.g. a builtin scalar).

@@ -36,6 +36,8 @@ auto token_kind_name(const TokenKind kind) -> const char * {
     case TokenKind::KwTrue:          return "KW_TRUE";
     case TokenKind::KwFalse:         return "KW_FALSE";
     case TokenKind::KwSizeOf:        return "KW_SIZEOF";
+    case TokenKind::KwTypeOf:        return "KW_TYPEOF";
+    case TokenKind::KwTypeInfoOf:    return "KW_TYPEINFOOF";
     case TokenKind::KwOffsetOf:      return "KW_OFFSETOF";
     case TokenKind::KwStackAlloc:    return "KW_STACKALLOC";
     case TokenKind::KwCast:          return "KW_CAST";
@@ -64,6 +66,7 @@ auto token_kind_name(const TokenKind kind) -> const char * {
     case TokenKind::KwByte:          return "KW_BYTE";
     case TokenKind::KwError:         return "KW_ERROR";
     case TokenKind::KwAnyptr:        return "KW_ANYPTR";
+    case TokenKind::KwAny:           return "KW_ANY";
     case TokenKind::Plus:            return "PLUS";
     case TokenKind::Minus:           return "MINUS";
     case TokenKind::Star:            return "STAR";

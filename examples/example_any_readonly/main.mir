@@ -1,0 +1,9 @@
+// example_any_readonly — negative test: 'any''s '.id'/'.data' pseudo-fields are read-only;
+// assigning to either is a sema error.
+
+pub fn main() -> i32 {
+    mut x: i32 = 42
+    const a: any = x
+    a.id = type_of(u8)
+    return 0
+}

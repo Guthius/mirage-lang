@@ -1,0 +1,92 @@
+// example_type_reflection — positive-path coverage for the reflection system's Definition of
+// Done: sizeof(type)/sizeof(any), type_of identity/disambiguation, any coercion + .id/.data,
+// and type_info_of on both a builtin scalar (nil) and a struct (byte-correct fields).
+
+const rt := import("../../runtime/type_info")
+
+pub type Point = struct {
+    x: i32
+    y: i32
+}
+
+fn str_eq(a: []u8, b: []u8) -> bool {
+    if len(a) != len(b) {
+        return false
+    }
+    mut i: usize = 0
+    while i < len(a) {
+        if a[i] != b[i] {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// 'type_of' is compile-time constant except for 'any' — global-scope initializers require a
+// compile-time constant, so this line failing to build would itself be the regression signal.
+const point_type_id: type = type_of(Point)
+
+pub fn main() -> i32 {
+    // sizeof(type) == 8, sizeof(any) == 16.
+    if sizeof(type) != 8 { return 1 }
+    if sizeof(any) != 16 { return 2 }
+
+    // type_of identity: builtin, named type, and expression operands (same disambiguation
+    // rule as sizeof).
+    if type_of(i32) != type_of(i32) { return 3 }
+    if type_of(i32) == type_of(u32) { return 4 }
+    const my_i32: i32 = 42
+    if type_of(my_i32) != type_of(i32) { return 5 }
+    if type_of(Point) != point_type_id { return 6 }
+    const p: Point = {.x = 1, .y = 2}
+    if type_of(p) != type_of(Point) { return 7 }
+
+    // 'any' coercion (addressable source) + '.id'/'.data' access.
+    mut x: i32 = 99
+    const a: any = x
+    if a.id != type_of(i32) { return 8 }
+    if cast(a.data, *i32).* != 99 { return 9 }
+
+    // type_info_of: nil for builtin scalars.
+    if type_info_of(type_of(i32)) != nil { return 10 }
+    if type_info_of(type_of(u8)) != nil { return 11 }
+    if type_info_of(type_of(bool)) != nil { return 12 }
+    if type_info_of(type_of(anyptr)) != nil { return 13 }
+
+    // type_info_of: byte-correct Struct reflection.
+    const info_ptr := type_info_of(type_of(Point))
+    if info_ptr == nil { return 14 }
+    const info: *rt.Type_Info = cast(info_ptr, *rt.Type_Info)
+    mut result: i32 = 0
+    switch info.* {
+        .Struct(s): {
+            if !str_eq(s.name, "Point") { result = 15 }
+            if s.size != 8 { result = 16 }
+            if s.align != 4 { result = 17 }
+            if len(s.fields) != 2 { result = 18 }
+            if !str_eq(s.fields[0].name, "x") { result = 19 }
+            if s.fields[0].offset != 0 { result = 20 }
+            if !str_eq(s.fields[1].name, "y") { result = 21 }
+            if s.fields[1].offset != 4 { result = 22 }
+        },
+        _: { result = 23 },
+    }
+    if result != 0 { return result }
+
+    // type_info_of on an 'any' value (runtime binary-search table path).
+    const any_info_ptr := type_info_of(a)
+    if any_info_ptr != nil { return 24 } // a's type is i32, a builtin scalar - still nil
+
+    // type_info_of on a 'type' value reached INDIRECTLY through a variable, not the direct
+    // 'type_info_of(type_of(T))' syntactic shape — still needs a Type_Info global and a
+    // runtime table entry (see Program::types_needing_info's registration in check_expr's
+    // TypeOfExpr case, which must fire on every type_of(T), not just ones nested directly
+    // inside type_info_of).
+    const point_id := type_of(Point)
+    const indirect_info_ptr := type_info_of(point_id)
+    if indirect_info_ptr == nil { return 25 }
+    if indirect_info_ptr != info_ptr { return 26 } // same type -> same *Type_Info
+
+    return 0
+}

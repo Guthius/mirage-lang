@@ -1,0 +1,7 @@
+// example_any_non_addressable — negative test: coercing a non-addressable value (a bare
+// literal) to 'any' is a sema error.
+
+pub fn main() -> i32 {
+    const a: any = 42
+    return 0
+}

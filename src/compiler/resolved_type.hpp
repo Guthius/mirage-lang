@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 
 namespace sema {
     enum class TypeKind : uint8_t {
@@ -29,6 +30,8 @@ namespace sema {
         Function,
         Trait,
         Bitset,
+        Type,
+        Any,
     };
 
     struct ResolvedType {
@@ -132,3 +135,26 @@ namespace sema {
         }
     }
 }
+
+// Hashes every field operator== compares (kind + all 9 *_index fields), so two
+// ResolvedTypes that compare equal always hash equal - required for
+// std::unordered_map<ResolvedType, uint64_t> (sema::Program::type_ids).
+template <>
+struct std::hash<sema::ResolvedType> {
+    auto operator()(const sema::ResolvedType &t) const noexcept -> size_t {
+        size_t h = std::hash<int>{}(static_cast<int>(t.kind));
+        auto combine = [&h](const int v) {
+            h ^= std::hash<int>{}(v) + 0x9e3779b9U + (h << 6) + (h >> 2);
+        };
+        combine(t.pointee_index);
+        combine(t.struct_index);
+        combine(t.array_index);
+        combine(t.slice_index);
+        combine(t.enum_index);
+        combine(t.union_index);
+        combine(t.fn_index);
+        combine(t.trait_index);
+        combine(t.bitset_index);
+        return h;
+    }
+};

@@ -29,6 +29,7 @@ namespace ast {
         Byte,
         Anyptr,
         Type,
+        Any,
     };
 
     struct BuiltinType {
@@ -146,6 +147,8 @@ namespace ast {
     };
 
     struct SizeOfExpr;
+    struct TypeOfExpr;
+    struct TypeInfoOfExpr;
     struct OptionExpr;
     struct EnvExpr;
     struct TypeExpr;
@@ -220,6 +223,8 @@ namespace ast {
         ImportExpr,
         ImportBinExpr,
         std::unique_ptr<SizeOfExpr>,
+        std::unique_ptr<TypeOfExpr>,
+        std::unique_ptr<TypeInfoOfExpr>,
         std::unique_ptr<OptionExpr>,
         std::unique_ptr<EnvExpr>,
         std::unique_ptr<TypeExpr>,
@@ -425,6 +430,24 @@ namespace ast {
     };
 
     struct SizeOfExpr {
+        Expr operand;
+        SourceLocation location;
+    };
+
+    // 'type_of(expr)' / 'type_of(Type)' — the unique 'type' identifier of the operand's type.
+    // Operand disambiguation (type vs. expr) follows the exact same starts_type_only rule as
+    // SizeOfExpr above. Compile-time constant for every operand except one whose resolved type
+    // is 'any' (a runtime load of the any value's 'id' field) — see is_constant_expr_impl.
+    struct TypeOfExpr {
+        Expr operand;
+        SourceLocation location;
+    };
+
+    // 'type_info_of(expr)' — a runtime *Type_Info descriptor pointer (always 'anyptr') for the
+    // operand, which must resolve to 'type' or 'any'. Unlike TypeOfExpr's operand, this is
+    // always parsed as a plain expr (e.g. 'type_of(i32)' itself is an ordinary expr here) - no
+    // starts_type_only gating.
+    struct TypeInfoOfExpr {
         Expr operand;
         SourceLocation location;
     };

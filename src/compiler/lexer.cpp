@@ -38,6 +38,8 @@ namespace lexer {
             {"true",      TokenKind::KwTrue     },
             {"false",     TokenKind::KwFalse    },
             {"sizeof",    TokenKind::KwSizeOf   },
+            {"type_of",   TokenKind::KwTypeOf   },
+            {"type_info_of", TokenKind::KwTypeInfoOf},
             {"offsetof",  TokenKind::KwOffsetOf },
             {"stackalloc",TokenKind::KwStackAlloc},
             {"cast",      TokenKind::KwCast     },
@@ -68,6 +70,7 @@ namespace lexer {
             {"byte",      TokenKind::KwByte     },
             {"error",     TokenKind::KwError    },
             {"anyptr",    TokenKind::KwAnyptr   },
+            {"any",       TokenKind::KwAny      },
         };
 
         auto is_digit(const char ch) -> bool { return std::isdigit(ch) != 0; }

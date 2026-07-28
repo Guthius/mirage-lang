@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <format>
+#include <ranges>
 #include <unordered_set>
 
 namespace sema {
@@ -11,7 +12,36 @@ namespace sema {
         struct LvalueInfo {
             ResolvedType type;
             bool writable = false;
+            // False only for 'any''s synthetic '.id'/'.data' pseudo-fields, which have no
+            // memory location of their own (they're ExtractValue-read out of the fat pointer,
+            // not GEP'd) - '&any_val.id' must be a sema error, not a codegen crash. Every other
+            // lvalue keeps the default 'true'.
+            bool has_address = true;
         };
+
+        // Pure structural predicate (no diagnostics, no recursion into check_expr) mirroring
+        // codegen's is_addressable_expr exactly: true for the shapes that can plausibly resolve
+        // to an addressable lvalue (checked for real, WITH diagnostics, by resolve_lvalue if the
+        // value is actually taken further). Used only to decide whether an implicit 'any'
+        // coercion's source expression can be addressed.
+        auto is_addressable_shape(const ast::Expr &expr) -> bool {
+            return std::visit(
+                [&]<typename T>(const T &v) -> bool {
+                    using V = std::decay_t<T>;
+                    if constexpr (std::is_same_v<V, ast::IdentExpr>) {
+                        return true;
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
+                        return v->op == ast::UnaryOp::Deref;
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                        return true;
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                        return true;
+                    } else {
+                        return false;
+                    }
+                },
+                expr);
+        }
 
         auto error(DiagnosticEngine &diag, const SourceLocation &loc, std::string msg) -> ResolvedType {
             diag.report_error(DiagnosticStage::Sema, loc, std::move(msg));
@@ -35,6 +65,36 @@ namespace sema {
         auto is_aggregate_no_cmp(const ResolvedType &t) -> bool {
             return t.kind == TypeKind::Struct || t.kind == TypeKind::Array ||
                    t.kind == TypeKind::Union || t.kind == TypeKind::Slice;
+        }
+
+        // Locates 'pub type Type_Info = union(enum) {...}' by name, wherever it's declared in
+        // the program (see runtime/type_info) - 'type_info_of' is name-driven rather than
+        // path-driven so it isn't tied to any particular checkout layout. Forces the symbol's
+        // resolution (rather than only checking whether it's already resolved) since a program
+        // may reach 'type_info_of' before anything else has referenced 'Type_Info' itself.
+        // Snapshots module paths before resolving (rather than holding a live iterator into
+        // Program::modules across a call that can insert new modules on demand - the same
+        // hazard documented on ensure_module_declared) to avoid unordered_map rehashing
+        // invalidating the iteration mid-loop.
+        auto find_type_info_union(Program &program, DiagnosticEngine &diag) -> const UnionInfo * {
+            std::vector<std::string> module_paths;
+            module_paths.reserve(program.modules.size());
+            for (const auto &path : program.modules | std::views::keys) {
+                module_paths.push_back(path);
+            }
+            for (const auto &path : module_paths) {
+                const auto mod_it = program.modules.find(path);
+                if (mod_it == program.modules.end()) continue;
+                const auto sym_it = mod_it->second.symbols.find("Type_Info");
+                if (sym_it == mod_it->second.symbols.end() || !std::holds_alternative<TypeSymbol>(sym_it->second)) {
+                    continue;
+                }
+                const auto resolved = resolve_type_symbol(path, "Type_Info", program, diag, {});
+                if (resolved.kind == TypeKind::Union) {
+                    return program.union_at(resolved.union_index);
+                }
+            }
+            return nullptr;
         }
 
         auto format_named_type(const ast::NamedType &named) -> std::string {
@@ -110,6 +170,13 @@ namespace sema {
                                  op == ast::BinaryOp::LessEqual || op == ast::BinaryOp::GreaterEqual;
             if (!is_cmp && (lhs.kind == TypeKind::Function || rhs.kind == TypeKind::Function)) {
                 return error(diag, loc, "arithmetic is not allowed on function pointer types");
+            }
+            // 'type' values are opaque compile-time identifiers: no arithmetic, no ordering,
+            // only identity comparison.
+            if (lhs.kind == TypeKind::Type || rhs.kind == TypeKind::Type) {
+                if (op != ast::BinaryOp::Equal && op != ast::BinaryOp::NotEqual) {
+                    return error(diag, loc, "'type' values only support '==' and '!='");
+                }
             }
 
             switch (op) {
@@ -777,6 +844,14 @@ namespace sema {
             } else if (object_type.kind == TypeKind::Trait) {
                 error(diag, m.location, "cannot access fields on a trait handle; handles have no visible layout");
                 return {ResolvedType{.kind = TypeKind::Invalid}, false};
+            } else if (object_type.kind == TypeKind::Any) {
+                // '.id'/'.data' are synthetic read-only pseudo-fields (not a real struct) -
+                // ExtractValue-read out of the fat pointer at codegen time, never GEP'd, so
+                // they have neither a writable location nor an address of their own.
+                if (m.member == "id") return {ResolvedType{.kind = TypeKind::Type}, false, false};
+                if (m.member == "data") return {ResolvedType{.kind = TypeKind::Anyptr}, false, false};
+                error(diag, m.location, std::format("'any' has no member named '{}'; only '.id' and '.data' are available", m.member));
+                return {ResolvedType{.kind = TypeKind::Invalid}, false, false};
             } else if (object_type.kind == TypeKind::Invalid) {
                 return {ResolvedType{.kind = TypeKind::Invalid}, false};
             } else {
@@ -1024,6 +1099,10 @@ namespace sema {
                     case ast::UnaryOp::AddressOf:
                         {
                             const LvalueInfo lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
+                            if (!lv.has_address) {
+                                return error(diag, v->location,
+                                    "cannot take the address of 'any''s synthetic '.id'/'.data' field; it has no memory location");
+                            }
                             // Taking the address of an error-tracked local invalidates its
                             // typestate to Unknown — spec only requires this when the pointer
                             // then feeds a call argument, but unconditional invalidation on any
@@ -1389,6 +1468,75 @@ namespace sema {
                     }
                     check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     return ResolvedType{.kind = TypeKind::USize};
+
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
+                    // Same ident/qualified-type-name special lookup as SizeOfExpr above, so
+                    // 'type_of(TypeName)'/'type_of(module.TypeName)' resolve the NAMED type
+                    // directly rather than mis-evaluating it as a value expression. Every
+                    // resolved operand type gets registered into Program::type_ids right here
+                    // (not lazily at codegen time) — codegen only ever reads that map.
+                    ResolvedType operand_type;
+                    bool resolved_as_type_name = false;
+                    if (auto *ident = std::get_if<ast::IdentExpr>(&v->operand)) {
+                        const auto mod_it = program.modules.find(module_path);
+                        if (mod_it != program.modules.end()) {
+                            if (auto sym_it = mod_it->second.symbols.find(ident->name); sym_it != mod_it->second.symbols.end() && std::holds_alternative<TypeSymbol>(sym_it->second)) {
+                                operand_type = resolve_type_symbol(module_path, ident->name, program, diag, v->location);
+                                resolved_as_type_name = true;
+                            }
+                        }
+                    } else if (auto *mem = std::get_if<std::unique_ptr<ast::MemberExpr>>(&v->operand)) {
+                        if (auto target_module = try_resolve_namespace_chain((*mem)->object, module_path, locals, program)) {
+                            auto mod_it = program.modules.find(*target_module);
+                            if (mod_it != program.modules.end()) {
+                                if (auto sym_it = mod_it->second.symbols.find((*mem)->member); sym_it != mod_it->second.symbols.end() && std::holds_alternative<TypeSymbol>(sym_it->second)) {
+                                    operand_type = resolve_type_symbol(*target_module, (*mem)->member, program, diag, v->location);
+                                    resolved_as_type_name = true;
+                                }
+                            }
+                        }
+                    }
+                    if (!resolved_as_type_name) {
+                        operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    }
+                    if (operand_type.kind != TypeKind::Invalid) {
+                        const auto id = intern_type_id(program, operand_type);
+                        // Register for possible reflection unconditionally, not just when this
+                        // TypeOfExpr is the direct syntactic argument of type_info_of — the
+                        // resulting 'type' value can just as easily be stored in a variable and
+                        // handed to type_info_of indirectly (or reach it via any other runtime
+                        // control flow), and the runtime binary-search table has no other way to
+                        // learn about this type. See declare_type_info_globals in codegen.cpp.
+                        program.types_needing_info.insert(id);
+                        program.types_needing_info_types[id] = operand_type;
+                    }
+                    program.modules.at(module_path).expr_type_of_operand_type[get_expr_key(expr)] = operand_type;
+                    return ResolvedType{.kind = TypeKind::Type};
+
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeInfoOfExpr>>) {
+                    const auto operand_ty = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    if (operand_ty.kind != TypeKind::Type && operand_ty.kind != TypeKind::Any) {
+                        return error(diag, v->location,
+                            std::format("type_info_of() requires an argument of type 'type' or 'any'; got '{}'. Use 'type_of(expr)' to get the type ID first.",
+                                describe_type(operand_ty, program)));
+                    }
+                    if (!find_type_info_union(program, diag)) {
+                        return error(diag, v->location,
+                            "'type_info_of' requires importing a module that defines 'pub type Type_Info = union(enum) {...}' (see runtime/type_info)");
+                    }
+                    // Fast path: the operand is syntactically 'type_of(T)' — fold T's id right
+                    // now and register it for a dedicated '__type_info_<id>' global, rather than
+                    // the generic runtime binary-search table. Every other shape (a runtime
+                    // 'type' value, or an 'any') falls through to that generic runtime lookup at
+                    // codegen time — see codegen.cpp's TypeInfoOfExpr case.
+                    if (std::holds_alternative<std::unique_ptr<ast::TypeOfExpr>>(v->operand)) {
+                        const auto inner_ty = program.modules.at(module_path).expr_type_of_operand_type.at(get_expr_key(v->operand));
+                        const auto id = intern_type_id(program, inner_ty);
+                        program.modules.at(module_path).expr_type_info_const_id[get_expr_key(expr)] = id;
+                        program.types_needing_info.insert(id);
+                        program.types_needing_info_types[id] = inner_ty;
+                    }
+                    return ResolvedType{.kind = TypeKind::Anyptr};
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeExpr>>) {
                     // A Type wrapped in an Expr slot (currently only produced by the parser for
@@ -2241,6 +2389,24 @@ namespace sema {
             program.modules.at(module_path).expr_trait_coercions[get_expr_key(expr)] = TraitCoercion{
                 .trait_index = expected->trait_index,
             };
+            return *expected;
+        }
+
+        // Implicit value-to-'any' coercion: applies through the same expected-type channel as
+        // the coercions above. The source must be addressable (bindable to a memory location) -
+        // see AnyCoercion's doc comment in sema.hpp for why this is recorded in a side table
+        // rather than overwriting expr_types for this node. Also registers the source type's id
+        // (for 'type_of'/the runtime Type_Info table lookup) and marks it as needing a
+        // 'Type_Info' global, so the generic runtime lookup path has real entries to find.
+        if (expected && expected->kind == TypeKind::Any && ty.kind != TypeKind::Invalid && ty.kind != TypeKind::Any) {
+            if (!is_addressable_shape(expr)) {
+                return error(diag, get_expr_location(expr),
+                    "cannot coerce non-addressable value to 'any'; bind it to a variable first.");
+            }
+            const auto id = intern_type_id(program, ty);
+            program.types_needing_info.insert(id);
+            program.types_needing_info_types[id] = ty;
+            program.modules.at(module_path).expr_any_coercions[get_expr_key(expr)] = AnyCoercion{.source_type = ty};
             return *expected;
         }
 

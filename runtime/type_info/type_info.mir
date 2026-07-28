@@ -1,0 +1,128 @@
+pub type Type_Kind = enum(u32) {
+    U8      = 1
+    U16     = 2
+    U32     = 3
+    U64     = 4
+    I8      = 5
+    I16     = 6
+    I32     = 7
+    I64     = 8
+    F32     = 9
+    F64     = 10
+    USize   = 11
+    Bool    = 12
+    Byte    = 13
+    Anyptr  = 14
+    Error   = 15
+
+    Pointer      = 16
+    Slice        = 17
+    Array        = 18
+    Named        = 19
+    Struct       = 20
+    Enum         = 21
+    Union        = 22
+    Tagged_Union = 23
+    Bitset       = 24
+    Function     = 25
+    Trait        = 26
+    Error_Type   = 27
+}
+
+pub type Type_Info_Field = struct {
+    name:      []u8
+    type_info: anyptr
+    offset:    usize
+}
+
+pub type Type_Info_Enum_Variant = struct {
+    name:  []u8
+    value: i64
+}
+
+pub type Type_Info_Tagged_Variant = struct {
+    name:      []u8
+    tag_value: u32
+    payload:   anyptr
+}
+
+pub type Type_Info_Param = struct {
+    name:      []u8
+    type_info: anyptr
+}
+
+pub type Type_Info_Method = struct {
+    name:      []u8
+    type_info: anyptr
+}
+
+pub type Type_Info = union(enum) {
+    Pointer: struct {
+        base_type: anyptr
+    }
+
+    Slice: struct {
+        base_type: anyptr
+    }
+
+    Array: struct {
+        base_type: anyptr
+        length:    usize
+    }
+
+    Named: struct {
+        name:      []u8
+        base_type: anyptr
+    }
+
+    Struct: struct {
+        name:   []u8
+        fields: []Type_Info_Field
+        size:   usize
+        align:  usize
+        packed: bool
+    }
+
+    Enum: struct {
+        name:         []u8
+        variants:     []Type_Info_Enum_Variant
+        storage_kind: Type_Kind
+        size:         usize
+    }
+
+    Union: struct {
+        name:    []u8
+        members: []Type_Info_Field
+        size:    usize
+        align:   usize
+    }
+
+    Tagged_Union: struct {
+        name:     []u8
+        variants: []Type_Info_Tagged_Variant
+        size:     usize
+        align:    usize
+    }
+
+    Bitset: struct {
+        name:         []u8
+        member_type:  anyptr
+        storage_kind: Type_Kind
+        size:         usize
+    }
+
+    Function: struct {
+        params:       []Type_Info_Param
+        return_types: []anyptr
+        is_variadic:  bool
+    }
+
+    Trait: struct {
+        name:    []u8
+        methods: []Type_Info_Method
+    }
+
+    Error_Type: struct {
+        members: []anyptr
+    }
+}

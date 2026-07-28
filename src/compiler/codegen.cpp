@@ -23,6 +23,7 @@
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace codegen {
@@ -160,9 +161,11 @@ namespace codegen {
             case sema::TypeKind::Pointer:
             case sema::TypeKind::Anyptr:
             case sema::TypeKind::Function:
+            case sema::TypeKind::Type: // compile-time-unique type identifier, backed by u64
                 return 8;
             case sema::TypeKind::Slice:
             case sema::TypeKind::Trait: // fat pointer: {data: anyptr, vtable: *const VTable}, 16 bytes
+            case sema::TypeKind::Any:  // fat pointer: {id: type, data: anyptr}, 16 bytes
                 return 16;
             default:
                 return 0;
@@ -211,6 +214,7 @@ namespace codegen {
                 declare_methods();
                 declare_trait_methods();
                 declare_vtables();
+                declare_type_info_globals();
                 const sema::FunctionSymbol *entry_main = nullptr;
                 if (!options_.freestanding) {
                     entry_main = validate_hosted_main();
@@ -279,6 +283,19 @@ namespace codegen {
             std::map<std::tuple<std::string, std::string, std::string, std::string>, llvm::GlobalVariable *> vtables_;
             size_t string_counter_ = 0;
             size_t vtable_counter_ = 0;
+
+            // 'type_info_of' support (Part 4/5): every distinct ResolvedType a '*Type_Info'
+            // global has been emitted for so far (keyed by the type itself, not by
+            // Program::type_ids' id, since most references — a struct field's type, a
+            // pointer's pointee — are reached recursively and were never independently
+            // 'type_of'/any-coerced, so have no id of their own to key on).
+            std::unordered_map<sema::ResolvedType, llvm::Constant *> type_info_globals_by_type_;
+            // Cycle guard: types currently being emitted, so a self-referential struct (a
+            // pointer field pointing back to its own struct type) resolves to nil instead of
+            // infinite recursion — see type_info_ptr_for.
+            std::unordered_set<sema::ResolvedType> type_info_emitting_;
+            llvm::GlobalVariable *type_info_table_global_ = nullptr;
+            size_t type_info_table_size_ = 0;
 
             auto module_for(const std::string &path) const -> const sema::ProgramModule & {
                 return sema_program_.modules.at(path);
@@ -417,6 +434,12 @@ namespace codegen {
                     }
                 case sema::TypeKind::Function:
                     return llvm::PointerType::getUnqual(*context_);
+                case sema::TypeKind::Type:
+                    return llvm::Type::getInt64Ty(*context_);
+                case sema::TypeKind::Any:
+                    // Fat pointer: {id: type, data: anyptr} - note the field order is the
+                    // opposite of Trait's {data, vtable} above, per the language spec.
+                    return llvm::StructType::get(*context_, {llvm::Type::getInt64Ty(*context_), llvm::PointerType::getUnqual(*context_)});
                 default: return llvm::Type::getVoidTy(*context_);
                 }
             }
@@ -1298,6 +1321,25 @@ namespace codegen {
                 return build_trait_handle_value(data_ptr, it->second, trait_ty, *current_module_path_);
             }
 
+            // Materializes an implicit value-to-'any' coercion sema already decided (see
+            // AnyCoercion's doc comment in sema.hpp): word 0 = the source type's id, word 1 =
+            // the 'data' pointer — the value's own address, except when the source is already
+            // an 'anyptr' (used directly, per the language spec, since it already IS the data
+            // pointer being erased). Sema already validated addressability (is_addressable_shape)
+            // before recording this coercion, so emit_lvalue is always safe to call here.
+            auto emit_any_coercion(const ast::Expr &expr, const sema::AnyCoercion &ac) -> llvm::Value * {
+                llvm::Value *data_ptr = ac.source_type.kind == sema::TypeKind::Anyptr
+                    ? emit_expr(expr)
+                    : emit_lvalue(expr).ptr;
+
+                const auto type_id = sema_program_.type_ids.at(ac.source_type);
+                const sema::ResolvedType any_ty{.kind = sema::TypeKind::Any};
+                llvm::Value *any_val = llvm::UndefValue::get(llvm_type(*current_module_path_, any_ty));
+                any_val = builder_.CreateInsertValue(any_val, builder_.getInt64(type_id), {0});
+                any_val = builder_.CreateInsertValue(any_val, data_ptr, {1});
+                return any_val;
+            }
+
             auto validate_hosted_main() const -> const sema::FunctionSymbol * {
                 const auto root_it = sema_program_.modules.find(ast_program_.root_module_path);
                 if (root_it == sema_program_.modules.end()) {
@@ -1474,6 +1516,537 @@ namespace codegen {
                         vtables_[{impl_info.trait_module, impl_info.trait_name, impl_info.type_module, impl_info.type_name}] = global;
                     }
                 }
+            }
+
+            // ---- type_info_of / runtime/type_info support (Part 4/5) ----
+
+            // Read-only lookup for 'pub type Type_Info = union(enum) {...}', wherever it's
+            // declared — sema already forced its resolution (see find_type_info_union in
+            // sema_check.cpp) for any program that got this far, so this never re-resolves,
+            // only reads back what's already there.
+            auto find_type_info_union() const -> const sema::UnionInfo * {
+                for (const auto &mod : sema_program_.modules | std::views::values) {
+                    if (const auto it = mod.symbols.find("Type_Info"); it != mod.symbols.end()) {
+                        if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second);
+                            ts && ts->resolved && ts->resolved->kind == sema::TypeKind::Union) {
+                            return sema_program_.union_at(ts->resolved->union_index);
+                        }
+                    }
+                }
+                return nullptr;
+            }
+
+            auto find_resolved_type_by_name(const std::string &module_path, const std::string &name) const -> std::optional<sema::ResolvedType> {
+                const auto mod_it = sema_program_.modules.find(module_path);
+                if (mod_it == sema_program_.modules.end()) return std::nullopt;
+                const auto sym_it = mod_it->second.symbols.find(name);
+                if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
+                const auto *ts = std::get_if<sema::TypeSymbol>(&sym_it->second);
+                if (!ts || !ts->resolved) return std::nullopt;
+                return *ts->resolved;
+            }
+
+            auto named_struct_llvm_type(const std::string &module_path, const std::string &name) -> llvm::Type * {
+                const auto ty = find_resolved_type_by_name(module_path, name);
+                return ty ? llvm_type(module_path, *ty) : llvm::Type::getInt8Ty(*context_);
+            }
+
+            static auto find_type_info_variant(const sema::UnionInfo &u, const std::string &name) -> const sema::TaggedUnionVariant * {
+                for (const auto &v : u.variants) {
+                    if (v.name == name) return &v;
+                }
+                return nullptr;
+            }
+
+            // Fixed numbering from runtime/type_info.mir's own Type_Kind enum — distinct from
+            // (and unrelated to) Program::type_ids' compiler-internal numbering. Only the
+            // scalar kinds that can legally appear as an Enum/Bitset's storage type are ever
+            // passed here.
+            static auto mirage_type_kind_value(sema::TypeKind kind) -> uint32_t {
+                switch (kind) {
+                case sema::TypeKind::U8:     return 1;
+                case sema::TypeKind::U16:    return 2;
+                case sema::TypeKind::U32:    return 3;
+                case sema::TypeKind::U64:    return 4;
+                case sema::TypeKind::I8:     return 5;
+                case sema::TypeKind::I16:    return 6;
+                case sema::TypeKind::I32:    return 7;
+                case sema::TypeKind::I64:    return 8;
+                case sema::TypeKind::F32:    return 9;
+                case sema::TypeKind::F64:    return 10;
+                case sema::TypeKind::USize:  return 11;
+                case sema::TypeKind::Bool:   return 12;
+                case sema::TypeKind::Anyptr: return 14;
+                default:                     return 0;
+                }
+            }
+
+            struct TypeInfoFieldAssignment {
+                std::string name;
+                llvm::Constant *value = nullptr;
+            };
+
+            // Assembles a payload struct's field-value vector in DECLARATION order, dispatching
+            // each named assignment to its field's actual index (never assumed position) —
+            // robust to the payload struct's own field order as declared in runtime/type_info.mir.
+            auto build_type_info_payload_values(const sema::StructInfo &payload_struct, const std::vector<TypeInfoFieldAssignment> &assignments) -> std::vector<llvm::Constant *> {
+                std::vector<llvm::Constant *> values(payload_struct.fields.size(), nullptr);
+                for (const auto &a : assignments) {
+                    const auto it = std::ranges::find(payload_struct.fields, a.name, &sema::StructField::name);
+                    if (it != payload_struct.fields.end()) {
+                        values[static_cast<size_t>(it - payload_struct.fields.begin())] = a.value;
+                    }
+                }
+                for (size_t i = 0; i < values.size(); ++i) {
+                    if (!values[i]) {
+                        values[i] = llvm::Constant::getNullValue(llvm_type(payload_struct.module_path, payload_struct.fields[i].type));
+                    }
+                }
+                return values;
+            }
+
+            // Builds a ConstantStruct for 'struct_index' from already-computed field values (in
+            // declaration order) — replicates declare_structs()'s exact padding-interleaving so
+            // the result matches struct_lowering(struct_index).type's real LLVM element layout.
+            // Never recomputes offsets — reads them straight from sema's StructInfo.
+            auto build_struct_constant(int struct_index, const std::vector<llvm::Constant *> &field_values) -> llvm::Constant * {
+                const auto &info = sema_program_.structs.at(struct_index);
+                const auto &path = info.module_path;
+
+                std::vector<llvm::Constant *> elements;
+                uint32_t cursor = 0;
+                for (size_t i = 0; i < info.fields.size(); ++i) {
+                    const auto &field = info.fields[i];
+                    if (field.offset > cursor) {
+                        elements.push_back(llvm::Constant::getNullValue(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), field.offset - cursor)));
+                    }
+                    elements.push_back(field_values.at(i));
+                    cursor = field.offset + size_of(path, field.type);
+                }
+                if (info.size > cursor) {
+                    elements.push_back(llvm::Constant::getNullValue(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), info.size - cursor)));
+                }
+                return llvm::ConstantStruct::get(struct_lowering(struct_index).type, elements);
+            }
+
+            // Builds a private constant array of 'elements' plus a {ptr, len} slice constant
+            // pointing at it — the same construction emit_string_literal() uses for []u8,
+            // generalized to any element type. Empty slices use the all-zero {nil, 0}
+            // representation, matching how 'nil' coerced to a slice type is represented
+            // elsewhere (LiteralNilExpr's Slice case).
+            auto emit_constant_slice(llvm::Type *element_ty, const std::vector<llvm::Constant *> &elements, const char *global_name_prefix) -> llvm::Constant * {
+                auto *slice_ty = llvm::StructType::get(*context_, {llvm::PointerType::getUnqual(*context_), llvm::Type::getInt64Ty(*context_)});
+                if (elements.empty()) {
+                    return llvm::ConstantAggregateZero::get(slice_ty);
+                }
+                auto *array_ty = llvm::ArrayType::get(element_ty, elements.size());
+                auto *init = llvm::ConstantArray::get(array_ty, elements);
+                auto *global = new llvm::GlobalVariable(
+                    *module_, array_ty, true, llvm::GlobalValue::PrivateLinkage, init,
+                    std::format("{}.{}", global_name_prefix, string_counter_++));
+                llvm::Constant *indices[] = {builder_.getInt32(0), builder_.getInt32(0)};
+                auto *ptr = llvm::ConstantExpr::getInBoundsGetElementPtr(array_ty, global, llvm::ArrayRef(indices));
+                auto *len = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), elements.size());
+                return llvm::ConstantStruct::get(slice_ty, {ptr, len});
+            }
+
+            auto build_type_info_field_entry(const std::string &module_path, const std::string &name, const sema::ResolvedType &type, uint64_t offset) -> llvm::Constant * {
+                const auto ty = find_resolved_type_by_name(module_path, "Type_Info_Field");
+                if (!ty || ty->kind != sema::TypeKind::Struct) return nullptr;
+                auto values = build_type_info_payload_values(sema_program_.structs.at(ty->struct_index), {
+                    {"name", emit_string_literal(name)},
+                    {"type_info", type_info_ptr_for(type)},
+                    {"offset", builder_.getInt64(offset)},
+                });
+                return build_struct_constant(ty->struct_index, values);
+            }
+
+            auto build_type_info_enum_variant_entry(const std::string &module_path, const std::string &name, int64_t value) -> llvm::Constant * {
+                const auto ty = find_resolved_type_by_name(module_path, "Type_Info_Enum_Variant");
+                if (!ty || ty->kind != sema::TypeKind::Struct) return nullptr;
+                auto values = build_type_info_payload_values(sema_program_.structs.at(ty->struct_index), {
+                    {"name", emit_string_literal(name)},
+                    {"value", builder_.getInt64(static_cast<uint64_t>(value))},
+                });
+                return build_struct_constant(ty->struct_index, values);
+            }
+
+            auto build_type_info_tagged_variant_entry(const std::string &module_path, const std::string &name, uint32_t tag_value, llvm::Constant *payload_ptr) -> llvm::Constant * {
+                const auto ty = find_resolved_type_by_name(module_path, "Type_Info_Tagged_Variant");
+                if (!ty || ty->kind != sema::TypeKind::Struct) return nullptr;
+                auto values = build_type_info_payload_values(sema_program_.structs.at(ty->struct_index), {
+                    {"name", emit_string_literal(name)},
+                    {"tag_value", builder_.getInt32(tag_value)},
+                    {"payload", payload_ptr},
+                });
+                return build_struct_constant(ty->struct_index, values);
+            }
+
+            auto build_type_info_param_entry(const std::string &module_path, const std::string &name, const sema::ResolvedType &type) -> llvm::Constant * {
+                const auto ty = find_resolved_type_by_name(module_path, "Type_Info_Param");
+                if (!ty || ty->kind != sema::TypeKind::Struct) return nullptr;
+                auto values = build_type_info_payload_values(sema_program_.structs.at(ty->struct_index), {
+                    {"name", emit_string_literal(name)},
+                    {"type_info", type_info_ptr_for(type)},
+                });
+                return build_struct_constant(ty->struct_index, values);
+            }
+
+            auto build_type_info_method_entry(const std::string &module_path, const std::string &name, llvm::Constant *type_info_ptr) -> llvm::Constant * {
+                const auto ty = find_resolved_type_by_name(module_path, "Type_Info_Method");
+                if (!ty || ty->kind != sema::TypeKind::Struct) return nullptr;
+                auto values = build_type_info_payload_values(sema_program_.structs.at(ty->struct_index), {
+                    {"name", emit_string_literal(name)},
+                    {"type_info", type_info_ptr},
+                });
+                return build_struct_constant(ty->struct_index, values);
+            }
+
+            // Builds the Type_Info union's own constant value: {tag, [pad], payload, [pad]} as
+            // a bespoke packed struct type sized/offset exactly per UnionInfo (D4 — never
+            // reused/named, just a one-off literal LLVM type; safe because every consumer only
+            // ever touches this global through an untyped 'ptr', same as every other anyptr in
+            // this compiler).
+            auto build_type_info_union_constant(const sema::UnionInfo &u, const sema::TaggedUnionVariant &variant, llvm::Constant *payload_value) -> llvm::Constant * {
+                std::vector<llvm::Type *> elem_types;
+                std::vector<llvm::Constant *> elem_values;
+
+                elem_types.push_back(llvm::Type::getInt32Ty(*context_));
+                elem_values.push_back(builder_.getInt32(static_cast<uint32_t>(variant.tag_value)));
+                uint32_t cursor = 4; // tag is always u32 (sema::TAG_TYPE)
+
+                if (u.payload_offset > cursor) {
+                    const auto pad = u.payload_offset - cursor;
+                    auto *pad_ty = llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), pad);
+                    elem_types.push_back(pad_ty);
+                    elem_values.push_back(llvm::Constant::getNullValue(pad_ty));
+                    cursor += pad;
+                }
+
+                if (variant.payload_struct_index >= 0 && payload_value) {
+                    elem_types.push_back(struct_lowering(variant.payload_struct_index).type);
+                    elem_values.push_back(payload_value);
+                    cursor += sema_program_.structs.at(variant.payload_struct_index).size;
+                }
+
+                if (u.size > cursor) {
+                    const auto pad = u.size - cursor;
+                    auto *pad_ty = llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), pad);
+                    elem_types.push_back(pad_ty);
+                    elem_values.push_back(llvm::Constant::getNullValue(pad_ty));
+                }
+
+                auto *bespoke_ty = llvm::StructType::get(*context_, elem_types, /*isPacked=*/true);
+                return llvm::ConstantStruct::get(bespoke_ty, elem_values);
+            }
+
+            // Entry point for every '*Type_Info' reference (top-level or nested, e.g. a
+            // pointer's base_type) — memoized by the ResolvedType itself (not by
+            // Program::type_ids' id, since most references are reached recursively and were
+            // never independently 'type_of'/any-coerced, so have no id of their own).
+            auto type_info_ptr_for(const sema::ResolvedType &ty) -> llvm::Constant * {
+                switch (ty.kind) {
+                case sema::TypeKind::Pointer:
+                case sema::TypeKind::Slice:
+                case sema::TypeKind::Array:
+                case sema::TypeKind::Struct:
+                case sema::TypeKind::Enum:
+                case sema::TypeKind::Union:
+                case sema::TypeKind::Bitset:
+                case sema::TypeKind::Function:
+                case sema::TypeKind::Trait:
+                    break;
+                default:
+                    // Builtin scalars (ids 1-15) and anything else Type_Info has no shape for.
+                    return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
+                }
+                if (const auto it = type_info_globals_by_type_.find(ty); it != type_info_globals_by_type_.end()) {
+                    return it->second;
+                }
+                if (type_info_emitting_.contains(ty)) {
+                    // Cycle (e.g. a self-referential struct reached through a pointer field) —
+                    // break it with nil rather than recursing forever; the outer type's own
+                    // Type_Info is still correct, just this one back-reference is unavailable.
+                    return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
+                }
+                const auto *type_info_union = find_type_info_union();
+                if (!type_info_union) {
+                    return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
+                }
+                return emit_type_info_global(ty, *type_info_union);
+            }
+
+            auto emit_type_info_global(const sema::ResolvedType &ty, const sema::UnionInfo &type_info_union) -> llvm::Constant * {
+                type_info_emitting_.insert(ty);
+                const auto &module_path = type_info_union.module_path;
+
+                std::string variant_name;
+                std::vector<TypeInfoFieldAssignment> assignments;
+
+                switch (ty.kind) {
+                case sema::TypeKind::Pointer: {
+                    variant_name = "Pointer";
+                    assignments.push_back({"base_type", type_info_ptr_for(sema_program_.pointer_pointees.at(ty.pointee_index))});
+                    break;
+                }
+                case sema::TypeKind::Slice: {
+                    variant_name = "Slice";
+                    assignments.push_back({"base_type", type_info_ptr_for(sema_program_.slices.at(ty.slice_index).element_type)});
+                    break;
+                }
+                case sema::TypeKind::Array: {
+                    variant_name = "Array";
+                    const auto &arr = sema_program_.arrays.at(ty.array_index);
+                    assignments.push_back({"base_type", type_info_ptr_for(arr.element_type)});
+                    assignments.push_back({"length", builder_.getInt64(arr.count)});
+                    break;
+                }
+                case sema::TypeKind::Struct: {
+                    variant_name = "Struct";
+                    const auto &info = sema_program_.structs.at(ty.struct_index);
+                    const auto [tmod, tname] = sema::find_type_module_and_name(ty, sema_program_);
+                    std::vector<llvm::Constant *> field_entries;
+                    for (const auto &f : info.fields) {
+                        field_entries.push_back(build_type_info_field_entry(module_path, f.name, f.type, f.offset));
+                    }
+                    assignments.push_back({"name", emit_string_literal(tname)});
+                    assignments.push_back({"fields", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Field"), field_entries, ".type_info_fields")});
+                    assignments.push_back({"size", builder_.getInt64(info.size)});
+                    assignments.push_back({"align", builder_.getInt64(info.align)});
+                    assignments.push_back({"packed", builder_.getInt1(info.is_packed)});
+                    break;
+                }
+                case sema::TypeKind::Enum: {
+                    variant_name = "Enum";
+                    const auto &info = sema_program_.enums.at(ty.enum_index);
+                    const auto [tmod, tname] = sema::find_type_module_and_name(ty, sema_program_);
+                    std::vector<llvm::Constant *> variant_entries;
+                    for (const auto &f : info.fields) {
+                        variant_entries.push_back(build_type_info_enum_variant_entry(module_path, f.name, f.value));
+                    }
+                    assignments.push_back({"name", emit_string_literal(tname)});
+                    assignments.push_back({"variants", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Enum_Variant"), variant_entries, ".type_info_variants")});
+                    assignments.push_back({"storage_kind", builder_.getInt32(mirage_type_kind_value(info.underlying_type.kind))});
+                    assignments.push_back({"size", builder_.getInt64(primitive_size(info.underlying_type.kind))});
+                    break;
+                }
+                case sema::TypeKind::Union: {
+                    const auto &info = sema_program_.unions.at(ty.union_index);
+                    const auto [tmod, tname] = sema::find_type_module_and_name(ty, sema_program_);
+                    if (info.is_error_union) {
+                        variant_name = "Error_Type";
+                        std::vector<llvm::Constant *> members;
+                        for (const auto &m : info.error_member_types) {
+                            members.push_back(type_info_ptr_for(m));
+                        }
+                        assignments.push_back({"members", emit_constant_slice(llvm::PointerType::getUnqual(*context_), members, ".type_info_err_members")});
+                    } else if (info.is_tagged) {
+                        variant_name = "Tagged_Union";
+                        std::vector<llvm::Constant *> variant_entries;
+                        for (const auto &v : info.variants) {
+                            llvm::Constant *payload_ptr = v.payload_struct_index >= 0
+                                ? type_info_ptr_for(sema::ResolvedType{.kind = sema::TypeKind::Struct, .struct_index = v.payload_struct_index})
+                                : llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
+                            variant_entries.push_back(build_type_info_tagged_variant_entry(module_path, v.name, static_cast<uint32_t>(v.tag_value), payload_ptr));
+                        }
+                        assignments.push_back({"name", emit_string_literal(tname)});
+                        assignments.push_back({"variants", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Tagged_Variant"), variant_entries, ".type_info_tagged_variants")});
+                        assignments.push_back({"size", builder_.getInt64(info.size)});
+                        assignments.push_back({"align", builder_.getInt64(info.align)});
+                    } else {
+                        variant_name = "Union";
+                        std::vector<llvm::Constant *> member_entries;
+                        for (const auto &m : info.members) {
+                            member_entries.push_back(build_type_info_field_entry(module_path, m.name, m.type, 0));
+                        }
+                        assignments.push_back({"name", emit_string_literal(tname)});
+                        assignments.push_back({"members", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Field"), member_entries, ".type_info_umembers")});
+                        assignments.push_back({"size", builder_.getInt64(info.size)});
+                        assignments.push_back({"align", builder_.getInt64(info.align)});
+                    }
+                    break;
+                }
+                case sema::TypeKind::Bitset: {
+                    variant_name = "Bitset";
+                    const auto &info = sema_program_.bitsets.at(ty.bitset_index);
+                    const auto [tmod, tname] = sema::find_type_module_and_name(ty, sema_program_);
+                    assignments.push_back({"name", emit_string_literal(tname)});
+                    assignments.push_back({"member_type", type_info_ptr_for(info.member_enum_type)});
+                    assignments.push_back({"storage_kind", builder_.getInt32(mirage_type_kind_value(info.storage_type.kind))});
+                    assignments.push_back({"size", builder_.getInt64(primitive_size(info.storage_type.kind))});
+                    break;
+                }
+                case sema::TypeKind::Function: {
+                    variant_name = "Function";
+                    const auto &info = sema_program_.fn_signatures.at(ty.fn_index);
+                    std::vector<llvm::Constant *> param_entries;
+                    for (size_t i = 0; i < info.param_types.size(); ++i) {
+                        const std::string pname = i < info.param_names.size() ? info.param_names[i] : std::string{};
+                        param_entries.push_back(build_type_info_param_entry(module_path, pname, info.param_types[i]));
+                    }
+                    std::vector<llvm::Constant *> return_ptrs;
+                    for (const auto &rt : info.return_types) {
+                        return_ptrs.push_back(type_info_ptr_for(rt));
+                    }
+                    assignments.push_back({"params", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Param"), param_entries, ".type_info_params")});
+                    assignments.push_back({"return_types", emit_constant_slice(llvm::PointerType::getUnqual(*context_), return_ptrs, ".type_info_returns")});
+                    assignments.push_back({"is_variadic", builder_.getInt1(info.is_variadic)});
+                    break;
+                }
+                case sema::TypeKind::Trait: {
+                    variant_name = "Trait";
+                    const auto *info = sema_program_.trait_at(ty.trait_index);
+                    const auto [tmod, tname] = sema::find_type_module_and_name(ty, sema_program_);
+                    std::vector<llvm::Constant *> method_entries;
+                    if (info) {
+                        for (const auto &m : info->methods) {
+                            // Trait methods don't carry a separately-interned function-type
+                            // ResolvedType to recurse into — nil 'type_info', name is still
+                            // reflected.
+                            method_entries.push_back(build_type_info_method_entry(
+                                module_path, m.name, llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_))));
+                        }
+                    }
+                    assignments.push_back({"name", emit_string_literal(tname)});
+                    assignments.push_back({"methods", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Method"), method_entries, ".type_info_methods")});
+                    break;
+                }
+                default:
+                    break;
+                }
+
+                type_info_emitting_.erase(ty);
+
+                if (variant_name.empty()) {
+                    return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
+                }
+
+                const auto *variant = find_type_info_variant(type_info_union, variant_name);
+                if (!variant || variant->payload_struct_index < 0) {
+                    report_codegen_error(diag_, {}, std::format(
+                        "internal error: runtime/type_info's Type_Info union has no '{}' variant", variant_name));
+                    return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
+                }
+
+                const auto &payload_struct = sema_program_.structs.at(variant->payload_struct_index);
+                auto payload_values = build_type_info_payload_values(payload_struct, assignments);
+                auto *payload_value = build_struct_constant(variant->payload_struct_index, payload_values);
+                auto *union_const = build_type_info_union_constant(type_info_union, *variant, payload_value);
+
+                auto *global = new llvm::GlobalVariable(
+                    *module_, union_const->getType(), true, llvm::GlobalValue::PrivateLinkage, union_const,
+                    std::format(".type_info.{}", type_info_globals_by_type_.size()));
+                type_info_globals_by_type_[ty] = global;
+                return global;
+            }
+
+            auto type_info_table_entry_ty() -> llvm::StructType * {
+                return llvm::StructType::get(*context_, {llvm::Type::getInt64Ty(*context_), llvm::PointerType::getUnqual(*context_)});
+            }
+
+            // Emits a '*Type_Info' global for every type the program's 'type_info_of' calls
+            // and 'any' coercions need (Program::types_needing_info — see D5 in the reflection
+            // plan), plus the sorted '__mirage_type_info_table' binary-search table over all of
+            // them. A strict no-op (early return) for any program that never imports
+            // runtime/type_info — types_needing_info is only ever populated by sema's
+            // TypeInfoOfExpr/'any'-coercion handling.
+            void declare_type_info_globals() {
+                if (sema_program_.types_needing_info.empty()) return;
+                const auto *type_info_union = find_type_info_union();
+                if (!type_info_union) return;
+
+                for (const auto id : sema_program_.types_needing_info) {
+                    const auto ty_it = sema_program_.types_needing_info_types.find(id);
+                    if (ty_it == sema_program_.types_needing_info_types.end()) continue;
+                    type_info_ptr_for(ty_it->second);
+                }
+
+                if (type_info_globals_by_type_.empty()) return;
+
+                std::vector<llvm::Constant *> table_entries;
+                for (const auto id : sema_program_.types_needing_info) {
+                    const auto ty_it = sema_program_.types_needing_info_types.find(id);
+                    if (ty_it == sema_program_.types_needing_info_types.end()) continue;
+                    const auto global_it = type_info_globals_by_type_.find(ty_it->second);
+                    if (global_it == type_info_globals_by_type_.end()) continue;
+                    table_entries.push_back(llvm::ConstantStruct::get(type_info_table_entry_ty(), {builder_.getInt64(id), global_it->second}));
+                }
+                if (table_entries.empty()) return;
+
+                auto *arr_ty = llvm::ArrayType::get(type_info_table_entry_ty(), table_entries.size());
+                auto *init = llvm::ConstantArray::get(arr_ty, table_entries);
+                type_info_table_global_ = new llvm::GlobalVariable(
+                    *module_, arr_ty, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage, init, "__mirage_type_info_table");
+                type_info_table_size_ = table_entries.size();
+            }
+
+            // Inline binary search over '__mirage_type_info_table' (never a runtime function
+            // call, per the reflection design) using this codebase's existing alloca+load/store
+            // loop idiom (see emit_while) rather than raw SSA/PHI, to stay consistent with the
+            // rest of this file. Returns nil if the key isn't found (e.g. a builtin scalar's id
+            // at runtime, which never gets a table entry).
+            auto emit_type_info_runtime_lookup(const ast::TypeInfoOfExpr &expr) -> llvm::Value * {
+                auto *ptr_ty = llvm::PointerType::getUnqual(*context_);
+                if (!type_info_table_global_ || type_info_table_size_ == 0) {
+                    return llvm::ConstantPointerNull::get(ptr_ty);
+                }
+
+                const auto operand_ty = current_module_->expr_types.at(sema::get_expr_key(expr.operand));
+                llvm::Value *key = operand_ty.kind == sema::TypeKind::Any
+                    ? builder_.CreateExtractValue(emit_expr(expr.operand), {0})
+                    : emit_expr(expr.operand); // already an i64 'type' id value
+
+                auto *fn = builder_.GetInsertBlock()->getParent();
+                auto *i64_ty = llvm::Type::getInt64Ty(*context_);
+                auto *entry_ty = type_info_table_entry_ty();
+                auto *table_ty = llvm::ArrayType::get(entry_ty, type_info_table_size_);
+
+                auto *lo_slot = create_entry_alloca(fn, i64_ty, "tinfo.lo");
+                auto *hi_slot = create_entry_alloca(fn, i64_ty, "tinfo.hi");
+                auto *result_slot = create_entry_alloca(fn, ptr_ty, "tinfo.result");
+                builder_.CreateStore(llvm::ConstantInt::get(i64_ty, 0), lo_slot);
+                builder_.CreateStore(llvm::ConstantInt::get(i64_ty, type_info_table_size_ - 1), hi_slot);
+                builder_.CreateStore(llvm::ConstantPointerNull::get(ptr_ty), result_slot);
+
+                auto *cond_bb = llvm::BasicBlock::Create(*context_, "tinfo.cond", fn);
+                auto *body_bb = llvm::BasicBlock::Create(*context_, "tinfo.body", fn);
+                auto *found_bb = llvm::BasicBlock::Create(*context_, "tinfo.found", fn);
+                auto *checklt_bb = llvm::BasicBlock::Create(*context_, "tinfo.checklt", fn);
+                auto *narrow_hi_bb = llvm::BasicBlock::Create(*context_, "tinfo.narrow_hi", fn);
+                auto *narrow_lo_bb = llvm::BasicBlock::Create(*context_, "tinfo.narrow_lo", fn);
+                auto *end_bb = llvm::BasicBlock::Create(*context_, "tinfo.end", fn);
+                builder_.CreateBr(cond_bb);
+
+                builder_.SetInsertPoint(cond_bb);
+                auto *lo = builder_.CreateLoad(i64_ty, lo_slot);
+                auto *hi = builder_.CreateLoad(i64_ty, hi_slot);
+                builder_.CreateCondBr(builder_.CreateICmpSLE(lo, hi), body_bb, end_bb);
+
+                builder_.SetInsertPoint(body_bb);
+                auto *lo2 = builder_.CreateLoad(i64_ty, lo_slot);
+                auto *hi2 = builder_.CreateLoad(i64_ty, hi_slot);
+                auto *mid = builder_.CreateAdd(lo2, builder_.CreateUDiv(builder_.CreateSub(hi2, lo2), llvm::ConstantInt::get(i64_ty, 2)));
+                auto *entry_ptr = builder_.CreateInBoundsGEP(table_ty, type_info_table_global_, {llvm::ConstantInt::get(i64_ty, 0), mid});
+                auto *entry_id = builder_.CreateLoad(i64_ty, builder_.CreateStructGEP(entry_ty, entry_ptr, 0));
+                builder_.CreateCondBr(builder_.CreateICmpEQ(key, entry_id), found_bb, checklt_bb);
+
+                builder_.SetInsertPoint(found_bb);
+                builder_.CreateStore(builder_.CreateLoad(ptr_ty, builder_.CreateStructGEP(entry_ty, entry_ptr, 1)), result_slot);
+                builder_.CreateBr(end_bb);
+
+                builder_.SetInsertPoint(checklt_bb);
+                builder_.CreateCondBr(builder_.CreateICmpULT(key, entry_id), narrow_hi_bb, narrow_lo_bb);
+
+                builder_.SetInsertPoint(narrow_hi_bb);
+                builder_.CreateStore(builder_.CreateSub(mid, llvm::ConstantInt::get(i64_ty, 1)), hi_slot);
+                builder_.CreateBr(cond_bb);
+
+                builder_.SetInsertPoint(narrow_lo_bb);
+                builder_.CreateStore(builder_.CreateAdd(mid, llvm::ConstantInt::get(i64_ty, 1)), lo_slot);
+                builder_.CreateBr(cond_bb);
+
+                builder_.SetInsertPoint(end_bb);
+                return builder_.CreateLoad(ptr_ty, result_slot);
             }
 
             // Find the pointer ResolvedType for self_type in the current module's pointees.
@@ -2079,6 +2652,9 @@ namespace codegen {
                 }
                 if (const auto it = current_module_->expr_trait_coercions.find(sema::get_expr_key(expr)); it != current_module_->expr_trait_coercions.end()) {
                     return emit_trait_coercion(expr, it->second);
+                }
+                if (const auto it = current_module_->expr_any_coercions.find(sema::get_expr_key(expr)); it != current_module_->expr_any_coercions.end()) {
+                    return emit_any_coercion(expr, it->second);
                 }
                 const auto from = current_module_->expr_types.at(sema::get_expr_key(expr));
                 if (from.kind == sema::TypeKind::Array && target.kind == sema::TypeKind::Slice) {
@@ -3021,6 +3597,37 @@ namespace codegen {
                             return emit_incr_decr(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                             return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), sizeof_operand(*v));
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
+                            // Unlike a generic value operand, an operand that names a TYPE (e.g.
+                            // 'type_of(Point)') never went through check_expr (see sema's mirrored
+                            // ident/member special-case) and so has no expr_types entry of its own
+                            // - .find() rather than .at() here, matching type_of_operand's own
+                            // ident/member-vs-generic split below.
+                            const auto ty_it = current_module_->expr_types.find(sema::get_expr_key(v->operand));
+                            if (ty_it != current_module_->expr_types.end() && ty_it->second.kind == sema::TypeKind::Any) {
+                                // Runtime load of the any value's 'id' field (word 0).
+                                return builder_.CreateExtractValue(emit_expr(v->operand), {0});
+                            }
+                            return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), type_of_operand(*v));
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeInfoOfExpr>>) {
+                            // Fast path: 'type_info_of(type_of(T))' — sema already folded T's id
+                            // at check_expr time (see expr_type_info_const_id). Nil for builtin
+                            // scalar ids (1-15); else the (already emitted) '__type_info_<id>'
+                            // global's address.
+                            if (const auto it = current_module_->expr_type_info_const_id.find(sema::get_expr_key(expr)); it != current_module_->expr_type_info_const_id.end()) {
+                                const auto id = it->second;
+                                if (id >= 1 && id <= 15) {
+                                    return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
+                                }
+                                const auto ty_it = sema_program_.types_needing_info_types.find(id);
+                                if (ty_it != sema_program_.types_needing_info_types.end()) {
+                                    return type_info_ptr_for(ty_it->second);
+                                }
+                                return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
+                            }
+                            // Runtime path: a non-constant 'type' value, or an 'any' — inline
+                            // binary search over '__mirage_type_info_table'.
+                            return emit_type_info_runtime_lookup(*v);
                         } else if constexpr (std::is_same_v<V, ast::ImportBinExpr>) {
                             return emit_import_bin(v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) {
@@ -3060,6 +3667,13 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
                             return emit_slice_expr(*v, ty);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                            // 'any' fat pointer's synthetic '.id'/'.data' pseudo-fields: read via
+                            // ExtractValue out of the {id, data} aggregate, never GEP'd (they have
+                            // no memory location of their own — see resolve_member's Any branch).
+                            if (const auto obj_ty_it = current_module_->expr_types.find(sema::get_expr_key(v->object));
+                                obj_ty_it != current_module_->expr_types.end() && obj_ty_it->second.kind == sema::TypeKind::Any) {
+                                return builder_.CreateExtractValue(emit_expr(v->object), {v->member == "id" ? 0u : 1u});
+                            }
                             // Cross-module function pointer taking: mod.fn_name
                             if (ty.kind == sema::TypeKind::Function) {
                                 if (const auto target_mod = try_namespace_chain(v->object)) {
@@ -3777,6 +4391,30 @@ namespace codegen {
                 return size_of(*current_module_path_, current_module_->expr_types.at(sema::get_expr_key(expr.operand)));
             }
 
+            // Mirrors sizeof_operand() above, but never invents a new id - every id a program
+            // can ever reference was already assigned synchronously during sema's whole-program
+            // check_expr pass (see intern_type_id), so this only ever reads sema_program_.type_ids.
+            auto type_of_operand(const ast::TypeOfExpr &expr) const -> uint64_t {
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&expr.operand)) {
+                    if (const auto it = current_module_->symbols.find(ident->name); it != current_module_->symbols.end()) {
+                        if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second); ts && ts->resolved) {
+                            return sema_program_.type_ids.at(*ts->resolved);
+                        }
+                    }
+                }
+                if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr.operand)) {
+                    if (const auto ns = try_namespace_chain((*member)->object)) {
+                        const auto &mod = module_for(*ns);
+                        if (const auto it = mod.symbols.find((*member)->member); it != mod.symbols.end()) {
+                            if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second); ts && ts->resolved) {
+                                return sema_program_.type_ids.at(*ts->resolved);
+                            }
+                        }
+                    }
+                }
+                return sema_program_.type_ids.at(current_module_->expr_types.at(sema::get_expr_key(expr.operand)));
+            }
+
             // Sema has already validated the path (containment, existence) by the time codegen
             // runs, so this just re-reads the bytes — no error reporting needed here, same trust
             // relationship sizeof_operand has with its sema-side counterpart.
@@ -3863,6 +4501,11 @@ namespace codegen {
                             // alloca/store, which can't be constant-folded — falls through below.
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                             return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), sizeof_operand(*v));
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
+                            // constant=true here means sema already confirmed this is eligible as
+                            // a compile-time constant (is_constant_expr), which for TypeOfExpr
+                            // means the operand is never 'any' — see is_constant_expr_impl.
+                            return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), type_of_operand(*v));
                         } else if constexpr (std::is_same_v<V, ast::ImportBinExpr>) {
                             return emit_import_bin(v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {

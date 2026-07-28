@@ -47,6 +47,34 @@ namespace sema {
         return ResolvedType{.kind = TypeKind::Slice, .slice_index = static_cast<int>(program.slices.size()) - 1};
     }
 
+    auto intern_type_id(Program &program, const ResolvedType &t) -> uint64_t {
+        if (const auto it = program.type_ids.find(t); it != program.type_ids.end()) {
+            return it->second;
+        }
+        const auto id = program.next_type_id++;
+        program.type_ids[t] = id;
+        return id;
+    }
+
+    void seed_builtin_type_ids(Program &program) {
+        // Fixed, compiler-internal numbering for the 15 builtin scalar kinds that can never
+        // carry a struct/union/enum-style layout worth reflecting on — distinct from (and
+        // unrelated to) the Mirage-level 'runtime/type_info' module's own Type_Kind enum,
+        // which numbers its OWN 1-15 range independently for a different purpose (labeling
+        // Type_Info variant shapes, not type identity).
+        static constexpr TypeKind kBuiltinOrder[] = {
+            TypeKind::U8, TypeKind::U16, TypeKind::U32, TypeKind::U64,
+            TypeKind::I8, TypeKind::I16, TypeKind::I32, TypeKind::I64,
+            TypeKind::F32, TypeKind::F64, TypeKind::USize, TypeKind::Bool,
+            TypeKind::Anyptr, TypeKind::Void, TypeKind::Type,
+        };
+        uint64_t id = 1;
+        for (const auto kind : kBuiltinOrder) {
+            program.type_ids[ResolvedType{.kind = kind}] = id++;
+        }
+        program.next_type_id = 16;
+    }
+
     namespace {
         auto intern_array(Program &program, const ResolvedType &element, const uint64_t count, const uint32_t size, const uint32_t align) -> ResolvedType {
             for (size_t i = 0; i < program.arrays.size(); ++i) {
@@ -81,10 +109,12 @@ namespace sema {
             case TypeKind::Pointer:
             case TypeKind::Anyptr:
             case TypeKind::Function: // code pointer, 8 bytes
+            case TypeKind::Type:     // compile-time-unique type identifier, backed by u64
                 return 8;
 
             case TypeKind::Slice:
             case TypeKind::Trait: // fat pointer: {data: anyptr, vtable: *const VTable}, 16 bytes
+            case TypeKind::Any:   // fat pointer: {id: type, data: anyptr}, 16 bytes
                 return 16;
 
             default:
@@ -396,6 +426,7 @@ namespace sema {
                 if (t.kind == TypeKind::Array) { const auto *info = program.array_at(t.array_index); return info ? info->align : 1; }
                 if (t.kind == TypeKind::Slice) return 8;
                 if (t.kind == TypeKind::Trait) return 8; // primitive_align would wrongly forward to primitive_size's 16
+                if (t.kind == TypeKind::Any) return 8;   // same reasoning as Trait above
                 if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_align(info->underlying_type.kind) : 1; }
                 if (t.kind == TypeKind::Union) { const auto *info = program.union_at(t.union_index); return info ? info->align : 1; }
                 if (t.kind == TypeKind::Bitset) { const auto *info = program.bitset_at(t.bitset_index); return info ? primitive_align(info->storage_type.kind) : 1; }
@@ -1144,7 +1175,8 @@ namespace sema {
                 case ast::BuiltinTypeKind::Bool:   return ResolvedType{.kind = TypeKind::Bool};
                 case ast::BuiltinTypeKind::Byte:   return ResolvedType{.kind = TypeKind::U8};
                 case ast::BuiltinTypeKind::Anyptr: return ResolvedType{.kind = TypeKind::Anyptr};
-                case ast::BuiltinTypeKind::Type:   return ResolvedType{.kind = TypeKind::Void};
+                case ast::BuiltinTypeKind::Type:   return ResolvedType{.kind = TypeKind::Type};
+                case ast::BuiltinTypeKind::Any:    return ResolvedType{.kind = TypeKind::Any};
                 }
 
                 return ResolvedType{.kind = TypeKind::Invalid};

@@ -209,6 +209,15 @@ namespace sema {
         int trait_index = -1;
     };
 
+    // Records an implicit value-to-'any' coercion decided by check_expr's expected-type
+    // tail (sibling to TraitCoercion above). 'source_type' is the coerced value's own
+    // natural type — codegen uses it to look up the type's id (Program::type_ids) and to
+    // decide how to materialize the 'data' word (take the value's address, or use it
+    // directly if it's already an 'anyptr' — see emit_any_coercion).
+    struct AnyCoercion {
+        ResolvedType source_type;
+    };
+
     // Records where a '.method()' call was resolved against a trait's method list via
     // an actual dyn-handle receiver (TypeKind::Trait), rather than a concrete MethodInfo.
     // 'method_order_index' is the index into TraitInfo::methods — the vtable slot.
@@ -284,7 +293,19 @@ namespace sema {
         std::unordered_map<const void *, ResolvedType> expr_types;
         std::unordered_map<const void *, VariantCoercion> expr_variant_coercions;
         std::unordered_map<const void *, TraitCoercion> expr_trait_coercions;
+        std::unordered_map<const void *, AnyCoercion> expr_any_coercions;
         std::unordered_map<const void *, TraitDispatchInfo> expr_trait_dispatch;
+        // 'type_info_of(type_of(T))' EXPRESSION -> T's compile-time-constant type id, present
+        // only for this exact syntactic shape (see check_expr's TypeInfoOfExpr case) — the fast
+        // path that resolves directly to a specific '__type_info_<id>' global at codegen time,
+        // rather than the generic runtime binary-search table lookup.
+        std::unordered_map<const void *, uint64_t> expr_type_info_const_id;
+        // 'type_of(...)' EXPRESSION -> its operand's resolved type. Needed because a type-name
+        // operand (e.g. 'type_of(Point)') never goes through check_expr itself (see check_expr's
+        // TypeOfExpr case, mirroring SizeOfExpr) and so has no expr_types entry of its own -
+        // TypeInfoOfExpr's 'type_info_of(type_of(T))' fast-path detection reads this instead of
+        // trying (and failing) to look up the inner operand's expr_types entry directly.
+        std::unordered_map<const void *, ResolvedType> expr_type_of_operand_type;
         std::unordered_map<const void *, ErrorMatchUnwrap> expr_error_match_unwrap;
         // '#option(...)'/'#env(...)' expression -> its resolved compile-time value, cached
         // by check_expr's OptionExpr/EnvExpr cases so later constant-folding (when
@@ -366,6 +387,23 @@ namespace sema {
         // union_index of the synthesized Ok/Failed wrapper. Two 'error(...)' spellings
         // naming the same set of member types (in any order) intern to the same union.
         std::vector<std::pair<std::vector<ResolvedType>, int>> error_unions;
+        // 'type_of's identity table: every distinct ResolvedType that has ever been the
+        // operand of a 'type_of'/'any' coercion gets a stable id here, assigned lazily in
+        // encounter order (see intern_type_id). Ids 1-15 are pre-seeded for the builtin
+        // scalar kinds by seed_builtin_type_ids (called once at the top of check_program);
+        // 'next_type_id' starts at 16 for everything else. Codegen NEVER calls
+        // intern_type_id itself — every id a program can ever reference is assigned
+        // synchronously during sema's whole-program check_expr pass, so codegen only ever
+        // reads this map (see codegen.cpp's type_of_operand).
+        std::unordered_map<ResolvedType, uint64_t> type_ids;
+        uint64_t next_type_id = 16;
+        // Every type id for which 'type_info_of(type_of(T))' (the compile-time-constant
+        // fast path — see check_expr's TypeInfoOfExpr case) appears anywhere in the
+        // program, plus every source type of an 'any' coercion (so the generic runtime
+        // binary-search table has real entries to find) — the set of types codegen's
+        // declare_type_info_globals() must emit a 'Type_Info' global for.
+        std::set<uint64_t> types_needing_info;
+        std::map<uint64_t, ResolvedType> types_needing_info_types;
         ResolveState resolve_state;
         bool ok = false;
 
@@ -503,6 +541,15 @@ namespace sema {
     auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType;
     auto intern_slice(Program &program, const ResolvedType &element) -> ResolvedType;
     auto intern_function_type(Program &program, FunctionTypeInfo sig) -> ResolvedType;
+    // Assigns (or looks up) 'type''s stable identity for a given ResolvedType — the
+    // compile-time value 'type_of' resolves to. Lazy, encounter-order assignment starting
+    // at Program::next_type_id (16); ids 1-15 are pre-seeded by seed_builtin_type_ids for
+    // the builtin scalar kinds. See Program::type_ids' doc comment for the sema-decides/
+    // codegen-only-reads contract.
+    auto intern_type_id(Program &program, const ResolvedType &t) -> uint64_t;
+    // Pre-registers compiler-internal type ids 1-15 for the builtin scalar TypeKinds, called
+    // once at the top of check_program before any 'type_of' expression can be visited.
+    void seed_builtin_type_ids(Program &program);
     // See resolve_type's 'ast_program' doc above — same on-demand-declare purpose.
     auto resolve_type_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc, const ast::Program *ast_program = nullptr) -> ResolvedType;
     auto resolve_global_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> ResolvedType;

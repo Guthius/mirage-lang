@@ -1,0 +1,130 @@
+// example_reflection — exercises the reflection system end to end: 'any', 'type_of',
+// 'type_info_of', and the full println/print_any dispatch chain (adapted from the task's
+// pseudocode to this repo's real APIs — see the reflection plan's "Conflicts" section for
+// why: builder.StringBuilder is a free-function API, not a method-call 'fmt.Builder'; there is
+// no 'libc' module, raw syscalls are declared inline per-module; bare '-> error' isn't legal
+// grammar, so a local ReflectError is declared).
+
+const string  := import("../string")
+const builder := import("../builder")
+// Not referenced by name below — type_info_of's fallback path (see print_any) locates
+// 'Type_Info' by scanning every module reachable from the program's import graph, so this
+// module must be imported SOMEWHERE for that lookup to find it at all (see D6 in the
+// reflection plan).
+const rt := import("../../runtime/type_info")
+
+ext fn write(fd: i32, buf: *u8, count: usize) -> i64
+
+pub type ReflectError = enum(i32) {
+    WriteFailed = 1
+}
+
+pub fn println(format: []u8, args: ...any) -> error(ReflectError | string.StringError) {
+    mut b := builder.new_builder()
+    defer builder.destroy(&b)
+
+    mut arg_idx: usize = 0
+    mut i: usize = 0
+
+    while i < len(format) {
+        if format[i] == '{' && i + 1 < len(format) && format[i+1] == '}' {
+            if arg_idx < len(args) {
+                try print_any(&b, args[arg_idx])
+                arg_idx += 1
+            }
+            i += 2
+            continue
+        }
+        if !builder.put_char(&b, format[i]) {
+            return_err .WriteFailed
+        }
+        i += 1
+    }
+
+    if !builder.put_char(&b, '\n') {
+        return_err .WriteFailed
+    }
+    const s := builder.to_slice(&b)
+    write(1, cast(s, *u8), len(s))
+    return_ok
+}
+
+fn print_any(b: *builder.StringBuilder, a: any) -> error(ReflectError | string.StringError) {
+    const t := type_of(a)
+
+    if t == type_of(i32) {
+        const val: i32 = cast(a.data, *i32).*
+        mut buf: [11]u8 = undefined
+        const s := try string.from_i32(buf, val)
+        if !builder.put_str(b, s) { return_err .WriteFailed }
+        return_ok
+    }
+    if t == type_of(i64) {
+        const val: i64 = cast(a.data, *i64).*
+        mut buf: [20]u8 = undefined
+        const s := try string.from_i64(buf, val)
+        if !builder.put_str(b, s) { return_err .WriteFailed }
+        return_ok
+    }
+    if t == type_of(u32) {
+        const val: u32 = cast(a.data, *u32).*
+        mut buf: [10]u8 = undefined
+        const s := try string.from_u32(buf, val)
+        if !builder.put_str(b, s) { return_err .WriteFailed }
+        return_ok
+    }
+    if t == type_of(u64) {
+        const val: u64 = cast(a.data, *u64).*
+        mut buf: [20]u8 = undefined
+        const s := try string.from_u64(buf, val)
+        if !builder.put_str(b, s) { return_err .WriteFailed }
+        return_ok
+    }
+    if t == type_of(f64) {
+        const val: f64 = cast(a.data, *f64).*
+        mut buf: [32]u8 = undefined
+        const s := try string.from_f64(buf, val)
+        if !builder.put_str(b, s) { return_err .WriteFailed }
+        return_ok
+    }
+    if t == type_of(bool) {
+        const val: bool = cast(a.data, *bool).*
+        if !builder.put_str(b, val ? "true" : "false") { return_err .WriteFailed }
+        return_ok
+    }
+    if t == type_of([]u8) {
+        const val: []u8 = cast(a.data, *[]u8).*
+        if !builder.put_str(b, val) { return_err .WriteFailed }
+        return_ok
+    }
+    if t == type_of(u8) {
+        const val: u8 = cast(a.data, *u8).*
+        mut buf: [3]u8 = undefined
+        const s := try string.from_u8(buf, val)
+        if !builder.put_str(b, s) { return_err .WriteFailed }
+        return_ok
+    }
+
+    // Unknown type — fall back to type_info if available.
+    const info_ptr := type_info_of(a)
+    if info_ptr == nil {
+        if !builder.put_str(b, "<unknown>") { return_err .WriteFailed }
+        return_ok
+    }
+    if !builder.put_str(b, "<type>") { return_err .WriteFailed }
+    return_ok
+}
+
+pub fn main() -> i32 {
+    mut x: i32 = 42
+    const name: []u8 = "Mirage"
+    const pi: f64 = 3.14159
+
+    const flag: bool = true
+    const byte_val: u8 = cast(255, u8)
+
+    if println("Hello, {}!", name) { return 1 }
+    if println("x = {}, pi = {}", x, pi) { return 1 }
+    if println("bool: {}, u8: {}", flag, byte_val) { return 1 }
+    return 0
+}

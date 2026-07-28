@@ -43,6 +43,8 @@ enum class TokenKind : uint8_t {
     KwTrue,
     KwFalse,
     KwSizeOf,
+    KwTypeOf,
+    KwTypeInfoOf,
     KwOffsetOf,
     KwStackAlloc,
     KwCast,
@@ -73,6 +75,7 @@ enum class TokenKind : uint8_t {
     KwByte,
     KwError,
     KwAnyptr,
+    KwAny,
 
     // Operators
     Plus,

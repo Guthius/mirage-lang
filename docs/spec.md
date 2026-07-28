@@ -65,6 +65,65 @@ Type System".
 
 `anyptr` supports arithmetic with integer operands (`+`, `-`) for pointer arithmetic. It can be assigned to and from any typed pointer or function pointer, and compared with `nil`.
 
+### The `type` Type
+
+`type` is a compile-time-unique identifier for a type, backed by a `u64` at the ABI level (`sizeof(type)` is 8, and it participates in ordinary struct/array layout like any other 8-byte scalar). It supports only `==` and `!=` — no arithmetic, no ordering.
+
+A `type` value is produced with `type_of` (below); its runtime shape is otherwise opaque — there is no literal syntax for a `type` value.
+
+### The `any` Type
+
+`any` is a fat pointer erasing a value's type: `{ id: type, data: anyptr }`, 16 bytes, 8-byte aligned. A value of any other type is implicitly coerced to `any` wherever `any` is the expected type (call arguments, return statements, `var`/`const` initializers, struct/array/union field initializers — the same expected-type channel used by tagged-union and trait-handle coercion):
+
+```mirage
+const x: i32 = 42
+const a: any = x           // OK — x is addressable
+const b: any = 42          // ERROR — 42 is not addressable
+mut tmp: i32 = 42
+const c: any = tmp         // OK
+```
+
+The source value must be **addressable** (an identifier, a dereference, a member access, or an index expression) — coercing a non-addressable value (a bare literal, an arithmetic expression, a call result, ...) is a sema error:
+
+```
+error: cannot coerce non-addressable value to 'any'; bind it to a variable first.
+```
+
+The coercion produces `{ id: type_of(T), data: &value }`, where `T` is the source value's own type. If the source is already `anyptr`, `data` is that pointer directly rather than `&value`.
+
+`any` exposes two read-only pseudo-fields — not a real struct, just special-cased member access:
+
+- `.id` — the value's `type` (equivalent to `type_of` on the original value).
+- `.data` — the erased `anyptr`.
+
+Assigning to either, or taking their address with `&`, is a sema error (they have no memory location of their own — reading them is a direct extract from the fat pointer, not a field load).
+
+```mirage
+const test_var: any = my_i32
+const val: i32 = cast(test_var.data, *i32).*
+```
+
+`cast`ing `.data` to the wrong pointer type is not checked — same posture as any other `anyptr` cast, the programmer is responsible for the cast type matching `.id`.
+
+### `type_of` and `type_info_of`
+
+```mirage
+const t1 := type_of(i32)           // compile-time constant
+const t2 := type_of(my_i32_var)    // compile-time constant — uses the variable's static type
+const t3 := type_of(my_any_var)    // RUNTIME — reads my_any_var.id
+```
+
+`type_of(expr_or_type)` returns the operand's `type` identity. The operand may be a type written directly (`type_of(u64)`, `type_of(*u8)`, `type_of(SomeStruct)`) or an arbitrary expression (whose *static* type is used) — the parser disambiguates the two exactly like `sizeof` (§ grammar note 12). `type_of` is a compile-time constant for every operand **except** one whose resolved type is `any`, which instead lowers to a runtime load of `.id`.
+
+`type_info_of(expr)` returns a runtime descriptor pointer (`anyptr`) for a `type` or `any` operand — any other operand type is a sema error. Cast the result to `*Type_Info` (defined by the `runtime/type_info` module, not built into the compiler) to inspect it:
+
+```mirage
+const rt := import("runtime/type_info")
+const info: *rt.Type_Info = cast(type_info_of(type_of(my_var)), *rt.Type_Info)
+```
+
+`type_info_of` returns `nil` for every builtin scalar type (`u8`..`f64`, `usize`, `bool`, `byte`, `anyptr`, `error`) — only compound and user-defined types (pointers, slices, arrays, structs, enums, unions, tagged unions, bitsets, function types, traits) get a real `Type_Info`. `type_info_of` requires importing a module that defines `pub type Type_Info = union(enum) {...}` (i.e. `runtime/type_info`) — using it without that import is a sema error.
+
 ---
 
 ## 2. Composite Types
@@ -599,6 +658,23 @@ sizeof(module.TypeName)
 ```
 
 Returns the size in bytes as `usize`. The operand may be an arbitrary expression *or* a type written directly — including built-in type keywords: `sizeof(u64)`, `sizeof(*u8)`, `sizeof([]T)`, and `sizeof(fn(i32) -> i32)` are all valid. The parser disambiguates by looking ahead: anything that can only start a type (a built-in type keyword, `*`, `[`, `struct`, `enum`, `union`, `fn`, `trait`) is parsed as a type; otherwise the operand is parsed as a normal expression (which may itself simply name a type, e.g. `sizeof(module.TypeName)`).
+
+### `type_of`
+
+```mirage
+type_of(expr)
+type_of(TypeName)
+```
+
+Returns the operand's unique `type` identity. Operand disambiguation is identical to `sizeof` above. Compile-time constant except when the operand's resolved type is `any`, in which case it's a runtime load of `.id`. See [The `type` Type](#1-primitive-types) above.
+
+### `type_info_of`
+
+```mirage
+type_info_of(expr)
+```
+
+Returns a runtime `*Type_Info` descriptor (as `anyptr`) for a `type`- or `any`-typed operand — any other operand type is a sema error. `nil` for builtin scalar types. See [The `type` Type](#1-primitive-types) above and `runtime/type_info` for `Type_Info`'s definition.
 
 ### `len`
 
@@ -2181,7 +2257,7 @@ pub fn main() -> i32 {
 
 The following identifiers are reserved by the language:
 
-`asm` `bitset` `break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `import_bin` `in` `iota` `len` `macro` `match` `mut` `nil` `pub` `return` `return_err` `return_ok` `sizeof` `stackalloc` `struct` `switch` `trait` `true` `try` `type` `undefined` `union` `when` `while`
+`any` `asm` `bitset` `break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `import_bin` `in` `iota` `len` `macro` `match` `mut` `nil` `pub` `return` `return_err` `return_ok` `sizeof` `stackalloc` `struct` `switch` `trait` `true` `try` `type` `type_of` `type_info_of` `undefined` `union` `when` `while`
 
 `ext` is parsed as an identifier, not a keyword; it is used as the prefix
 for extern function declarations. `option`, `env`, `link`, and `warn` are

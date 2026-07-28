@@ -482,6 +482,7 @@ namespace sema {
 
         Program out;
         out.options = options;
+        seed_builtin_type_ids(out);
 
         // Reentrant/memoized rather than a flat loop: a module-scope 'when' condition may
         // reference another module's const (e.g. 'opts.target_os'), which needs that
