@@ -1,0 +1,10 @@
+// example_any_bad_cast — negative test: 'any' may only be cast to a pointer type or
+// 'anyptr' (which extracts the fat value's data word) — casting to any other type is a
+// sema error.
+
+pub fn main() -> i32 {
+    mut x: i32 = 42
+    const a: any = x
+    const v: i32 = cast(a, i32)
+    return 0
+}

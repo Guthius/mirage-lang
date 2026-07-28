@@ -12,11 +12,6 @@ namespace sema {
         struct LvalueInfo {
             ResolvedType type;
             bool writable = false;
-            // False only for 'any''s synthetic '.id'/'.data' pseudo-fields, which have no
-            // memory location of their own (they're ExtractValue-read out of the fat pointer,
-            // not GEP'd) - '&any_val.id' must be a sema error, not a codegen crash. Every other
-            // lvalue keeps the default 'true'.
-            bool has_address = true;
         };
 
         // Pure structural predicate (no diagnostics, no recursion into check_expr) mirroring
@@ -283,6 +278,10 @@ namespace sema {
         }
 
         auto is_cast_legal(const ResolvedType &from, const ResolvedType &to) -> bool {
+            // 'any' can only be cast to a pointer type or 'anyptr' — extracts the fat value's
+            // data word. No type-id check is performed; that's always the programmer's
+            // responsibility, same posture as every other anyptr cast.
+            if (from.kind == TypeKind::Any) return to.kind == TypeKind::Pointer || to.kind == TypeKind::Anyptr;
             if (to.kind == TypeKind::Slice) return from.kind == TypeKind::Pointer || from.kind == TypeKind::Anyptr || from.kind == TypeKind::Array || from.kind == TypeKind::Slice;
             if (from.kind == TypeKind::Array && (to.kind == TypeKind::Pointer || to.kind == TypeKind::Anyptr)) return true;
             if (from.kind == TypeKind::Slice && (to.kind == TypeKind::Pointer || to.kind == TypeKind::Anyptr)) return true;
@@ -845,13 +844,10 @@ namespace sema {
                 error(diag, m.location, "cannot access fields on a trait handle; handles have no visible layout");
                 return {ResolvedType{.kind = TypeKind::Invalid}, false};
             } else if (object_type.kind == TypeKind::Any) {
-                // '.id'/'.data' are synthetic read-only pseudo-fields (not a real struct) -
-                // ExtractValue-read out of the fat pointer at codegen time, never GEP'd, so
-                // they have neither a writable location nor an address of their own.
-                if (m.member == "id") return {ResolvedType{.kind = TypeKind::Type}, false, false};
-                if (m.member == "data") return {ResolvedType{.kind = TypeKind::Anyptr}, false, false};
-                error(diag, m.location, std::format("'any' has no member named '{}'; only '.id' and '.data' are available", m.member));
-                return {ResolvedType{.kind = TypeKind::Invalid}, false, false};
+                // 'any' has no fields — it isn't a struct. Use type_of(a) for the type id and
+                // cast(a, anyptr)/cast(a, *T) for the data pointer (see check_cast).
+                error(diag, m.location, std::format("'any' has no field '{}'", m.member));
+                return {ResolvedType{.kind = TypeKind::Invalid}, false};
             } else if (object_type.kind == TypeKind::Invalid) {
                 return {ResolvedType{.kind = TypeKind::Invalid}, false};
             } else {
@@ -1099,10 +1095,6 @@ namespace sema {
                     case ast::UnaryOp::AddressOf:
                         {
                             const LvalueInfo lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
-                            if (!lv.has_address) {
-                                return error(diag, v->location,
-                                    "cannot take the address of 'any''s synthetic '.id'/'.data' field; it has no memory location");
-                            }
                             // Taking the address of an error-tracked local invalidates its
                             // typestate to Unknown — spec only requires this when the pointer
                             // then feeds a call argument, but unconditional invalidation on any
@@ -1568,6 +1560,9 @@ namespace sema {
                     // cast(expr, Type) - value first, target type second.
                     const ResolvedType from = check_expr(v->value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     const ResolvedType to = resolve_type(v->as_type, module_path, program, diag);
+                    if (from.kind == TypeKind::Any && to.kind != TypeKind::Pointer && to.kind != TypeKind::Anyptr) {
+                        return error(diag, v->location, "'any' may only be cast to a pointer type or 'anyptr'.");
+                    }
                     if (from.kind != TypeKind::Invalid && to.kind != TypeKind::Invalid && !is_cast_legal(from, to)) {
                         return error(diag, v->location, "illegal cast between these types");
                     }

@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reflection — Mirage</title>
+  <meta name="description" content="type_of, type_info_of, and the any fat-pointer type: compile-time-unique type identity and runtime type descriptions.">
+  <script src="theme-init.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" aria-label="Toggle navigation"><span></span><span></span><span></span></button>
+  <a href="index.html" class="topbar-logo">mir<span>age</span></a>
+</div>
+<div class="sidebar-backdrop"></div>
+
+<div class="layout">
+
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+      <button class="theme-toggle" aria-label="Toggle color theme">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+    </div>
+    <nav>
+      <div class="sidebar-section">Introduction</div>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="getting-started.html">Getting Started</a></li>
+      </ul>
+      <div class="sidebar-section">Language</div>
+      <ul>
+        <li><a href="types.html">Types</a></li>
+        <li><a href="functions.html">Functions</a></li>
+        <li><a href="control-flow.html">Control Flow</a></li>
+        <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="traits.html">Traits</a></li>
+        <li><a href="error-handling.html">Error Handling</a></li>
+        <li><a href="modules.html">Modules</a></li>
+        <li><a href="comptime-config.html">Compile-Time Config</a></li>
+        <li><a href="inline-assembly.html">Inline Assembly</a></li>
+        <li><a href="attributes.html">Declaration Attributes</a></li>
+        <li><a href="reflection.html" class="active">Reflection</a></li>
+      </ul>
+      <div class="sidebar-section">Reference</div>
+      <ul>
+        <li><a href="grammar.html">Grammar</a></li>
+      </ul>
+    </nav>
+    <div class="sidebar-footer">Mirage Language<br>Documentation</div>
+  </aside>
+
+  <main class="main">
+    <div class="content">
+
+      <h1>Reflection</h1>
+      <p class="subtitle"><code>type_of</code>, <code>type_info_of</code>, and the <code>any</code> fat-pointer type — compile-time-unique type identity, type-erased values, and runtime type descriptions.</p>
+
+      <p>
+        Mirage's reflection system has three parts that build on each other: <code>type_of</code>
+        gives every type in a program a stable, comparable identity; <code>any</code> is a
+        type-erased container that carries that identity alongside a data pointer, so a value's
+        type can travel with it at runtime; and <code>type_info_of</code> turns that identity into
+        a structured, inspectable description — field names, offsets, sizes — for the types that
+        actually need one.
+      </p>
+      <p>
+        None of this requires generics or a garbage collector. There is no hidden per-object
+        metadata: a plain struct is still just its bytes, and only the values you explicitly wrap
+        in <code>any</code> or ask <code>type_of</code> about ever touch the reflection system at
+        all.
+      </p>
+
+      <h2>The <code>type</code> Type</h2>
+      <p>
+        <code>type</code> is a builtin type: a compile-time-unique identifier for a type, backed
+        by a <code>u64</code>. It supports only <code>==</code> and <code>!=</code> — no
+        arithmetic, no ordering, and no literal syntax of its own. The only way to produce a
+        <code>type</code> value is <code>type_of</code>.
+      </p>
+      <pre><code><span class="kw">if</span> <span class="fn">sizeof</span>(<span class="ty">type</span>) != <span class="num">8</span> { <span class="cmt">// always false — type is 8 bytes</span>
+    <span class="kw">return</span> <span class="num">1</span>
+}</code></pre>
+
+      <h2><code>type_of</code></h2>
+      <pre><code><span class="kw">const</span> <span class="var">t1</span> := <span class="fn">type_of</span>(<span class="ty">i32</span>)           <span class="cmt">// compile-time constant</span>
+<span class="kw">const</span> <span class="var">t2</span> := <span class="fn">type_of</span>(<span class="var">my_i32_var</span>)    <span class="cmt">// compile-time constant — uses the variable's static type</span>
+<span class="kw">const</span> <span class="var">t3</span> := <span class="fn">type_of</span>(<span class="var">my_any_var</span>)    <span class="cmt">// RUNTIME — reads my_any_var's type id</span></code></pre>
+      <p>
+        <code>type_of(expr_or_type)</code> returns its operand's <code>type</code> identity. The
+        operand may be a type written directly (<code>type_of(u64)</code>,
+        <code>type_of(*u8)</code>, <code>type_of(SomeStruct)</code>) or an arbitrary expression,
+        whose <em>static</em> type is used — the parser disambiguates the two exactly like
+        <a href="types.html"><code>sizeof</code></a> does: a token that can only begin a type is
+        parsed as a type, anything else as an ordinary expression.
+      </p>
+      <p>
+        Two <code>type_of</code> calls on the same type always compare equal, regardless of how
+        many times or where in the program they're written:
+      </p>
+      <pre><code><span class="kw">type</span> <span class="ty">Point</span> = <span class="kw">struct</span> { <span class="var">x</span>: <span class="ty">i32</span>; <span class="var">y</span>: <span class="ty">i32</span> }
+
+<span class="kw">if</span> <span class="fn">type_of</span>(<span class="ty">i32</span>) != <span class="fn">type_of</span>(<span class="ty">i32</span>) { <span class="kw">return</span> <span class="num">1</span> }   <span class="cmt">// never true</span>
+<span class="kw">if</span> <span class="fn">type_of</span>(<span class="ty">i32</span>) == <span class="fn">type_of</span>(<span class="ty">u32</span>) { <span class="kw">return</span> <span class="num">1</span> }   <span class="cmt">// never true — different types</span>
+
+<span class="kw">const</span> <span class="var">p</span>: <span class="ty">Point</span> = {.<span class="var">x</span> = <span class="num">1</span>, .<span class="var">y</span> = <span class="num">2</span>}
+<span class="kw">if</span> <span class="fn">type_of</span>(<span class="var">p</span>) != <span class="fn">type_of</span>(<span class="ty">Point</span>) { <span class="kw">return</span> <span class="num">1</span> }  <span class="cmt">// never true — a value and its named type match</span></code></pre>
+      <div class="callout">
+        <div class="callout-title">Compile-time, except for <code>any</code></div>
+        <code>type_of</code> is a compile-time constant for every operand — usable anywhere a
+        constant is required, including a global initializer — <strong>except</strong> when the
+        operand's resolved type is <code>any</code>. In that one case it lowers to a runtime read
+        of the value's type id, since an <code>any</code>'s underlying type isn't known until
+        runtime.
+      </div>
+
+      <h2>The <code>any</code> Type</h2>
+      <p>
+        <code>any</code> is a fat pointer that erases a value's type: <code>{ id: type, data:
+        anyptr }</code>, 16 bytes, 8-byte aligned. Any value is implicitly coerced to
+        <code>any</code> wherever <code>any</code> is the expected type — call arguments, return
+        statements, variable initializers — the same expected-type mechanism used by tagged-union
+        and trait-handle coercion:
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">x</span>: <span class="ty">i32</span> = <span class="num">42</span>
+<span class="kw">const</span> <span class="var">a</span>: <span class="ty">any</span> = <span class="var">x</span>           <span class="cmt">// OK — x is addressable</span>
+<span class="kw">const</span> <span class="var">b</span>: <span class="ty">any</span> = <span class="num">42</span>          <span class="cmt">// ERROR — 42 is not addressable</span>
+
+<span class="kw">mut</span> <span class="var">tmp</span>: <span class="ty">i32</span> = <span class="num">42</span>
+<span class="kw">const</span> <span class="var">c</span>: <span class="ty">any</span> = <span class="var">tmp</span>         <span class="cmt">// OK</span></code></pre>
+      <div class="callout warning">
+        <div class="callout-title">The source must be addressable</div>
+        Coercing a non-addressable value — a bare literal, an arithmetic result, a function call's
+        return value — to <code>any</code> is a sema error, because the coercion needs to take the
+        value's address:
+        <pre><code>error: cannot coerce non-addressable value to 'any'; bind it to a variable first.</code></pre>
+        Bind the value to a <code>const</code> or <code>mut</code> first, as with <code>c</code>
+        above, and the coercion works.
+      </div>
+      <p>
+        The coercion produces <code>{ id: type_of(T), data: &amp;value }</code>, where
+        <code>T</code> is the source's own type. If the source is already <code>anyptr</code>,
+        <code>data</code> is that pointer directly, rather than taking its address again.
+      </p>
+      <div class="callout warning">
+        <div class="callout-title"><code>any</code> has no fields</div>
+        It's a fat pointer, not a struct — <code>a.id</code> and <code>a.data</code> are both a
+        sema error:
+        <pre><code>error: 'any' has no field 'id'</code></pre>
+        Its two words are reached through dedicated operations instead, described below.
+      </div>
+      <p>
+        The type identity is <code>type_of(a)</code> — the same function used everywhere else in
+        the reflection system, just evaluated at runtime for an <code>any</code> operand instead
+        of resolved at compile time:
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">a</span>: <span class="ty">any</span> = <span class="var">my_i32</span>
+<span class="kw">if</span> <span class="fn">type_of</span>(<span class="var">a</span>) == <span class="fn">type_of</span>(<span class="ty">i32</span>) { <span class="cmt">// ...</span> }</code></pre>
+      <p>
+        The data pointer comes from <code>cast</code>: <code>any</code> is a legal cast source,
+        but only to a pointer type or <code>anyptr</code> — casting to anything else is a sema
+        error:
+      </p>
+      <pre><code>error: 'any' may only be cast to a pointer type or 'anyptr'.</code></pre>
+      <pre><code><span class="kw">const</span> <span class="var">test_var</span>: <span class="ty">any</span> = <span class="var">my_i32</span>
+<span class="kw">const</span> <span class="var">val</span>: <span class="ty">i32</span> = <span class="fn">cast</span>(<span class="var">test_var</span>, *<span class="ty">i32</span>).*
+<span class="kw">const</span> <span class="var">p</span>: <span class="ty">anyptr</span> = <span class="fn">cast</span>(<span class="var">test_var</span>, <span class="ty">anyptr</span>)</code></pre>
+      <p>
+        The cast performs no type-id check — the programmer is responsible for the target type
+        matching <code>type_of(test_var)</code>, same posture as every other <code>anyptr</code>
+        cast.
+      </p>
+
+      <h2>The <code>runtime/type_info</code> Module</h2>
+      <p>
+        <code>type_info_of</code> (below) returns a raw <code>anyptr</code> — to actually read it,
+        cast it to <code>*Type_Info</code>, a type defined not by the compiler but by a small
+        stdlib module you import explicitly:
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">rt</span> := <span class="fn">import</span>(<span class="str">"runtime/type_info"</span>)</code></pre>
+      <p>
+        <code>Type_Info</code> is a tagged union with one variant per kind of type it can
+        describe — <code>Struct</code>, <code>Enum</code>, <code>Union</code>,
+        <code>Tagged_Union</code>, <code>Bitset</code>, <code>Pointer</code>, <code>Slice</code>,
+        <code>Array</code>, <code>Function</code>, <code>Trait</code>, and <code>Error_Type</code>.
+        Each variant carries exactly the fields you'd expect — a struct's field names and byte
+        offsets, an enum's variant names and values, and so on. <code>Type_Kind</code> is a
+        parallel enum used for a couple of "what scalar backs this" fields (an enum or bitset's
+        storage type). Being ordinary Mirage source, you can read its full field list directly:
+        it's just a <code>union(enum)</code> and a handful of small structs, no compiler magic.
+      </p>
+      <div class="callout tip">
+        <div class="callout-title">Not auto-imported</div>
+        Unlike builtin types, <code>runtime/type_info</code> is a regular stdlib module. Nothing
+        in the compiler auto-imports it — a program that never calls <code>type_info_of</code>
+        pays nothing for it, not even a symbol in the binary.
+      </div>
+
+      <h2><code>type_info_of</code></h2>
+      <pre><code><span class="kw">const</span> <span class="var">info</span>: *<span class="var">rt</span>.<span class="ty">Type_Info</span> = <span class="fn">cast</span>(<span class="fn">type_info_of</span>(<span class="fn">type_of</span>(<span class="var">my_var</span>)), *<span class="var">rt</span>.<span class="ty">Type_Info</span>)</code></pre>
+      <p>
+        <code>type_info_of(expr)</code> takes an operand of type <code>type</code> or
+        <code>any</code> — anything else is a sema error naming the fix:
+      </p>
+      <pre><code>error: type_info_of() requires an argument of type 'type' or 'any'; got 'i32'.
+       Use 'type_of(expr)' to get the type ID first.</code></pre>
+      <p>
+        It always returns <code>anyptr</code>, and is <code>nil</code> for every builtin scalar
+        type (<code>u8</code>..<code>f64</code>, <code>usize</code>, <code>bool</code>,
+        <code>byte</code>, <code>anyptr</code>, <code>error</code>) — only compound and
+        user-defined types get a real <code>Type_Info</code>. Check for <code>nil</code> before
+        casting:
+      </p>
+      <pre><code><span class="kw">if</span> <span class="fn">type_info_of</span>(<span class="fn">type_of</span>(<span class="ty">i32</span>)) != <span class="kw">nil</span> { <span class="kw">return</span> <span class="num">1</span> }  <span class="cmt">// never true — i32 is a builtin scalar</span></code></pre>
+
+      <h2>Example: Introspecting a Struct</h2>
+      <p>
+        Casting the result and <code>switch</code>ing on the tagged union gives structured access
+        to a type's shape. Field names come back as <code>[]u8</code>, so comparing them needs an
+        ordinary byte comparison — there's no built-in string equality operator:
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">rt</span> := <span class="fn">import</span>(<span class="str">"runtime/type_info"</span>)
+
+<span class="kw">type</span> <span class="ty">Point</span> = <span class="kw">struct</span> {
+    <span class="var">x</span>: <span class="ty">i32</span>
+    <span class="var">y</span>: <span class="ty">i32</span>
+}
+
+<span class="kw">fn</span> <span class="fn">str_eq</span>(<span class="var">a</span>: []<span class="ty">u8</span>, <span class="var">b</span>: []<span class="ty">u8</span>) -&gt; <span class="ty">bool</span> {
+    <span class="kw">if</span> <span class="fn">len</span>(<span class="var">a</span>) != <span class="fn">len</span>(<span class="var">b</span>) { <span class="kw">return</span> <span class="kw">false</span> }
+    <span class="kw">mut</span> <span class="var">i</span>: <span class="ty">usize</span> = <span class="num">0</span>
+    <span class="kw">while</span> <span class="var">i</span> &lt; <span class="fn">len</span>(<span class="var">a</span>) {
+        <span class="kw">if</span> <span class="var">a</span>[<span class="var">i</span>] != <span class="var">b</span>[<span class="var">i</span>] { <span class="kw">return</span> <span class="kw">false</span> }
+        <span class="var">i</span> += <span class="num">1</span>
+    }
+    <span class="kw">return</span> <span class="kw">true</span>
+}
+
+<span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">i32</span> {
+    <span class="kw">const</span> <span class="var">info_ptr</span> := <span class="fn">type_info_of</span>(<span class="fn">type_of</span>(<span class="ty">Point</span>))
+    <span class="kw">if</span> <span class="var">info_ptr</span> == <span class="kw">nil</span> { <span class="kw">return</span> <span class="num">1</span> }
+
+    <span class="kw">const</span> <span class="var">info</span>: *<span class="var">rt</span>.<span class="ty">Type_Info</span> = <span class="fn">cast</span>(<span class="var">info_ptr</span>, *<span class="var">rt</span>.<span class="ty">Type_Info</span>)
+    <span class="kw">switch</span> <span class="var">info</span>.* {
+        .<span class="var">Struct</span>(<span class="var">s</span>): {
+            <span class="kw">if</span> !<span class="fn">str_eq</span>(<span class="var">s</span>.<span class="var">name</span>, <span class="str">"Point"</span>) { <span class="kw">return</span> <span class="num">1</span> }
+            <span class="kw">if</span> <span class="var">s</span>.<span class="var">size</span> != <span class="num">8</span> { <span class="kw">return</span> <span class="num">1</span> }
+            <span class="kw">if</span> <span class="fn">len</span>(<span class="var">s</span>.<span class="var">fields</span>) != <span class="num">2</span> { <span class="kw">return</span> <span class="num">1</span> }
+            <span class="kw">if</span> !<span class="fn">str_eq</span>(<span class="var">s</span>.<span class="var">fields</span>[<span class="num">0</span>].<span class="var">name</span>, <span class="str">"x"</span>) { <span class="kw">return</span> <span class="num">1</span> }
+            <span class="kw">if</span> <span class="var">s</span>.<span class="var">fields</span>[<span class="num">0</span>].<span class="var">offset</span> != <span class="num">0</span> { <span class="kw">return</span> <span class="num">1</span> }
+            <span class="kw">if</span> !<span class="fn">str_eq</span>(<span class="var">s</span>.<span class="var">fields</span>[<span class="num">1</span>].<span class="var">name</span>, <span class="str">"y"</span>) { <span class="kw">return</span> <span class="num">1</span> }
+            <span class="kw">if</span> <span class="var">s</span>.<span class="var">fields</span>[<span class="num">1</span>].<span class="var">offset</span> != <span class="num">4</span> { <span class="kw">return</span> <span class="num">1</span> }
+        },
+        _: { <span class="kw">return</span> <span class="num">1</span> },
+    }
+    <span class="kw">return</span> <span class="num">0</span>
+}</code></pre>
+
+      <h2>Example: A Generic <code>print_any</code></h2>
+      <p>
+        The combination that makes reflection useful day to day: a <code>...any</code> variadic
+        parameter (any value implicitly coerces to <code>any</code>, including at a variadic call
+        site) plus <code>type_of</code> comparisons to dispatch on the value's real type at
+        runtime:
+      </p>
+      <pre><code><span class="kw">fn</span> <span class="fn">print_any</span>(<span class="var">b</span>: *<span class="var">builder</span>.<span class="ty">StringBuilder</span>, <span class="var">a</span>: <span class="ty">any</span>) -&gt; <span class="ty">bool</span> {
+    <span class="kw">const</span> <span class="var">t</span> := <span class="fn">type_of</span>(<span class="var">a</span>)
+
+    <span class="kw">if</span> <span class="var">t</span> == <span class="fn">type_of</span>(<span class="ty">i32</span>) {
+        <span class="kw">const</span> <span class="var">val</span>: <span class="ty">i32</span> = <span class="fn">cast</span>(<span class="var">a</span>, *<span class="ty">i32</span>).*
+        <span class="kw">mut</span> <span class="var">buf</span>: [<span class="num">11</span>]<span class="ty">u8</span> = <span class="kw">undefined</span>
+        <span class="kw">return</span> <span class="var">builder</span>.<span class="fn">put_str</span>(<span class="var">b</span>, <span class="fn">string</span>.<span class="fn">from_i32</span>(<span class="var">buf</span>, <span class="var">val</span>))
+    }
+    <span class="kw">if</span> <span class="var">t</span> == <span class="fn">type_of</span>(<span class="ty">bool</span>) {
+        <span class="kw">const</span> <span class="var">val</span>: <span class="ty">bool</span> = <span class="fn">cast</span>(<span class="var">a</span>, *<span class="ty">bool</span>).*
+        <span class="kw">return</span> <span class="var">builder</span>.<span class="fn">put_str</span>(<span class="var">b</span>, <span class="var">val</span> ? <span class="str">"true"</span> : <span class="str">"false"</span>)
+    }
+    <span class="kw">if</span> <span class="var">t</span> == <span class="fn">type_of</span>([]<span class="ty">u8</span>) {
+        <span class="kw">const</span> <span class="var">val</span>: []<span class="ty">u8</span> = <span class="fn">cast</span>(<span class="var">a</span>, *[]<span class="ty">u8</span>).*
+        <span class="kw">return</span> <span class="var">builder</span>.<span class="fn">put_str</span>(<span class="var">b</span>, <span class="var">val</span>)
+    }
+
+    <span class="cmt">// Unknown type — fall back to a generic "&lt;type&gt;" if a Type_Info exists at all.</span>
+    <span class="kw">return</span> <span class="fn">type_info_of</span>(<span class="var">a</span>) != <span class="kw">nil</span> ? <span class="var">builder</span>.<span class="fn">put_str</span>(<span class="var">b</span>, <span class="str">"&lt;type&gt;"</span>) : <span class="var">builder</span>.<span class="fn">put_str</span>(<span class="var">b</span>, <span class="str">"&lt;unknown&gt;"</span>)
+}</code></pre>
+      <p>
+        Called as <code>print_any(&amp;b, name)</code>, <code>print_any(&amp;b, x)</code>,
+        <code>print_any(&amp;b, flag)</code> — each argument is coerced to <code>any</code> at the
+        call site, and <code>print_any</code> figures out what it actually got. This is exactly
+        the shape a <code>println(format, args: ...any)</code>-style formatter uses to accept
+        arbitrary argument types without generics.
+      </p>
+
+      <div class="callout tip">
+        <div class="callout-title">Indirect <code>type_info_of</code> works too</div>
+        Storing a <code>type_of</code> result and passing it to <code>type_info_of</code> later —
+        rather than writing <code>type_info_of(type_of(T))</code> directly — works exactly the
+        same way:
+        <pre><code><span class="kw">const</span> <span class="var">t</span> := <span class="fn">type_of</span>(<span class="ty">Point</span>)
+<span class="cmt">// ... t travels through other code, gets stored, passed around ...</span>
+<span class="kw">const</span> <span class="var">info</span> := <span class="fn">type_info_of</span>(<span class="var">t</span>)   <span class="cmt">// still finds Point's Type_Info</span></code></pre>
+        The direct <code>type_info_of(type_of(T))</code> spelling resolves to a specific
+        compile-time global; every other case — a stored <code>type</code> value, or an
+        <code>any</code> — resolves through a sorted lookup table with an inline binary search at
+        runtime. Either way, every type ever passed to <code>type_of</code> anywhere in the
+        program gets an entry, so which spelling you use only affects how the lookup is compiled,
+        never whether it succeeds.
+      </div>
+
+      <h2>Summary</h2>
+      <table>
+        <tr><th>Feature</th><th>Purpose</th></tr>
+        <tr><td><code>type</code></td><td>A compile-time-unique, comparable identity for a type. 8 bytes, <code>==</code>/<code>!=</code> only.</td></tr>
+        <tr><td><code>type_of(expr_or_type)</code></td><td>Produces a <code>type</code> value. Compile-time constant, except for an <code>any</code> operand.</td></tr>
+        <tr><td><code>any</code></td><td>A type-erased fat pointer: <code>{ id: type, data: anyptr }</code>. Implicit coercion from any addressable value.</td></tr>
+        <tr><td><code>type_info_of(expr)</code></td><td>Turns a <code>type</code> or <code>any</code> into a runtime <code>*Type_Info</code> descriptor, or <code>nil</code> for builtin scalars.</td></tr>
+        <tr><td><code>runtime/type_info</code></td><td>The stdlib module defining <code>Type_Info</code>/<code>Type_Kind</code> — imported explicitly, never automatic.</td></tr>
+      </table>
+
+      <div class="page-nav">
+        <a href="attributes.html" class="prev"><span class="label">Previous</span>Declaration Attributes</a>
+        <a href="grammar.html" class="next"><span class="label">Next</span>Grammar</a>
+      </div>
+
+    </div>
+  </main>
+
+</div>
+<script src="site.js" defer></script>
+</body>
+</html>

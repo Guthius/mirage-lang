@@ -3660,6 +3660,11 @@ namespace codegen {
                             if (from.kind == sema::TypeKind::Slice && is_pointer_like(ty)) {
                                 return builder_.CreateExtractValue(emit_expr(v->value), {0});
                             }
+                            if (from.kind == sema::TypeKind::Any) {
+                                // 'any' -> pointer/anyptr (sema guarantees 'ty' is one of these):
+                                // extract the fat value's data word (word 1 of {id, data}).
+                                return builder_.CreateExtractValue(emit_expr(v->value), {1});
+                            }
                             return emit_cast(emit_expr(v->value), from, ty);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
                             const auto lv = emit_lvalue(expr);
@@ -3667,13 +3672,6 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
                             return emit_slice_expr(*v, ty);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
-                            // 'any' fat pointer's synthetic '.id'/'.data' pseudo-fields: read via
-                            // ExtractValue out of the {id, data} aggregate, never GEP'd (they have
-                            // no memory location of their own — see resolve_member's Any branch).
-                            if (const auto obj_ty_it = current_module_->expr_types.find(sema::get_expr_key(v->object));
-                                obj_ty_it != current_module_->expr_types.end() && obj_ty_it->second.kind == sema::TypeKind::Any) {
-                                return builder_.CreateExtractValue(emit_expr(v->object), {v->member == "id" ? 0u : 1u});
-                            }
                             // Cross-module function pointer taking: mod.fn_name
                             if (ty.kind == sema::TypeKind::Function) {
                                 if (const auto target_mod = try_namespace_chain(v->object)) {

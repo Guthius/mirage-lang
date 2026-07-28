@@ -55,7 +55,8 @@ def run(example_dir: str) -> subprocess.CompletedProcess:
 NEGATIVE_CASES = [
     ("example_type_no_arith", "'type' values only support '==' and '!='"),
     ("example_any_non_addressable", "cannot coerce non-addressable value to 'any'; bind it to a variable first."),
-    ("example_any_readonly", "left-hand side of assignment is not mutable"),
+    ("example_any_no_fields", "'any' has no field 'id'"),
+    ("example_any_bad_cast", "'any' may only be cast to a pointer type or 'anyptr'."),
     ("example_type_info_wrong_arg", "type_info_of() requires an argument of type 'type' or 'any'"),
 ]
 

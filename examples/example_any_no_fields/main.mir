@@ -1,0 +1,9 @@
+// example_any_no_fields — negative test: 'any' has no fields at all (it isn't a struct) —
+// use type_of(a) for the type id and cast(a, anyptr)/cast(a, *T) for the data pointer instead.
+
+pub fn main() -> i32 {
+    mut x: i32 = 42
+    const a: any = x
+    const t := a.id
+    return 0
+}

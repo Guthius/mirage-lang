@@ -53,52 +53,52 @@ fn print_any(b: *builder.StringBuilder, a: any) -> error(ReflectError | string.S
     const t := type_of(a)
 
     if t == type_of(i32) {
-        const val: i32 = cast(a.data, *i32).*
+        const val: i32 = cast(a, *i32).*
         mut buf: [11]u8 = undefined
         const s := try string.from_i32(buf, val)
         if !builder.put_str(b, s) { return_err .WriteFailed }
         return_ok
     }
     if t == type_of(i64) {
-        const val: i64 = cast(a.data, *i64).*
+        const val: i64 = cast(a, *i64).*
         mut buf: [20]u8 = undefined
         const s := try string.from_i64(buf, val)
         if !builder.put_str(b, s) { return_err .WriteFailed }
         return_ok
     }
     if t == type_of(u32) {
-        const val: u32 = cast(a.data, *u32).*
+        const val: u32 = cast(a, *u32).*
         mut buf: [10]u8 = undefined
         const s := try string.from_u32(buf, val)
         if !builder.put_str(b, s) { return_err .WriteFailed }
         return_ok
     }
     if t == type_of(u64) {
-        const val: u64 = cast(a.data, *u64).*
+        const val: u64 = cast(a, *u64).*
         mut buf: [20]u8 = undefined
         const s := try string.from_u64(buf, val)
         if !builder.put_str(b, s) { return_err .WriteFailed }
         return_ok
     }
     if t == type_of(f64) {
-        const val: f64 = cast(a.data, *f64).*
+        const val: f64 = cast(a, *f64).*
         mut buf: [32]u8 = undefined
         const s := try string.from_f64(buf, val)
         if !builder.put_str(b, s) { return_err .WriteFailed }
         return_ok
     }
     if t == type_of(bool) {
-        const val: bool = cast(a.data, *bool).*
+        const val: bool = cast(a, *bool).*
         if !builder.put_str(b, val ? "true" : "false") { return_err .WriteFailed }
         return_ok
     }
     if t == type_of([]u8) {
-        const val: []u8 = cast(a.data, *[]u8).*
+        const val: []u8 = cast(a, *[]u8).*
         if !builder.put_str(b, val) { return_err .WriteFailed }
         return_ok
     }
     if t == type_of(u8) {
-        const val: u8 = cast(a.data, *u8).*
+        const val: u8 = cast(a, *u8).*
         mut buf: [3]u8 = undefined
         const s := try string.from_u8(buf, val)
         if !builder.put_str(b, s) { return_err .WriteFailed }

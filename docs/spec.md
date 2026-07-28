@@ -91,29 +91,31 @@ error: cannot coerce non-addressable value to 'any'; bind it to a variable first
 
 The coercion produces `{ id: type_of(T), data: &value }`, where `T` is the source value's own type. If the source is already `anyptr`, `data` is that pointer directly rather than `&value`.
 
-`any` exposes two read-only pseudo-fields — not a real struct, just special-cased member access:
+`any` has no fields — it is not a struct, and field syntax would wrongly imply one. Its two words are reached through dedicated operations instead:
 
-- `.id` — the value's `type` (equivalent to `type_of` on the original value).
-- `.data` — the erased `anyptr`.
+- The type identity: `type_of(a)` — same as `type_of` on any other expression, except it's read at runtime instead of resolved at compile time (see below).
+- The data pointer: `cast(a, anyptr)` or `cast(a, *T)` — `any` is one of `cast`'s legal source types, but only when the target is a pointer type or `anyptr`; casting to anything else is a sema error:
 
-Assigning to either, or taking their address with `&`, is a sema error (they have no memory location of their own — reading them is a direct extract from the fat pointer, not a field load).
+```
+error: 'any' may only be cast to a pointer type or 'anyptr'.
+```
 
 ```mirage
 const test_var: any = my_i32
-const val: i32 = cast(test_var.data, *i32).*
+const val: i32 = cast(test_var, *i32).*
 ```
 
-`cast`ing `.data` to the wrong pointer type is not checked — same posture as any other `anyptr` cast, the programmer is responsible for the cast type matching `.id`.
+The cast performs no type-ID check — the programmer is responsible for the target type matching `type_of(test_var)`, same posture as every other `anyptr` cast.
 
 ### `type_of` and `type_info_of`
 
 ```mirage
 const t1 := type_of(i32)           // compile-time constant
 const t2 := type_of(my_i32_var)    // compile-time constant — uses the variable's static type
-const t3 := type_of(my_any_var)    // RUNTIME — reads my_any_var.id
+const t3 := type_of(my_any_var)    // RUNTIME — reads my_any_var's type id
 ```
 
-`type_of(expr_or_type)` returns the operand's `type` identity. The operand may be a type written directly (`type_of(u64)`, `type_of(*u8)`, `type_of(SomeStruct)`) or an arbitrary expression (whose *static* type is used) — the parser disambiguates the two exactly like `sizeof` (§ grammar note 12). `type_of` is a compile-time constant for every operand **except** one whose resolved type is `any`, which instead lowers to a runtime load of `.id`.
+`type_of(expr_or_type)` returns the operand's `type` identity. The operand may be a type written directly (`type_of(u64)`, `type_of(*u8)`, `type_of(SomeStruct)`) or an arbitrary expression (whose *static* type is used) — the parser disambiguates the two exactly like `sizeof` (§ grammar note 12). `type_of` is a compile-time constant for every operand **except** one whose resolved type is `any`, which instead lowers to a runtime read of the value's type id.
 
 `type_info_of(expr)` returns a runtime descriptor pointer (`anyptr`) for a `type` or `any` operand — any other operand type is a sema error. Cast the result to `*Type_Info` (defined by the `runtime/type_info` module, not built into the compiler) to inspect it:
 
@@ -648,6 +650,7 @@ Valid casts:
 - `anyptr` ↔ function pointer type
 - Array → slice (same element type)
 - Pointer/anyptr → slice (requires length expression)
+- `any` → a pointer type or `anyptr` only — extracts the fat value's data word; no other target type is legal (`cast(any_value, i32)` is a sema error). See [The `any` Type](#1-primitive-types) above.
 
 ### `sizeof`
 
@@ -666,7 +669,7 @@ type_of(expr)
 type_of(TypeName)
 ```
 
-Returns the operand's unique `type` identity. Operand disambiguation is identical to `sizeof` above. Compile-time constant except when the operand's resolved type is `any`, in which case it's a runtime load of `.id`. See [The `type` Type](#1-primitive-types) above.
+Returns the operand's unique `type` identity. Operand disambiguation is identical to `sizeof` above. Compile-time constant except when the operand's resolved type is `any`, in which case it's a runtime read of the value's type id. See [The `type` Type](#1-primitive-types) above.
 
 ### `type_info_of`
 

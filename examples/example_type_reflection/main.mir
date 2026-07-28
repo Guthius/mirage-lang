@@ -1,6 +1,7 @@
 // example_type_reflection — positive-path coverage for the reflection system's Definition of
-// Done: sizeof(type)/sizeof(any), type_of identity/disambiguation, any coercion + .id/.data,
-// and type_info_of on both a builtin scalar (nil) and a struct (byte-correct fields).
+// Done: sizeof(type)/sizeof(any), type_of identity/disambiguation, any coercion + cast-based
+// data access, and type_info_of on both a builtin scalar (nil) and a struct (byte-correct
+// fields). 'any' has no '.id'/'.data' fields — use type_of(a) and cast(a, *T)/cast(a, anyptr).
 
 const rt := import("../../runtime/type_info")
 
@@ -42,11 +43,12 @@ pub fn main() -> i32 {
     const p: Point = {.x = 1, .y = 2}
     if type_of(p) != type_of(Point) { return 7 }
 
-    // 'any' coercion (addressable source) + '.id'/'.data' access.
+    // 'any' coercion (addressable source) + type_of/cast-based access (any has no fields).
     mut x: i32 = 99
     const a: any = x
-    if a.id != type_of(i32) { return 8 }
-    if cast(a.data, *i32).* != 99 { return 9 }
+    if type_of(a) != type_of(i32) { return 8 }
+    if cast(a, *i32).* != 99 { return 9 }
+    if cast(cast(a, anyptr), *i32).* != 99 { return 9 }
 
     // type_info_of: nil for builtin scalars.
     if type_info_of(type_of(i32)) != nil { return 10 }
