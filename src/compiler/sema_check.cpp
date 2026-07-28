@@ -1716,7 +1716,8 @@ namespace sema {
                         if (union_info && union_info->is_tagged) {
                             const auto it = std::ranges::find(union_info->variants, v.name, &TaggedUnionVariant::name);
                             if (it == union_info->variants.end()) {
-                                return error_as(diag, v.location, std::format("no variant '{}' on tagged union", v.name), *expected);
+                                return error_as(diag, v.location,
+                                    std::format("no variant '{}' on {}", v.name, union_info->is_error_union ? "error" : "tagged union"), *expected);
                             }
                             if (it->payload_struct_index >= 0) {
                                 return error_as(diag, v.location, std::format("variant '{}' has a payload; use '.{}{{...}}' syntax", v.name, v.name), *expected);
@@ -1934,7 +1935,7 @@ namespace sema {
                                 }
                             }
                             if (!found) {
-                                error(diag, arm.location, std::format("no variant '{}' on tagged union", vp.name));
+                                error(diag, arm.location, std::format("no variant '{}' on {}", vp.name, union_info.is_error_union ? "error" : "tagged union"));
                                 const auto val_type = check_expr(arm.value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                                 if (first_arm) { arm_type = val_type; first_arm = false; }
                             }
@@ -2102,7 +2103,8 @@ namespace sema {
                     }
                     const auto variant_it = std::ranges::find(union_info.variants, v->variant_name, &TaggedUnionVariant::name);
                     if (variant_it == union_info.variants.end()) {
-                        return error_as(diag, v->location, std::format("no variant '{}' on tagged union", v->variant_name), union_ty);
+                        return error_as(diag, v->location,
+                            std::format("no variant '{}' on {}", v->variant_name, union_info.is_error_union ? "error" : "tagged union"), union_ty);
                     }
                     const bool has_payload = variant_it->payload_struct_index >= 0;
                     if (!has_payload && v->payload.has_value()) {
@@ -3355,7 +3357,8 @@ namespace sema {
                                 }
                             }
                             if (!found) {
-                                diag.report_error(DiagnosticStage::Sema, arm.location, std::format("no variant '{}' on tagged union", vp.name));
+                                diag.report_error(DiagnosticStage::Sema, arm.location,
+                                    std::format("no variant '{}' on {}", vp.name, union_info.is_error_union ? "error" : "tagged union"));
                             }
                         }
                         if (default_arm_idx && std::ranges::all_of(covered, [](bool b) { return b; })) {
@@ -3457,6 +3460,32 @@ namespace sema {
                         return;
                     }
                     for (size_t i = 0; i < v.return_values.size(); ++i) {
+                        // Last return slot of a function returning 'error(...)': a bare
+                        // '.Variant' / '.Variant(payload)' (or one reachable through
+                        // 'match'/'when'/ternary) needs the same unwrap 'return_err' does,
+                        // since 'expected_returns[i]' here is the outer Ok/Failed wrapper,
+                        // whose own variants are always just "Ok"/"Failed" — never the
+                        // wrapped enum/union's names. A value that's already fully typed as
+                        // the wrapper (e.g. forwarding another call's error(...) result)
+                        // falls through to the ordinary path below unchanged.
+                        if (fn_error_type && i == v.return_values.size() - 1) {
+                            if (const auto member_type = resolve_return_err_member_type(
+                                    v.return_values[i], *fn_error_type, module_path, program, diag, v.location)) {
+                                auto ty = check_expr(v.return_values[i], locals, module_path, program, diag,
+                                                      *member_type, loop_depth, defer_loop_base, fn_error_type);
+                                if (!assignable_in_module(ty, *member_type, module_path, program)) {
+                                    diag.report_error(DiagnosticStage::Sema, v.location, std::format("return value {} type mismatch", i + 1));
+                                }
+                                continue;
+                            }
+                            if (find_bare_return_err_variant_name(v.return_values[i])) {
+                                // resolve_return_err_member_type already reported a diagnostic
+                                // for this sugar form (unknown/ambiguous variant, etc).
+                                check_expr(v.return_values[i], locals, module_path, program, diag,
+                                           std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                                continue;
+                            }
+                        }
                         auto ty = check_expr(v.return_values[i], locals, module_path, program, diag, expected_returns[i], loop_depth, defer_loop_base, fn_error_type);
                         if (!assignable_in_module(ty, expected_returns[i], module_path, program)) {
                             diag.report_error(DiagnosticStage::Sema, v.location, std::format("return value {} type mismatch", i + 1));

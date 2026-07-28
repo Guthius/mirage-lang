@@ -5485,6 +5485,20 @@ namespace codegen {
                 std::vector<llvm::Value *> ret_vals;
                 ret_vals.reserve(stmt.return_values.size());
                 for (size_t i = 0; i < stmt.return_values.size(); ++i) {
+                    // Last slot of a function returning 'error(...)': sema resolves a bare
+                    // '.Variant' operand's type to the concrete error MEMBER type, not the
+                    // Ok/Failed wrapper (see resolve_return_err_member_type), so it needs the
+                    // same wrapping emit_return_err uses instead of plain emit_value_as, which
+                    // has no error-union-aware coercion. A value that's already the full
+                    // wrapper type passes through emit_error_return_operand unchanged.
+                    if (i == stmt.return_values.size() - 1) {
+                        const auto *union_info = current_returns_[i].kind == sema::TypeKind::Union
+                            ? sema_program_.union_at(current_returns_[i].union_index) : nullptr;
+                        if (union_info && union_info->is_error_union) {
+                            ret_vals.push_back(emit_error_return_operand(stmt.return_values[i], current_returns_[i]));
+                            continue;
+                        }
+                    }
                     ret_vals.push_back(emit_value_as(stmt.return_values[i], current_returns_[i], *current_module_path_));
                 }
 
@@ -5507,31 +5521,30 @@ namespace codegen {
                 builder_.CreateRet(agg);
             }
 
-            void emit_return_err(const ast::ReturnErrStmt &stmt) {
-                // For '.Variant' / '.Variant(payload)' sugar (and any other bare error-member
-                // expression) the operand's sema type is the concrete error MEMBER type (e.g.
-                // MemoryError) — ordinary enum/tagged-union codegen (emit_expr) applies
-                // unchanged; build_error_failed_value does the Ok/Failed wrapping. But sema
-                // also allows the operand to already be a full error(...) value (this
-                // function's own, or a subset of it — see error_union_is_subset in
-                // sema_check.cpp); that case is propagated as-is, translating tags if the two
-                // unions differ, exactly like 'try' propagation.
-                const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(stmt.error_value));
-                auto *operand_val = emit_expr(stmt.error_value);
+            // For '.Variant' / '.Variant(payload)' sugar (and any other bare error-member
+            // expression) the operand's sema type is the concrete error MEMBER type (e.g.
+            // MemoryError) — ordinary enum/tagged-union codegen (emit_expr) applies
+            // unchanged; build_error_failed_value does the Ok/Failed wrapping. But sema also
+            // allows the operand to already be a full error(...) value (this function's own,
+            // or a subset of it — see error_union_is_subset in sema_check.cpp); that case is
+            // propagated as-is, translating tags if the two unions differ, exactly like 'try'
+            // propagation. Shared by emit_return_err and emit_return's trailing error slot.
+            auto emit_error_return_operand(const ast::Expr &error_value, const sema::ResolvedType &target) -> llvm::Value * {
+                const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(error_value));
+                auto *operand_val = emit_expr(error_value);
 
                 if (operand_type.kind == sema::TypeKind::Union) {
                     const auto *union_info = sema_program_.union_at(operand_type.union_index);
                     if (union_info && union_info->is_error_union) {
-                        llvm::Value *err_val = (operand_type == current_returns_.back())
-                            ? operand_val
-                            : translate_error_value(operand_val, operand_type, current_returns_.back());
-                        emit_error_return(err_val);
-                        return;
+                        return (operand_type == target) ? operand_val : translate_error_value(operand_val, operand_type, target);
                     }
                 }
 
-                auto *err_val = build_error_failed_value(operand_type, operand_val, current_returns_.back());
-                emit_error_return(err_val);
+                return build_error_failed_value(operand_type, operand_val, target);
+            }
+
+            void emit_return_err(const ast::ReturnErrStmt &stmt) {
+                emit_error_return(emit_error_return_operand(stmt.error_value, current_returns_.back()));
             }
 
             void emit_return_ok(const ast::ReturnOkStmt &stmt) {
