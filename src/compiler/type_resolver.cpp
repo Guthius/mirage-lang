@@ -349,9 +349,14 @@ namespace sema {
                     if (!info) return error(diag, loc, std::format("internal error: invalid trait index for '{}'", name));
                     if (info->layout_done) return *ts->resolved;
 
+                    // Unlike struct/union/bitset, a trait value is a fixed-size fat pointer
+                    // (kind + trait_index, see size_of/align_of above) whose ResolvedType never
+                    // depends on TraitInfo::methods being resolved. So a trait referencing itself
+                    // (or another trait referencing it back) in a method signature isn't a real
+                    // cycle — just return the already-known handle type instead of recursing.
                     const auto key = std::make_pair(module_path, name);
                     if (program.resolve_state.trait_resolving.contains(key)) {
-                        return error(diag, loc, std::format("trait cycle detected at '{}'", name));
+                        return *ts->resolved;
                     }
 
                     program.resolve_state.trait_resolving.insert(key);
