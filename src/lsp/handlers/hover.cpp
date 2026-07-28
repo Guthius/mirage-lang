@@ -89,14 +89,27 @@ namespace lsp::handlers {
         // Renders a compile-time-folded const value (see sema::evaluate_const_value) for
         // display under a const's hover signature. 'type' disambiguates a bool const (folded to
         // a bare 0/1 int64_t, same as any other integer) so it prints as 'true'/'false' rather
-        // than '1'/'0'.
+        // than '1'/'0', and an unsigned-typed const so it prints as unsigned rather than signed -
+        // evaluate_const_value folds every integer expression through a plain signed int64_t
+        // with no notion of the target type's width/signedness (e.g. '~cast(0, usize)' folds to
+        // int64_t{-1} - the correct 64-bit bit pattern, just the wrong C++ type to print it as),
+        // so this is the one place that actually has 'type' in hand to render it correctly.
         auto format_const_fold_value(const sema::ConstFoldValue &value, const sema::ResolvedType &type) -> std::string {
             return std::visit(
                 [&]<typename T>(const T &v) -> std::string {
                     using V = std::decay_t<T>;
                     if constexpr (std::is_same_v<V, int64_t>) {
                         if (type.kind == sema::TypeKind::Bool) return v != 0 ? "true" : "false";
-                        return std::to_string(v);
+                        switch (type.kind) {
+                        case sema::TypeKind::U8:  return std::to_string(static_cast<uint64_t>(v) & 0xFFu);
+                        case sema::TypeKind::U16: return std::to_string(static_cast<uint64_t>(v) & 0xFFFFu);
+                        case sema::TypeKind::U32: return std::to_string(static_cast<uint64_t>(v) & 0xFFFFFFFFu);
+                        case sema::TypeKind::U64:
+                        case sema::TypeKind::USize:
+                            return std::to_string(static_cast<uint64_t>(v));
+                        default:
+                            return std::to_string(v);
+                        }
                     } else {
                         return "\"" + v + "\"";
                     }
