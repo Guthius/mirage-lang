@@ -90,10 +90,15 @@
       }
     },
     "asm-block": {
-      "begin": "\\b(asm)\\s*(\\{)",
+      "comment": "Matches both the statement form 'asm { ... }' and the expression form 'asm -> reg [: type] { ... }' — groups 2-5 are absent for the statement form.",
+      "begin": "\\b(asm)\\b(?:\\s*(->)\\s*([A-Za-z_][A-Za-z0-9_]*)(?:\\s*(:)\\s*([A-Za-z_][A-Za-z0-9_]*))?)?\\s*(\\{)",
       "beginCaptures": {
         "1": { "name": "keyword.other.mirage" },
-        "2": { "name": "punctuation.brackets.mirage" }
+        "2": { "name": "keyword.operator.arrow.mirage" },
+        "3": { "name": "variable.language.register.asm.mirage" },
+        "4": { "name": "punctuation.separator.colon.mirage" },
+        "5": { "name": "storage.type.mirage" },
+        "6": { "name": "punctuation.brackets.mirage" }
       },
       "end": "\\}",
       "endCaptures": {
