@@ -6,6 +6,7 @@
 #include "handlers/definition.hpp"
 #include "handlers/diagnostics.hpp"
 #include "handlers/hover.hpp"
+#include "handlers/inlay_hint.hpp"
 #include "task_queue.hpp"
 #include "transport.hpp"
 #include "uri.hpp"
@@ -280,6 +281,7 @@ namespace lsp {
                     {"hoverProvider", true},
                     {"definitionProvider", true},
                     {"completionProvider", {{"triggerCharacters", {"."}}}},
+                    {"inlayHintProvider", true},
                 };
                 send_response(channel, message["id"], {{"capabilities", capabilities}});
             } else if (method == "initialized") {
@@ -357,6 +359,23 @@ namespace lsp {
                         const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
                         auto &result = worker.documents.ensure_analysed(path);
                         return handlers::handle_completion(result, module_path, path, line, character);
+                    });
+                }});
+            } else if (method == "textDocument/inlayHint") {
+                const auto id = message["id"];
+                const auto id_key = id_key_of(id);
+                auto path = canonical_path_of(message["params"]["textDocument"]["uri"].get<std::string>());
+                const auto start_line = message["params"]["range"]["start"]["line"].get<size_t>() + 1;
+                const auto end_line = message["params"]["range"]["end"]["line"].get<size_t>() + 1;
+
+                auto cancelled = std::make_shared<std::atomic<bool>>(false);
+                in_flight_[id_key] = cancelled;
+
+                queue.push(Task{cancelled, [&worker, &channel, &completed, cancelled, id, id_key, path, start_line, end_line] {
+                    run_cancellable_request(cancelled, completed, id_key, channel, id, [&]() -> json {
+                        const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
+                        auto &result = worker.documents.ensure_analysed(path);
+                        return handlers::handle_inlay_hint(result, module_path, path, start_line, end_line);
                     });
                 }});
             } else {

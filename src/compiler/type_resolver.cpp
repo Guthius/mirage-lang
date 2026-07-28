@@ -1330,4 +1330,34 @@ namespace sema {
         const Resolver resolver{program, diag, ast_program};
         return resolver.resolve_final_full(module_path, name, false, loc);
     }
+
+    // Mirrors Resolver::size_of() above (and codegen.cpp's Generator::size_of(), which computes
+    // the identical thing over its own sema_program_ member) exactly - kept as a public free
+    // function since neither of those is reachable from a caller that only has a Program&, which
+    // is all the LSP's hover support for size_of()/len() has available.
+    auto resolved_type_size(const ResolvedType &t, const Program &program) -> uint32_t {
+        if (t.kind == TypeKind::Struct) { const auto *info = program.struct_at(t.struct_index); return info ? info->size : 0; }
+        if (t.kind == TypeKind::Array) { const auto *info = program.array_at(t.array_index); return info ? info->size : 0; }
+        if (t.kind == TypeKind::Slice) return 16;
+        if (t.kind == TypeKind::Trait) return 16;
+        if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_size(info->underlying_type.kind) : 0; }
+        if (t.kind == TypeKind::Union) { const auto *info = program.union_at(t.union_index); return info ? info->size : 0; }
+        if (t.kind == TypeKind::Bitset) { const auto *info = program.bitset_at(t.bitset_index); return info ? primitive_size(info->storage_type.kind) : 0; }
+        return primitive_size(t.kind);
+    }
+
+    // Mirrors resolved_type_size() above exactly, substituting alignment for size - including
+    // the Trait/Any override (primitive_align would wrongly forward to primitive_size's 16 for
+    // these two 16-byte fat pointers, which are actually only 8-byte aligned).
+    auto resolved_type_align(const ResolvedType &t, const Program &program) -> uint32_t {
+        if (t.kind == TypeKind::Struct) { const auto *info = program.struct_at(t.struct_index); return info ? info->align : 1; }
+        if (t.kind == TypeKind::Array) { const auto *info = program.array_at(t.array_index); return info ? info->align : 1; }
+        if (t.kind == TypeKind::Slice) return 8;
+        if (t.kind == TypeKind::Trait) return 8;
+        if (t.kind == TypeKind::Any) return 8;
+        if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_align(info->underlying_type.kind) : 1; }
+        if (t.kind == TypeKind::Union) { const auto *info = program.union_at(t.union_index); return info ? info->align : 1; }
+        if (t.kind == TypeKind::Bitset) { const auto *info = program.bitset_at(t.bitset_index); return info ? primitive_align(info->storage_type.kind) : 1; }
+        return primitive_align(t.kind);
+    }
 }

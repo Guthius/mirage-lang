@@ -184,6 +184,8 @@ namespace lsp::handlers {
             .sema_program = result.sema_program,
             .module_path = module_path,
             .diag = throwaway_diag,
+            .tokens = &tokens,
+            .program_result = &result,
         };
 
         // Find whatever's immediately before the cursor: either a partially-typed identifier
@@ -224,7 +226,7 @@ namespace lsp::handlers {
             }
         }
 
-        const auto enclosing = find_enclosing_function(mod_it->second, sema_mod_it->second, tokens, line);
+        const auto enclosing = find_enclosing_function(mod_it->second, sema_mod_it->second, result.sema_program, tokens, line);
 
         auto resolve_base_name = [&](const std::string &name) -> std::optional<Resolution> {
             for (const auto &p : enclosing.params) {

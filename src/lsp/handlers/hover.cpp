@@ -3,6 +3,9 @@
 #include "../type_printer.hpp"
 #include "common.hpp"
 
+#include "compiler/lexer.hpp"
+
+#include <format>
 #include <type_traits>
 
 namespace lsp::handlers {
@@ -82,15 +85,73 @@ namespace lsp::handlers {
                 }},
             };
         }
+
+        // Renders a compile-time-folded const value (see sema::evaluate_const_value) for
+        // display under a const's hover signature. 'type' disambiguates a bool const (folded to
+        // a bare 0/1 int64_t, same as any other integer) so it prints as 'true'/'false' rather
+        // than '1'/'0'.
+        auto format_const_fold_value(const sema::ConstFoldValue &value, const sema::ResolvedType &type) -> std::string {
+            return std::visit(
+                [&]<typename T>(const T &v) -> std::string {
+                    using V = std::decay_t<T>;
+                    if constexpr (std::is_same_v<V, int64_t>) {
+                        if (type.kind == sema::TypeKind::Bool) return v != 0 ? "true" : "false";
+                        return std::to_string(v);
+                    } else {
+                        return "\"" + v + "\"";
+                    }
+                },
+                value);
+        }
+
+        // Appends the source text of a module-scope const/mut's initializer, and (if it's a
+        // compile-time constant whose folded value reads DIFFERENTLY from that source text -
+        // e.g. an octal '0o00010000' folds to the decimal '4096', worth showing, but a plain
+        // decimal '16' folds to '16', pure repetition) its folded value as a trailing comment -
+        // all on the same line as the plain "const NAME: Type" signature describe_symbol()
+        // already produced. Separate from describe_symbol() itself since it needs the file's
+        // token stream (to find the initializer's raw source span) and a mutable Program& +
+        // DiagnosticEngine& (evaluate_const_value may need to force-resolve a referenced global
+        // and can itself report diagnostics), neither of which describe_symbol()'s signature
+        // carries.
+        auto append_const_init_detail(std::string text, const sema::GlobalSymbol &global, const std::string &module_path,
+                                       const std::vector<Token> &tokens, const std::string_view source_text,
+                                       sema::Program &program, DiagnosticEngine &diag) -> std::string {
+            if (!global.decl || !global.decl->init) return text;
+
+            const auto init_text = raw_const_init_text(tokens, source_text, global.decl->location);
+            if (!init_text.empty()) {
+                text += " = " + init_text;
+            }
+
+            if (sema::is_constant_expr(*global.decl->init, module_path, program)) {
+                if (const auto folded = sema::evaluate_const_value(*global.decl->init, module_path, program, diag)) {
+                    if (const auto folded_text = format_const_fold_value(*folded, global.type); folded_text != init_text) {
+                        text += " // = " + folded_text;
+                    }
+                }
+            }
+            return text;
+        }
     }
 
     auto handle_hover(analysis::ProgramResult &result, const std::string &module_path,
                        const std::string &path, const size_t line, const size_t column) -> nlohmann::json {
-        const auto res = resolve_at(result, module_path, path, line, column);
+        DiagnosticEngine throwaway_diag(*result.source_manager);
+        const auto source_file = result.source_manager->load(path, throwaway_diag);
+        if (source_file.text.empty()) return nullptr;
+        const auto tokens = lexer::tokenize(source_file.text, source_file.filename, throwaway_diag);
+
+        const auto res = resolve_at_tokens(result, module_path, tokens, line, column);
 
         switch (res.kind) {
-        case Resolution::Kind::Symbol:
-            return hover_json(describe_symbol(res.name, *res.symbol, result.sema_program, res.module_path));
+        case Resolution::Kind::Symbol: {
+            std::string text = describe_symbol(res.name, *res.symbol, result.sema_program, res.module_path);
+            if (const auto *global = std::get_if<sema::GlobalSymbol>(res.symbol)) {
+                text = append_const_init_detail(std::move(text), *global, res.module_path, tokens, source_file.text, result.sema_program, throwaway_diag);
+            }
+            return hover_json(text);
+        }
 
         case Resolution::Kind::Local:
             return hover_json("(local) " + res.name + ": " + type_to_string(res.type, result.sema_program, module_path));
@@ -102,9 +163,35 @@ namespace lsp::handlers {
         case Resolution::Kind::UnionMember:
             return hover_json(res.name + ": " + type_to_string(res.type, result.sema_program, module_path));
 
-        case Resolution::Kind::EnumField:
-        case Resolution::Kind::Variant:
-            return hover_json(type_to_string(res.type, result.sema_program, module_path) + "." + res.name);
+        case Resolution::Kind::EnumField: {
+            std::string text = type_to_string(res.type, result.sema_program, module_path) + "." + res.name;
+            if (res.type.kind == sema::TypeKind::Enum) {
+                if (const auto *info = result.sema_program.enum_at(res.type.enum_index)) {
+                    if (const auto *field = sema::find_enum_field_by_name(*info, res.name)) {
+                        text += " = " + std::to_string(field->value);
+                    }
+                }
+            }
+            return hover_json(text);
+        }
+
+        case Resolution::Kind::Variant: {
+            std::string text = type_to_string(res.type, result.sema_program, module_path) + "." + res.name;
+            if (res.type.kind == sema::TypeKind::Union) {
+                if (const auto *info = result.sema_program.union_at(res.type.union_index)) {
+                    for (const auto &variant : info->variants) {
+                        if (variant.name != res.name) continue;
+                        if (variant.payload_struct_index >= 0) {
+                            text += ": " + describe_type_definition(variant.payload_type, result.sema_program, module_path);
+                        } else if (variant.payload_type.kind != sema::TypeKind::Invalid && variant.payload_type.kind != sema::TypeKind::Void) {
+                            text += ": " + type_to_string(variant.payload_type, result.sema_program, module_path);
+                        }
+                        break;
+                    }
+                }
+            }
+            return hover_json(text);
+        }
 
         case Resolution::Kind::Method: {
             std::string params = res.method && res.method->decl
@@ -116,8 +203,24 @@ namespace lsp::handlers {
             return hover_json("fn " + res.name + "(" + params + ")" + ret);
         }
 
-        case Resolution::Kind::Builtin:
-            return hover_json("builtin " + res.name + "(): " + type_to_string(res.type, result.sema_program, module_path));
+        case Resolution::Kind::Builtin: {
+            const std::string operand_str = res.builtin_operand_type.kind != sema::TypeKind::Invalid
+                ? type_to_string(res.builtin_operand_type, result.sema_program, module_path)
+                : "";
+            std::string text = res.name + "(" + operand_str + ") -> " + type_to_string(res.type, result.sema_program, module_path);
+            if (res.builtin_const_value) {
+                text += "\n= " + std::to_string(*res.builtin_const_value);
+            }
+            return hover_json(text);
+        }
+
+        case Resolution::Kind::AsmRegister: {
+            std::string text = "register " + res.name;
+            if (!res.asm_register_family.empty()) {
+                text += std::format(" ({}-bit, '{}' family)", res.asm_register_width_bits, res.asm_register_family);
+            }
+            return hover_json(text);
+        }
 
         default:
             return nullptr;

@@ -536,6 +536,15 @@ namespace sema {
     // Minimal human-readable rendering of a resolved type, used for trait conformance
     // and default-parameter-value diagnostics.
     auto describe_type(const ResolvedType &t, const Program &program) -> std::string;
+    // Byte size/alignment of an already-resolved type - exactly what 'size_of(T)'/
+    // 'align_of(T)' evaluate to at compile time. codegen.cpp's Generator::size_of()/
+    // align_of() and type_resolver.cpp's own Resolver::size_of()/align_of() each compute
+    // this identically but privately (codegen.cpp isn't linked into mirage-lsp, and
+    // Resolver is a file-local type_resolver.cpp class) - these free functions are the
+    // one copy exposed for callers with only a Program& in hand, namely the LSP's hover
+    // support for size_of()/align_of()/len().
+    auto resolved_type_size(const ResolvedType &t, const Program &program) -> uint32_t;
+    auto resolved_type_align(const ResolvedType &t, const Program &program) -> uint32_t;
     auto error_union_is_subset(const ResolvedType &callee, const ResolvedType &caller, const Program &program) -> bool;
     auto function_params_compatible(const std::vector<ResolvedType> &actual, const std::vector<ResolvedType> &expected) -> bool;
     auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType;

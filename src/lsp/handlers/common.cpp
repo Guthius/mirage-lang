@@ -1,5 +1,7 @@
 #include "common.hpp"
 
+#include "ast_walker.hpp"
+#include "compiler/asm_registers.hpp"
 #include "compiler/lexer.hpp"
 
 #include <algorithm>
@@ -277,9 +279,11 @@ namespace lsp::handlers {
                         best = LocalInfo{.location = node.location, .type = resolve_var_decl_type(node, ctx)};
                     }
                 } else if constexpr (std::is_same_v<U, ast::VarDeclGroupStmt>) {
-                    if (node.location.line <= before_line &&
-                        std::ranges::find(node.names, name) != node.names.end()) {
-                        best = LocalInfo{.location = node.location, .type = {}};
+                    if (node.location.line <= before_line) {
+                        if (const auto idx = std::ranges::find(node.names, name); idx != node.names.end()) {
+                            const auto name_index = static_cast<size_t>(idx - node.names.begin());
+                            best = LocalInfo{.location = node.location, .type = resolve_group_decl_name_type(node, name_index, ctx)};
+                        }
                     }
                 }
                 // ExprStmt, ContinueStmt, BreakStmt, ReturnStmt,
@@ -328,8 +332,8 @@ namespace lsp::handlers {
                     }
                 } else if constexpr (std::is_same_v<U, ast::VarDeclGroupStmt>) {
                     if (node.location.line <= before_line) {
-                        for (const auto &name : node.names) {
-                            out[name] = LocalInfo{.location = node.location, .type = {}};
+                        for (size_t i = 0; i < node.names.size(); ++i) {
+                            out[node.names[i]] = LocalInfo{.location = node.location, .type = resolve_group_decl_name_type(node, i, ctx)};
                         }
                     }
                 }
@@ -384,7 +388,7 @@ namespace lsp::handlers {
     // so its bracket-index match gives the real end directly; ext fn/macro have no body
     // block, so their end is wherever their own declaration's terminating ';' is.
     auto find_enclosing_function(const ast::Module &module, const sema::ProgramModule &sema_module,
-                                 const std::vector<Token> &tokens, const size_t line) -> EnclosingFunction {
+                                 const sema::Program &program, const std::vector<Token> &tokens, const size_t line) -> EnclosingFunction {
         const auto bracket_index = build_bracket_index(tokens);
 
         auto end_line_for = [&](const SourceLocation &decl_location, const ast::Stmt *body) -> size_t {
@@ -471,6 +475,37 @@ namespace lsp::handlers {
                         params.push_back({fn.params[i].name, type, fn.params[i].location});
                     }
                     consider(fn.location, std::move(params), &fn.body);
+                }
+            } else if (const auto *type_decl = std::get_if<ast::TypeDecl>(&decl)) {
+                // A trait method ('type T = trait { fn foo(self, ...) -> ... }') has no body
+                // (trait method declarations cannot have one - see parse_trait_method_decl in
+                // ast.cpp) and never gets an ImplDecl::Function/MethodInfo of its own - without
+                // this branch, a cursor sitting on 'self' or a named param inside one has no
+                // EnclosingFunction at all, so resolve_base_name can never find them (see the
+                // bug this fixed). 'self' is given the trait's OWN handle type (there being no
+                // concrete Self type a trait declaration can name).
+                const auto *trait_type = std::get_if<std::unique_ptr<ast::TraitType>>(&type_decl->type);
+                if (!trait_type) continue;
+
+                const auto sym_it = sema_module.symbols.find(type_decl->name);
+                const auto *type_sym = sym_it != sema_module.symbols.end() ? std::get_if<sema::TypeSymbol>(&sym_it->second) : nullptr;
+                if (!type_sym || !type_sym->resolved || type_sym->resolved->kind != sema::TypeKind::Trait) continue;
+
+                const auto *trait_info = program.trait_at(type_sym->resolved->trait_index);
+                if (!trait_info) continue;
+
+                for (const auto &method_info : trait_info->methods) {
+                    const auto *method_decl = method_info.decl;
+                    if (!method_decl) continue;
+
+                    std::vector<ParamInfo> params;
+                    params.push_back({"self", *type_sym->resolved, method_decl->self_location});
+                    for (size_t i = 0; i < method_decl->params.size(); ++i) {
+                        sema::ResolvedType type{};
+                        if (i < method_info.params.size()) type = method_info.params[i];
+                        params.push_back({method_decl->params[i].name, type, method_decl->params[i].location});
+                    }
+                    consider(method_decl->location, std::move(params), nullptr);
                 }
             }
         }
@@ -575,8 +610,16 @@ namespace lsp::handlers {
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IncrDecrExpr>>) {
                     return find_expr_by_location(node->operand, target);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SizeOfExpr>>) {
+                    // Matches on the node's own location first (cursor on the 'size_of' keyword
+                    // itself, e.g. for hover's constant-value display), else keeps looking inside
+                    // the operand. Mirrors AlignOfExpr/LenExpr immediately below.
+                    if (location_matches(node->location, target)) return &expr;
+                    return find_expr_by_location(node->operand, target);
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::AlignOfExpr>>) {
+                    if (location_matches(node->location, target)) return &expr;
                     return find_expr_by_location(node->operand, target);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::LenExpr>>) {
+                    if (location_matches(node->location, target)) return &expr;
                     return find_expr_by_location(node->operand, target);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::CastExpr>>) {
                     if (const auto *r = find_expr_by_location(node->value, target)) return r;
@@ -731,44 +774,340 @@ namespace lsp::handlers {
         return prefix;
     }
 
-    auto resolve_at(analysis::ProgramResult &result, const std::string &module_path, const std::string &path,
-                    const size_t line, const size_t column) -> Resolution {
-        DiagnosticEngine throwaway_diag(*result.source_manager);
-        const auto source_file = result.source_manager->load(path, throwaway_diag);
-        if (source_file.text.empty()) return {};
-
-        auto tokens = lexer::tokenize(source_file.text, source_file.filename, throwaway_diag);
-        const auto idx_opt = token_at(tokens, line, column);
-        if (!idx_opt) return {};
-
-        // sizeof/len are dedicated keyword tokens (TokenKind::KwSizeOf/KwLen), not
-        // TokenKind::Identifier, so they'd otherwise be rejected by the guard below - resolve
-        // them directly as a synthetic builtin, always usize (see SizeOfExpr/LenExpr handling
-        // in sema_check.cpp).
-        if (tokens[*idx_opt].kind == TokenKind::KwSizeOf || tokens[*idx_opt].kind == TokenKind::KwLen) {
-            return Resolution{
-                .kind = Resolution::Kind::Builtin,
-                .name = tokens[*idx_opt].kind == TokenKind::KwSizeOf ? "sizeof" : "len",
-                .type = sema::ResolvedType{.kind = sema::TypeKind::USize},
-            };
+    auto callee_name_location(const ast::Expr &callee, const std::vector<Token> &tokens) -> std::optional<SourceLocation> {
+        if (const auto *ident = std::get_if<ast::IdentExpr>(&callee)) {
+            return ident->location;
         }
-        if (tokens[*idx_opt].kind != TokenKind::Identifier) return {};
-        const auto idx = *idx_opt;
+        if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&callee)) {
+            if (const auto dot_idx = token_at(tokens, (*member)->location.line, (*member)->location.column)) {
+                if (*dot_idx + 1 < tokens.size()) return tokens[*dot_idx + 1].location;
+            }
+        }
+        return std::nullopt;
+    }
 
+    auto callee_return_types(const Resolution &res) -> std::vector<sema::ResolvedType> {
+        if (res.kind == Resolution::Kind::Method) {
+            return res.method ? res.method->return_types : std::vector<sema::ResolvedType>{};
+        }
+        if (res.kind != Resolution::Kind::Symbol || !res.symbol) return {};
+
+        return std::visit(
+            [&]<typename T>(const T &sym) -> std::vector<sema::ResolvedType> {
+                using S = std::decay_t<T>;
+                if constexpr (std::is_same_v<S, sema::FunctionSymbol>) {
+                    return sym.return_types;
+                }
+                // ExtFunctionSymbol/MacroSymbol never multi-return; GlobalSymbol/ImportSymbol/
+                // TypeSymbol aren't callable at all.
+                return {};
+            },
+            *res.symbol);
+    }
+
+    // A register or variable operand found inside an 'asm { ... }'/'asm -> reg { ... }' body at
+    // some cursor position - copied by value (rather than returning an ast::AsmOperand* /
+    // AsmRegisterOperand*) since AsmExpr::result_register isn't itself stored in the
+    // ast::AsmOperand variant, so a single pointer-returning type can't represent both sources
+    // uniformly.
+    struct AsmOperandHit {
+        bool is_register = false;
+        std::string name;
+        uint32_t width_bits = 0; // meaningful only if is_register
+        bool is_address = false; // meaningful only if !is_register ('&var' vs bare 'var')
+    };
+
+    // Finds the (register or variable) operand within any 'asm { ... }'/'asm -> reg { ... }'
+    // construct reachable from `body` whose own span contains 1-based (line, column). Needed
+    // because asm bodies are raw-captured as a single opaque token in the main lexer's token
+    // stream (see asm_lexer.cpp's raw-capture) - every line but the block's first has no token
+    // of its own there at all, so resolve_at_tokens()'s ordinary token-based path below can
+    // never see these identifiers. Each AsmOperand's own location is already accurate in the
+    // *original* file's coordinates (asm diagnostics already report real file positions off
+    // these same fields), so this walks the AST directly via the shared ast_walker instead.
+    auto find_asm_operand_at(const ast::Stmt &body, const size_t line, const size_t column) -> std::optional<AsmOperandHit> {
+        std::optional<AsmOperandHit> found;
+
+        auto matches = [&](const SourceLocation &loc, const size_t name_len) {
+            return name_len > 0 && loc.line == line && column >= loc.column && column < loc.column + name_len;
+        };
+        auto check_instructions = [&](const std::vector<ast::AsmInstruction> &instructions) {
+            for (const auto &instr : instructions) {
+                if (found) return;
+                for (const auto &operand : instr.operands) {
+                    if (found) return;
+                    std::visit(
+                        [&]<typename T>(const T &o) {
+                            if constexpr (std::is_same_v<T, ast::AsmRegisterOperand>) {
+                                if (matches(o.location, o.name.size())) {
+                                    found = AsmOperandHit{.is_register = true, .name = o.name, .width_bits = o.width_bits};
+                                }
+                            } else if constexpr (std::is_same_v<T, ast::AsmVariableOperand>) {
+                                // '&' (if present) is part of the token AsmVariableOperand::location
+                                // anchors to - see asm_lexer.cpp's lex_address_of.
+                                const auto len = o.name.size() + (o.is_address ? 1 : 0);
+                                if (matches(o.location, len)) {
+                                    found = AsmOperandHit{.is_register = false, .name = o.name, .is_address = o.is_address};
+                                }
+                            }
+                            // AsmImmediateOperand - a literal, nothing to hover.
+                        },
+                        operand);
+                }
+            }
+        };
+
+        AstVisitor visitor;
+        visitor.on_stmt = [&](const ast::Stmt &s) {
+            if (const auto *asm_stmt = std::get_if<std::unique_ptr<ast::AsmStmt>>(&s)) {
+                check_instructions((*asm_stmt)->instructions);
+            }
+        };
+        visitor.on_expr = [&](const ast::Expr &e) {
+            if (const auto *asm_expr = std::get_if<std::unique_ptr<ast::AsmExpr>>(&e)) {
+                check_instructions((*asm_expr)->instructions);
+                if (!found) {
+                    const auto &reg = (*asm_expr)->result_register;
+                    if (matches(reg.location, reg.name.size())) {
+                        found = AsmOperandHit{.is_register = true, .name = reg.name, .width_bits = reg.width_bits};
+                    }
+                }
+            }
+        };
+        walk_stmt(body, visitor);
+
+        return found;
+    }
+
+    // Fallback search for size_of()/align_of()/len() used OUTSIDE any function/method body - a
+    // module-scope const's initializer, or a macro's expression template - neither of which
+    // find_enclosing_function() exposes a body for (EnclosingFunction::body is only ever set
+    // for FunctionDecl/ImplDecl::Function, never ExtFunctionDecl/MacroDecl - see its own doc
+    // comment above).
+    auto find_expr_by_location_in_module(const ast::Module &module, const SourceLocation &target) -> const ast::Expr * {
+        for (const auto &decl : module) {
+            if (const auto *var = std::get_if<ast::VarDecl>(&decl)) {
+                if (var->init) {
+                    if (const auto *found = find_expr_by_location(*var->init, target)) return found;
+                }
+            } else if (const auto *macro = std::get_if<ast::MacroDecl>(&decl)) {
+                if (const auto *found = find_expr_by_location(macro->expr_template, target)) return found;
+            }
+        }
+        return nullptr;
+    }
+
+    // Fallback for an enum field or union(enum) variant name hovered at its OWN declaration
+    // site (e.g. 'Red' in 'type Color = enum(i32) { Red = 0 }') - these names are never module
+    // symbols in their own right (only the enclosing type's name, 'Color', is), so
+    // resolve_base_name can't find them by the ordinary module-symbol-table lookup. Scans every
+    // EnumType/UnionType TypeDecl in the module for a field/member whose own name-token span
+    // contains (line, column), returning the same Kind::EnumField/Variant shape a usage-site
+    // '.Field' reference resolves to (see match_enum_or_variant) - hover.cpp's rendering for
+    // both is shared for free as a result.
+    auto resolve_type_decl_field_at(const ast::Module &module, const sema::ProgramModule &sema_module,
+                                     const size_t line, const size_t column) -> std::optional<Resolution> {
+        const auto matches = [&](const SourceLocation &loc, const size_t name_len) {
+            return name_len > 0 && loc.line == line && column >= loc.column && column < loc.column + name_len;
+        };
+
+        for (const auto &decl : module) {
+            const auto *type_decl = std::get_if<ast::TypeDecl>(&decl);
+            if (!type_decl) continue;
+
+            const auto sym_it = sema_module.symbols.find(type_decl->name);
+            const auto *type_sym = sym_it != sema_module.symbols.end() ? std::get_if<sema::TypeSymbol>(&sym_it->second) : nullptr;
+            if (!type_sym || !type_sym->resolved) continue;
+
+            if (const auto *enum_type = std::get_if<std::unique_ptr<ast::EnumType>>(&type_decl->type)) {
+                for (const auto &field : (*enum_type)->fields) {
+                    if (matches(field.location, field.name.size())) {
+                        return Resolution{.kind = Resolution::Kind::EnumField, .name = field.name,
+                                           .location = field.location, .type = *type_sym->resolved};
+                    }
+                }
+            } else if (const auto *union_type = std::get_if<std::unique_ptr<ast::UnionType>>(&type_decl->type)) {
+                if ((*union_type)->is_tagged) {
+                    for (const auto &member : (*union_type)->members) {
+                        if (matches(member.location, member.name.size())) {
+                            return Resolution{.kind = Resolution::Kind::Variant, .name = member.name,
+                                               .location = member.location, .type = *type_sym->resolved};
+                        }
+                    }
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
+    // Resolves a 'size_of'/'align_of' operand's own resolved type: an IdentExpr/(single-hop)
+    // MemberExpr naming a TYPE (never run through check_expr, so never cached in expr_types -
+    // see sema_check.cpp's SizeOfExpr/AlignOfExpr cases) is looked up directly against the
+    // symbol table, exactly mirroring codegen.cpp's Generator::sizeof_operand()/
+    // align_of_operand() and type_resolver.cpp's Resolver::sizeof_expr_operand()/
+    // align_of_expr_operand() (this intentionally only replicates their single-hop
+    // MemberExpr case, not the fuller multi-hop walk_namespace_chain those use - a qualified
+    // type name nested two or more modules deep falls back to the ordinary value path
+    // below and simply won't resolve a type name specially, same as an unresolvable ordinary
+    // expression). Everything else (an ordinary value expression, or a TypeExpr for
+    // pointer/array/slice/fn-ptr/builtin spellings that can't be written as an IdentExpr) was
+    // already resolved and cached into expr_types by the whole-program check.
+    auto sizeof_align_operand_type(const ast::Expr &operand, const std::string &module_path,
+                                    const sema::Program &program) -> sema::ResolvedType {
+        if (const auto *ident = std::get_if<ast::IdentExpr>(&operand)) {
+            if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
+                if (const auto sym_it = mod_it->second.symbols.find(ident->name); sym_it != mod_it->second.symbols.end()) {
+                    if (const auto *ts = std::get_if<sema::TypeSymbol>(&sym_it->second); ts && ts->resolved) {
+                        return *ts->resolved;
+                    }
+                }
+            }
+        } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&operand)) {
+            if (const auto *obj_ident = std::get_if<ast::IdentExpr>(&(*member)->object)) {
+                if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
+                    if (const auto sym_it = mod_it->second.symbols.find(obj_ident->name); sym_it != mod_it->second.symbols.end()) {
+                        if (const auto *imp = std::get_if<sema::ImportSymbol>(&sym_it->second)) {
+                            if (const auto target_mod_it = program.modules.find(imp->module_path); target_mod_it != program.modules.end()) {
+                                if (const auto target_sym_it = target_mod_it->second.symbols.find((*member)->member);
+                                    target_sym_it != target_mod_it->second.symbols.end()) {
+                                    if (const auto *ts = std::get_if<sema::TypeSymbol>(&target_sym_it->second); ts && ts->resolved) {
+                                        return *ts->resolved;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
+            if (const auto ty_it = mod_it->second.expr_types.find(sema::get_expr_key(operand)); ty_it != mod_it->second.expr_types.end()) {
+                return ty_it->second;
+            }
+        }
+        return {};
+    }
+
+    // Builds the Kind::Builtin Resolution for a 'size_of'/'align_of'/'len' keyword token,
+    // filling in the operand's resolved type and (when statically known) its folded value if
+    // `found` is the corresponding SizeOfExpr/AlignOfExpr/LenExpr AST node - i.e. resolve_at_
+    // tokens()/its module-scope fallback managed to locate it. `found` is nullptr only when
+    // that lookup failed (shouldn't normally happen for a real keyword token, but resolve_at is
+    // a best-effort UI utility, not a parser, so this degrades to the bare "builtin, type
+    // usize" answer rather than crashing).
+    auto resolve_builtin_at(const ast::Expr *found, const TokenKind keyword, const std::string &module_path,
+                            const sema::Program &program) -> Resolution {
+        Resolution res{
+            .kind = Resolution::Kind::Builtin,
+            .name = keyword == TokenKind::KwSizeOf ? "size_of" : keyword == TokenKind::KwAlignOf ? "align_of" : "len",
+            .type = sema::ResolvedType{.kind = sema::TypeKind::USize},
+        };
+        if (!found) return res;
+
+        if (const auto *size_of_expr = std::get_if<std::unique_ptr<ast::SizeOfExpr>>(found)) {
+            res.builtin_operand_type = sizeof_align_operand_type((*size_of_expr)->operand, module_path, program);
+            if (res.builtin_operand_type.kind != sema::TypeKind::Invalid) {
+                res.builtin_const_value = sema::resolved_type_size(res.builtin_operand_type, program);
+            }
+        } else if (const auto *align_of_expr = std::get_if<std::unique_ptr<ast::AlignOfExpr>>(found)) {
+            res.builtin_operand_type = sizeof_align_operand_type((*align_of_expr)->operand, module_path, program);
+            if (res.builtin_operand_type.kind != sema::TypeKind::Invalid) {
+                res.builtin_const_value = sema::resolved_type_align(res.builtin_operand_type, program);
+            }
+        } else if (const auto *len_expr = std::get_if<std::unique_ptr<ast::LenExpr>>(found)) {
+            if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
+                if (const auto ty_it = mod_it->second.expr_types.find(sema::get_expr_key((*len_expr)->operand));
+                    ty_it != mod_it->second.expr_types.end()) {
+                    res.builtin_operand_type = ty_it->second;
+                    // Only a fixed-size array's length is a compile-time constant; a slice's is
+                    // a runtime field (see sema_check.cpp's LenExpr case).
+                    if (res.builtin_operand_type.kind == sema::TypeKind::Array) {
+                        if (const auto *arr = program.array_at(res.builtin_operand_type.array_index)) {
+                            res.builtin_const_value = arr->count;
+                        }
+                    }
+                }
+            }
+        }
+        return res;
+    }
+
+    // Scans forward from `from_idx` (inclusive) tracking paren/bracket/brace depth, returning
+    // the index of the first token in `kinds` found at depth 0, or nullopt if none is found
+    // before the token stream ends.
+    auto find_token_at_depth_zero(const std::vector<Token> &tokens, const size_t from_idx,
+                                   std::initializer_list<TokenKind> kinds) -> std::optional<size_t> {
+        int depth = 0;
+        for (size_t i = from_idx; i < tokens.size(); ++i) {
+            switch (tokens[i].kind) {
+            case TokenKind::LParen:
+            case TokenKind::LBracket:
+            case TokenKind::LBrace:
+                ++depth;
+                break;
+            case TokenKind::RParen:
+            case TokenKind::RBracket:
+            case TokenKind::RBrace:
+                if (depth > 0) --depth;
+                break;
+            default:
+                if (depth == 0 && std::ranges::find(kinds, tokens[i].kind) != kinds.end()) {
+                    return i;
+                }
+                break;
+            }
+        }
+        return std::nullopt;
+    }
+
+    auto raw_const_init_text(const std::vector<Token> &tokens, const std::string_view source_text,
+                              const SourceLocation &decl_location) -> std::string {
+        // A module-scope VarDecl's own location is its 'const'/'mut' keyword (see
+        // parse_var_decl in ast.cpp) - not the initializer expression's, which (unlike this
+        // scan) can't be used directly here: this AST stores each expression node's own
+        // single DEFINING token location, not a true span start, and for a compound top-level
+        // initializer (e.g. a BinaryExpr) that's the OPERATOR's position, not the expression's
+        // first token (see ast.cpp's parse_multiplicative/parse_bitwise_and et al., which
+        // capture 'location' at the operator, before or after consuming it, inconsistently
+        // across precedence levels) - starting from decl_location and finding the real ':='/'='
+        // token by scanning instead sidesteps that entirely.
+        const auto decl_idx_opt = token_at(tokens, decl_location.line, decl_location.column);
+        if (!decl_idx_opt) return {};
+
+        const auto assign_idx_opt = find_token_at_depth_zero(tokens, *decl_idx_opt, {TokenKind::ColonEqual, TokenKind::Equal});
+        if (!assign_idx_opt || *assign_idx_opt + 1 >= tokens.size()) return {};
+        const auto init_start_idx = *assign_idx_opt + 1;
+
+        const auto semi_idx_opt = find_token_at_depth_zero(tokens, init_start_idx, {TokenKind::Semicolon});
+        const auto end_offset = semi_idx_opt && *semi_idx_opt > 0
+                                     ? tokens[*semi_idx_opt - 1].location.offset + tokens[*semi_idx_opt - 1].lexeme.size()
+                                     : source_text.size();
+
+        const auto start_offset = tokens[init_start_idx].location.offset;
+        if (end_offset <= start_offset || end_offset > source_text.size()) return {};
+        return std::string(source_text.substr(start_offset, end_offset - start_offset));
+    }
+
+    auto resolve_at_tokens(analysis::ProgramResult &result, const std::string &module_path,
+                          const std::vector<Token> &tokens, const size_t line, const size_t column) -> Resolution {
         const auto mod_it = result.ast_program.modules.find(module_path);
         const auto sema_mod_it = result.sema_program.modules.find(module_path);
         if (mod_it == result.ast_program.modules.end() || sema_mod_it == result.sema_program.modules.end()) {
             return {};
         }
 
+        DiagnosticEngine throwaway_diag(*result.source_manager);
         const LocalLookupContext ctx{
             .sema_module = sema_mod_it->second,
             .sema_program = result.sema_program,
             .module_path = module_path,
             .diag = throwaway_diag,
+            .tokens = &tokens,
+            .program_result = &result,
         };
 
-        const auto enclosing = find_enclosing_function(mod_it->second, sema_mod_it->second, tokens, line);
+        const auto enclosing = find_enclosing_function(mod_it->second, sema_mod_it->second, result.sema_program, tokens, line);
 
         auto resolve_base_name = [&](const std::string &name) -> std::optional<Resolution> {
             for (const auto &p : enclosing.params) {
@@ -791,6 +1130,40 @@ namespace lsp::handlers {
             }
             return std::nullopt;
         };
+
+        // Asm operand hover (register or variable) - must run before the ordinary token-based
+        // path below, since asm bodies are raw-captured as a single opaque token in `tokens`
+        // (see find_asm_operand_at's own doc comment for why token_at() can't see inside one).
+        if (enclosing.body) {
+            if (const auto hit = find_asm_operand_at(*enclosing.body, line, column)) {
+                if (hit->is_register) {
+                    Resolution res{.kind = Resolution::Kind::AsmRegister, .name = hit->name, .asm_register_width_bits = hit->width_bits};
+                    if (const auto *info = asm_registers::lookup_register(hit->name)) {
+                        res.asm_register_family = std::string(info->family);
+                    }
+                    return res;
+                }
+                // Variable operand - resolves exactly like an ordinary identifier reference
+                // (param, then local, then module symbol); sema's own asm diagnostics already
+                // report "unknown identifier" for one that resolves to nothing here.
+                return resolve_base_name(hit->name).value_or(Resolution{});
+            }
+        }
+
+        const auto idx_opt = token_at(tokens, line, column);
+        if (!idx_opt) return {};
+        const auto idx = *idx_opt;
+
+        // size_of/align_of/len are dedicated keyword tokens (TokenKind::KwSizeOf/KwAlignOf/
+        // KwLen), not TokenKind::Identifier, so they'd otherwise be rejected by the guard below -
+        // resolve them directly as a synthetic Kind::Builtin, filling in the operand's type and
+        // (when statically known) its folded constant value.
+        if (tokens[idx].kind == TokenKind::KwSizeOf || tokens[idx].kind == TokenKind::KwAlignOf || tokens[idx].kind == TokenKind::KwLen) {
+            const ast::Expr *found = enclosing.body ? find_expr_by_location(*enclosing.body, tokens[idx].location) : nullptr;
+            if (!found) found = find_expr_by_location_in_module(mod_it->second, tokens[idx].location);
+            return resolve_builtin_at(found, tokens[idx].kind, module_path, result.sema_program);
+        }
+        if (tokens[idx].kind != TokenKind::Identifier) return {};
 
         const auto prefix = chain_prefix(tokens, idx);
 
@@ -843,7 +1216,13 @@ namespace lsp::handlers {
                     }
                 }
             }
-            return resolve_base_name(tokens[idx].lexeme).value_or(Resolution{});
+            if (const auto base = resolve_base_name(tokens[idx].lexeme)) return *base;
+            // Not a local/param/module symbol - could still be an enum field/union(enum)
+            // variant name at its OWN declaration site (e.g. 'Red' in 'enum(i32) { Red = 0 }'),
+            // which isn't a symbol in its own right. See resolve_type_decl_field_at's own doc
+            // comment for why this needs to be a whole-module scan rather than something
+            // resolve_base_name itself could ever find.
+            return resolve_type_decl_field_at(mod_it->second, sema_mod_it->second, line, column).value_or(Resolution{});
         }
 
         const auto base = resolve_base_name(prefix[0]);
@@ -861,5 +1240,53 @@ namespace lsp::handlers {
 
         auto [final_res, unused] = step(container, tokens[idx].lexeme, result.sema_program);
         return final_res;
+    }
+
+    auto resolve_at(analysis::ProgramResult &result, const std::string &module_path, const std::string &path,
+                    const size_t line, const size_t column) -> Resolution {
+        DiagnosticEngine throwaway_diag(*result.source_manager);
+        const auto source_file = result.source_manager->load(path, throwaway_diag);
+        if (source_file.text.empty()) return {};
+
+        const auto tokens = lexer::tokenize(source_file.text, source_file.filename, throwaway_diag);
+        return resolve_at_tokens(result, module_path, tokens, line, column);
+    }
+
+    auto resolve_group_decl_name_type(const ast::VarDeclGroupStmt &node, const size_t name_index,
+                                       const LocalLookupContext &ctx) -> sema::ResolvedType {
+        if (!ctx.tokens || !ctx.program_result) return {};
+        if (name_index >= node.names.size()) return {};
+
+        bool is_try = false;
+        const ast::Expr *inner = &node.init;
+        if (const auto *try_expr = std::get_if<std::unique_ptr<ast::TryExpr>>(&node.init)) {
+            is_try = true;
+            inner = &(*try_expr)->call;
+        }
+
+        const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(inner);
+        if (!call) return {};
+
+        const auto callee_loc = callee_name_location((*call)->callee, *ctx.tokens);
+        if (!callee_loc) return {};
+
+        const auto callee_res = resolve_at_tokens(*ctx.program_result, ctx.module_path, *ctx.tokens, callee_loc->line, callee_loc->column);
+        auto returns = callee_return_types(callee_res);
+        if (returns.empty()) return {};
+
+        // 'try f()' strips the trailing error(...) slot off the call's own return list before
+        // matching it against the group decl's names - mirrors sema_check.cpp's
+        // VarDeclGroupStmt handling exactly (see check_group_call_returns's caller there).
+        if (is_try) {
+            const auto &last = returns.back();
+            if (last.kind == sema::TypeKind::Union) {
+                if (const auto *info = ctx.sema_program.union_at(last.union_index); info && info->is_error_union) {
+                    returns.pop_back();
+                }
+            }
+        }
+
+        if (name_index >= returns.size()) return {};
+        return returns[name_index];
     }
 }

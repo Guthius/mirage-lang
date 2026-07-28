@@ -39,6 +39,8 @@ namespace lsp::handlers {
                     walk_expr(node->operand, visitor);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SizeOfExpr>>) {
                     walk_expr(node->operand, visitor);
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::AlignOfExpr>>) {
+                    walk_expr(node->operand, visitor);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::LenExpr>>) {
                     walk_expr(node->operand, visitor);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::StackAllocExpr>>) {

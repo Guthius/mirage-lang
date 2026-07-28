@@ -56,8 +56,13 @@ namespace lsp {
             const auto *info = program.struct_at(type.struct_index);
             if (!info) return "struct " + name + " {}";
             const std::string keyword = info->is_packed ? "packed struct " : "struct ";
-            if (info->fields.empty()) return keyword + name + " {}";
-            std::string out = keyword + name + " {\n";
+            // An anonymous struct (a tagged-union variant's inline 'struct { ... }' payload -
+            // see describe_variant_payload above, which handles the same case for a bare
+            // (non-defining) reference) has no real name for type_to_string to have found -
+            // "struct <anonymous type> { ... }" reads oddly, so omit the placeholder name here.
+            const auto struct_name = name == "<anonymous type>" ? "" : name + " ";
+            if (info->fields.empty()) return keyword + struct_name + "{}";
+            std::string out = keyword + struct_name + "{\n";
             for (const auto &field : info->fields) {
                 out += "    " + field.name + ": " + type_to_string(field.type, program, current_module_path) + ",\n";
             }
@@ -77,6 +82,15 @@ namespace lsp {
         if (type.kind == TypeKind::Union) {
             const auto *info = program.union_at(type.union_index);
             if (!info) return "union " + name + " {}";
+            // A compiler-synthesized error(...) wrapper (see type_to_string's own Union case
+            // above) is never a real user-declared tagged union - expanding it into its
+            // synthesized Ok/Failed variant listing would misleadingly suggest those are
+            // switchable/matchable tags a caller can see, when they're purely an
+            // implementation detail (see sema's Typed Error System). Render it exactly like an
+            // ordinary reference to it instead - 'error(Members)'.
+            if (info->is_error_union) {
+                return name;
+            }
             if (info->is_tagged) {
                 if (info->variants.empty()) return "union(enum) " + name + " {}";
                 std::string out = "union(enum) " + name + " {\n";
@@ -93,6 +107,39 @@ namespace lsp {
             std::string out = "union " + name + " {\n";
             for (const auto &member : info->members) {
                 out += "    " + member.name + ": " + type_to_string(member.type, program, current_module_path) + ",\n";
+            }
+            return out + "}";
+        }
+
+        if (type.kind == TypeKind::Bitset) {
+            const auto *info = program.bitset_at(type.bitset_index);
+            if (!info) return "bitset(<unknown>)";
+            return "bitset(" + type_to_string(info->member_enum_type, program, current_module_path) + ", " +
+                   type_to_string(info->storage_type, program, current_module_path) + ")";
+        }
+
+        if (type.kind == TypeKind::Trait) {
+            const auto *info = program.trait_at(type.trait_index);
+            if (!info || info->methods.empty()) return "trait " + name + " {}";
+            std::string out = "trait " + name + " {\n";
+            for (const auto &method : info->methods) {
+                out += "    fn " + method.name + "(" + (method.is_mut_self ? "mut self" : "self");
+                if (method.decl) {
+                    for (size_t i = 0; i < method.decl->params.size(); ++i) {
+                        out += ", " + method.decl->params[i].name;
+                        if (i < method.params.size()) {
+                            out += ": " + type_to_string(method.params[i], program, current_module_path);
+                        }
+                    }
+                }
+                out += ")";
+                if (!method.return_types.empty()) {
+                    out += " -> ";
+                    out += method.return_types.size() == 1
+                               ? type_to_string(method.return_types[0], program, current_module_path)
+                               : "(" + join_types(method.return_types, program, current_module_path) + ")";
+                }
+                out += "\n";
             }
             return out + "}";
         }
@@ -157,7 +204,9 @@ namespace lsp {
             [[fallthrough]];
         }
         case TypeKind::Struct:
-        case TypeKind::Enum: {
+        case TypeKind::Enum:
+        case TypeKind::Bitset:
+        case TypeKind::Trait: {
             const auto [module_path, name] = sema::find_type_module_and_name(type, program);
             if (name.empty()) {
                 return "<anonymous type>";
