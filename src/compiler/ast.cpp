@@ -2294,14 +2294,36 @@ namespace ast {
             return params;
         }
 
-        auto parse_function_return_types(Parser &parser) -> std::vector<Type> {
-            std::vector<Type> return_types;
+        struct FunctionReturnTypes {
+            std::vector<Type> types;
+            std::vector<std::string> names; // parallel to types; "" = unnamed
+        };
+
+        // -> T   or   -> (T1, T2, ...)  — each entry may optionally be prefixed with
+        // 'name:' purely for documentation (e.g. LSP hover / self-documenting code);
+        // never used for matching or type identity, exactly like parse_function_type's
+        // 'param_name' convention. Safe with 1 token of lookahead for the same reason
+        // param names are: parse_type always starts with an Identifier/keyword and
+        // never itself contains a top-level ':' immediately following a leading
+        // identifier.
+        auto parse_function_return_types(Parser &parser) -> FunctionReturnTypes {
+            FunctionReturnTypes result;
+
+            auto parse_one = [&] {
+                std::string name;
+                if (parser.check(TokenKind::Identifier) && parser.check_next(TokenKind::Colon)) {
+                    name = parser.expect_identifier();
+                    parser.expect(TokenKind::Colon, "':'");
+                }
+                result.names.push_back(std::move(name));
+                result.types.push_back(parse_type(parser));
+            };
 
             if (parser.match(TokenKind::Arrow)) {
                 if (parser.match(TokenKind::LParen)) {
-                    // Multi-return: -> (T1, T2, ...)
+                    // Multi-return: -> (T1, T2, ...) or -> (name1: T1, name2: T2, ...)
                     while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
-                        return_types.push_back(parse_type(parser));
+                        parse_one();
                         skip_semicolons(parser);
                         if (!parser.check(TokenKind::RParen)) {
                             parser.expect(TokenKind::Comma, "','");
@@ -2309,12 +2331,12 @@ namespace ast {
                     }
                     parser.expect(TokenKind::RParen, "')'");
                 } else {
-                    // Single return: -> T
-                    return_types.push_back(parse_type(parser));
+                    // Single return: -> T  or  -> name: T
+                    parse_one();
                 }
             }
 
-            return return_types;
+            return result;
         }
 
         auto parse_trait_method_decl(Parser &parser) -> TraitType::Method {
@@ -2391,7 +2413,8 @@ namespace ast {
                 .name = std::move(name),
                 .is_mut_self = is_mut_self,
                 .params = std::move(params),
-                .return_types = std::move(return_types),
+                .return_types = std::move(return_types.types),
+                .return_names = std::move(return_types.names),
                 .location = location,
                 .self_location = self_location,
             };
@@ -2505,7 +2528,8 @@ namespace ast {
                 .attributes = std::move(attributes),
                 .name = fn_name,
                 .params = std::move(fn_params),
-                .return_types = std::move(fn_return_types),
+                .return_types = std::move(fn_return_types.types),
+                .return_names = std::move(fn_return_types.names),
                 .body = std::move(fn_body),
                 .location = location,
             };
@@ -3105,7 +3129,8 @@ namespace ast {
             .is_mut_self = is_mut_self,
             .name = std::move(name),
             .params = std::move(params),
-            .return_types = std::move(return_types),
+            .return_types = std::move(return_types.types),
+            .return_names = std::move(return_types.names),
             .body = std::move(body),
             .location = location,
             .self_location = self_location,

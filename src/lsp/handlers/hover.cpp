@@ -7,15 +7,26 @@
 
 namespace lsp::handlers {
     namespace {
-        auto join_return_types(const std::vector<sema::ResolvedType> &returns, const sema::Program &program,
-                                const std::string &module_path) -> std::string {
+        // 'names' is parallel to 'returns' (from the originating ast::FunctionDecl/
+        // ImplDecl::Function's optional 'return_names') — may be shorter than 'returns'
+        // or absent entirely if the decl couldn't be resolved.
+        auto describe_return(const sema::ResolvedType &type, size_t index, const std::vector<std::string> &names,
+                              const sema::Program &program, const std::string &module_path) -> std::string {
+            std::string out;
+            if (index < names.size() && !names[index].empty()) out += names[index] + ": ";
+            out += type_to_string(type, program, module_path);
+            return out;
+        }
+
+        auto join_return_types(const std::vector<sema::ResolvedType> &returns, const std::vector<std::string> &names,
+                                const sema::Program &program, const std::string &module_path) -> std::string {
             if (returns.empty()) return "";
-            if (returns.size() == 1) return " -> " + type_to_string(returns[0], program, module_path);
+            if (returns.size() == 1) return " -> " + describe_return(returns[0], 0, names, program, module_path);
 
             std::string out = " -> (";
             for (size_t i = 0; i < returns.size(); ++i) {
                 if (i > 0) out += ", ";
-                out += type_to_string(returns[i], program, module_path);
+                out += describe_return(returns[i], i, names, program, module_path);
             }
             return out + ")";
         }
@@ -42,7 +53,9 @@ namespace lsp::handlers {
                                type_to_string(sym.type, program, module_path);
                     } else if constexpr (std::is_same_v<S, sema::FunctionSymbol>) {
                         std::string params = sym.decl ? format_params(sym.decl->params, sym.params, program, module_path) : "";
-                        return "fn " + name + "(" + params + ")" + join_return_types(sym.return_types, program, module_path);
+                        static const std::vector<std::string> kNoNames;
+                        const auto &return_names = sym.decl ? sym.decl->return_names : kNoNames;
+                        return "fn " + name + "(" + params + ")" + join_return_types(sym.return_types, return_names, program, module_path);
                     } else if constexpr (std::is_same_v<S, sema::ExtFunctionSymbol>) {
                         std::string params = sym.decl ? format_params(sym.decl->params, sym.params, program, module_path) : "";
                         std::string ret = sym.return_type ? " -> " + type_to_string(*sym.return_type, program, module_path) : "";
@@ -97,7 +110,9 @@ namespace lsp::handlers {
             std::string params = res.method && res.method->decl
                                       ? format_params(res.method->decl->params, res.method->param_types, result.sema_program, module_path)
                                       : "";
-            std::string ret = res.method ? join_return_types(res.method->return_types, result.sema_program, module_path) : "";
+            static const std::vector<std::string> kNoNames;
+            const auto &return_names = res.method && res.method->decl ? res.method->decl->return_names : kNoNames;
+            std::string ret = res.method ? join_return_types(res.method->return_types, return_names, result.sema_program, module_path) : "";
             return hover_json("fn " + res.name + "(" + params + ")" + ret);
         }
 

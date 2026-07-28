@@ -43,11 +43,22 @@ param         ::= [ 'mut' ] IDENT ':' type [ '=' expr ]  (* typed, optional defa
                | [ 'mut' ] IDENT ':=' expr               (* inferred type, default required *)
                | IDENT ':' '...' type                    (* native variadic; must be the last parameter *)
 
-return_types  ::= '->' type                       (* single return *)
-               | '->' '(' type { ',' type } ')'  (* multi-return *)
+return_types  ::= '->' ret_item                                  (* single return *)
+               | '->' '(' ret_item { ',' ret_item } ')'         (* multi-return *)
+
+ret_item      ::= [ IDENT ':' ] type   (* the 'IDENT :' name is optional and purely
+                                          cosmetic — self-documenting, no functional
+                                          effect (no implicit bare-return binding) *)
 ```
 
 `pub`, if present, comes after the attribute: `@naked pub fn f() { ... }`, never `pub @naked fn f() { ... }`.
+
+A return type (single or, per-entry, within a multi-return list) may optionally be named —
+`-> (index: usize, found: bool)` — purely to make the signature self-documenting (e.g. in
+LSP hover). The name has no functional effect: it does not create an implicit binding, and
+`return` still requires explicit values (`return 0, false`), exactly as with unnamed return
+types. Naming is independent per entry — a multi-return list may mix named and unnamed
+entries.
 
 ### Declaration Attributes
 

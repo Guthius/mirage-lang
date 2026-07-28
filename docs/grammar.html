@@ -95,9 +95,20 @@ declaration   ::= [ attribute ] [ 'pub' ] fn_decl   <span class="bnf-cm">-- attr
 param         ::= [ 'mut' ] IDENT ':' type
                | IDENT ':' '...' type   <span class="bnf-cm">-- native variadic; must be the last parameter</span>
 
-return_types  ::= '->' type
-               | '->' '(' type { ',' type } ')'</code></pre>
+return_types  ::= '->' ret_item
+               | '->' '(' ret_item { ',' ret_item } ')'
+
+ret_item      ::= [ IDENT ':' ] type   <span class="bnf-cm">-- the 'IDENT :' name is optional and purely
+                                          cosmetic (self-documenting); no functional effect</span></code></pre>
       <p><code>pub</code>, if present, comes after the attribute: <code>@naked pub fn f() { ... }</code>, never <code>pub @naked fn f() { ... }</code>.</p>
+      <p>
+        A return type (single, or per-entry within a multi-return list) may optionally be named
+        &mdash; <code>-&gt; (index: usize, found: bool)</code> &mdash; purely to make the signature
+        self-documenting (e.g. in editor hover). It has no functional effect: it does not create
+        an implicit binding, and <code>return</code> still requires explicit values, exactly as
+        with unnamed return types. Naming is independent per entry, so a multi-return list may
+        mix named and unnamed entries.
+      </p>
 
       <h3>Declaration Attributes</h3>
       <pre><code>attribute     ::= '@' IDENT                              <span class="bnf-cm">-- single, no arguments</span>

@@ -1029,12 +1029,22 @@ fn name(param1: Type1, mut param2: Type2) -> ReturnType {
 pub fn name(p: Type) -> (T1, T2) {
     // multi-return
 }
+
+fn binary_search(base: anyptr, elem_count: usize, elem_size: usize, key: anyptr) -> (index: usize, found: bool) {
+    // named multi-return, purely self-documenting
+}
 ```
 
 - Parameters are immutable by default; `mut` makes a parameter mutable.
 - `pub` makes the function visible to importing modules.
 - Multi-return: `-> (T1, T2, ...)` syntax.
 - Void return: omit the `->` clause.
+- **Named return values**: any return type (single or per-entry in a multi-return list) may
+  optionally be prefixed with `name:` — `-> (index: usize, found: bool)`. This is purely
+  cosmetic (self-documenting signatures, shown in LSP hover); it has no functional effect.
+  It does **not** create an implicit binding — `return` still requires explicit values
+  (`return 0, false`), exactly as with unnamed return types. Naming is independent per
+  entry, so a multi-return list may mix named and unnamed entries.
 
 ### Default Parameter Values
 

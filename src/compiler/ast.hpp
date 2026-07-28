@@ -324,10 +324,13 @@ namespace ast {
         };
 
         struct Method {
-            std::string name;
+    std::string name;
             bool is_mut_self;
             std::vector<Param> params; // non-self params; no 'mut', no variadics (rejected by parser)
             std::vector<Type> return_types;
+            std::vector<std::string> return_names; // parallel to return_types; "" = unnamed.
+                                                    // Cosmetic only (e.g. LSP hover/self-documenting
+                                                    // signatures) — never used for matching or identity.
             SourceLocation location;      // 'fn' keyword
             SourceLocation self_location; // the 'self' token itself
         };
@@ -850,6 +853,9 @@ namespace ast {
         std::string name;
         std::vector<Param> params;
         std::vector<Type> return_types;
+        std::vector<std::string> return_names; // parallel to return_types; "" = unnamed.
+                                                // Cosmetic only (e.g. LSP hover/self-documenting
+                                                // signatures) — never used for matching or identity.
         Stmt body;
         SourceLocation location;
     };
@@ -921,6 +927,9 @@ namespace ast {
             std::string name;
             std::vector<Param> params; // non-self params
             std::vector<Type> return_types;
+            std::vector<std::string> return_names; // parallel to return_types; "" = unnamed.
+                                                    // Cosmetic only (e.g. LSP hover/self-documenting
+                                                    // signatures) — never used for matching or identity.
             Stmt body;
             SourceLocation location;      // 'fn' keyword
             SourceLocation self_location; // the 'self' token itself

@@ -101,6 +101,18 @@
       <p>Use <code>_</code> to discard one or more return values:</p>
       <pre><code><span class="kw">mut</span> <span class="var">q</span>, <span class="var">_</span> := <span class="fn">divmod</span>(<span class="num">17</span>, <span class="num">5</span>)   <span class="cmt">// only keep quotient</span></code></pre>
 
+      <h3>Named Return Values</h3>
+      <p>
+        Each return type &mdash; single or per-entry in a multi-return list &mdash; may optionally
+        be prefixed with a name, purely to make the signature self-documenting (e.g. in editor
+        hover). Naming has <strong>no functional effect</strong>: it does not create an implicit
+        binding, and <code>return</code> still requires explicit values, exactly as with unnamed
+        return types.
+      </p>
+      <pre><code><span class="kw">fn</span> <span class="fn">binary_search</span>(<span class="var">base</span>: <span class="ty">anyptr</span>, <span class="var">elem_count</span>: <span class="ty">usize</span>, <span class="var">elem_size</span>: <span class="ty">usize</span>, <span class="var">key</span>: <span class="ty">anyptr</span>) -&gt; (<span class="var">index</span>: <span class="ty">usize</span>, <span class="var">found</span>: <span class="ty">bool</span>) {
+    <span class="kw">return</span> <span class="num">0</span>, <span class="kw">false</span>   <span class="cmt">// still explicit values, not the names above</span>
+}</code></pre>
+
       <h2>Fallible Functions (Typed Errors)</h2>
       <p>
         A function is <em>fallible</em> when its last return type is <code>error(T)</code> (a single
