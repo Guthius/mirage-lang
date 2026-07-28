@@ -45,6 +45,7 @@
         <li><a href="comptime-config.html">Compile-Time Config</a></li>
         <li><a href="inline-assembly.html">Inline Assembly</a></li>
         <li><a href="attributes.html">Declaration Attributes</a></li>
+        <li><a href="reflection.html">Reflection</a></li>
       </ul>
       <div class="sidebar-section">Reference</div>
       <ul>
@@ -127,6 +128,10 @@
         <div class="feature-card">
           <h3>Declaration Attributes</h3>
           <p><code>@naked</code>, <code>@no_return</code>, <code>@always_inline</code>, <code>@section("...")</code>, and <code>@init</code> attach compiler-recognized metadata to a function, including automatic, dependency-ordered module initializers.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Reflection</h3>
+          <p><code>type_of</code> and <code>type_info_of</code> plus the <code>any</code> fat-pointer type give type-erased values a stable identity and, for compound types, a runtime-inspectable field/variant description.</p>
         </div>
       </div>
 
