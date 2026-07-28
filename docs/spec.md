@@ -2503,11 +2503,11 @@ error: expected a register name after 'asm ->'
 
 `@name` / `@name(args)` precedes a `fn` declaration, attaching compiler-recognized metadata
 to it. Attributes are currently legal only on `fn` (not `ext fn`, methods inside `impl`
-blocks, or any other declaration kind), and `pub`, if present, comes before the attribute:
+blocks, or any other declaration kind), and `pub`, if present, comes after the attribute:
 
 ```mirage
-pub @naked
-fn raw_entry() {
+@naked
+pub fn raw_entry() {
     asm { ret }
 }
 ```

@@ -68,14 +68,14 @@
       </p>
 
       <div class="callout">
-        <div class="callout-title"><code>pub</code> comes first</div>
-        If a declaration is both <code>pub</code> and attributed, <code>pub</code> precedes the
-        attribute:
-        <pre><code><span class="kw">pub</span> <span class="kw">@naked</span>
-<span class="kw">fn</span> <span class="fn">raw_entry</span>() {
+        <div class="callout-title">the attribute comes first</div>
+        If a declaration is both <code>pub</code> and attributed, the attribute precedes
+        <code>pub</code>:
+        <pre><code><span class="kw">@naked</span>
+<span class="kw">pub</span> <span class="kw">fn</span> <span class="fn">raw_entry</span>() {
     <span class="kw">asm</span> { ret }
 }</code></pre>
-        Never <code>@naked pub fn ...</code> — that order is a parse error.
+        Never <code>pub @naked fn ...</code> — that order is a parse error.
       </div>
 
       <h2>Syntax</h2>

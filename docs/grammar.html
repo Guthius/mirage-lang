@@ -76,7 +76,7 @@
       <h2>Top-Level Structure</h2>
       <pre><code>program       ::= { declaration } EOF
 
-declaration   ::= [ 'pub' ] [ attribute ] fn_decl   <span class="bnf-cm">-- attribute: only legal here, see below</span>
+declaration   ::= [ attribute ] [ 'pub' ] fn_decl   <span class="bnf-cm">-- attribute: only legal here, see below</span>
                | [ 'pub' ] ext_fn_decl
                | [ 'pub' ] type_decl
                | [ 'pub' ] var_decl
@@ -96,7 +96,7 @@ param         ::= [ 'mut' ] IDENT ':' type
 
 return_types  ::= '->' type
                | '->' '(' type { ',' type } ')'</code></pre>
-      <p><code>pub</code>, if present, precedes the attribute: <code>pub @naked fn f() { ... }</code>, never <code>@naked pub fn f() { ... }</code>.</p>
+      <p><code>pub</code>, if present, comes after the attribute: <code>@naked pub fn f() { ... }</code>, never <code>pub @naked fn f() { ... }</code>.</p>
 
       <h3>Declaration Attributes</h3>
       <pre><code>attribute     ::= '@' IDENT                              <span class="bnf-cm">-- single, no arguments</span>

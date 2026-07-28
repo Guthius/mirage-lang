@@ -9,7 +9,7 @@ This grammar is derived directly from the parser in `src/compiler/ast.cpp`. Term
 ```ebnf
 program       ::= { declaration } EOF
 
-declaration   ::= [ 'pub' ] [ attribute ] fn_decl   (* attribute: only legal here — see below *)
+declaration   ::= [ attribute ] [ 'pub' ] fn_decl   (* attribute: only legal here — see below *)
                | [ 'pub' ] ext_fn_decl
                | [ 'pub' ] type_decl
                | [ 'pub' ] var_decl
@@ -47,7 +47,7 @@ return_types  ::= '->' type                       (* single return *)
                | '->' '(' type { ',' type } ')'  (* multi-return *)
 ```
 
-`pub`, if present, precedes the attribute: `pub @naked fn f() { ... }`, never `@naked pub fn f() { ... }`.
+`pub`, if present, comes after the attribute: `@naked pub fn f() { ... }`, never `pub @naked fn f() { ... }`.
 
 ### Declaration Attributes
 

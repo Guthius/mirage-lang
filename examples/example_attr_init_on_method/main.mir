@@ -9,8 +9,8 @@ type Point = struct {
 }
 
 impl Point {
-    pub @init
-    fn bad(self) {
+    @init
+    pub fn bad(self) {
     }
 }
 

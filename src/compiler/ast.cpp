@@ -2944,22 +2944,24 @@ namespace ast {
 
     auto parse_impl_method(Parser &parser, const bool allow_pub) -> ImplDecl::Function {
         const auto location = parser.current_location();
+
+        // Parsed permissively here (any of the five known attribute names) exactly like a
+        // free function's attribute clause — sema rejects '@init' specifically on a method
+        // (see sema_attributes.cpp) rather than the parser vetoing every attribute name
+        // uniformly, since the other four have no stated restriction against methods. Parsed
+        // before 'pub', matching parse_decl's attribute-before-pub ordering.
+        auto attributes = parse_attribute_clause(parser);
+        if (!attributes.empty()) {
+            // See parse_decl's identical skip: an attribute clause's last token is always an
+            // ASI trigger, so a virtual ';' separates it from 'pub'/'fn' on the next line.
+            skip_semicolons(parser);
+        }
+
         const bool is_pub = parser.match(TokenKind::KwPub);
         if (is_pub && !allow_pub) {
             parser.report_error(
                 location,
                 "'pub' is not allowed on methods inside 'impl TRAIT for TYPE'; the trait's own visibility governs");
-        }
-
-        // Parsed permissively here (any of the five known attribute names) exactly like a
-        // free function's attribute clause — sema rejects '@init' specifically on a method
-        // (see sema_attributes.cpp) rather than the parser vetoing every attribute name
-        // uniformly, since the other four have no stated restriction against methods.
-        auto attributes = parse_attribute_clause(parser);
-        if (!attributes.empty()) {
-            // See parse_decl's identical skip: an attribute clause's last token is always an
-            // ASI trigger, so a virtual ';' separates it from 'fn' on the next line.
-            skip_semicolons(parser);
         }
 
         parser.expect(TokenKind::KwFn, "'fn'");
@@ -3153,22 +3155,24 @@ namespace ast {
     }
 
     auto parse_decl(Parser &parser, const bool top_level) -> std::optional<Decl> {
-        const auto is_pub = !top_level || parser.match(TokenKind::KwPub);
-
         // Attributes are currently legal only immediately before a 'fn' declaration (see
-        // Attribute's doc comment in ast.hpp). Parsed unconditionally here, right after
-        // 'is_pub', and rejected-after-parse for every other decl kind below — the same
-        // "parse permissively, reject with a precise diagnostic" idiom this function already
-        // uses for 'is_pub' on 'impl'/'when'/'#link'/'#error'/'#warn'/'asm'.
+        // Attribute's doc comment in ast.hpp). Parsed unconditionally here, before 'is_pub'
+        // (attribute-before-pub ordering: '@naked pub fn f()', never 'pub @naked fn f()'), and
+        // rejected-after-parse for every other decl kind below — the same "parse permissively,
+        // reject with a precise diagnostic" idiom this function already uses for 'is_pub' on
+        // 'impl'/'when'/'#link'/'#error'/'#warn'/'asm'.
         //
         // Every attribute clause's last token (an Identifier for '@name'/grouped members, an
         // RParen for '@name(args)'/'@(...)') is an ASI trigger, so the idiomatic one-clause-
         // per-line style (see spec.md's examples) leaves a virtual ';' between the clause and
-        // 'fn' on the next line — skip it here before checking what follows.
+        // 'pub'/'fn' on the next line — skip it here before checking what follows.
         auto attributes = parse_attribute_clause(parser);
         if (!attributes.empty()) {
             skip_semicolons(parser);
         }
+
+        const auto is_pub = !top_level || parser.match(TokenKind::KwPub);
+
         if (!attributes.empty() && !parser.check(TokenKind::KwFn)) {
             parser.report_error(attributes.front().location, "attributes are only allowed on 'fn' declarations");
         }
