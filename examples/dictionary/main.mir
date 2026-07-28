@@ -27,16 +27,16 @@ fn hash(mut k: anyptr, count: usize) -> u32 {
 
 impl dictionary(K: type, V: type) {
     pub fn put(self, key: K, value: V) {
-        const index := hash(&key, sizeof(K))
+        const index := hash(&key, size_of(K))
         mut cur := self.buckets[index]
         while cur {
-            if mem.compare(&cur.key, &key, sizeof(K)) == 0 {
+            if mem.compare(&cur.key, &key, size_of(K)) == 0 {
                 cur.value = value
                 return
             }
             cur = cur.next
         }
-        mut new_entry: *entry(K, V) = mem.alloc(sizeof(entry(K, V)))
+        mut new_entry: *entry(K, V) = mem.alloc(size_of(entry(K, V)))
         new_entry.key = key
         new_entry.value = value
         new_entry.next = self.buckets[index]
@@ -44,10 +44,10 @@ impl dictionary(K: type, V: type) {
     }
 
     pub fn try_get(self, key: K, mut *value: V) -> bool {
-        const index := hash(&key, sizeof(K))
+        const index := hash(&key, size_of(K))
         mut cur := self.buckets[index]
         while cur {
-            if mem.compare(&cur.key, &key, sizeof(K)) == 0 {
+            if mem.compare(&cur.key, &key, size_of(K)) == 0 {
                 value.* = cur.value
                 return true
             }
@@ -57,11 +57,11 @@ impl dictionary(K: type, V: type) {
     }
 
     pub fn remove(self, key: K) -> bool {
-        const index := hash(&key, sizeof(K))
+        const index := hash(&key, size_of(K))
         mut cur := &self.buckets[index]
         while cur.* != nil {
              const temp := cur.*
-            if mem.compare(&temp.key, &key, sizeof(K)) == 0 {
+            if mem.compare(&temp.key, &key, size_of(K)) == 0 {
                cur.* = temp.next
                mem.free(temp)
                return true

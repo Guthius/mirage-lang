@@ -47,8 +47,8 @@ pub fn main() -> i32 {
         return 3
     }
 
-    // sizeof reflects tag + alignment + max payload size
-    const sz: usize = sizeof(Shape)
+    // size_of reflects tag + alignment + max payload size
+    const sz: usize = size_of(Shape)
     if sz < 16 {
         return 4
     }

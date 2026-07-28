@@ -10,7 +10,7 @@ type block_header = struct {
     next: *block_header
 }
 
-const block_header_size := align_up(sizeof(block_header))
+const block_header_size := align_up(size_of(block_header))
 
 mut heap_head: *block_header = nil
 mut heap_tail: *block_header = nil

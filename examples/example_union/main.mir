@@ -32,8 +32,8 @@ pub fn main() -> i32 {
         return 3
     }
 
-    // sizeof reflects the largest member (f64 = 8 bytes)
-    const sz: usize = sizeof(NumUnion)
+    // size_of reflects the largest member (f64 = 8 bytes)
+    const sz: usize = size_of(NumUnion)
     if sz != 8 {
         return 4
     }

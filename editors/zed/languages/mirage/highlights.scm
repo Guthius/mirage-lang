@@ -98,7 +98,7 @@
 
 ["const" "mut" "pub" "packed"] @keyword.modifier
 
-["sizeof" "type_of" "type_info_of" "len" "cast" "stackalloc" "import" "import_bin"] @function.builtin
+["size_of" "align_of" "type_of" "type_info_of" "len" "cast" "stackalloc" "import" "import_bin"] @function.builtin
 
 ; Operators and punctuation
 

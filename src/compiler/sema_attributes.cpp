@@ -267,6 +267,8 @@ namespace sema {
                     walk_expr_for_foreign_refs(v->operand, locals, module_path, program, on_foreign_ref);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                     walk_expr_for_foreign_refs(v->operand, locals, module_path, program, on_foreign_ref);
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) {
+                    walk_expr_for_foreign_refs(v->operand, locals, module_path, program, on_foreign_ref);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
                     walk_expr_for_foreign_refs(v->operand, locals, module_path, program, on_foreign_ref);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeInfoOfExpr>>) {

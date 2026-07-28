@@ -103,8 +103,12 @@ namespace sema {
                         return true;
                     }
 
+                    if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) {
+                        return true;
+                    }
+
                     // Compile-time constant for every operand EXCEPT one whose resolved type is
-                    // 'any' — that case lowers to a runtime load of the any value's 'id' field
+                    // 'any' — that case lowers to a runtime read of the any value's type id
                     // (see codegen.cpp's TypeOfExpr case).
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
                         if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {

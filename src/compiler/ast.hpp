@@ -147,6 +147,7 @@ namespace ast {
     };
 
     struct SizeOfExpr;
+    struct AlignOfExpr;
     struct TypeOfExpr;
     struct TypeInfoOfExpr;
     struct OptionExpr;
@@ -223,6 +224,7 @@ namespace ast {
         ImportExpr,
         ImportBinExpr,
         std::unique_ptr<SizeOfExpr>,
+        std::unique_ptr<AlignOfExpr>,
         std::unique_ptr<TypeOfExpr>,
         std::unique_ptr<TypeInfoOfExpr>,
         std::unique_ptr<OptionExpr>,
@@ -434,10 +436,18 @@ namespace ast {
         SourceLocation location;
     };
 
+    // 'align_of(expr)' / 'align_of(Type)' — the operand's required alignment in bytes, as
+    // 'usize'. Operand disambiguation (type vs. expr) follows the exact same starts_type_only
+    // rule as SizeOfExpr above; always a compile-time constant.
+    struct AlignOfExpr {
+        Expr operand;
+        SourceLocation location;
+    };
+
     // 'type_of(expr)' / 'type_of(Type)' — the unique 'type' identifier of the operand's type.
     // Operand disambiguation (type vs. expr) follows the exact same starts_type_only rule as
     // SizeOfExpr above. Compile-time constant for every operand except one whose resolved type
-    // is 'any' (a runtime load of the any value's 'id' field) — see is_constant_expr_impl.
+    // is 'any' (a runtime read of the any value's type id) — see is_constant_expr_impl.
     struct TypeOfExpr {
         Expr operand;
         SourceLocation location;

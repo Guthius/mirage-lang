@@ -78,7 +78,7 @@ pub fn main() -> i32 {
         return 11
     }
 
-    if sizeof(Stream_Modes) != 2 {
+    if size_of(Stream_Modes) != 2 {
         return 12
     }
 

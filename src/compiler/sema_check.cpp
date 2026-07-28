@@ -1430,17 +1430,40 @@ namespace sema {
                     return resolve_import_bin_type(module_path, v.path, v.location, program, diag);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
-                    // sizeof on a (possibly qualified) TYPE name - checked
-                    // first via try_resolve_namespace_chain so `sizeof(a.b.T)`
+                    // size_of on a (possibly qualified) TYPE name - checked
+                    // first via try_resolve_namespace_chain so `size_of(a.b.T)`
                     // resolves through arbitrarily many namespace hops, same
                     // as any other qualified type reference. Falls back to
                     // evaluating the operand as an ordinary value expression
-                    // (runtime sizeof) if it isn't a type-name shape. Operand
+                    // (runtime size_of) if it isn't a type-name shape. Operand
                     // shapes the parser can't spell as an IdentExpr/MemberExpr
                     // (pointer/array/slice/fn-ptr types, builtin type keywords)
                     // arrive as a TypeExpr instead and fall through to the
                     // generic check_expr call below, which resolves them via
                     // the TypeExpr case further down in this dispatch.
+                    if (auto *ident = std::get_if<ast::IdentExpr>(&v->operand)) {
+                        const auto mod_it = program.modules.find(module_path);
+                        if (mod_it != program.modules.end()) {
+                            if (auto sym_it = mod_it->second.symbols.find(ident->name); sym_it != mod_it->second.symbols.end() && std::holds_alternative<TypeSymbol>(sym_it->second)) {
+                                return ResolvedType{.kind = TypeKind::USize};
+                            }
+                        }
+                    } else if (auto *mem = std::get_if<std::unique_ptr<ast::MemberExpr>>(&v->operand)) {
+                        if (auto target_module = try_resolve_namespace_chain((*mem)->object, module_path, locals, program)) {
+                            auto mod_it = program.modules.find(*target_module);
+                            if (mod_it != program.modules.end()) {
+                                if (auto sym_it = mod_it->second.symbols.find((*mem)->member); sym_it != mod_it->second.symbols.end() && std::holds_alternative<TypeSymbol>(sym_it->second)) {
+                                    return ResolvedType{.kind = TypeKind::USize};
+                                }
+                            }
+                        }
+                    }
+                    check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    return ResolvedType{.kind = TypeKind::USize};
+
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) {
+                    // Mirrors SizeOfExpr's case exactly (see comments above) — same type-name
+                    // special lookup, same fallback to a generic expr, same USize result type.
                     if (auto *ident = std::get_if<ast::IdentExpr>(&v->operand)) {
                         const auto mod_it = program.modules.find(module_path);
                         if (mod_it != program.modules.end()) {
@@ -1532,7 +1555,7 @@ namespace sema {
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeExpr>>) {
                     // A Type wrapped in an Expr slot (currently only produced by the parser for
-                    // sizeof operands that can't be spelled as an ordinary expression - see
+                    // size_of/align_of operands that can't be spelled as an ordinary expression - see
                     // starts_type_only in ast.cpp). Resolves like any other type reference; the
                     // result is cached into expr_types by the generic caching below, which is
                     // how codegen's sizeof_operand and type_resolver's sizeof_expr_operand read

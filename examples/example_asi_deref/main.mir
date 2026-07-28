@@ -19,7 +19,7 @@ fn make_point(x: i32, y: i32) -> Point {
 }
 
 fn alloc_point() -> *Point {
-    mut point_ptr: *Point = cast(mem.malloc(sizeof(Point)), *Point)
+    mut point_ptr: *Point = cast(mem.malloc(size_of(Point)), *Point)
     point_ptr.* = make_point(1, 2)
     return point_ptr
 }

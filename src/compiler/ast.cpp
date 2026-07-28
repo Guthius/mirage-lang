@@ -53,7 +53,7 @@ namespace ast {
         }
 
         // True for tokens that can only ever begin a Type in this grammar, never an Expr -
-        // lets sizeof's operand disambiguate a type from a value with a single token of
+        // lets size_of's operand disambiguate a type from a value with a single token of
         // lookahead instead of backtracking. Prefix '*' always means pointer-type (dereference
         // is postfix '.*', see parse_postfix); '[' only starts array/slice type syntax (array
         // literals use '{...}'); struct/enum/union/fn only appear in type/decl position, never
@@ -358,6 +358,7 @@ namespace ast {
             case TokenKind::Ampersand:
             case TokenKind::KwCast:
             case TokenKind::KwSizeOf:
+            case TokenKind::KwAlignOf:
             case TokenKind::KwTypeOf:
             case TokenKind::KwTypeInfoOf:
             case TokenKind::KwStackAlloc:
@@ -978,6 +979,28 @@ namespace ast {
                 });
             }
 
+            if (parser.check(TokenKind::KwAlignOf)) {
+                parser.advance();
+                parser.expect(TokenKind::LParen, "'('");
+
+                auto operand = starts_type_only(parser)
+                    ? [&]() -> Expr {
+                          const auto type_location = parser.current_location();
+                          return std::make_unique<TypeExpr>(TypeExpr{
+                              .type = parse_type(parser),
+                              .location = type_location,
+                          });
+                      }()
+                    : parse_expr(parser);
+
+                parser.expect(TokenKind::RParen, "')'");
+
+                return std::make_unique<AlignOfExpr>(AlignOfExpr{
+                    .operand = std::move(operand),
+                    .location = location,
+                });
+            }
+
             if (parser.check(TokenKind::KwTypeOf)) {
                 parser.advance();
                 parser.expect(TokenKind::LParen, "'('");
@@ -1004,9 +1027,9 @@ namespace ast {
                 parser.advance();
                 parser.expect(TokenKind::LParen, "'('");
 
-                // Unlike sizeof/type_of, the operand is always a plain expr — 'type_of(i32)'
-                // itself parses as an ordinary primary expression here, no starts_type_only
-                // gating needed.
+                // Unlike size_of/align_of/type_of, the operand is always a plain expr —
+                // 'type_of(i32)' itself parses as an ordinary primary expression here, no
+                // starts_type_only gating needed.
                 auto operand = parse_expr(parser);
 
                 parser.expect(TokenKind::RParen, "')'");

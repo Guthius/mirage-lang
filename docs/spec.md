@@ -67,7 +67,7 @@ Type System".
 
 ### The `type` Type
 
-`type` is a compile-time-unique identifier for a type, backed by a `u64` at the ABI level (`sizeof(type)` is 8, and it participates in ordinary struct/array layout like any other 8-byte scalar). It supports only `==` and `!=` — no arithmetic, no ordering.
+`type` is a compile-time-unique identifier for a type, backed by a `u64` at the ABI level (`size_of(type)` is 8, and it participates in ordinary struct/array layout like any other 8-byte scalar). It supports only `==` and `!=` — no arithmetic, no ordering.
 
 A `type` value is produced with `type_of` (below); its runtime shape is otherwise opaque — there is no literal syntax for a `type` value.
 
@@ -115,7 +115,7 @@ const t2 := type_of(my_i32_var)    // compile-time constant — uses the variabl
 const t3 := type_of(my_any_var)    // RUNTIME — reads my_any_var's type id
 ```
 
-`type_of(expr_or_type)` returns the operand's `type` identity. The operand may be a type written directly (`type_of(u64)`, `type_of(*u8)`, `type_of(SomeStruct)`) or an arbitrary expression (whose *static* type is used) — the parser disambiguates the two exactly like `sizeof` (§ grammar note 12). `type_of` is a compile-time constant for every operand **except** one whose resolved type is `any`, which instead lowers to a runtime read of the value's type id.
+`type_of(expr_or_type)` returns the operand's `type` identity. The operand may be a type written directly (`type_of(u64)`, `type_of(*u8)`, `type_of(SomeStruct)`) or an arbitrary expression (whose *static* type is used) — the parser disambiguates the two exactly like `size_of`/`align_of` (§ grammar note 12). `type_of` is a compile-time constant for every operand **except** one whose resolved type is `any`, which instead lowers to a runtime read of the value's type id.
 
 `type_info_of(expr)` returns a runtime descriptor pointer (`anyptr`) for a `type` or `any` operand — any other operand type is a sema error. Cast the result to `*Type_Info` (defined by the `runtime/type_info` module, not built into the compiler) to inspect it:
 
@@ -652,15 +652,25 @@ Valid casts:
 - Pointer/anyptr → slice (requires length expression)
 - `any` → a pointer type or `anyptr` only — extracts the fat value's data word; no other target type is legal (`cast(any_value, i32)` is a sema error). See [The `any` Type](#1-primitive-types) above.
 
-### `sizeof`
+### `size_of`
 
 ```mirage
-sizeof(expr)
-sizeof(TypeName)
-sizeof(module.TypeName)
+size_of(expr)
+size_of(TypeName)
+size_of(module.TypeName)
 ```
 
-Returns the size in bytes as `usize`. The operand may be an arbitrary expression *or* a type written directly — including built-in type keywords: `sizeof(u64)`, `sizeof(*u8)`, `sizeof([]T)`, and `sizeof(fn(i32) -> i32)` are all valid. The parser disambiguates by looking ahead: anything that can only start a type (a built-in type keyword, `*`, `[`, `struct`, `enum`, `union`, `fn`, `trait`) is parsed as a type; otherwise the operand is parsed as a normal expression (which may itself simply name a type, e.g. `sizeof(module.TypeName)`).
+Returns the size in bytes as `usize`. The operand may be an arbitrary expression *or* a type written directly — including built-in type keywords: `size_of(u64)`, `size_of(*u8)`, `size_of([]T)`, and `size_of(fn(i32) -> i32)` are all valid. The parser disambiguates by looking ahead: anything that can only start a type (a built-in type keyword, `*`, `[`, `struct`, `enum`, `union`, `fn`, `trait`) is parsed as a type; otherwise the operand is parsed as a normal expression (which may itself simply name a type, e.g. `size_of(module.TypeName)`).
+
+### `align_of`
+
+```mirage
+align_of(expr)
+align_of(TypeName)
+align_of(module.TypeName)
+```
+
+Returns the required alignment in bytes as `usize`. Operand disambiguation, and every other rule (arbitrary expression or a type written directly), is identical to `size_of` above — `align_of(u64)`, `align_of(*u8)`, `align_of(SomeStruct)` are all valid. Always a compile-time constant.
 
 ### `type_of`
 
@@ -669,7 +679,7 @@ type_of(expr)
 type_of(TypeName)
 ```
 
-Returns the operand's unique `type` identity. Operand disambiguation is identical to `sizeof` above. Compile-time constant except when the operand's resolved type is `any`, in which case it's a runtime read of the value's type id. See [The `type` Type](#1-primitive-types) above.
+Returns the operand's unique `type` identity. Operand disambiguation is identical to `size_of`/`align_of` above. Compile-time constant except when the operand's resolved type is `any`, in which case it's a runtime read of the value's type id. See [The `type` Type](#1-primitive-types) above.
 
 ### `type_info_of`
 
@@ -2066,9 +2076,9 @@ error: bitset variant 'Small.Query' has value 7, producing bit index 8
        values.
 ```
 
-### `sizeof` / `alignof`
+### `size_of` / `align_of`
 
-`sizeof(BitsetType)` and `alignof(BitsetType)` equal the storage type's
+`size_of(BitsetType)` and `align_of(BitsetType)` equal the storage type's
 size/alignment (e.g. 2 bytes for `bitset(E, u16)`).
 
 ### Literals
@@ -2260,7 +2270,7 @@ pub fn main() -> i32 {
 
 The following identifiers are reserved by the language:
 
-`any` `asm` `bitset` `break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `import_bin` `in` `iota` `len` `macro` `match` `mut` `nil` `pub` `return` `return_err` `return_ok` `sizeof` `stackalloc` `struct` `switch` `trait` `true` `try` `type` `type_of` `type_info_of` `undefined` `union` `when` `while`
+`align_of` `any` `asm` `bitset` `break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `import_bin` `in` `iota` `len` `macro` `match` `mut` `nil` `pub` `return` `return_err` `return_ok` `size_of` `stackalloc` `struct` `switch` `trait` `true` `try` `type` `type_of` `type_info_of` `undefined` `union` `when` `while`
 
 `ext` is parsed as an identifier, not a keyword; it is used as the prefix
 for extern function declarations. `option`, `env`, `link`, and `warn` are
@@ -2281,7 +2291,7 @@ sigil (`@no_return`, `@naked`, `@always_inline`, `@section(...)`,
 The lexer also reserves the following identifiers, but nothing in the language currently uses them — writing any of them (e.g. as a variable or function name) is a parse error today, even though no feature consumes them yet:
 
 - **`namespace`** — likely reserved for an explicit namespace-declaration feature; not implemented.
-- **`offsetof`** — likely reserved as a future sibling to `sizeof` for computing a struct field's byte offset; not implemented.
+- **`offsetof`** — likely reserved as a future sibling to `size_of`/`align_of` for computing a struct field's byte offset; not implemented.
 
 `asm` is no longer in this list — see [Inline Assembly](#20-inline-assembly).
 

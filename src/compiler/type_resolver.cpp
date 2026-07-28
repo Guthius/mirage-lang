@@ -459,6 +459,33 @@ namespace sema {
                 return size_of(module_path, operand_type);
             }
 
+            // Mirrors sizeof_expr_operand() above exactly, substituting align_of() for size_of().
+            auto align_of_expr_operand(const std::string &module_path, const ast::AlignOfExpr &expr) -> uint64_t {
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&expr.operand)) {
+                    auto &mod = program.modules.at(module_path);
+                    if (const auto it = mod.symbols.find(ident->name); it != mod.symbols.end()) {
+                        if (std::holds_alternative<TypeSymbol>(it->second)) {
+                            return align_of(module_path, resolve_type_symbol(module_path, ident->name, program, diag, ident->location));
+                        }
+                    }
+                }
+
+                if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr.operand)) {
+                    if (const auto target = walk_namespace_chain(module_path, as_named_member(**member), program, diag, ast_program)) {
+                        const auto &mod = program.modules.at(target->module_path);
+                        if (const auto it = mod.symbols.find(target->name); it != mod.symbols.end()) {
+                            if (std::holds_alternative<TypeSymbol>(it->second)) {
+                                return align_of(target->module_path, resolve_type_symbol(target->module_path, target->name, program, diag, (*member)->location));
+                            }
+                        }
+                    }
+                }
+
+                LocalScope no_locals;
+                const auto operand_type = check_expr(expr.operand, no_locals, module_path, program, diag, std::nullopt, 0);
+                return align_of(module_path, operand_type);
+            }
+
             static auto as_named_member(const ast::MemberExpr &member) -> ast::NamedType {
                 std::vector<std::pair<std::string, SourceLocation>> parts;
                 const auto collect = [&](this const auto &self, const ast::Expr &expr) -> bool {
@@ -542,6 +569,9 @@ namespace sema {
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                             return sizeof_expr_operand(module_path, *v);
+
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) {
+                            return align_of_expr_operand(module_path, *v);
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                             return eval_integer_const_expr(v->value, module_path, macro_args);

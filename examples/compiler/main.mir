@@ -13,7 +13,7 @@ pub fn main() -> error(io.IoError) {
 
     const x: u32 = 5
 
-    hash_map.init(sizeof(x))
+    hash_map.init(size_of(x))
     hash_map.put("key_a", &x)
 
     return_ok

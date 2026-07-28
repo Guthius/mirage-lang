@@ -284,7 +284,7 @@ impl Dictionary {
             return true
         }
 
-        mut entry: *Node = malloc(sizeof(Node))
+        mut entry: *Node = malloc(size_of(Node))
         if entry == nil {
             return false
         }

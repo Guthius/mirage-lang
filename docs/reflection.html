@@ -82,7 +82,7 @@
         arithmetic, no ordering, and no literal syntax of its own. The only way to produce a
         <code>type</code> value is <code>type_of</code>.
       </p>
-      <pre><code><span class="kw">if</span> <span class="fn">sizeof</span>(<span class="ty">type</span>) != <span class="num">8</span> { <span class="cmt">// always false — type is 8 bytes</span>
+      <pre><code><span class="kw">if</span> <span class="fn">size_of</span>(<span class="ty">type</span>) != <span class="num">8</span> { <span class="cmt">// always false — type is 8 bytes</span>
     <span class="kw">return</span> <span class="num">1</span>
 }</code></pre>
 
@@ -95,8 +95,8 @@
         operand may be a type written directly (<code>type_of(u64)</code>,
         <code>type_of(*u8)</code>, <code>type_of(SomeStruct)</code>) or an arbitrary expression,
         whose <em>static</em> type is used — the parser disambiguates the two exactly like
-        <a href="types.html"><code>sizeof</code></a> does: a token that can only begin a type is
-        parsed as a type, anything else as an ordinary expression.
+        <a href="types.html"><code>size_of</code>/<code>align_of</code></a> do: a token that can
+        only begin a type is parsed as a type, anything else as an ordinary expression.
       </p>
       <p>
         Two <code>type_of</code> calls on the same type always compare equal, regardless of how

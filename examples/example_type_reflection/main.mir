@@ -1,5 +1,5 @@
 // example_type_reflection — positive-path coverage for the reflection system's Definition of
-// Done: sizeof(type)/sizeof(any), type_of identity/disambiguation, any coercion + cast-based
+// Done: size_of(type)/size_of(any), type_of identity/disambiguation, any coercion + cast-based
 // data access, and type_info_of on both a builtin scalar (nil) and a struct (byte-correct
 // fields). 'any' has no '.id'/'.data' fields — use type_of(a) and cast(a, *T)/cast(a, anyptr).
 
@@ -29,12 +29,19 @@ fn str_eq(a: []u8, b: []u8) -> bool {
 const point_type_id: type = type_of(Point)
 
 pub fn main() -> i32 {
-    // sizeof(type) == 8, sizeof(any) == 16.
-    if sizeof(type) != 8 { return 1 }
-    if sizeof(any) != 16 { return 2 }
+    // size_of(type) == 8, size_of(any) == 16.
+    if size_of(type) != 8 { return 1 }
+    if size_of(any) != 16 { return 2 }
+
+    // align_of: type operands (same disambiguation rule as size_of), builtin scalars, and
+    // a struct whose alignment is its widest field's (i32, 4 bytes).
+    if align_of(i32) != 4 { return 30 }
+    if align_of(u8) != 1 { return 31 }
+    if align_of(any) != 8 { return 32 }
+    if align_of(Point) != 4 { return 33 }
 
     // type_of identity: builtin, named type, and expression operands (same disambiguation
-    // rule as sizeof).
+    // rule as size_of).
     if type_of(i32) != type_of(i32) { return 3 }
     if type_of(i32) == type_of(u32) { return 4 }
     const my_i32: i32 = 42
@@ -42,6 +49,7 @@ pub fn main() -> i32 {
     if type_of(Point) != point_type_id { return 6 }
     const p: Point = {.x = 1, .y = 2}
     if type_of(p) != type_of(Point) { return 7 }
+    if align_of(p) != 4 { return 34 } // align_of with an expr operand
 
     // 'any' coercion (addressable source) + type_of/cast-based access (any has no fields).
     mut x: i32 = 99

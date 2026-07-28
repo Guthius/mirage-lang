@@ -35,7 +35,8 @@ auto token_kind_name(const TokenKind kind) -> const char * {
     case TokenKind::KwNil:           return "KW_NIL";
     case TokenKind::KwTrue:          return "KW_TRUE";
     case TokenKind::KwFalse:         return "KW_FALSE";
-    case TokenKind::KwSizeOf:        return "KW_SIZEOF";
+    case TokenKind::KwSizeOf:        return "KW_SIZE_OF";
+    case TokenKind::KwAlignOf:       return "KW_ALIGN_OF";
     case TokenKind::KwTypeOf:        return "KW_TYPEOF";
     case TokenKind::KwTypeInfoOf:    return "KW_TYPEINFOOF";
     case TokenKind::KwOffsetOf:      return "KW_OFFSETOF";

@@ -162,7 +162,7 @@
 
       <pre><code><span class="kw">mut</span> <span class="var">arr</span>: [<span class="num">5</span>]<span class="ty">i32</span> = {<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>}   <span class="cmt">// partial init; remaining elements zeroed</span>
 <span class="kw">const</span> <span class="var">n</span>: <span class="ty">usize</span> = <span class="kw">len</span>(<span class="var">arr</span>)      <span class="cmt">// 5</span>
-<span class="kw">const</span> <span class="var">sz</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(<span class="var">arr</span>)   <span class="cmt">// 20 bytes</span>
+<span class="kw">const</span> <span class="var">sz</span>: <span class="ty">usize</span> = <span class="kw">size_of</span>(<span class="var">arr</span>)   <span class="cmt">// 20 bytes</span>
 <span class="var">arr</span>[<span class="num">0</span>] = <span class="num">99</span>                      <span class="cmt">// index access</span></code></pre>
 
       <p>Arrays are <strong>value types</strong> — assigning an array copies all elements.</p>
@@ -266,16 +266,18 @@
         <li>Pointer or <code>anyptr</code> → slice with length: <code>cast(p, []T, n)</code></li>
       </ul>
 
-      <h2>The <code>sizeof</code> and <code>len</code> Operators</h2>
-      <pre><code><span class="kw">const</span> <span class="var">sz</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(<span class="var">my_struct</span>)   <span class="cmt">// size of a value</span>
-<span class="kw">const</span> <span class="var">sz2</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(<span class="ty">u64</span>)      <span class="cmt">// size of a type keyword works too</span>
-<span class="kw">const</span> <span class="var">sz3</span>: <span class="ty">usize</span> = <span class="kw">sizeof</span>(*<span class="ty">u8</span>)      <span class="cmt">// size of a pointer type</span>
+      <h2>The <code>size_of</code>, <code>align_of</code>, and <code>len</code> Operators</h2>
+      <pre><code><span class="kw">const</span> <span class="var">sz</span>: <span class="ty">usize</span> = <span class="kw">size_of</span>(<span class="var">my_struct</span>)   <span class="cmt">// size of a value</span>
+<span class="kw">const</span> <span class="var">sz2</span>: <span class="ty">usize</span> = <span class="kw">size_of</span>(<span class="ty">u64</span>)      <span class="cmt">// size of a type keyword works too</span>
+<span class="kw">const</span> <span class="var">sz3</span>: <span class="ty">usize</span> = <span class="kw">size_of</span>(*<span class="ty">u8</span>)      <span class="cmt">// size of a pointer type</span>
+<span class="kw">const</span> <span class="var">al</span>:  <span class="ty">usize</span> = <span class="kw">align_of</span>(<span class="var">my_struct</span>)  <span class="cmt">// required alignment of a value</span>
 <span class="kw">const</span> <span class="var">n</span>:  <span class="ty">usize</span> = <span class="kw">len</span>(<span class="var">my_array</span>)        <span class="cmt">// element count of array or slice</span></code></pre>
 
       <div class="callout">
         <div class="callout-title">Note</div>
-        <code>sizeof</code>'s operand can be either a value expression or a type written directly —
-        including built-in type keywords, pointer types, slice types, and function pointer types.
+        <code>size_of</code>'s and <code>align_of</code>'s operand can each be either a value
+        expression or a type written directly — including built-in type keywords, pointer types,
+        slice types, and function pointer types. Both are always compile-time constants.
       </div>
 
       <h2>Stack Allocation: <code>stackalloc</code></h2>

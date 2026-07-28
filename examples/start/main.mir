@@ -4,7 +4,7 @@ const vec := import("../vector")
 pub fn main() -> i32 {
     const x: i32 = 42
     mut v: vec.vector
-    vec.init(&v, sizeof(x))
+    vec.init(&v, size_of(x))
     v.push(&x)
     const result := cast(v.at(0), *i32).*
     vec.destroy(&v)

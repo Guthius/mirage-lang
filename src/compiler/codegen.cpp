@@ -172,6 +172,8 @@ namespace codegen {
             }
         }
 
+        auto primitive_align(const sema::TypeKind kind) -> uint32_t { return primitive_size(kind); }
+
         auto is_pointer_like(const sema::ResolvedType &type) -> bool {
             return type.kind == sema::TypeKind::Pointer || type.kind == sema::TypeKind::Anyptr;
         }
@@ -388,6 +390,37 @@ namespace codegen {
                     return primitive_size(sema_program_.bitsets.at(type.bitset_index).storage_type.kind);
                 }
                 return primitive_size(type.kind);
+            }
+
+            // Mirrors size_of() above exactly, substituting alignment for size — including the
+            // Trait/Any override (primitive_align would wrongly forward to primitive_size's 16
+            // for these two 16-byte fat pointers, which are actually only 8-byte aligned).
+            auto align_of(const std::string &module_path, const sema::ResolvedType &type) const -> uint32_t {
+                if (type.kind == sema::TypeKind::Struct) {
+                    return sema_program_.structs.at(type.struct_index).align;
+                }
+                if (type.kind == sema::TypeKind::Array) {
+                    return sema_program_.arrays.at(type.array_index).align;
+                }
+                if (type.kind == sema::TypeKind::Slice) {
+                    return 8;
+                }
+                if (type.kind == sema::TypeKind::Trait) {
+                    return 8;
+                }
+                if (type.kind == sema::TypeKind::Any) {
+                    return 8;
+                }
+                if (type.kind == sema::TypeKind::Enum) {
+                    return primitive_align(sema_program_.enums.at(type.enum_index).underlying_type.kind);
+                }
+                if (type.kind == sema::TypeKind::Union) {
+                    return sema_program_.unions.at(type.union_index).align;
+                }
+                if (type.kind == sema::TypeKind::Bitset) {
+                    return primitive_align(sema_program_.bitsets.at(type.bitset_index).storage_type.kind);
+                }
+                return primitive_align(type.kind);
             }
 
             auto llvm_type(const std::string &module_path, const sema::ResolvedType &type) -> llvm::Type * {
@@ -3597,6 +3630,8 @@ namespace codegen {
                             return emit_incr_decr(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                             return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), sizeof_operand(*v));
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) {
+                            return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), align_of_operand(*v));
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
                             // Unlike a generic value operand, an operand that names a TYPE (e.g.
                             // 'type_of(Point)') never went through check_expr (see sema's mirrored
@@ -4389,6 +4424,28 @@ namespace codegen {
                 return size_of(*current_module_path_, current_module_->expr_types.at(sema::get_expr_key(expr.operand)));
             }
 
+            // Mirrors sizeof_operand() above exactly, substituting align_of() for size_of().
+            auto align_of_operand(const ast::AlignOfExpr &expr) const -> uint64_t {
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&expr.operand)) {
+                    if (const auto it = current_module_->symbols.find(ident->name); it != current_module_->symbols.end()) {
+                        if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second); ts && ts->resolved) {
+                            return align_of(*current_module_path_, *ts->resolved);
+                        }
+                    }
+                }
+                if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr.operand)) {
+                    if (const auto ns = try_namespace_chain((*member)->object)) {
+                        const auto &mod = module_for(*ns);
+                        if (const auto it = mod.symbols.find((*member)->member); it != mod.symbols.end()) {
+                            if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second); ts && ts->resolved) {
+                                return align_of(*ns, *ts->resolved);
+                            }
+                        }
+                    }
+                }
+                return align_of(*current_module_path_, current_module_->expr_types.at(sema::get_expr_key(expr.operand)));
+            }
+
             // Mirrors sizeof_operand() above, but never invents a new id - every id a program
             // can ever reference was already assigned synchronously during sema's whole-program
             // check_expr pass (see intern_type_id), so this only ever reads sema_program_.type_ids.
@@ -4499,6 +4556,8 @@ namespace codegen {
                             // alloca/store, which can't be constant-folded — falls through below.
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                             return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), sizeof_operand(*v));
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) {
+                            return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), align_of_operand(*v));
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
                             // constant=true here means sema already confirmed this is eligible as
                             // a compile-time constant (is_constant_expr), which for TypeOfExpr

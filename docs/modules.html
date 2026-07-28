@@ -188,7 +188,7 @@
 
 <span class="kw">pub fn</span> <span class="fn">main</span>() -&gt; <span class="ty">i32</span> {
     <span class="kw">mut</span> <span class="var">v</span>: <span class="var">vec</span>.<span class="ty">vector</span>
-    <span class="var">vec</span>.<span class="fn">create</span>(&amp;<span class="var">v</span>, <span class="kw">sizeof</span>(<span class="var">v</span>))
+    <span class="var">vec</span>.<span class="fn">create</span>(&amp;<span class="var">v</span>, <span class="kw">size_of</span>(<span class="var">v</span>))
 
     <span class="kw">const</span> <span class="var">x</span>: <span class="ty">i32</span> = <span class="num">42</span>
     <span class="var">v</span>.<span class="fn">push</span>(&amp;<span class="var">x</span>)   <span class="cmt">// method call on cross-module type</span>

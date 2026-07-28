@@ -151,7 +151,7 @@
           "name": "storage.type.mirage"
         },
         {
-          "match": "\\b(import_bin|import|asm|macro|sizeof|type_of|type_info_of|offsetof|stackalloc|cast|len)\\b",
+          "match": "\\b(import_bin|import|asm|macro|size_of|align_of|type_of|type_info_of|offsetof|stackalloc|cast|len)\\b",
           "name": "keyword.other.mirage"
         }
       ]
