@@ -9,7 +9,7 @@ This grammar is derived directly from the parser in `src/compiler/ast.cpp`. Term
 ```ebnf
 program       ::= { declaration } EOF
 
-declaration   ::= [ attribute ] [ 'pub' ] fn_decl   (* attribute: only legal here — see below *)
+declaration   ::= [ attribute ] [ 'pub' ] fn_decl   (* attribute: also legal on method_decl inside impl blocks — see below *)
                | [ 'pub' ] ext_fn_decl
                | [ 'pub' ] type_decl
                | [ 'pub' ] var_decl
@@ -68,14 +68,16 @@ attribute     ::= '@' IDENT                                 (* single, no argume
                | '@' '(' IDENT { ',' IDENT } ')'           (* grouped — one or more, no arguments *)
 ```
 
-One attribute clause may precede a `fn_decl` — currently the only declaration kind attributes
-are legal on. Multiple separate clauses on the same declaration (`@naked @no_return`) are a
-parse error; use the grouped form instead (`@(naked, no_return)`). A grouped-form member never
-takes its own argument list — `@(section(".text"))` is a parse error; only the ungrouped
-`@name(args)` form takes arguments. `IDENT` here (`no_return`, `naked`, `always_inline`,
-`section`, `init`) is validated against the fixed known-attribute set by the parser, the same
-way `link_decl`'s category name is — see spec.md's "Declaration Attributes" section for each
-attribute's semantics.
+One attribute clause may precede a `fn_decl` or a `method_decl` (a method inside an `impl`
+block) — these are the only declaration kinds attributes are legal on. Multiple separate
+clauses on the same declaration (`@naked @no_return`) are a parse error; use the grouped form
+instead (`@(naked, no_return)`). A grouped-form member never takes its own argument list —
+`@(section(".text"))` is a parse error; only the ungrouped `@name(args)` form takes arguments.
+`IDENT` here (`no_return`, `naked`, `always_inline`, `section`, `init`) is validated against
+the fixed known-attribute set by the parser, the same way `link_decl`'s category name is —
+see spec.md's "Declaration Attributes" section for each attribute's semantics. `init` is
+additionally rejected specifically on a `method_decl` by sema (a structural restriction, not
+a parser-level one) — see spec.md's `@init` section.
 
 A parameter's `':=' expr` form infers the parameter's type from the default
 expression's type (same literal-defaulting rules as `var_decl_stmt`'s `:=`
@@ -138,7 +140,7 @@ macro_param   ::= IDENT ':' type
 impl_decl     ::= 'impl' named_type '{' { method_decl } '}'                    (* bare impl *)
                | 'impl' named_type 'for' named_type '{' { method_decl } '}'  (* trait impl *)
 
-method_decl   ::= [ 'pub' ] 'fn' IDENT
+method_decl   ::= [ attribute ] [ 'pub' ] 'fn' IDENT
                   '(' ( 'self' | 'mut' 'self' )
                       { ',' ( [ 'mut' ] IDENT ':' type [ '=' expr ]
                             | [ 'mut' ] IDENT ':=' expr ) }
@@ -146,6 +148,10 @@ method_decl   ::= [ 'pub' ] 'fn' IDENT
                   [ return_types ]
                   stmt
 ```
+
+An attribute clause on a `method_decl` follows the same ordering as `fn_decl` (attribute
+before `pub`) and accepts the same five known names, though sema rejects `init` specifically
+on a method — see spec.md's "Declaration Attributes" section for each attribute's semantics.
 
 `method_decl`'s non-self params accept the same default-value forms as
 `param` above (see the note after `fn_decl`'s grammar). In `impl TRAIT for

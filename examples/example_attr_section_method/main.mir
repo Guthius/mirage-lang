@@ -1,0 +1,20 @@
+// example_attr_section_method.mir — '@section("name")' on a method inside an 'impl' block
+// behaves identically to '@section' on a free function (see example_attr_section.mir).
+// Verified via '--emit-ir' (see tests/attribute_codegen_test.py), which greps the emitted
+// 'define ...' line for 'section ".text.hot"'.
+//
+// Expected: builds successfully; '--emit-ir' output contains 'section ".text.hot"'.
+
+type Point = struct {
+    x: i32
+}
+
+impl Point {
+    @section(".text.hot")
+    pub fn hot_path(self) -> i32 {
+        return 1
+    }
+}
+
+pub fn main() {
+}

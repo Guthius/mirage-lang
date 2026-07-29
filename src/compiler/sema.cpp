@@ -9,6 +9,8 @@ namespace sema {
     void register_trait_impls_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag);
     void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag);
     void validate_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
+    void validate_method_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
+    void validate_trait_impl_attributes_for_program(Program &program, DiagnosticEngine &diag);
     void validate_init_dependencies_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag);
 
     // Minimal human-readable rendering of a resolved type, used for trait conformance
@@ -512,7 +514,9 @@ namespace sema {
         // checks need (resolved return types, raw AST param/attribute/body shape).
         for (const auto &path : program.modules | std::views::keys) {
             validate_attributes_for_module(path, out.modules.at(path), out, diag);
+            validate_method_attributes_for_module(path, out.modules.at(path), out, diag);
         }
+        validate_trait_impl_attributes_for_program(out, diag);
 
         for (const auto &path : program.modules | std::views::keys) {
             resolve_values_for_module(path, out.modules.at(path), out, diag);

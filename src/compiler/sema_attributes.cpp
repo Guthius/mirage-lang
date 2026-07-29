@@ -51,21 +51,21 @@ namespace sema {
             return nullptr;
         }
 
-        void validate_no_return_attribute(const ast::Attribute &attr, const FunctionSymbol &fn, const Program &program, DiagnosticEngine &diag) {
+        void validate_no_return_attribute(const ast::Attribute &attr, const std::vector<ResolvedType> &return_types, const Program &program, DiagnosticEngine &diag) {
             if (!attr.args.empty()) {
                 diag.report_error(DiagnosticStage::Sema, attr.location, "'@no_return' takes no arguments");
             }
-            if (!is_void_or_error_return(fn.return_types, program)) {
+            if (!is_void_or_error_return(return_types, program)) {
                 diag.warn(DiagnosticStage::Sema, attr.location,
                     "a '@no_return' function with a value return type will never return its value");
             }
         }
 
-        void validate_naked_attribute(const ast::Attribute &attr, const ast::FunctionDecl &decl, DiagnosticEngine &diag) {
+        void validate_naked_attribute(const ast::Attribute &attr, const ast::Stmt &body, DiagnosticEngine &diag) {
             if (!attr.args.empty()) {
                 diag.report_error(DiagnosticStage::Sema, attr.location, "'@naked' takes no arguments");
             }
-            if (const auto *bad_stmt = find_first_non_asm_stmt(decl.body)) {
+            if (const auto *bad_stmt = find_first_non_asm_stmt(body)) {
                 diag.warn(DiagnosticStage::Sema, stmt_location(*bad_stmt),
                     "'@naked' function contains a non-'asm' statement; naked functions should "
                     "contain only inline 'asm' blocks, since the compiler emits no prologue/"
@@ -103,6 +103,25 @@ namespace sema {
             }
         }
 
+        // Covers the four attribute checks that apply identically regardless of whether the
+        // declaration is a free function, a bare-impl method, or a trait-impl method, plus
+        // their one mutual conflict that isn't '@init'-specific ('@naked' + '@always_inline').
+        // '@init' is deliberately NOT handled here: it's rejected on methods upstream at
+        // declare time (sema_declare.cpp), so a method's attrs never legitimately contain it;
+        // its own structural check and '@init'-combination conflicts stay free-function-only,
+        // inline at validate_attributes_for_module's call site below.
+        void validate_common_attributes(const std::vector<ast::Attribute> &attrs, const std::vector<ResolvedType> &return_types,
+                                         const ast::Stmt &body, const std::string &module_path, Program &program, DiagnosticEngine &diag) {
+            if (const auto *a = find_attribute(attrs, "no_return")) validate_no_return_attribute(*a, return_types, program, diag);
+            if (const auto *a = find_attribute(attrs, "naked")) validate_naked_attribute(*a, body, diag);
+            if (const auto *a = find_attribute(attrs, "always_inline")) validate_always_inline_attribute(*a, diag);
+            if (const auto *a = find_attribute(attrs, "section")) validate_section_attribute(*a, module_path, program, diag);
+            if (find_attribute(attrs, "naked") && find_attribute(attrs, "always_inline")) {
+                diag.report_error(DiagnosticStage::Sema, find_attribute(attrs, "naked")->location,
+                    "'@naked' and '@always_inline' cannot be combined: a naked function has no body to inline");
+            }
+        }
+
         void validate_init_structural(const ast::Attribute &attr, const ast::FunctionDecl &decl, const FunctionSymbol &fn, const Program &program, DiagnosticEngine &diag) {
             if (!attr.args.empty()) {
                 diag.report_error(DiagnosticStage::Sema, attr.location, "'@init' takes no arguments");
@@ -125,7 +144,10 @@ namespace sema {
     // (called from check_program right after resolve_trait_impl_signatures_for_program), but
     // before body-checking — none of the five attributes' own checks need type-checked
     // bodies, only resolved signatures and raw AST shape (attribute args, param/return lists,
-    // the body's top-level statement list for '@naked').
+    // the body's top-level statement list for '@naked'). Sibling functions
+    // validate_method_attributes_for_module (bare-impl methods) and
+    // validate_trait_impl_attributes_for_program (trait-impl methods) below cover the other
+    // two declaration kinds attributes are legal on.
     void validate_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
         for (auto &[name, sym] : module.symbols) {
             // A bare-import alias shares its 'decl' AST pointer with the origin — the
@@ -137,10 +159,8 @@ namespace sema {
             if (!fn || !fn->decl || fn->decl->attributes.empty()) continue;
             const auto &attrs = fn->decl->attributes;
 
-            if (const auto *a = find_attribute(attrs, "no_return")) validate_no_return_attribute(*a, *fn, program, diag);
-            if (const auto *a = find_attribute(attrs, "naked")) validate_naked_attribute(*a, *fn->decl, diag);
-            if (const auto *a = find_attribute(attrs, "always_inline")) validate_always_inline_attribute(*a, diag);
-            if (const auto *a = find_attribute(attrs, "section")) validate_section_attribute(*a, module_path, program, diag);
+            validate_common_attributes(attrs, fn->return_types, fn->decl->body, module_path, program, diag);
+
             if (const auto *init_attr = find_attribute(attrs, "init")) {
                 validate_init_structural(*init_attr, *fn->decl, *fn, program, diag);
 
@@ -159,9 +179,36 @@ namespace sema {
                         "from the generated '_init', inlining them defeats the purpose");
                 }
             }
-            if (find_attribute(attrs, "naked") && find_attribute(attrs, "always_inline")) {
-                diag.report_error(DiagnosticStage::Sema, find_attribute(attrs, "naked")->location,
-                    "'@naked' and '@always_inline' cannot be combined: a naked function has no body to inline");
+        }
+    }
+
+    // Sibling to validate_attributes_for_module, but for bare-impl methods (module.methods).
+    // Called per-module at the same pipeline point — resolve_impl_signatures_for_module has
+    // already resolved every method's signature by the time check_program calls this. No
+    // '@init' handling: it's already a declare-time error for methods (sema_declare.cpp), so
+    // it never legitimately reaches here.
+    void validate_method_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
+        for (auto &method_map : module.methods | std::views::values) {
+            for (auto &info : method_map | std::views::values) {
+                if (!info.is_resolved || !info.decl || info.decl->attributes.empty()) continue;
+                validate_common_attributes(info.decl->attributes, info.return_types, info.decl->body, module_path, program, diag);
+            }
+        }
+    }
+
+    // Whole-program pass (not per-module) for trait-impl methods, mirroring why
+    // resolve_trait_impl_signatures_for_program is its own whole-program pass distinct from
+    // resolve_signatures_for_module: TraitImplInfo::impl_module can differ from the type's own
+    // module, so this can't be folded into validate_method_attributes_for_module's per-module
+    // loop above.
+    void validate_trait_impl_attributes_for_program(Program &program, DiagnosticEngine &diag) {
+        for (auto &impls : program.trait_impls_by_type | std::views::values) {
+            for (auto &impl_info : impls) {
+                for (auto &info : impl_info.methods | std::views::values) {
+                    if (!info.is_resolved || !info.decl || info.decl->attributes.empty()) continue;
+                    validate_common_attributes(info.decl->attributes, info.return_types, info.decl->body,
+                                                impl_info.impl_module, program, diag);
+                }
             }
         }
     }

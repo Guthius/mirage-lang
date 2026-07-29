@@ -49,6 +49,8 @@ ATTR_CASES = [
     ("example_attr_naked", "raw_add_one", "attr", "naked"),
     ("example_attr_always_inline_address_taken", "_add", "attr", "alwaysinline"),
     ("example_attr_section", "hot_path", "section", '".text.hot"'),
+    ("example_attr_section_method", "hot_path", "section", '".text.hot"'),
+    ("example_attr_section_trait_method", "draw", "section", '".text.hot"'),
 ]
 
 

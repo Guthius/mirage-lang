@@ -822,6 +822,29 @@ namespace codegen {
                 return std::nullopt;
             }
 
+            // Applies the codegen-visible subset of a declaration's attributes to an
+            // already-created llvm::Function. Shared by declare_globals_and_functions (free
+            // functions), declare_methods (bare-impl methods), and declare_trait_methods
+            // (trait-impl methods) — 'module_path' is the only call-site-specific piece,
+            // needed to constant-fold '@section's argument in the right module context.
+            void apply_function_attributes(llvm::Function *fn, const std::vector<ast::Attribute> &attrs, const std::string &module_path) {
+                for (const auto &attr : attrs) {
+                    if (const auto kind = attribute_kind_for_name(attr.name)) {
+                        fn->addFnAttr(*kind);
+                    } else if (attr.name == "section" && attr.args.size() == 1) {
+                        // Re-folds the already-sema-validated constant '[]u8' argument (sema
+                        // only validated it, it didn't stash the folded string anywhere) —
+                        // evaluate_const_value is a pure fold with no side effects for a plain
+                        // string literal, the only shape sema accepted here.
+                        if (const auto folded = sema::evaluate_const_value(attr.args[0], module_path, const_cast<sema::Program &>(sema_program_), diag_)) {
+                            if (const auto *str = std::get_if<std::string>(&*folded)) {
+                                fn->setSection(*str);
+                            }
+                        }
+                    }
+                }
+            }
+
             void declare_globals_and_functions() {
                 for (const auto &[path, mod] : sema_program_.modules) {
                     for (const auto &[name, sym] : mod.symbols) {
@@ -857,22 +880,7 @@ namespace codegen {
                             functions_[FunctionKey{path, name}] = llvm_fn;
 
                             if (fn->decl) {
-                                for (const auto &attr : fn->decl->attributes) {
-                                    if (const auto kind = attribute_kind_for_name(attr.name)) {
-                                        llvm_fn->addFnAttr(*kind);
-                                    } else if (attr.name == "section" && attr.args.size() == 1) {
-                                        // Re-folds the already-sema-validated constant '[]u8'
-                                        // argument (sema only validated it, it didn't stash
-                                        // the folded string anywhere) — evaluate_const_value
-                                        // is a pure fold with no side effects for a plain
-                                        // string literal, the only shape sema accepted here.
-                                        if (const auto folded = sema::evaluate_const_value(attr.args[0], path, const_cast<sema::Program &>(sema_program_), diag_)) {
-                                            if (const auto *str = std::get_if<std::string>(&*folded)) {
-                                                llvm_fn->setSection(*str);
-                                            }
-                                        }
-                                    }
-                                }
+                                apply_function_attributes(llvm_fn, fn->decl->attributes, path);
                             }
                         } else if (const auto *ef = std::get_if<sema::ExtFunctionSymbol>(&sym)) {
                             // External C symbols are process-global, not module-scoped: if another
@@ -1476,6 +1484,10 @@ namespace codegen {
                             auto *llvm_fn = llvm::Function::Create(
                                 fn_type, llvm::GlobalValue::InternalLinkage, fname, *module_);
                             functions_[FunctionKey{path, method_fn_key(type_name, method_name)}] = llvm_fn;
+
+                            if (info.decl) {
+                                apply_function_attributes(llvm_fn, info.decl->attributes, path);
+                            }
                         }
                     }
                 }
@@ -1504,6 +1516,10 @@ namespace codegen {
                             auto *llvm_fn = llvm::Function::Create(
                                 fn_type, llvm::GlobalValue::InternalLinkage, fname, *module_);
                             functions_[FunctionKey{impl_info.impl_module, key}] = llvm_fn;
+
+                            if (info.decl) {
+                                apply_function_attributes(llvm_fn, info.decl->attributes, impl_info.impl_module);
+                            }
                         }
                     }
                 }

@@ -1,0 +1,29 @@
+// example_attr_naked_method_non_asm_body.mir — confirms the sema-level "'@naked' function
+// contains a non-'asm' statement" warning (see example_attr_naked_non_asm_body.mir) now
+// fires for a method too, proving validate_common_attributes actually runs for methods. The
+// overall build still fails, but for an unrelated, pre-existing reason (see
+// example_attr_naked_method.mir): every method has a mandatory 'self' argument that LLVM's
+// 'naked' attribute forbids referencing at all, so no '@naked' method can pass LLVM
+// verification regardless of its body's contents.
+//
+// Expected: the sema warning is printed to stderr —
+//   warning: '@naked' function contains a non-'asm' statement; naked functions should contain
+//            only inline 'asm' blocks, since the compiler emits no prologue/epilogue for them
+// — followed by a build failure from LLVM verification ('cannot use argument of naked function').
+
+type Point = struct {
+    x: i32
+}
+
+impl Point {
+    @naked
+    pub fn raw(self) {
+        const x := 1
+        asm {
+            ret
+        }
+    }
+}
+
+pub fn main() {
+}

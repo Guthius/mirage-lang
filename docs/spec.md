@@ -1180,9 +1180,9 @@ An optional `: Type` annotation between the parameter list and `->` declares the
 
 ### Declaration Attributes
 
-A `fn` declaration may be preceded by an `@name` attribute clause (`@naked`, `@no_return`,
-`@always_inline`, `@section("...")`, `@init`) — see [Declaration Attributes](#21-declaration-attributes)
-for the full syntax and semantics.
+A `fn` declaration, or a method inside an `impl` block, may be preceded by an `@name`
+attribute clause (`@naked`, `@no_return`, `@always_inline`, `@section("...")`, `@init`) — see
+[Declaration Attributes](#21-declaration-attributes) for the full syntax and semantics.
 
 ---
 
@@ -1238,11 +1238,12 @@ Matches any value. Must be the last arm. At most one `_` allowed per match/switc
 ```mirage
 impl TypeName {
     fn method_name(self) -> ReturnType {
-        // access self.field
+        self.field += 1   // legal: 'self' is a pointer; field mutation never requires 'mut'
     }
 
     pub fn mutable_method(mut self, arg: i32) -> i32 {
-        self.field += arg
+        self.field += arg   // also legal without 'mut self' — 'mut' here only makes the
+                             // 'self' binding itself reassignable
         return self.field
     }
 }
@@ -1250,8 +1251,12 @@ impl TypeName {
 
 - Methods are associated functions on a named type (struct or enum).
 - The first parameter is always `self` or `mut self`.
-- `self` is internally a pointer (`*T`); field access and method calls auto-deref.
-- `mut self` allows mutation of the receiver's fields.
+- `self` is internally a pointer (`*T`); field access, method calls, and mutating the
+  receiver's fields (e.g. `self.field = x`) all auto-deref through it — this is legal
+  whether or not `self` is declared `mut`.
+- `mut self` follows the same rule as `mut` on any other parameter: it makes the `self`
+  binding itself reassignable as a local. It does not gate field mutation — that's always
+  legal (see above).
 - `pub` on individual methods makes them visible cross-module.
 - `impl` blocks cannot be `pub` (the individual methods control visibility).
 - Methods are called as `value.method(args)` or `pointer.method(args)`.
@@ -2600,14 +2605,22 @@ error: expected a register name after 'asm ->'
 
 ## 21. Declaration Attributes
 
-`@name` / `@name(args)` precedes a `fn` declaration, attaching compiler-recognized metadata
-to it. Attributes are currently legal only on `fn` (not `ext fn`, methods inside `impl`
-blocks, or any other declaration kind), and `pub`, if present, comes after the attribute:
+`@name` / `@name(args)` precedes a `fn` declaration or a method inside an `impl` block,
+attaching compiler-recognized metadata to it. Attributes are legal on `fn` and on methods
+inside `impl` blocks (not `ext fn` or any other declaration kind), and `pub`, if present,
+comes after the attribute:
 
 ```mirage
 @naked
 pub fn raw_entry() {
     asm { ret }
+}
+
+impl Handle {
+    @always_inline
+    pub fn get(self) -> i32 {
+        return self.raw
+    }
 }
 ```
 
@@ -2653,6 +2666,8 @@ returned:
 warning: a '@no_return' function with a value return type will never return its value
 ```
 
+Applies identically to a method inside an `impl` block — no method-specific restriction.
+
 ### `@naked`
 
 Suppresses the compiler-generated prologue and epilogue entirely: no stack frame setup, no
@@ -2668,6 +2683,8 @@ warning: '@naked' function contains a non-'asm' statement; naked functions shoul
          only inline 'asm' blocks, since the compiler emits no prologue/epilogue for them
 ```
 
+Applies identically to a method inside an `impl` block — no method-specific restriction.
+
 ### `@always_inline`
 
 Requests that the function be inlined at every direct call site (LLVM's `alwaysinline`
@@ -2682,12 +2699,15 @@ warning: taking the address of '@always_inline' function 'f'. Calls through a fu
          '@always_inline' attribute has no effect on indirect calls.
 ```
 
+Applies identically to a method inside an `impl` block — no method-specific restriction.
+
 ### `@section("name")`
 
 Places the function in the named ELF section instead of the default `.text`. The argument
 must be a non-empty compile-time-constant `[]u8` string; an empty string is a sema error.
 The section name is passed to the linker verbatim — Mirage does not validate ELF section
-naming conventions itself.
+naming conventions itself. Applies identically to a method inside an `impl` block — no
+method-specific restriction.
 
 ### `@init`
 

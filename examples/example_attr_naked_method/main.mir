@@ -1,0 +1,29 @@
+// example_attr_naked_method.mir — REJECTION CASE (LLVM level, not a regression). '@naked' on
+// a method behaves identically to '@naked' on a free function: LLVM's 'naked' attribute
+// forbids referencing ANY function argument, and every method has a mandatory implicit
+// 'self' argument that emit_method() always materializes (stores into an entry alloca)
+// regardless of whether the body actually reads it. This is exactly the same restriction a
+// '@naked' free function with one or more parameters already hits today — methods simply
+// can never be zero-argument, so '@naked' can never succeed on one. Sema-level validation
+// (attribute args, the naked+always_inline conflict, the non-asm-statement warning — see
+// example_attr_naked_method_non_asm_body.mir) still runs correctly for methods; this is
+// purely a downstream LLVM IR-verification restriction.
+//
+// Expected: compilation fails with
+//   cannot use argument of naked function
+
+type Point = struct {
+    x: i32
+}
+
+impl Point {
+    @naked
+    pub fn raw(self) {
+        asm {
+            ret
+        }
+    }
+}
+
+pub fn main() {
+}

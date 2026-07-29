@@ -1,0 +1,22 @@
+// example_attr_naked_always_inline_method.mir — REJECTION CASE. '@naked' and '@always_inline'
+// combined on a method inside an 'impl' block — confirms the mutual-conflict check (a naked
+// function has no compiler-generated body shape to inline) now runs for methods too.
+//
+// Expected: compilation fails with
+//   error: '@naked' and '@always_inline' cannot be combined: a naked function has no body to inline
+
+type Point = struct {
+    x: i32
+}
+
+impl Point {
+    @(naked, always_inline)
+    pub fn raw(self) {
+        asm {
+            ret
+        }
+    }
+}
+
+pub fn main() {
+}

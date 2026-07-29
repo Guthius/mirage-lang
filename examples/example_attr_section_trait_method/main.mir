@@ -1,0 +1,25 @@
+// example_attr_section_trait_method.mir — '@section("name")' on a trait-impl method
+// ('impl TRAIT for TYPE { ... }'), specifically exercising the codegen/sema path that folds
+// the argument relative to the impl block's OWN module ('impl_module'), which can differ
+// from the type's own module in general (here they're the same module, but the code path
+// taken is the trait-impl one, not the bare-impl one exercised by
+// example_attr_section_method.mir).
+//
+// Expected: builds successfully; '--emit-ir' output contains 'section ".text.hot"'.
+
+type Drawable = trait {
+    fn draw(self)
+}
+
+type Circle = struct {
+    r: i32
+}
+
+impl Drawable for Circle {
+    @section(".text.hot")
+    fn draw(self) {
+    }
+}
+
+pub fn main() {
+}

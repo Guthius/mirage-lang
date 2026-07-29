@@ -1,0 +1,19 @@
+// example_attr_section_method_empty.mir — REJECTION CASE. Like example_attr_section_empty.mir
+// but on a method inside an 'impl' block — confirms '@section's empty-string check now runs
+// for methods too.
+//
+// Expected: compilation fails with
+//   error: '@section' argument must not be an empty string
+
+type Point = struct {
+    x: i32
+}
+
+impl Point {
+    @section("")
+    pub fn f(self) {
+    }
+}
+
+pub fn main() {
+}
