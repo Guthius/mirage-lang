@@ -1,5 +1,6 @@
 #include "common.hpp"
 
+#include "../type_printer.hpp"
 #include "ast_walker.hpp"
 #include "compiler/asm_registers.hpp"
 #include "compiler/lexer.hpp"
@@ -388,7 +389,27 @@ namespace lsp::handlers {
     // so its bracket-index match gives the real end directly; ext fn/macro have no body
     // block, so their end is wherever their own declaration's terminating ';' is.
     auto find_enclosing_function(const ast::Module &module, const sema::ProgramModule &sema_module,
-                                 const sema::Program &program, const std::vector<Token> &tokens, const size_t line) -> EnclosingFunction {
+                                 sema::Program &program, const std::string &module_path, DiagnosticEngine &diag,
+                                 const std::vector<Token> &tokens, const size_t line) -> EnclosingFunction {
+        // Fallback for a generic decl's param, whose type was never resolved by sema (see
+        // this function's own doc comment in common.hpp) - resolves straight from the AST
+        // annotation. A ':='-inferred param (no declared type) stays default (Invalid),
+        // same as it would for a non-generic decl reached via this same fallback path.
+        auto resolve_param_type_fallback = [&](const std::optional<ast::Type> &type) -> sema::ResolvedType {
+            if (!type) return {};
+            return sema::resolve_type(*type, module_path, program, diag);
+        };
+
+        // Makes a generic decl's own 'T'/'N' hoverable as ordinary params — resolves each
+        // param's OWN declared type ('type' for a type param, e.g. 'usize' for a value
+        // param) via the same fallback, so 'T' shows "(param) T: type" and 'N' shows
+        // "(param) N: usize" rather than resolving to nothing at all.
+        auto push_generic_params = [&](const std::vector<ast::GenericParam> &generic_params, std::vector<ParamInfo> &params) {
+            for (const auto &gp : generic_params) {
+                params.push_back({gp.name, sema::resolve_type(gp.type, module_path, program, diag), gp.location});
+            }
+        };
+
         const auto bracket_index = build_bracket_index(tokens);
 
         auto end_line_for = [&](const SourceLocation &decl_location, const ast::Stmt *body) -> size_t {
@@ -431,11 +452,18 @@ namespace lsp::handlers {
             if (const auto *fn = std::get_if<ast::FunctionDecl>(&decl)) {
                 const auto sym_it = sema_module.symbols.find(fn->name);
                 const auto *sym = sym_it != sema_module.symbols.end() ? std::get_if<sema::FunctionSymbol>(&sym_it->second) : nullptr;
+                const bool is_generic = !fn->generic_params.empty();
                 std::vector<ParamInfo> params;
+                if (is_generic) push_generic_params(fn->generic_params, params);
                 for (size_t i = 0; i < fn->params.size(); ++i) {
                     sema::ResolvedType type{};
-                    if (sym && i < sym->params.size()) type = sym->params[i];
-                    params.push_back({fn->params[i].name, type, fn->params[i].location});
+                    std::optional<std::string> display_override;
+                    if (!is_generic && sym && i < sym->params.size()) type = sym->params[i];
+                    else if (is_generic) {
+                        type = resolve_param_type_fallback(fn->params[i].type);
+                        if (fn->params[i].type) display_override = ast_type_to_string(*fn->params[i].type);
+                    }
+                    params.push_back({fn->params[i].name, type, fn->params[i].location, display_override});
                 }
                 consider(fn->location, std::move(params), &fn->body);
             } else if (const auto *ext = std::get_if<ast::ExtFunctionDecl>(&decl)) {
@@ -460,6 +488,7 @@ namespace lsp::handlers {
                 consider(macro->location, std::move(params), nullptr);
             } else if (const auto *impl = std::get_if<ast::ImplDecl>(&decl)) {
                 const auto methods_it = sema_module.methods.find(impl->target.name);
+                const bool is_generic = !impl->generic_params.empty();
                 for (const auto &fn : impl->functions) {
                     const sema::MethodInfo *sym = nullptr;
                     if (methods_it != sema_module.methods.end()) {
@@ -468,11 +497,23 @@ namespace lsp::handlers {
                         }
                     }
                     std::vector<ParamInfo> params;
-                    if (sym) params.push_back({"self", sym->self_type, fn.self_location});
+                    if (is_generic) push_generic_params(impl->generic_params, params);
+                    // No concrete receiver type exists for a generic method's template — omit
+                    // 'self' entirely rather than showing a wrong placeholder (self_type is
+                    // never resolved on the template, see resolve_impl_signatures_for_module's
+                    // skip); hovering 'self' inside a generic method body then simply finds no
+                    // resolution instead — the impl's own generic params ('T'/'N'), pushed just
+                    // above, DO resolve now (as ordinary "params"), unlike self.
+                    if (sym && !is_generic) params.push_back({"self", sym->self_type, fn.self_location});
                     for (size_t i = 0; i < fn.params.size(); ++i) {
                         sema::ResolvedType type{};
-                        if (sym && i < sym->param_types.size()) type = sym->param_types[i];
-                        params.push_back({fn.params[i].name, type, fn.params[i].location});
+                        std::optional<std::string> display_override;
+                        if (!is_generic && sym && i < sym->param_types.size()) type = sym->param_types[i];
+                        else if (is_generic) {
+                            type = resolve_param_type_fallback(fn.params[i].type);
+                            if (fn.params[i].type) display_override = ast_type_to_string(*fn.params[i].type);
+                        }
+                        params.push_back({fn.params[i].name, type, fn.params[i].location, display_override});
                     }
                     consider(fn.location, std::move(params), &fn.body);
                 }
@@ -1114,12 +1155,13 @@ namespace lsp::handlers {
             .program_result = &result,
         };
 
-        const auto enclosing = find_enclosing_function(mod_it->second, sema_mod_it->second, result.sema_program, tokens, line);
+        const auto enclosing = find_enclosing_function(mod_it->second, sema_mod_it->second, result.sema_program, module_path, throwaway_diag, tokens, line);
 
         auto resolve_base_name = [&](const std::string &name) -> std::optional<Resolution> {
             for (const auto &p : enclosing.params) {
                 if (p.name == name) {
-                    return Resolution{.kind = Resolution::Kind::Param, .name = name, .location = p.location, .type = p.type};
+                    return Resolution{.kind = Resolution::Kind::Param, .name = name, .location = p.location, .type = p.type,
+                                       .display_override = p.display_override};
                 }
             }
             if (enclosing.body) {

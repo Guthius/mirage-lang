@@ -46,6 +46,62 @@ namespace lsp::handlers {
             return out;
         }
 
+        // Renders a param list straight from the AST (name + declared type AS WRITTEN, no
+        // sema resolution) — the fallback for an UNSPECIALIZED generic function/method,
+        // whose param_types/return_types are never resolved on the template (a param typed
+        // 'T' only means something once a concrete instantiation exists — see sema's
+        // resolve_impl_signatures_for_module/resolve_signatures_for_module skip for a decl
+        // with generic_params). A ':=' inferred-type param (no declared 'type') shows a
+        // literal '<inferred>' placeholder, since its real type also needs an instantiation
+        // to resolve — this is the one param form where format_params' resolved-type path
+        // would show more, but only for a NON-generic function; a generic one never reaches
+        // this fallback with a mix of concerns worth special-casing further.
+        template <typename ParamList>
+        auto ast_params_to_string(const ParamList &decl_params) -> std::string {
+            std::string out;
+            for (size_t i = 0; i < decl_params.size(); ++i) {
+                if (i > 0) out += ", ";
+                const auto &p = decl_params[i];
+                if (p.is_mut) out += "mut ";
+                out += p.name;
+                out += p.type ? ": " + ast_type_to_string(*p.type) : " := <inferred>";
+            }
+            return out;
+        }
+
+        auto ast_return_types_to_string(const std::vector<ast::Type> &types, const std::vector<std::string> &names) -> std::string {
+            if (types.empty()) return "";
+            std::string out = " -> ";
+            if (types.size() > 1) out += "(";
+            for (size_t i = 0; i < types.size(); ++i) {
+                if (i > 0) out += ", ";
+                if (i < names.size() && !names[i].empty()) out += names[i] + ": ";
+                out += ast_type_to_string(types[i]);
+            }
+            if (types.size() > 1) out += ")";
+            return out;
+        }
+
+        // Best-effort struct-field expansion for a generic type's own declaration (no
+        // resolved fields exist for an unspecialized generic decl — 'List' alone is never a
+        // valid type, see spec.md §22) — mirrors describe_type_definition's non-generic
+        // struct case, but reading straight from the AST. Falls back to just the header line
+        // for anything other than a struct RHS (enum/union/bitset/trait declared generic are
+        // legal per grammar but not part of the task's primary shapes — not worth the extra
+        // AST-rendering surface here).
+        auto describe_generic_type_symbol(const std::string &name, const ast::TypeDecl &decl) -> std::string {
+            const std::string header = "type " + name + ast_generic_params_to_string(decl.generic_params);
+            if (const auto *st = std::get_if<std::unique_ptr<ast::StructType>>(&decl.type)) {
+                if (!*st || (*st)->fields.empty()) return header + " = struct {}";
+                std::string out = header + " = struct {\n";
+                for (const auto &f : (*st)->fields) {
+                    out += "    " + f.name + ": " + ast_type_to_string(f.type) + ",\n";
+                }
+                return out + "}";
+            }
+            return header;
+        }
+
         auto describe_symbol(const std::string &name, const sema::Symbol &symbol, const sema::Program &program,
                               const std::string &module_path) -> std::string {
             return std::visit(
@@ -55,6 +111,15 @@ namespace lsp::handlers {
                         return std::string(sym.is_mut ? "mut " : "const ") + name + ": " +
                                type_to_string(sym.type, program, module_path);
                     } else if constexpr (std::is_same_v<S, sema::FunctionSymbol>) {
+                        // A generic function's signature is never resolved on the template
+                        // (see resolve_signatures_for_module's skip) — 'sym.params'/
+                        // 'sym.return_types' stay permanently empty, so fall back to
+                        // rendering straight from the AST, generic_params clause included.
+                        if (sym.decl && !sym.decl->generic_params.empty()) {
+                            return "fn " + name + ast_generic_params_to_string(sym.decl->generic_params) +
+                                   "(" + ast_params_to_string(sym.decl->params) + ")" +
+                                   ast_return_types_to_string(sym.decl->return_types, sym.decl->return_names);
+                        }
                         std::string params = sym.decl ? format_params(sym.decl->params, sym.params, program, module_path) : "";
                         static const std::vector<std::string> kNoNames;
                         const auto &return_names = sym.decl ? sym.decl->return_names : kNoNames;
@@ -69,6 +134,15 @@ namespace lsp::handlers {
                     } else if constexpr (std::is_same_v<S, sema::ImportSymbol>) {
                         return "import \"" + sym.module_path + "\"";
                     } else if constexpr (std::is_same_v<S, sema::TypeSymbol>) {
+                        // A generic type decl has no ResolvedType of its own ('sym.resolved'
+                        // stays nullopt — 'List' alone is never a valid type, see spec.md
+                        // §22), so 'sym.resolved ? ... : "type " + name' used to silently
+                        // drop the generic_params clause entirely for EVERY generic type,
+                        // both before and after this fix's predecessor. Render straight from
+                        // the AST instead, same fallback FunctionSymbol above uses.
+                        if (sym.decl && !sym.decl->generic_params.empty()) {
+                            return describe_generic_type_symbol(name, *sym.decl);
+                        }
                         return sym.resolved ? describe_type_definition(*sym.resolved, program, module_path) : "type " + name;
                     } else {
                         return name;
@@ -170,7 +244,8 @@ namespace lsp::handlers {
             return hover_json("(local) " + res.name + ": " + type_to_string(res.type, result.sema_program, module_path));
 
         case Resolution::Kind::Param:
-            return hover_json("(param) " + res.name + ": " + type_to_string(res.type, result.sema_program, module_path));
+            return hover_json("(param) " + res.name + ": " +
+                               (res.display_override ? *res.display_override : type_to_string(res.type, result.sema_program, module_path)));
 
         case Resolution::Kind::StructField:
         case Resolution::Kind::UnionMember:
@@ -207,6 +282,17 @@ namespace lsp::handlers {
         }
 
         case Resolution::Kind::Method: {
+            // A method on a GENERIC type's template MethodInfo is never resolved (see
+            // resolve_impl_signatures_for_module's skip for a generic type_name) —
+            // 'impl_generic_params' being set is exactly the "this is such a template"
+            // signal (populated only for a method whose enclosing 'impl' block carries its
+            // own generic_params — see MethodInfo's doc comment). Render straight from the
+            // AST, same fallback the FunctionSymbol/TypeSymbol cases above use.
+            if (res.method && res.method->decl && res.method->impl_generic_params) {
+                std::string params = ast_params_to_string(res.method->decl->params);
+                std::string ret = ast_return_types_to_string(res.method->decl->return_types, res.method->decl->return_names);
+                return hover_json("fn " + res.name + ast_generic_params_to_string(*res.method->impl_generic_params) + "(" + params + ")" + ret);
+            }
             std::string params = res.method && res.method->decl
                                       ? format_params(res.method->decl->params, res.method->param_types, result.sema_program, module_path)
                                       : "";

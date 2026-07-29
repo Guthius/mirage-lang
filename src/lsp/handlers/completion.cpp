@@ -54,7 +54,8 @@ namespace lsp::handlers {
                                     std::vector<json> &out) {
             for (const auto &p : enclosing.params) {
                 if (starts_with(p.name, prefix)) {
-                    out.emplace_back(item(p.name, ItemKind::Variable, ": " + type_to_string(p.type, program, module_path)));
+                    out.emplace_back(item(p.name, ItemKind::Variable,
+                                           ": " + (p.display_override ? *p.display_override : type_to_string(p.type, program, module_path))));
                 }
             }
             if (enclosing.body) {
@@ -226,7 +227,7 @@ namespace lsp::handlers {
             }
         }
 
-        const auto enclosing = find_enclosing_function(mod_it->second, sema_mod_it->second, result.sema_program, tokens, line);
+        const auto enclosing = find_enclosing_function(mod_it->second, sema_mod_it->second, result.sema_program, module_path, throwaway_diag, tokens, line);
 
         auto resolve_base_name = [&](const std::string &name) -> std::optional<Resolution> {
             for (const auto &p : enclosing.params) {

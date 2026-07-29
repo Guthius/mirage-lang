@@ -1,9 +1,51 @@
 #include "type_printer.hpp"
 
 #include <filesystem>
+#include <type_traits>
 
 namespace lsp {
     namespace {
+        // "[i32]", "[16]", "[u8, 16]" — the concrete generic_args suffix for a monomorphized
+        // Struct/Enum/Union/Bitset instantiation (see sema::GenericInstanceInfo), or "" for a
+        // non-generic type. Without this, type_to_string's bare-name rendering for e.g. a
+        // 'List[i32]'-typed local silently collapsed to just "List" — find_type_module_and_name
+        // deliberately returns the UNSPECIALIZED decl's own name for a generic instantiation
+        // (see its doc comment in sema.cpp), so the generic_args have to be re-appended here.
+        auto generic_args_suffix(const sema::ResolvedType &type, const sema::Program &program,
+                                  const std::string &current_module_path) -> std::string {
+            const sema::GenericInstanceInfo *info = nullptr;
+            switch (type.kind) {
+            case sema::TypeKind::Struct:
+                if (const auto *i = program.struct_at(type.struct_index); i && i->generic_instance) info = &*i->generic_instance;
+                break;
+            case sema::TypeKind::Enum:
+                if (const auto *i = program.enum_at(type.enum_index); i && i->generic_instance) info = &*i->generic_instance;
+                break;
+            case sema::TypeKind::Union:
+                if (const auto *i = program.union_at(type.union_index); i && i->generic_instance) info = &*i->generic_instance;
+                break;
+            case sema::TypeKind::Bitset:
+                if (const auto *i = program.bitset_at(type.bitset_index); i && i->generic_instance) info = &*i->generic_instance;
+                break;
+            default:
+                break;
+            }
+            if (!info) return "";
+
+            std::string out = "[";
+            for (size_t i = 0; i < info->args.size(); ++i) {
+                if (i > 0) out += ", ";
+                const auto &arg = info->args[i];
+                if (arg.is_type) {
+                    out += type_to_string(arg.type_arg, program, current_module_path);
+                } else if (const auto *iv = std::get_if<int64_t>(&arg.value_arg)) {
+                    out += std::to_string(*iv);
+                } else {
+                    out += "?";
+                }
+            }
+            return out + "]";
+        }
         auto join_types(const std::vector<sema::ResolvedType> &types, const sema::Program &program,
                          const std::string &current_module_path) -> std::string {
             std::string out;
@@ -167,6 +209,12 @@ namespace lsp {
         case TypeKind::USize: return "usize";
         case TypeKind::Bool: return "bool";
         case TypeKind::Anyptr: return "anyptr";
+        case TypeKind::Any: return "any";
+        // A type-generic-parameter reference's own compile-time-constant kind ('T' inside a
+        // generic decl, before any concrete instantiation binds it — see find_enclosing_function's
+        // synthetic generic-param ParamInfo entries) — was previously missing entirely, falling
+        // through to "<invalid>".
+        case TypeKind::Type: return "type";
 
         case TypeKind::Pointer:
             if (type.pointee_index < 0 || static_cast<size_t>(type.pointee_index) >= program.pointer_pointees.size()) {
@@ -211,10 +259,11 @@ namespace lsp {
             if (name.empty()) {
                 return "<anonymous type>";
             }
+            const auto suffix = generic_args_suffix(type, program, current_module_path);
             if (module_path != current_module_path) {
-                return module_display_name(module_path) + "." + name;
+                return module_display_name(module_path) + "." + name + suffix;
             }
-            return name;
+            return name + suffix;
         }
 
         case TypeKind::Function: {
@@ -243,5 +292,105 @@ namespace lsp {
         case TypeKind::Namespace: return "<namespace>";
         default: return "<invalid>";
         }
+    }
+
+    auto ast_type_to_string(const ast::Type &type) -> std::string {
+        return std::visit(
+            [&]<typename T>(const T &v) -> std::string {
+                using V = std::decay_t<T>;
+                if constexpr (std::is_same_v<V, std::monostate>) {
+                    return "<?>";
+                } else if constexpr (std::is_same_v<V, ast::BuiltinType>) {
+                    switch (v.kind) {
+                    case ast::BuiltinTypeKind::U8:     return "u8";
+                    case ast::BuiltinTypeKind::U16:    return "u16";
+                    case ast::BuiltinTypeKind::U32:    return "u32";
+                    case ast::BuiltinTypeKind::U64:    return "u64";
+                    case ast::BuiltinTypeKind::I8:     return "i8";
+                    case ast::BuiltinTypeKind::I16:    return "i16";
+                    case ast::BuiltinTypeKind::I32:    return "i32";
+                    case ast::BuiltinTypeKind::I64:    return "i64";
+                    case ast::BuiltinTypeKind::F32:    return "f32";
+                    case ast::BuiltinTypeKind::F64:    return "f64";
+                    case ast::BuiltinTypeKind::Usize:  return "usize";
+                    case ast::BuiltinTypeKind::Bool:   return "bool";
+                    case ast::BuiltinTypeKind::Byte:   return "byte";
+                    case ast::BuiltinTypeKind::Anyptr: return "anyptr";
+                    case ast::BuiltinTypeKind::Type:   return "type";
+                    case ast::BuiltinTypeKind::Any:    return "any";
+                    }
+                    return "<?>";
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::PointerType>>) {
+                    return "*" + ast_type_to_string(v->pointee);
+                } else if constexpr (std::is_same_v<V, ast::NamedType>) {
+                    std::string out = v.name;
+                    const ast::NamedType *leaf = &v;
+                    while (leaf->member) {
+                        out += "." + leaf->member->name;
+                        leaf = leaf->member.get();
+                    }
+                    if (!leaf->generic_args.empty()) {
+                        out += "[";
+                        for (size_t i = 0; i < leaf->generic_args.size(); ++i) {
+                            if (i > 0) out += ", ";
+                            const auto &arg = *leaf->generic_args[i];
+                            if (const auto *t = std::get_if<ast::Type>(&arg.value)) {
+                                out += ast_type_to_string(*t);
+                            } else if (const auto *e = std::get_if<ast::Expr>(&arg.value)) {
+                                if (const auto *ident = std::get_if<ast::IdentExpr>(e)) {
+                                    out += ident->name;
+                                } else if (const auto *lit = std::get_if<ast::LiteralIntegerExpr>(e)) {
+                                    out += std::to_string(lit->value);
+                                } else {
+                                    out += "...";
+                                }
+                            }
+                        }
+                        out += "]";
+                    }
+                    return out;
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ArrayType>>) {
+                    std::string size_str = "?";
+                    if (v->size) {
+                        if (const auto *ident = std::get_if<ast::IdentExpr>(&*v->size)) {
+                            size_str = ident->name;
+                        } else if (const auto *lit = std::get_if<ast::LiteralIntegerExpr>(&*v->size)) {
+                            size_str = std::to_string(lit->value);
+                        } else {
+                            size_str = "...";
+                        }
+                    }
+                    return "[" + size_str + "]" + ast_type_to_string(v->base_type);
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceType>>) {
+                    return "[]" + ast_type_to_string(v->base_type);
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StructType>>) {
+                    return "struct {...}";
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnumType>>) {
+                    return "enum {...}";
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnionType>>) {
+                    return "union {...}";
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::FunctionType>>) {
+                    return "fn(...)";
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TraitType>>) {
+                    return "trait {...}";
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ErrorType>>) {
+                    return "error(...)";
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BitsetType>>) {
+                    return "bitset(...)";
+                } else {
+                    return "<?>";
+                }
+            },
+            type);
+    }
+
+    auto ast_generic_params_to_string(const std::vector<ast::GenericParam> &params) -> std::string {
+        if (params.empty()) return "";
+        std::string out = "[";
+        for (size_t i = 0; i < params.size(); ++i) {
+            if (i > 0) out += ", ";
+            out += params[i].name + ": " + ast_type_to_string(params[i].type);
+        }
+        return out + "]";
     }
 }

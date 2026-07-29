@@ -45,6 +45,10 @@ namespace lsp::handlers {
         SourceLocation location;
         sema::ResolvedType type;
 
+        // Kind::Param only: see ParamInfo::display_override's doc comment - carries the same
+        // AST-rendered fallback through to hover/definition/references display code.
+        std::optional<std::string> display_override;
+
         const sema::StructField *struct_field = nullptr;
         const sema::UnionMember *union_member = nullptr;
         const sema::MethodInfo *method = nullptr;
@@ -76,6 +80,13 @@ namespace lsp::handlers {
         std::string name;
         sema::ResolvedType type;
         SourceLocation location;
+
+        // Set only for a param inside a generic decl's own template body whose declared
+        // type references the enclosing generic_params (e.g. 'value: T') - such a type has
+        // no concrete ResolvedType at all outside an actual instantiation, so 'type' above
+        // is unreliable (may resolve to TypeKind::Invalid). When set, display code should
+        // prefer this AST-rendered string ("T", "*T", "[N]u8", ...) over type_to_string(type).
+        std::optional<std::string> display_override;
     };
 
     struct EnclosingFunction {
@@ -136,8 +147,20 @@ namespace lsp::handlers {
     // handle type, there being no concrete Self type to report) and (for FunctionDecl/
     // ImplDecl::Function only - a trait method is signature-only, never has a body) its body
     // statement.
+    //
+    // For a GENERIC fn/impl (non-empty 'generic_params' on the FunctionDecl or the
+    // enclosing ImplDecl), sema never resolves the template's own param types (a param
+    // typed 'T' only means something once a concrete instantiation exists) - 'program'/
+    // 'module_path'/'diag' let this fall back to resolving each param's type straight from
+    // its AST annotation instead (works for a param whose type doesn't itself reference a
+    // generic parameter, e.g. 'index: usize'; a param typed 'T'/'[N]u8' resolves to
+    // TypeKind::Invalid via the ordinary "unknown identifier" path, same graceful
+    // degradation a truly-unresolvable type already gets elsewhere). 'self' is omitted
+    // entirely for a generic method (no concrete receiver type exists to report) rather
+    // than showing a wrong placeholder.
     auto find_enclosing_function(const ast::Module &module, const sema::ProgramModule &sema_module,
-                                 const sema::Program &program, const std::vector<Token> &tokens, size_t line) -> EnclosingFunction;
+                                 sema::Program &program, const std::string &module_path, DiagnosticEngine &diag,
+                                 const std::vector<Token> &tokens, size_t line) -> EnclosingFunction;
 
     // Mirrors sema_check.cpp's own VarDeclStmt handling: when a declared type annotation is
     // present, it - not the initializer's own natural type - is the variable's actual type.
