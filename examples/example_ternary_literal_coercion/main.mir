@@ -1,0 +1,28 @@
+// example_ternary_literal_coercion.mir — a narrow-typed value and an untyped integer literal
+// as the two branches of a ternary / 'when' expression, in both orders.
+//
+// BinaryExpr special-cases is_coercible_literal to decide which operand to check first, so a
+// literal on either side unifies against the other side's real type. TernaryExpr and WhenExpr
+// did not: they always checked the 'then' branch first with the outer expected type (usually
+// nullopt), which defaulted a literal to i32, then checked the 'else' branch with expected=i32
+// — which IdentExpr ignores — and reported "branches have different types".
+//
+// The result was order-dependent: 'cond ? 5 : x' failed while 'cond ? x : 5' compiled, for the
+// same two values.
+//
+// Expected: exit code 28. The condition is true, so the four branches yield 5, 3, 5, 3
+// (16 total), plus x * 4 = 12. Every branch is u8, which is the point: the literal takes the
+// narrow type from the other branch rather than defaulting to i32.
+
+pub fn main() -> i32 {
+    mut x: u8 = 3
+    const cond: bool = true
+
+    const a := cond ? 5 : x
+    const b := cond ? x : 5
+
+    const c := 5 when cond else x
+    const d := x when cond else 5
+
+    return cast(a, i32) + cast(b, i32) + cast(c, i32) + cast(d, i32) + cast(x, i32) * 4
+}

@@ -1789,8 +1789,21 @@ namespace sema {
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
                     check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
-                    ResolvedType then_ty = check_expr(v->then_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
-                    const ResolvedType else_ty = check_expr(v->else_expr, locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
+                    // Check the non-literal branch first when exactly one branch is a coercible
+                    // literal, so the literal unifies against the other branch's real type --
+                    // the same ordering swap BinaryExpr does above. Without it, 'cond ? 5 : x'
+                    // defaulted the literal to i32 (there is usually no outer expected type),
+                    // then checked 'x' with expected=i32, which IdentExpr ignores, and reported
+                    // a spurious mismatch -- while 'cond ? x : 5', the identical expression with
+                    // its operands swapped, compiled fine.
+                    ResolvedType then_ty, else_ty;
+                    if (is_coercible_literal(v->then_expr) && !is_coercible_literal(v->else_expr)) {
+                        else_ty = check_expr(v->else_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+                        then_ty = check_expr(v->then_expr, locals, module_path, program, diag, else_ty, loop_depth, defer_loop_base, fn_error_type);
+                    } else {
+                        then_ty = check_expr(v->then_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+                        else_ty = check_expr(v->else_expr, locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
+                    }
                     if (then_ty != else_ty) {
                         return error(diag, v->location, "ternary branches have different types");
                     }
@@ -1804,8 +1817,15 @@ namespace sema {
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
                     check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
-                    ResolvedType then_ty = check_expr(v->then_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
-                    const ResolvedType else_ty = check_expr(v->else_expr, locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
+                    // Same literal-coercion ordering as TernaryExpr above.
+                    ResolvedType then_ty, else_ty;
+                    if (is_coercible_literal(v->then_expr) && !is_coercible_literal(v->else_expr)) {
+                        else_ty = check_expr(v->else_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+                        then_ty = check_expr(v->then_expr, locals, module_path, program, diag, else_ty, loop_depth, defer_loop_base, fn_error_type);
+                    } else {
+                        then_ty = check_expr(v->then_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+                        else_ty = check_expr(v->else_expr, locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
+                    }
                     if (then_ty != else_ty) {
                         return error(diag, v->location, "'when' expression branches have different types");
                     }

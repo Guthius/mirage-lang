@@ -426,6 +426,10 @@
     "action": "run",
     "exit": 0
   },
+  "example_ternary_literal_coercion": {
+    "action": "run",
+    "exit": 28
+  },
   "example_trait_composition_bare": {
     "action": "run",
     "exit": 9
