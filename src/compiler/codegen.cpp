@@ -4473,6 +4473,14 @@ namespace codegen {
                     const auto &lp = std::get<ast::MatchExpr::LiteralPattern>(arm.pattern);
                     // Evaluate the constant for the LLVM switch case
                     const auto case_val = sema::evaluate_integer_constant(*lp.expr, *current_module_path_, sema_program_);
+                    if (!case_val) {
+                        // sema rejects a non-evaluatable pattern before codegen runs, so this is
+                        // an internal inconsistency rather than a user error -- but it used to be
+                        // an unchecked dereference of an empty optional, which aborts.
+                        report_codegen_error(diag_, arm.location,
+                            "internal error: match arm pattern could not be evaluated to a constant");
+                        continue;
+                    }
                     auto *case_ci = llvm::ConstantInt::get(operand_ll_ty, static_cast<uint64_t>(*case_val), operand_type.is_signed());
                     auto *arm_bb = llvm::BasicBlock::Create(*context_, "match.arm", fn);
                     sw->addCase(llvm::cast<llvm::ConstantInt>(case_ci), arm_bb);
@@ -4619,6 +4627,12 @@ namespace codegen {
                     if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) continue;
                     const auto &lp = std::get<ast::MatchExpr::LiteralPattern>(arm.pattern);
                     const auto case_val = sema::evaluate_integer_constant(*lp.expr, *current_module_path_, sema_program_);
+                    if (!case_val) {
+                        // See the matching guard in emit_match above.
+                        report_codegen_error(diag_, arm.location,
+                            "internal error: switch arm pattern could not be evaluated to a constant");
+                        continue;
+                    }
                     auto *case_ci = llvm::ConstantInt::get(operand_ll_ty, static_cast<uint64_t>(*case_val), operand_type.is_signed());
                     auto *arm_bb = llvm::BasicBlock::Create(*context_, "switch.arm", fn);
                     sw->addCase(llvm::cast<llvm::ConstantInt>(case_ci), arm_bb);

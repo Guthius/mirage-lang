@@ -4,10 +4,43 @@
 #include <cctype>
 #include <cstdlib>
 #include <format>
+#include <limits>
 #include <unordered_set>
 
 namespace sema {
     namespace {
+        // Guarded signed-integer folding, shared by this file's two evaluators.
+        //
+        // Division and modulo overflow for INT64_MIN / -1, which is undefined behaviour and
+        // traps with SIGFPE on x86-64 -- a hard compiler crash, not a diagnostic. A shift by a
+        // negative amount, or by at least the operand width, is likewise undefined; in
+        // practice x86 masks the count, so '1 << 64' silently folded to 1 and a case label
+        // written that way matched 1.
+        //
+        // Returning nullopt makes the expression "not a constant expression", which callers
+        // already handle and report. The uint64_t sibling in type_resolver.cpp
+        // (eval_integer_const_expr) has always guarded its shifts this way; unsigned division
+        // cannot overflow, which is why only these two needed the division guard.
+        auto fold_div(const int64_t lhs, const int64_t rhs) -> std::optional<int64_t> {
+            if (rhs == 0 || (lhs == std::numeric_limits<int64_t>::min() && rhs == -1)) return std::nullopt;
+            return lhs / rhs;
+        }
+
+        auto fold_mod(const int64_t lhs, const int64_t rhs) -> std::optional<int64_t> {
+            if (rhs == 0 || (lhs == std::numeric_limits<int64_t>::min() && rhs == -1)) return std::nullopt;
+            return lhs % rhs;
+        }
+
+        auto fold_shift_left(const int64_t lhs, const int64_t rhs) -> std::optional<int64_t> {
+            if (rhs < 0 || rhs >= 64) return std::nullopt;
+            return static_cast<int64_t>(static_cast<uint64_t>(lhs) << static_cast<uint64_t>(rhs));
+        }
+
+        auto fold_shift_right(const int64_t lhs, const int64_t rhs) -> std::optional<int64_t> {
+            if (rhs < 0 || rhs >= 64) return std::nullopt;
+            return lhs >> rhs;
+        }
+
         // Resolves the module a MemberExpr's `object` refers to, for the two shapes cross-
         // module qualified const access can take: a plain identifier bound to an
         // ImportSymbol (`opts.target_os`, opts := import(...)) or an inline import used
@@ -582,13 +615,13 @@ namespace sema {
                     case ast::BinaryOp::Add:        return *lhs + *rhs;
                     case ast::BinaryOp::Sub:        return *lhs - *rhs;
                     case ast::BinaryOp::Mul:        return *lhs * *rhs;
-                    case ast::BinaryOp::Div:        return *rhs != 0 ? std::optional<int64_t>{*lhs / *rhs} : std::nullopt;
-                    case ast::BinaryOp::Mod:        return *rhs != 0 ? std::optional<int64_t>{*lhs % *rhs} : std::nullopt;
+                    case ast::BinaryOp::Div:        return fold_div(*lhs, *rhs);
+                    case ast::BinaryOp::Mod:        return fold_mod(*lhs, *rhs);
                     case ast::BinaryOp::BitwiseAnd: return *lhs & *rhs;
                     case ast::BinaryOp::BitwiseOr:  return *lhs | *rhs;
                     case ast::BinaryOp::BitwiseXor: return *lhs ^ *rhs;
-                    case ast::BinaryOp::ShiftLeft:  return *lhs << *rhs;
-                    case ast::BinaryOp::ShiftRight: return *lhs >> *rhs;
+                    case ast::BinaryOp::ShiftLeft:  return fold_shift_left(*lhs, *rhs);
+                    case ast::BinaryOp::ShiftRight: return fold_shift_right(*lhs, *rhs);
                     default:                        return std::nullopt;
                     }
                 }
@@ -937,13 +970,13 @@ namespace sema {
                     case ast::BinaryOp::Add:          return *li + *ri;
                     case ast::BinaryOp::Sub:          return *li - *ri;
                     case ast::BinaryOp::Mul:          return *li * *ri;
-                    case ast::BinaryOp::Div:          return *ri != 0 ? std::optional<int64_t>{*li / *ri} : std::nullopt;
-                    case ast::BinaryOp::Mod:          return *ri != 0 ? std::optional<int64_t>{*li % *ri} : std::nullopt;
+                    case ast::BinaryOp::Div:          return fold_div(*li, *ri);
+                    case ast::BinaryOp::Mod:          return fold_mod(*li, *ri);
                     case ast::BinaryOp::BitwiseAnd:   return *li & *ri;
                     case ast::BinaryOp::BitwiseOr:    return *li | *ri;
                     case ast::BinaryOp::BitwiseXor:   return *li ^ *ri;
-                    case ast::BinaryOp::ShiftLeft:    return *li << *ri;
-                    case ast::BinaryOp::ShiftRight:   return *li >> *ri;
+                    case ast::BinaryOp::ShiftLeft:    return fold_shift_left(*li, *ri);
+                    case ast::BinaryOp::ShiftRight:   return fold_shift_right(*li, *ri);
                     case ast::BinaryOp::Less:         return int64_t{*li < *ri ? 1 : 0};
                     case ast::BinaryOp::Greater:      return int64_t{*li > *ri ? 1 : 0};
                     case ast::BinaryOp::LessEqual:    return int64_t{*li <= *ri ? 1 : 0};

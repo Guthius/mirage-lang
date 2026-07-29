@@ -196,6 +196,10 @@
     "action": "run",
     "exit": 112
   },
+  "example_const_fold_overflow": {
+    "action": "build",
+    "exit": 1
+  },
   "example_default_params": {
     "action": "run",
     "exit": 0

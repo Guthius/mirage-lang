@@ -1,0 +1,29 @@
+// example_const_fold_overflow.mir — REJECTION CASE. Constant folding must refuse expressions
+// whose value is not representable, rather than computing undefined behaviour.
+//
+// Two guards, both previously missing from the signed evaluators in value_resolver.cpp while
+// the unsigned sibling in type_resolver.cpp already had the shift one:
+//
+//   INT64_MIN / -1   signed division overflow. On x86-64 this raises SIGFPE, so the compiler
+//                    crashed outright on this input rather than reporting anything.
+//   1 << 64          shift of at least the operand width. x86 masks the shift count, so this
+//                    silently folded to 1 -- the arm below then matched v == 1 and the
+//                    program returned 7, with no diagnostic anywhere.
+//
+// Expected: compilation fails with two errors, one per arm:
+//   error: match arm pattern is not a representable integer constant
+//          (division overflow, or a shift of 64 or more)
+
+const MIN: i64 = -9223372036854775807 - 1
+
+pub fn main() -> i32 {
+    mut v: i64 = 1
+
+    const r := match v {
+        MIN / -1: 1,
+        1 << 64:  7,
+        _:        0
+    }
+
+    return cast(r, i32)
+}

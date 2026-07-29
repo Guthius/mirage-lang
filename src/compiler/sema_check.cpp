@@ -2549,13 +2549,24 @@ namespace sema {
 
                             const auto &lp = std::get<ast::MatchExpr::LiteralPattern>(arm.pattern);
                             // Pattern must be compile-time constant
-                            if (!is_constant_expr(*lp.expr, module_path, program)) {
+                            const auto pattern_is_constant = is_constant_expr(*lp.expr, module_path, program);
+                            if (!pattern_is_constant) {
                                 error(diag, arm_loc, "match arm pattern must be a compile-time constant");
                             }
                             // Type-check the pattern against the operand type
                             check_expr(*lp.expr, arm_locals, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_error_type);
                             // Evaluate for duplicate detection
                             const auto val = evaluate_integer_constant(*lp.expr, module_path, program);
+                            if (!val && pattern_is_constant) {
+                                // Constant in shape but not evaluatable: a division that overflows
+                                // (INT64_MIN / -1) or a shift of 64 or more. Reported here because
+                                // codegen needs a concrete value for the LLVM switch case and has
+                                // nothing to fall back on. Floating-point operands are rejected
+                                // earlier, so every pattern reaching here should otherwise fold.
+                                error(diag, arm_loc,
+                                    "match arm pattern is not a representable integer constant "
+                                    "(division overflow, or a shift of 64 or more)");
+                            }
                             if (val) {
                                 if (seen_values.count(*val)) {
                                     error(diag, arm_loc, std::format("duplicate match arm: value already covered by arm {}", seen_values.at(*val) + 1));
@@ -4058,11 +4069,18 @@ namespace sema {
                                 continue;
                             }
                             const auto &lp = std::get<ast::MatchExpr::LiteralPattern>(arm.pattern);
-                            if (!is_constant_expr(*lp.expr, module_path, program)) {
+                            const auto pattern_is_constant = is_constant_expr(*lp.expr, module_path, program);
+                            if (!pattern_is_constant) {
                                 diag.report_error(DiagnosticStage::Sema, arm.location, "switch arm pattern must be a compile-time constant");
                             }
                             check_expr(*lp.expr, locals, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_error_type);
                             const auto val = evaluate_integer_constant(*lp.expr, module_path, program);
+                            if (!val && pattern_is_constant) {
+                                // See the matching comment in the match-expression path above.
+                                diag.report_error(DiagnosticStage::Sema, arm.location,
+                                    "switch arm pattern is not a representable integer constant "
+                                    "(division overflow, or a shift of 64 or more)");
+                            }
                             if (val) {
                                 if (seen_values.count(*val)) {
                                     diag.report_error(DiagnosticStage::Sema, arm.location, std::format("duplicate switch arm: value already covered by arm {}", seen_values.at(*val) + 1));
