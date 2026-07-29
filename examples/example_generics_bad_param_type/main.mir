@@ -3,14 +3,27 @@
 // enum (or any other non-scalar type) is a sema error. See spec.md §22, "Declaring Generic
 // Types".
 //
-// Expected: compilation fails with
+// The same rule applies to a generic *function*, which used to escape it entirely:
+// validate_generic_param_types documents itself as shared by all four decl kinds carrying
+// generic_params (type/fn/impl/trait-impl), but declare_one_decl's FunctionDecl branch never
+// called it. 'fn bad_fn[E: Color]' was therefore accepted at its declaration, and the user
+// only found out at the call site via an unrelated-looking "generic argument 1 for 'bad_fn'
+// must be a compile-time constant expression of type 'Color'".
+//
+// Expected: compilation fails with one error per bad parameter:
 //   error: generic parameter 'E' declared type must be 'type' or a builtin scalar type
+//          (bool, an integer kind, or usize)
+//   error: generic parameter 'F' declared type must be 'type' or a builtin scalar type
 //          (bool, an integer kind, or usize)
 
 pub type Color = enum { Red Green Blue }
 
 pub type Bad[E: Color] = struct {
     value: i32
+}
+
+pub fn bad_fn[F: Color](v: i32) -> i32 {
+    return v
 }
 
 pub fn main() -> i32 {

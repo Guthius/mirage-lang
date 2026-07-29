@@ -603,6 +603,13 @@ namespace sema {
                     using V = std::decay_t<T>;
 
                     if constexpr (std::is_same_v<V, ast::FunctionDecl>) {
+                        // The missing fourth caller. validate_generic_param_types documents
+                        // itself as shared by all four decl kinds that carry generic_params,
+                        // but the bare generic free function never called it -- so an illegal
+                        // parameter type was accepted at the declaration and only surfaced at
+                        // the call site as a confusing "generic argument 1 for 'f' must be a
+                        // compile-time constant expression of type 'Thing'".
+                        validate_generic_param_types(v.generic_params, diag);
                         declare_symbol(module.symbols, v.name, FunctionSymbol{.decl = &v, .is_pub = v.is_pub}, v.location, diag);
                     } else if constexpr (std::is_same_v<V, ast::ExtFunctionDecl>) {
                         declare_symbol(module.symbols, v.name, ExtFunctionSymbol{.decl = &v, .is_pub = v.is_pub}, v.location, diag);
