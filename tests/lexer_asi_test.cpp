@@ -89,6 +89,24 @@ auto main() -> int {
         {TK::Identifier, TK::Equal, TK::KwNil, TK::Semicolon,
          TK::Identifier, TK::Equal, TK::IntLiteral, TK::Semicolon, TK::Eof});
 
+    expect_kinds("kw_default_line_end", "x = default\ny = 2\n",
+        {TK::Identifier, TK::Equal, TK::KwDefault, TK::Semicolon,
+         TK::Identifier, TK::Equal, TK::IntLiteral, TK::Semicolon, TK::Eof});
+
+    expect_kinds("kw_undefined_line_end", "x = undefined\ny = 2\n",
+        {TK::Identifier, TK::Equal, TK::KwUndefined, TK::Semicolon,
+         TK::Identifier, TK::Equal, TK::IntLiteral, TK::Semicolon, TK::Eof});
+
+    // The shape that actually misparsed without ASI: the next line opens with '(', which
+    // is a valid postfix continuation, so 'default' and the call merged into 'default(...)'.
+    expect_kinds("kw_default_then_paren_line", "x = default\n(f())\n",
+        {TK::Identifier, TK::Equal, TK::KwDefault, TK::Semicolon,
+         TK::LParen, TK::Identifier, TK::LParen, TK::RParen, TK::RParen, TK::Semicolon, TK::Eof});
+
+    expect_kinds("kw_undefined_then_paren_line", "x = undefined\n(f())\n",
+        {TK::Identifier, TK::Equal, TK::KwUndefined, TK::Semicolon,
+         TK::LParen, TK::Identifier, TK::LParen, TK::RParen, TK::RParen, TK::Semicolon, TK::Eof});
+
     expect_kinds("rparen_line_end", "f()\ng()\n",
         {TK::Identifier, TK::LParen, TK::RParen, TK::Semicolon,
          TK::Identifier, TK::LParen, TK::RParen, TK::Semicolon, TK::Eof});

@@ -97,6 +97,10 @@ namespace lexer {
             case TokenKind::KwTrue:
             case TokenKind::KwFalse:
             case TokenKind::KwNil:
+            // 'default' and 'undefined' are complete terminal expressions exactly like
+            // true/false/nil above -- 'mut x: T = default' is a finished statement.
+            case TokenKind::KwDefault:
+            case TokenKind::KwUndefined:
             case TokenKind::RParen:
             case TokenKind::RBrace:
             case TokenKind::RBracket:
