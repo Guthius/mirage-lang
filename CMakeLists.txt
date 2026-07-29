@@ -96,6 +96,22 @@ target_include_directories(lexer_asi_test
 enable_testing()
 add_test(NAME lexer_asi_test COMMAND lexer_asi_test)
 
+add_executable(diagnostic_engine_test
+        tests/diagnostic_engine_test.cpp
+        src/compiler/diagnostic_engine.cpp
+        src/compiler/diagnostic_engine.hpp
+        src/compiler/source_manager.cpp
+        src/compiler/source_manager.hpp
+        src/compiler/source_location.hpp
+)
+
+target_include_directories(diagnostic_engine_test
+        PRIVATE src
+)
+
+add_test(NAME diagnostic_engine_test COMMAND diagnostic_engine_test)
+set_tests_properties(diagnostic_engine_test PROPERTIES TIMEOUT 10)
+
 add_executable(ast_parser_progress_test
         tests/ast_parser_progress_test.cpp
         $<TARGET_OBJECTS:mirage_core>

@@ -57,12 +57,19 @@ void DiagnosticEngine::print_diagnostic(const Diagnostic &diagnostic) const {
         out << "  " << source_line << "\n";
         out << "  ";
 
-        for (uint32_t i = 1; i < diagnostic.location.column; ++i) {
-            out << (source_line[i - 1] == '\t' ? '\t' : ' ');
+        // A reported column is not guaranteed to fall inside its line: a stage can point
+        // just past end-of-line, and a miscomputed one can be arbitrarily large (an
+        // unsigned underflow lands near SIZE_MAX). Clamp before indexing -- this loop
+        // used to read source_line[i - 1] unbounded, which is an out-of-bounds read and,
+        // for an underflowed column, also an effectively unbounded loop.
+        const auto column = diagnostic.location.column;
+        const auto padding = column > 0 ? std::min<size_t>(column - 1, source_line.size()) : 0;
+        for (size_t i = 0; i < padding; ++i) {
+            out << (source_line[i] == '\t' ? '\t' : ' ');
         }
 
-        const auto max_length = diagnostic.location.column <= source_line.size()
-            ? source_line.size() - diagnostic.location.column + 1
+        const auto max_length = column > 0 && column <= source_line.size()
+            ? source_line.size() - column + 1
             : 1;
         const auto caret_count = std::max<size_t>(std::min<size_t>(diagnostic.location.length, max_length), 1);
 
