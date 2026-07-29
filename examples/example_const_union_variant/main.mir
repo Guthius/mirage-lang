@@ -1,0 +1,36 @@
+// example_const_union_variant.mir — a payload-free tagged-union variant as a module-level
+// 'const' initializer.
+//
+// sema's is_constant_expr accepts a bare '.name' (DotIdentExpr) as constant, but
+// emit_const_or_runtime's DotIdentExpr arm handled only Enum and Bitset and fell through for a
+// Union, landing on the internal "unsupported global constant initializer" error. The two
+// stages disagreed, so this compiled through sema and then failed in codegen.
+//
+// It is trivially foldable: a union lowers to [size x i8] with the u32 tag at offset 0, and a
+// payload-free variant is that tag with the remaining bytes zero — no alloca or store needed,
+// contrary to the comment that used to sit here.
+//
+// A payload-BEARING variant ('.Some(7)') remains rejected, and deliberately so: sema classifies
+// TaggedVariantExpr as non-constant because constructing it performs runtime stores, so it is
+// caught earlier with "global variable initializer must be a compile-time constant expression".
+//
+// Expected: exit code 42.
+
+type Opt = union(enum) {
+    Some: i32
+    None
+}
+
+type State = union(enum) {
+    Idle
+    Busy: i32
+}
+
+const NOTHING: Opt = .None
+const IDLE: State = .Idle
+
+pub fn main() -> i32 {
+    const a := match NOTHING { .Some(v): v, .None: 40 }
+    const b := match IDLE { .Idle: 2, .Busy(n): n }
+    return a + b
+}

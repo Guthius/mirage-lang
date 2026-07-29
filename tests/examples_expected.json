@@ -204,6 +204,10 @@
     "action": "build",
     "exit": 1
   },
+  "example_const_union_variant": {
+    "action": "run",
+    "exit": 42
+  },
   "example_default_params": {
     "action": "run",
     "exit": 0

@@ -4999,8 +4999,36 @@ namespace codegen {
                                 const auto mask = bitset_member_mask(bitset_info, v.name, v.location);
                                 return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty), mask.value_or(0), false);
                             }
-                            // Payload-free tagged-union variant (.name where ty is a Union) needs
-                            // alloca/store, which can't be constant-folded — falls through below.
+                            if (ty.kind == sema::TypeKind::Union) {
+                                // A payload-free tagged-union variant IS constant-foldable: it is
+                                // just the tag word, with the payload bytes zero. sema's
+                                // is_constant_expr already accepts a bare '.name' (DotIdentExpr),
+                                // so rejecting it here made the two disagree -- 'const A: Opt =
+                                // .None' passed sema and then failed with "unsupported global
+                                // constant initializer".
+                                //
+                                // A payload-BEARING variant ('.Some(7)') is a different matter and
+                                // is deliberately not handled: sema classifies TaggedVariantExpr
+                                // as non-constant ("has runtime stores"), so it is rejected before
+                                // reaching codegen and never lands in the fall-through below.
+                                const auto &union_info = sema_program_.unions.at(ty.union_index);
+                                for (const auto &variant : union_info.variants) {
+                                    if (variant.name != v.name) continue;
+                                    if (variant.payload_struct_index >= 0) break; // has a payload
+
+                                    // Unions lower to [size x i8] (declare_unions), with the u32
+                                    // tag at offset 0 — little-endian, matching the target.
+                                    auto *i8_ty = llvm::Type::getInt8Ty(*context_);
+                                    std::vector<llvm::Constant *> bytes(union_info.size,
+                                                                        llvm::ConstantInt::get(i8_ty, 0));
+                                    const auto tag = static_cast<uint32_t>(variant.tag_value);
+                                    for (uint32_t b = 0; b < 4 && b < union_info.size; ++b) {
+                                        bytes[b] = llvm::ConstantInt::get(i8_ty, (tag >> (8 * b)) & 0xFF);
+                                    }
+                                    return llvm::ConstantArray::get(
+                                        llvm::cast<llvm::ArrayType>(llvm_type(*current_module_path_, ty)), bytes);
+                                }
+                            }
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                             return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), sizeof_operand(*v));
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) {
