@@ -1236,7 +1236,7 @@ namespace codegen {
             auto emit_union_expr_value(const ast::StructExpr &se, const sema::ResolvedType &ty) -> llvm::Value * {
                 const auto &union_info = sema_program_.unions.at(ty.union_index);
                 auto *ll_ty = unions_.at(ty.union_index);
-                auto *slot = builder_.CreateAlloca(ll_ty);
+                auto *slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), ll_ty);
                 // se has exactly one field (enforced by sema)
                 if (!se.fields.empty()) {
                     const auto &sf = se.fields[0];
@@ -1256,7 +1256,7 @@ namespace codegen {
             auto emit_tagged_variant_expr(const ast::TaggedVariantExpr &expr, const sema::ResolvedType &ty) -> llvm::Value * {
                 const auto &union_info = sema_program_.unions.at(ty.union_index);
                 auto *ll_ty = unions_.at(ty.union_index); // [total_size x i8]
-                auto *slot = builder_.CreateAlloca(ll_ty);
+                auto *slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), ll_ty);
 
                 // Find the variant
                 const auto variant_it = std::ranges::find(union_info.variants, expr.variant_name, &sema::TaggedUnionVariant::name);
@@ -1305,7 +1305,7 @@ namespace codegen {
             // re-scans UnionInfo::variants itself.
             auto emit_variant_coercion(const ast::Expr &expr, const sema::VariantCoercion &vc) -> llvm::Value * {
                 auto *ll_ty = unions_.at(vc.union_type.union_index); // [total_size x i8]
-                auto *slot = builder_.CreateAlloca(ll_ty);
+                auto *slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), ll_ty);
 
                 auto *tag_val = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), static_cast<uint64_t>(vc.tag_value), false);
                 builder_.CreateStore(tag_val, slot);
@@ -2557,7 +2557,7 @@ namespace codegen {
                         // fixed sentinel exit code 1 — not the raw error value, since
                         // error(T) has no defined integer representation outside the
                         // function's own context.
-                        auto *slot = builder_.CreateAlloca(call_result->getType());
+                        auto *slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), call_result->getType());
                         builder_.CreateStore(call_result, slot);
                         auto *tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), slot);
                         auto *is_failed = builder_.CreateICmpNE(tag, builder_.getInt32(0));
@@ -2610,7 +2610,7 @@ namespace codegen {
                     // returned tagged-union value. Exit 0 on Ok, 1 on Failed — a single
                     // process exit code can't meaningfully recover which variant failed.
                     auto *result_val = builder_.CreateCall(main);
-                    auto *slot = builder_.CreateAlloca(result_val->getType());
+                    auto *slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), result_val->getType());
                     builder_.CreateStore(result_val, slot);
                     auto *tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), slot);
                     auto *is_failed = builder_.CreateICmpNE(tag, builder_.getInt32(0));
@@ -2622,7 +2622,17 @@ namespace codegen {
                 emit_process_exit(exit_code_i32);
             }
 
-            static auto create_entry_alloca(llvm::Function *fn, llvm::Type *type, llvm::StringRef name) -> llvm::AllocaInst * {
+            // Allocates in 'fn's entry block so the slot is one fixed frame object, rather than
+            // a stack adjustment repeated on every execution of an enclosing loop.
+            //
+            // Callers inside a function body pass current_function_. Callers in helpers that can
+            // also run while a *different* function is being emitted (the synthesized '_init'
+            // and '_start', global-constant emission) must pass
+            // builder_.GetInsertBlock()->getParent() instead: current_function_ is stale there,
+            // and hoisting into the wrong function's entry block produces an instruction used
+            // outside its own function, which fails LLVM module verification rather than
+            // misbehaving quietly.
+            static auto create_entry_alloca(llvm::Function *fn, llvm::Type *type, llvm::StringRef name = "") -> llvm::AllocaInst * {
                 llvm::IRBuilder tmp(&fn->getEntryBlock(), fn->getEntryBlock().begin());
                 return tmp.CreateAlloca(type, nullptr, name);
             }
@@ -2962,7 +2972,7 @@ namespace codegen {
 
                 const auto &array_info = sema_program_.arrays.at(array_type.array_index);
                 auto *ll_arr_ty = llvm_type(array_module, array_type);
-                auto *scratch = builder_.CreateAlloca(ll_arr_ty);
+                auto *scratch = create_entry_alloca(builder_.GetInsertBlock()->getParent(), ll_arr_ty);
 
                 auto *total_count = builder_.getInt64(array_info.count);
                 auto *copy_count = builder_.CreateSelect(builder_.CreateICmpULT(src_len, total_count), src_len, total_count);
@@ -3219,7 +3229,7 @@ namespace codegen {
                     struct_type = object_type;
                     struct_module = expr_type_module_hint(member.object);
                     auto *value = emit_expr(member.object);
-                    base = builder_.CreateAlloca(llvm_type(struct_module, struct_type));
+                    base = create_entry_alloca(builder_.GetInsertBlock()->getParent(), llvm_type(struct_module, struct_type));
                     builder_.CreateStore(value, base);
                 }
 
@@ -3719,7 +3729,7 @@ namespace codegen {
             // (the union's [size x i8] representation), so it's spilled to a scratch
             // alloca first — there's no way to GEP into a non-lvalue SSA value directly.
             auto extract_error_tag(llvm::Value *err_val) -> llvm::Value * {
-                auto *slot = builder_.CreateAlloca(err_val->getType());
+                auto *slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), err_val->getType());
                 builder_.CreateStore(err_val, slot);
                 return builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), slot);
             }
@@ -3735,7 +3745,7 @@ namespace codegen {
                                             const sema::ResolvedType &effective_type) -> llvm::Value * {
                 const auto &wrapper = sema_program_.unions.at(wrapper_type.union_index);
                 auto *wrapper_ll_ty = unions_.at(wrapper_type.union_index);
-                auto *slot = builder_.CreateAlloca(wrapper_ll_ty);
+                auto *slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), wrapper_ll_ty);
                 builder_.CreateStore(wrapper_val, slot);
                 auto *payload_ptr = builder_.CreateConstInBoundsGEP1_64(llvm::Type::getInt8Ty(*context_), slot, wrapper.payload_offset);
                 auto *effective_ll_ty = llvm_type(wrapper.module_path, effective_type);
@@ -3752,7 +3762,7 @@ namespace codegen {
                                            const sema::ResolvedType &error_union_type) -> llvm::Value * {
                 const auto &wrapper = sema_program_.unions.at(error_union_type.union_index);
                 auto *wrapper_ll_ty = unions_.at(error_union_type.union_index);
-                auto *outer_slot = builder_.CreateAlloca(wrapper_ll_ty);
+                auto *outer_slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), wrapper_ll_ty);
                 builder_.CreateStore(builder_.getInt32(1), outer_slot); // outer tag = Failed
 
                 // 'Failed' is always variants[1] by construction (see synthesize_error_union
@@ -3771,7 +3781,7 @@ namespace codegen {
                     const auto inner_variant_it = std::ranges::find_if(inner.variants,
                         [&](const auto &variant) { return variant.payload_type == member_type; });
 
-                    auto *inner_slot = builder_.CreateAlloca(inner_ll_ty);
+                    auto *inner_slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), inner_ll_ty);
                     builder_.CreateStore(
                         llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_), static_cast<uint64_t>(inner_variant_it->tag_value), false),
                         inner_slot);
@@ -3812,7 +3822,7 @@ namespace codegen {
                 auto *callee_ll_ty = unions_.at(callee_error_ty.union_index);
                 auto *caller_ll_ty = unions_.at(caller_error_ty.union_index);
 
-                auto *slot = builder_.CreateAlloca(callee_ll_ty);
+                auto *slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), callee_ll_ty);
                 builder_.CreateStore(err_val, slot);
                 auto *failed_payload_ptr = builder_.CreateConstInBoundsGEP1_64(llvm::Type::getInt8Ty(*context_), slot, callee_wrapper.payload_offset);
 
@@ -3836,7 +3846,7 @@ namespace codegen {
                 auto *fn = builder_.GetInsertBlock()->getParent();
                 auto *merge_bb = llvm::BasicBlock::Create(*context_, "try.translate.merge", fn);
                 auto *unreachable_bb = llvm::BasicBlock::Create(*context_, "try.translate.unreachable", fn);
-                auto *result_slot = builder_.CreateAlloca(caller_ll_ty);
+                auto *result_slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), caller_ll_ty);
                 auto *sw = builder_.CreateSwitch(inner_tag, unreachable_bb, static_cast<unsigned>(inner.variants.size()));
 
                 for (const auto &variant : inner.variants) {
@@ -4125,7 +4135,7 @@ namespace codegen {
                                 }
                                 // Emit as a tagged variant with no payload
                                 auto *ll_ty = unions_.at(ty.union_index);
-                                auto *slot = builder_.CreateAlloca(ll_ty);
+                                auto *slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), ll_ty);
                                 auto *tag_val = llvm::ConstantInt::get(llvm::Type::getInt32Ty(*context_),
                                                                         static_cast<uint64_t>(variant_it->tag_value), false);
                                 builder_.CreateStore(tag_val, slot);
@@ -5979,7 +5989,7 @@ namespace codegen {
                 // Ok: outer tag = 0, payload undefined (Ok carries no payload).
                 {
                     auto *ll_ty = unions_.at(current_returns_.back().union_index);
-                    auto *slot = builder_.CreateAlloca(ll_ty);
+                    auto *slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), ll_ty);
                     builder_.CreateStore(builder_.getInt32(0), slot);
                     ret_vals.push_back(builder_.CreateLoad(ll_ty, slot));
                 }
