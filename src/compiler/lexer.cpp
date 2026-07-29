@@ -162,7 +162,14 @@ namespace lexer {
                         }
                     }
 
-                    auto token = lex_token();
+                    auto maybe_token = lex_token();
+                    if (!maybe_token.has_value()) {
+                        // An unrecognized byte: already reported and consumed. Skip it and
+                        // keep lexing, so one stray character does not remove the rest of
+                        // the file from the token stream.
+                        continue;
+                    }
+                    auto token = std::move(*maybe_token);
 
                     // Go-style ASI also fires before EOF, so the last statement in a file
                     // terminates even without a trailing newline. Semicolon is never itself
@@ -320,7 +327,10 @@ namespace lexer {
                 }
             }
 
-            auto lex_token() -> Token {
+            // Returns nullopt when the input byte was unrecognized: it has been reported and
+            // consumed, and the caller should simply keep going. Every other path yields a
+            // token, including the genuine end-of-input Eof.
+            auto lex_token() -> std::optional<Token> {
                 const bool crossed_newline = skip_whitespace_and_comments();
 
                 if (crossed_newline && last_token_is_asi_trigger_) {
@@ -345,7 +355,7 @@ namespace lexer {
                 token_start_col_ = col_;
                 const auto ch = advance();
 
-                Token token = [&]() -> Token {
+                std::optional<Token> token = [&]() -> std::optional<Token> {
                     if (is_digit(ch)) {
                         return lex_number(start);
                     }
@@ -369,11 +379,18 @@ namespace lexer {
                     return lex_symbol(start, ch);
                 }();
 
+                if (!token.has_value()) {
+                    // Deliberately leave last_real_kind_/last_token_is_asi_trigger_ alone, as
+                    // the Eof path above does: a skipped byte is not a token, and the ASI
+                    // state must keep describing the last *real* token.
+                    return std::nullopt;
+                }
+
                 // 'expr.*' (postfix deref) can end a statement even though bare Star (binary
                 // multiply) cannot — see last_token_is_asi_trigger_'s doc comment.
-                const bool is_dot_star = token.kind == TokenKind::Star && last_real_kind_ == TokenKind::Dot;
-                last_token_is_asi_trigger_ = is_asi_trigger(token.kind) || is_dot_star;
-                last_real_kind_ = token.kind;
+                const bool is_dot_star = token->kind == TokenKind::Star && last_real_kind_ == TokenKind::Dot;
+                last_token_is_asi_trigger_ = is_asi_trigger(token->kind) || is_dot_star;
+                last_real_kind_ = token->kind;
                 return token;
             }
 
@@ -576,7 +593,8 @@ namespace lexer {
                 return make_token(TokenKind::CharLiteral, start);
             }
 
-            auto lex_symbol(const size_t start, const char ch) -> Token {
+            // nullopt means the byte was unrecognized (reported and consumed) — see lex_token.
+            auto lex_symbol(const size_t start, const char ch) -> std::optional<Token> {
                 const auto match_double = [&](const char expected, const TokenKind double_token,
                                               const TokenKind single_token) -> Token {
                     return make_token(match(expected) ? double_token : single_token, start);
@@ -646,13 +664,18 @@ namespace lexer {
                         DiagnosticStage::Lexer,
                         SourceLocation{
                             .filename = filename_,
-                            .line = line_,
-                            .column = col_ - 1,
+                            .line = token_start_line_,
+                            .column = token_start_col_,
                             .offset = start,
+                            .length = 1,
                         },
                         std::string("unexpected character '") + ch + "'");
 
-                    return make_token(TokenKind::Eof, start);
+                    // The byte is already consumed. Yield no token rather than a synthesized
+                    // Eof: tokenize()'s loop stops on any Eof, so returning one here truncated
+                    // the entire rest of the file from tokenization -- it was never parsed,
+                    // checked or compiled, with no indication beyond this one diagnostic.
+                    return std::nullopt;
                 }
             }
 

@@ -124,6 +124,48 @@ namespace {
         }
     }
 
+    // An unrecognized byte used to be reported and then returned as a synthesized Eof
+    // token, which tokenize()'s loop treats as end-of-input -- so one stray character
+    // silently removed everything after it from the token stream.
+    void test_stray_byte_does_not_truncate_the_file() {
+        const auto result = lex("a = 1\n`\nb = 2\nc = 3\nd = 4\n");
+        check(result.error_count == 1, "one stray byte reports exactly one error");
+
+        // Everything after the stray byte must still be tokenized.
+        int identifiers = 0;
+        for (const auto &token : result.tokens) {
+            if (token.kind == TokenKind::Identifier) {
+                ++identifiers;
+            }
+        }
+        check(identifiers == 4, "identifiers before and after a stray byte are all lexed");
+
+        check(!result.tokens.empty() && result.tokens.back().kind == TokenKind::Eof,
+              "token stream still ends with a real Eof");
+
+        // The fabricated Eof also carried the stray byte as its lexeme.
+        for (const auto &token : result.tokens) {
+            if (token.kind == TokenKind::Eof) {
+                check(token.lexeme.empty(), "Eof token carries no lexeme");
+            }
+        }
+    }
+
+    // A stray byte must not disturb ASI state: it is not a real token, so the trigger
+    // status of the last real token has to survive it.
+    void test_stray_byte_preserves_asi_state() {
+        const auto result = lex("x`\ny\n");
+        check(result.error_count == 1, "stray byte adjacent to an identifier reports once");
+
+        int semicolons = 0;
+        for (const auto &token : result.tokens) {
+            if (token.kind == TokenKind::Semicolon) {
+                ++semicolons;
+            }
+        }
+        check(semicolons == 2, "ASI still fires across a stray byte");
+    }
+
     // Escapes inside a well-formed literal must keep working unchanged.
     void test_valid_escapes_still_lex() {
         const auto result = lex("a = \"x\\\"y\"\nb = '\\n'\nc = '\\x41'\n");
@@ -138,6 +180,8 @@ auto main() -> int {
     test_unterminated_string_stays_on_its_line();
     test_unterminated_char_stays_on_its_line();
     test_backslash_before_newline_does_not_continue_literal();
+    test_stray_byte_does_not_truncate_the_file();
+    test_stray_byte_preserves_asi_state();
     test_valid_escapes_still_lex();
 
     if (failures > 0) {
