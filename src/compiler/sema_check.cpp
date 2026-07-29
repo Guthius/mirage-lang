@@ -2189,7 +2189,13 @@ namespace sema {
                             }
                         }
                     }
-                    check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    {
+                        const auto operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                        if (operand_type.kind == TypeKind::Namespace) {
+                            return error(diag, get_expr_location(v->operand),
+                                "'size_of' requires a type or a value; this names an imported module");
+                        }
+                    }
                     return ResolvedType{.kind = TypeKind::USize};
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) {
@@ -2212,7 +2218,13 @@ namespace sema {
                             }
                         }
                     }
-                    check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    {
+                        const auto operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                        if (operand_type.kind == TypeKind::Namespace) {
+                            return error(diag, get_expr_location(v->operand),
+                                "'align_of' requires a type or a value; this names an imported module");
+                        }
+                    }
                     return ResolvedType{.kind = TypeKind::USize};
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
@@ -2244,6 +2256,12 @@ namespace sema {
                     }
                     if (!resolved_as_type_name) {
                         operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    }
+                    if (operand_type.kind == TypeKind::Namespace) {
+                        // Same gap as size_of/align_of: a bare imported-module identifier is not
+                        // a value and has no type, but used to intern a meaningless type id.
+                        return error(diag, get_expr_location(v->operand),
+                            "'type_of' requires a type or a value; this names an imported module");
                     }
                     if (operand_type.kind != TypeKind::Invalid) {
                         const auto id = intern_type_id(program, operand_type);

@@ -155,6 +155,13 @@ namespace sema {
             case TypeKind::Any:   // fat pointer: {id: type, data: anyptr}, 16 bytes
                 return 16;
 
+            // Not a value type and so has no size. Reaching here means a stage above failed to
+            // reject it: 'size_of(some_import)' used to land here and silently evaluate to 0.
+            // sema_check.cpp's SizeOfExpr/AlignOfExpr cases now report that, so this stays 0
+            // purely as the error-recovery value rather than as a meaningful answer.
+            case TypeKind::Namespace:
+                return 0;
+
             default:
                 return 0;
             }

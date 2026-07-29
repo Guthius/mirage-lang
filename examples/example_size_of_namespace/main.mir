@@ -1,0 +1,21 @@
+// example_size_of_namespace.mir — REJECTION CASE. A bare imported-module identifier has
+// TypeKind::Namespace: it is not a value and has no size, alignment or type.
+//
+// None of size_of/align_of/type_of checked for it. Namespace fell through every switch's
+// default in Resolver::size_of/align_of, resolved_type_size/align and primitive_size/align,
+// which all return 0 — so 'size_of(sub)' silently evaluated to 0 with no diagnostic
+// anywhere, and 'type_of(sub)' interned a meaningless type id for reflection.
+//
+// Expected: compilation fails with three errors:
+//   error: 'size_of' requires a type or a value; this names an imported module
+//   error: 'align_of' requires a type or a value; this names an imported module
+//   error: 'type_of' requires a type or a value; this names an imported module
+
+const sub := import("sub")
+
+pub fn main() -> i32 {
+    const a := size_of(sub)
+    const b := align_of(sub)
+    const c := type_of(sub)
+    return cast(a + b, i32)
+}

@@ -386,6 +386,10 @@
     "action": "run",
     "exit": 111
   },
+  "example_size_of_namespace": {
+    "action": "build",
+    "exit": 1
+  },
   "example_slice_cast_ptr": {
     "action": "run",
     "exit": 0
