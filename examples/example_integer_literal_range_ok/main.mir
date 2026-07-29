@@ -1,0 +1,23 @@
+// example_integer_literal_range_ok.mir — the positive half of example_integer_literal_range:
+// every boundary value that MUST still be accepted, so the new range check cannot drift into
+// rejecting valid code (an off-by-one here is invisible without these).
+//
+// Expected: exit code 90 — 255 (u8 max) - 127 (i8 max) - 44 (300 truncated to u8 by the
+// explicit cast) + 65535 - 65535 + 6.
+
+pub fn main() -> i32 {
+    mut a: u8    = 255
+    mut b: i8    = 127
+    mut c: i8    = -128
+    mut d: u16   = 65535
+    mut e: i16   = -32768
+    mut f: i32   = 2147483647
+    mut g: i32   = -2147483648
+    mut h: u64   = 18446744073709551615
+    mut i: usize = 0
+
+    // Deliberate truncation via an explicit cast stays legal.
+    mut j: u8 = cast(300, u8)
+
+    return cast(a, i32) - cast(b, i32) - cast(j, i32) + cast(d, i32) - 65535 + 6
+}

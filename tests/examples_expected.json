@@ -362,6 +362,14 @@
     "action": "build",
     "exit": 1
   },
+  "example_integer_literal_range": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_integer_literal_range_ok": {
+    "action": "run",
+    "exit": 90
+  },
   "example_link_in_fn_body": {
     "action": "build",
     "exit": 1

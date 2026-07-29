@@ -1,0 +1,37 @@
+// example_integer_literal_range.mir — REJECTION CASE. An integer literal must be representable
+// in the type it is being coerced to.
+//
+// check_expr's LiteralIntegerExpr case was 'if (expected && expected->is_integer()) return
+// *expected;' with no bounds check anywhere in the compiler, so every one of the assignments
+// below compiled cleanly and truncated at codegen. 'x = 300' left x holding 44.
+//
+// A negated literal is checked as a whole rather than as its magnitude, so '-128' is accepted
+// for i8 (the negative range is one wider) while '-1' is rejected for u8.
+//
+// The escape hatch is an explicit cast: 'cast(300, u8)' still compiles and truncates, because
+// CastExpr checks its value with no expected type so the literal never reaches this check.
+//
+// Expected: compilation fails with six errors, one per line below, e.g.
+//   error: integer literal 300 is out of range for 'u8' (0..255); use 'cast(...)' if
+//          truncation is intended
+
+pub fn take_u8(v: u8) -> i32 {
+    return cast(v, i32)
+}
+
+pub fn main() -> i32 {
+    mut a: u8 = 0
+    a = 300
+
+    mut b: u8  = 300
+    mut c: i8  = 200
+    mut d: u16 = 70000
+
+    mut e: u8 = 0
+    e = -1
+
+    // Argument position: the plan's greps could not cover this, so it is pinned explicitly.
+    const f := take_u8(300)
+
+    return cast(a, i32)
+}

@@ -267,6 +267,55 @@ namespace sema {
                 expr);
         }
 
+        // Bit width of an integer TypeKind; 0 for anything else.
+        auto integer_bit_width(const TypeKind kind) -> unsigned {
+            switch (kind) {
+            case TypeKind::U8:
+            case TypeKind::I8:    return 8;
+            case TypeKind::U16:
+            case TypeKind::I16:   return 16;
+            case TypeKind::U32:
+            case TypeKind::I32:   return 32;
+            case TypeKind::U64:
+            case TypeKind::I64:
+            case TypeKind::USize: return 64;
+            default:              return 0;
+            }
+        }
+
+        // Whether an integer literal of the given magnitude, optionally negated, is
+        // representable in 'target'. 'magnitude' is the literal's own unsigned value as the
+        // lexer produced it -- '-5' is UnaryExpr(Negate) wrapping the literal 5, so the sign
+        // is not part of it and has to be passed in.
+        auto integer_literal_fits(const uint64_t magnitude, const bool negative, const ResolvedType &target) -> bool {
+            const auto bits = integer_bit_width(target.kind);
+            if (bits == 0) return true;
+
+            if (negative) {
+                // A negative value is never representable in an unsigned type. Use an explicit
+                // cast to reinterpret the bits deliberately.
+                if (!target.is_signed()) return false;
+                // The negative range is one wider than the positive one: i8 spans -128..127.
+                return magnitude <= (uint64_t{1} << (bits - 1));
+            }
+            if (target.is_signed()) {
+                return magnitude <= (uint64_t{1} << (bits - 1)) - 1;
+            }
+            if (bits >= 64) return true;
+            return magnitude <= (uint64_t{1} << bits) - 1;
+        }
+
+        auto describe_integer_range(const ResolvedType &target) -> std::string {
+            const auto bits = integer_bit_width(target.kind);
+            if (bits == 0) return {};
+            if (target.is_signed()) {
+                const auto limit = uint64_t{1} << (bits - 1);
+                return std::format("-{}..{}", limit, limit - 1);
+            }
+            if (bits >= 64) return std::format("0..{}", UINT64_MAX);
+            return std::format("0..{}", (uint64_t{1} << bits) - 1);
+        }
+
         auto contains_undefined(const ast::Expr &expr) -> bool;
 
         auto contains_undefined_in_braced(const ast::BracedInitializerExpr &bi) -> bool {
@@ -1651,7 +1700,25 @@ namespace sema {
                 using V = std::decay_t<T0>;
 
                 if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr>) {
-                    if (expected && expected->is_integer()) return *expected;
+                    if (expected && expected->is_integer()) {
+                        // Reject a literal that cannot be represented in the type it is being
+                        // coerced to, rather than silently truncating it at codegen. Only the
+                        // literal itself is checked, never a computed expression -- 'x + 1'
+                        // overflowing is a runtime concern, not this.
+                        //
+                        // 'cast(300, u8)' stays legal: CastExpr checks its value with no
+                        // expected type, so the literal defaults to i32 and never reaches here.
+                        // That makes the explicit cast the intended escape hatch for
+                        // deliberate truncation.
+                        if (!integer_literal_fits(v.value, /*negative=*/false, *expected)) {
+                            // Report but still return the expected type: yielding Invalid would
+                            // add a second, redundant "type mismatch" on the same line.
+                            diag.report_error(DiagnosticStage::Sema, v.location, std::format(
+                                "integer literal {} is out of range for '{}' ({}); use 'cast(...)' if truncation is intended",
+                                v.value, describe_type(*expected, program), describe_integer_range(*expected)));
+                        }
+                        return *expected;
+                    }
                     if (expected && expected->is_float()) return *expected;
                     return ResolvedType{.kind = TypeKind::I32};
 
@@ -1744,6 +1811,26 @@ namespace sema {
                     switch (v->op) {
                     case ast::UnaryOp::Negate:
                         {
+                            // A negated integer literal is range-checked here, as a whole,
+                            // rather than letting the literal case check its magnitude alone:
+                            // '-128' is representable in i8 while '128' is not, and '-1' must be
+                            // rejected for an unsigned target even though '1' fits.
+                            if (const auto *lit = std::get_if<ast::LiteralIntegerExpr>(&v->operand);
+                                lit && expected && expected->is_integer()) {
+                                if (!integer_literal_fits(lit->value, /*negative=*/true, *expected)) {
+                                    diag.report_error(DiagnosticStage::Sema, v->location, std::format(
+                                        "integer literal -{} is out of range for '{}' ({}); use 'cast(...)' if truncation is intended",
+                                        lit->value, describe_type(*expected, program), describe_integer_range(*expected)));
+                                }
+                                // Returning without recursing skips the expr_types entry
+                                // check_expr's wrapper would have recorded for the operand, and
+                                // codegen's UnaryExpr case reads exactly that to type the
+                                // CreateNeg. Record it here instead of re-checking the literal,
+                                // which would range-check its magnitude as a positive value and
+                                // reject '-128' for i8.
+                                program.modules.at(module_path).expr_types[get_expr_key(v->operand)] = *expected;
+                                return *expected;
+                            }
                             const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
                             if (!operand.is_integer() && !operand.is_float()) {
                                 return error(diag, v->location, "unary '-' requires a numeric operand");
