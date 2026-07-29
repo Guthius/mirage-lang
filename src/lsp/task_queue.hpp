@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <string>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -18,6 +19,11 @@ namespace lsp {
     struct Task {
         std::shared_ptr<std::atomic<bool>> cancelled;
         std::function<void()> run;
+        // JSON-RPC id this task answers, "" for a notification. Carried so the worker can
+        // report completion for a task it skips (cancelled before it was ever popped) or one
+        // that throws -- in both cases run_cancellable_request, the only other thing that
+        // reports completion, never gets to run.
+        std::string id_key;
     };
 
     // FIFO handoff queue between the stdin-reading thread and the analysis

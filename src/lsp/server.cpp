@@ -37,6 +37,7 @@ namespace lsp {
         };
 
         constexpr int METHOD_NOT_FOUND = -32601;
+        constexpr int INTERNAL_ERROR = -32603;
         constexpr int SERVER_NOT_INITIALIZED = -32002;
 
         // How long a burst of didChange notifications for the same file is allowed to
@@ -179,7 +180,7 @@ namespace lsp {
             std::unordered_map<std::string, std::chrono::steady_clock::time_point> pending_diag_deadlines_;
         };
 
-        void run_worker_loop(std::stop_token stop, TaskQueue &queue, Worker &worker) {
+        void run_worker_loop(std::stop_token stop, TaskQueue &queue, Worker &worker, CompletedRequests &completed) {
             while (!stop.stop_requested()) {
                 worker.sweep_due_diagnostics();
 
@@ -191,9 +192,35 @@ namespace lsp {
                     continue; // poll timeout - loop back around to sweep again
                 }
                 if (task->cancelled && task->cancelled->load()) {
+                    // LSPCORE-4: mark_done even though the task never ran. in_flight_ entries
+                    // are only erased via CompletedRequests::drain, which is fed exclusively
+                    // from run_cancellable_request -- and that never runs for a task cancelled
+                    // before the worker reached it. Fast cursor movement during hover leaked one
+                    // entry per superseded request, forever, which is exactly the unbounded
+                    // growth CompletedRequests exists to prevent.
+                    if (!task->id_key.empty()) {
+                        completed.mark_done(task->id_key);
+                    }
                     continue; // caller already moved on; skip without doing any work
                 }
-                task->run();
+                // This runs on a std::jthread. An exception escaping here does not merely fail
+                // the request -- it calls std::terminate directly, killing the server. The task
+                // bodies call into analyse()/sema::check_program with no try/catch anywhere
+                // above them, so any .at() miss or bad std::get in the compiler front end
+                // reaches this point.
+                try {
+                    task->run();
+                } catch (const std::exception &e) {
+                    std::cerr << "mirage-lsp: worker task failed: " << e.what() << "\n";
+                    if (!task->id_key.empty()) {
+                        completed.mark_done(task->id_key);
+                    }
+                } catch (...) {
+                    std::cerr << "mirage-lsp: worker task failed with a non-standard exception\n";
+                    if (!task->id_key.empty()) {
+                        completed.mark_done(task->id_key);
+                    }
+                }
             }
         }
 
@@ -231,7 +258,7 @@ namespace lsp {
         Worker worker(channel);
         CompletedRequests completed;
 
-        std::jthread worker_thread([&](const std::stop_token stop) { run_worker_loop(stop, queue, worker); });
+        std::jthread worker_thread([&](const std::stop_token stop) { run_worker_loop(stop, queue, worker, completed); });
 
         auto state = LifecycleState::Uninitialized;
         bool shutdown_received = false;
@@ -274,6 +301,18 @@ namespace lsp {
                 continue;
             }
 
+            // Everything below reads request fields with unchecked chained access --
+            // message["params"]["position"]["line"].get<size_t>() and friends. nlohmann's
+            // non-const operator[] auto-vivifies a missing key to null, and .get<> on null
+            // throws; nothing between here and main() caught it, so one malformed request --
+            // a hover with no "position", say -- terminated the process and took down every
+            // open file, not just that request.
+            //
+            // A failed request becomes a JSON-RPC error response when it has an id, so the
+            // client learns the call failed instead of waiting forever; a malformed
+            // notification is logged and dropped, since there is nobody to answer.
+            try {
+
             if (method == "initialize") {
                 state = LifecycleState::Running;
                 const json capabilities = {
@@ -310,7 +349,18 @@ namespace lsp {
                 auto path = canonical_path_of(message["params"]["textDocument"]["uri"].get<std::string>());
                 // Full sync (textDocumentSync=1): exactly one change, containing
                 // the entire new buffer contents.
-                auto text = message["params"]["contentChanges"].back()["text"].get<std::string>();
+                //
+                // The emptiness check is not defensive padding. nlohmann's back() decrements
+                // end() with no bounds check and does not throw, so 'contentChanges: []'
+                // dereferenced past the start of the array and took the whole server down with
+                // SIGSEGV -- a crash that no amount of try/catch around message dispatch could
+                // have caught, which is why this is fixed before LSPCORE-1 rather than after.
+                const auto &changes = message["params"]["contentChanges"];
+                if (!changes.is_array() || changes.empty()) {
+                    std::cerr << "mirage-lsp: didChange with no content changes, ignoring\n";
+                    continue;
+                }
+                auto text = changes.back()["text"].get<std::string>();
                 queue.push(Task{nullptr, [&worker, path, text = std::move(text)]() mutable {
                     worker.documents.update(path, std::move(text));
                     worker.schedule_diagnostics(path);
@@ -343,7 +393,7 @@ namespace lsp {
                         return is_hover ? handlers::handle_hover(result, module_path, path, line, character)
                                         : handlers::handle_definition(result, module_path, path, line, character);
                     });
-                }});
+                }, id_key});
             } else if (method == "textDocument/completion") {
                 const auto id = message["id"];
                 const auto id_key = id_key_of(id);
@@ -360,7 +410,7 @@ namespace lsp {
                         auto &result = worker.documents.ensure_analysed(path);
                         return handlers::handle_completion(result, module_path, path, line, character);
                     });
-                }});
+                }, id_key});
             } else if (method == "textDocument/inlayHint") {
                 const auto id = message["id"];
                 const auto id_key = id_key_of(id);
@@ -377,11 +427,18 @@ namespace lsp {
                         auto &result = worker.documents.ensure_analysed(path);
                         return handlers::handle_inlay_hint(result, module_path, path, start_line, end_line);
                     });
-                }});
+                }, id_key});
             } else {
                 std::cerr << "mirage-lsp: unhandled method '" << method << "'\n";
                 if (has_id) {
                     send_error(channel, message["id"], METHOD_NOT_FOUND, "method not found: " + method);
+                }
+            }
+            } catch (const std::exception &e) {
+                std::cerr << "mirage-lsp: error handling '" << method << "': " << e.what() << "\n";
+                if (has_id) {
+                    send_error(channel, message["id"], INTERNAL_ERROR,
+                               std::string("error handling ") + method + ": " + e.what());
                 }
             }
         }
