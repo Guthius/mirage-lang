@@ -172,12 +172,13 @@ namespace lsp::handlers {
                 const auto *name_tok = name_token_after(tokens, var->location);
                 if (!name_tok) return;
 
-                const auto type = resolve_var_decl_type(*var, ctx);
-                if (type.kind == sema::TypeKind::Invalid) return;
+                const auto resolved = resolve_var_decl_type(*var, ctx);
+                if (resolved.type.kind == sema::TypeKind::Invalid && !resolved.display_override) return;
 
                 const auto hint_column = name_tok->location.column + name_tok->lexeme.size();
                 hints.push_back(hint_json(name_tok->location.line, hint_column,
-                                          ": " + type_to_string(type, result.sema_program, module_path),
+                                          ": " + (resolved.display_override ? *resolved.display_override
+                                                                             : type_to_string(resolved.type, result.sema_program, module_path)),
                                           HintKind::Type, false, false));
                 return;
             }

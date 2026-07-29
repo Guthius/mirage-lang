@@ -294,7 +294,22 @@ namespace lsp {
         }
     }
 
-    auto ast_type_to_string(const ast::Type &type) -> std::string {
+    auto ast_generic_arg_to_string(const ast::GenericArg &arg) -> std::string {
+        if (const auto *t = std::get_if<ast::Type>(&arg.value)) {
+            return ast_type_to_string(*t);
+        }
+        if (const auto *e = std::get_if<ast::Expr>(&arg.value)) {
+            if (const auto *ident = std::get_if<ast::IdentExpr>(e)) {
+                return ident->name;
+            }
+            if (const auto *lit = std::get_if<ast::LiteralIntegerExpr>(e)) {
+                return std::to_string(lit->value);
+            }
+        }
+        return "...";
+    }
+
+    auto ast_type_to_string(const ast::Type &type, const std::unordered_map<std::string, std::string> &subst) -> std::string {
         return std::visit(
             [&]<typename T>(const T &v) -> std::string {
                 using V = std::decay_t<T>;
@@ -321,8 +336,11 @@ namespace lsp {
                     }
                     return "<?>";
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::PointerType>>) {
-                    return "*" + ast_type_to_string(v->pointee);
+                    return "*" + ast_type_to_string(v->pointee, subst);
                 } else if constexpr (std::is_same_v<V, ast::NamedType>) {
+                    if (v.member == nullptr && v.generic_args.empty()) {
+                        if (const auto it = subst.find(v.name); it != subst.end()) return it->second;
+                    }
                     std::string out = v.name;
                     const ast::NamedType *leaf = &v;
                     while (leaf->member) {
@@ -335,10 +353,14 @@ namespace lsp {
                             if (i > 0) out += ", ";
                             const auto &arg = *leaf->generic_args[i];
                             if (const auto *t = std::get_if<ast::Type>(&arg.value)) {
-                                out += ast_type_to_string(*t);
+                                out += ast_type_to_string(*t, subst);
                             } else if (const auto *e = std::get_if<ast::Expr>(&arg.value)) {
                                 if (const auto *ident = std::get_if<ast::IdentExpr>(e)) {
-                                    out += ident->name;
+                                    if (const auto it = subst.find(ident->name); it != subst.end()) {
+                                        out += it->second;
+                                    } else {
+                                        out += ident->name;
+                                    }
                                 } else if (const auto *lit = std::get_if<ast::LiteralIntegerExpr>(e)) {
                                     out += std::to_string(lit->value);
                                 } else {
@@ -353,16 +375,20 @@ namespace lsp {
                     std::string size_str = "?";
                     if (v->size) {
                         if (const auto *ident = std::get_if<ast::IdentExpr>(&*v->size)) {
-                            size_str = ident->name;
+                            if (const auto it = subst.find(ident->name); it != subst.end()) {
+                                size_str = it->second;
+                            } else {
+                                size_str = ident->name;
+                            }
                         } else if (const auto *lit = std::get_if<ast::LiteralIntegerExpr>(&*v->size)) {
                             size_str = std::to_string(lit->value);
                         } else {
                             size_str = "...";
                         }
                     }
-                    return "[" + size_str + "]" + ast_type_to_string(v->base_type);
+                    return "[" + size_str + "]" + ast_type_to_string(v->base_type, subst);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceType>>) {
-                    return "[]" + ast_type_to_string(v->base_type);
+                    return "[]" + ast_type_to_string(v->base_type, subst);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StructType>>) {
                     return "struct {...}";
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnumType>>) {

@@ -5,6 +5,7 @@
 #include "compiler/sema.hpp"
 
 #include <string>
+#include <unordered_map>
 
 namespace lsp {
     // The single canonical ResolvedType -> human-readable-string pretty
@@ -38,7 +39,23 @@ namespace lsp {
     // error/bitset types and non-trivial array-size expressions (renders a short
     // placeholder) since those essentially never appear in a param/return/field type
     // position in practice.
-    auto ast_type_to_string(const ast::Type &type) -> std::string;
+    //
+    // 'subst' (param name -> replacement text) substitutes a bare reference to one of ITS
+    // OWN enclosing decl's generic_params, e.g. rendering 'T' as 'i32' when called with
+    // subst={{"T","i32"}}. Used by common.cpp's resolve_var_decl_type fallback: a
+    // ':='-inferred local whose initializer calls an UNINSTANTIATED generic function/method
+    // (so sema never resolved a concrete return type for it - see this function's own
+    // "UNSPECIALIZED generic ... has no ResolvedType" note above) still needs a displayable
+    // type, built by rendering the callee's own declared return type with its generic_params
+    // substituted for the ACTUAL args written at the call site (see
+    // ast_generic_arg_to_string). Defaults to no substitution for every other caller.
+    auto ast_type_to_string(const ast::Type &type, const std::unordered_map<std::string, std::string> &subst = {}) -> std::string;
+
+    // Renders a single 'ast::GenericArg' as written at a call/instantiation site ("i32", "16",
+    // "T", or "..." for anything else) - the same rendering ast_type_to_string's own
+    // generic_args case uses internally for a NamedType's arguments, exposed so callers can
+    // build a 'subst' map (see ast_type_to_string above) from an explicit call site's args.
+    auto ast_generic_arg_to_string(const ast::GenericArg &arg) -> std::string;
 
     // Renders a 'generic_params' list as written ("[T: type, N: usize]"), or "" if empty.
     auto ast_generic_params_to_string(const std::vector<ast::GenericParam> &params) -> std::string;

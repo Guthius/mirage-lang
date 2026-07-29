@@ -241,7 +241,8 @@ namespace lsp::handlers {
         }
 
         case Resolution::Kind::Local:
-            return hover_json("(local) " + res.name + ": " + type_to_string(res.type, result.sema_program, module_path));
+            return hover_json("(local) " + res.name + ": " +
+                               (res.display_override ? *res.display_override : type_to_string(res.type, result.sema_program, module_path)));
 
         case Resolution::Kind::Param:
             return hover_json("(param) " + res.name + ": " +

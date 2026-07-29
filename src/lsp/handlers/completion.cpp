@@ -61,7 +61,8 @@ namespace lsp::handlers {
             if (enclosing.body) {
                 for (const auto &[name, info] : collect_locals_in_scope(*enclosing.body, ctx, before_line)) {
                     if (starts_with(name, prefix)) {
-                        out.emplace_back(item(name, ItemKind::Variable, ": " + type_to_string(info.type, program, module_path)));
+                        out.emplace_back(item(name, ItemKind::Variable,
+                                               ": " + (info.display_override ? *info.display_override : type_to_string(info.type, program, module_path))));
                     }
                 }
             }

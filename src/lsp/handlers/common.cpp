@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <type_traits>
+#include <unordered_map>
 
 namespace lsp::handlers {
     auto build_bracket_index(const std::vector<Token> &tokens) -> std::unordered_map<size_t, size_t> {
@@ -233,19 +234,146 @@ namespace lsp::handlers {
         return {};
     }
 
+    // A ':='-inferred local's initializer never got a real expr_types entry at all - meaning
+    // sema never type-checked it, which happens for a call sitting inside an UNINSTANTIATED
+    // generic function/method template body (nothing anywhere has instantiated the enclosing
+    // decl, so check_generic_function_instance_body never ran over it - see
+    // VarDeclTypeResult's doc comment). Only handles the shape that actually needs it: an
+    // explicit generic instantiation call ('make_list[T](allocator)') to a SAME-MODULE free
+    // function, found via a plain bare-identifier callee (mirrors sema_check.cpp's own
+    // 'index_callee'/'op_ident' free-function lookup for the same call shape). A concrete
+    // (non-generic) callee, or one already reached by some other instantiation, would have
+    // hit the expr_types cache above and never reach here at all.
+    auto describe_generic_call_return_type(const ast::Expr &init, const LocalLookupContext &ctx) -> std::optional<std::string> {
+        const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&init);
+        if (!call) return std::nullopt;
+
+        const auto *index_callee = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&(*call)->callee);
+        if (!index_callee) return std::nullopt;
+
+        const auto *op_ident = std::get_if<ast::IdentExpr>(&(*index_callee)->operand);
+        if (!op_ident) return std::nullopt;
+
+        const ast::FunctionDecl *decl = nullptr;
+        if (const auto mod_it = ctx.sema_program.modules.find(ctx.module_path); mod_it != ctx.sema_program.modules.end()) {
+            if (const auto sym_it = mod_it->second.symbols.find(op_ident->name); sym_it != mod_it->second.symbols.end()) {
+                if (const auto *fs = std::get_if<sema::FunctionSymbol>(&sym_it->second)) {
+                    decl = fs->decl;
+                }
+            }
+        }
+        if (!decl || decl->generic_params.empty() || decl->return_types.size() != 1) return std::nullopt;
+
+        std::unordered_map<std::string, std::string> subst;
+        const auto &call_args = (*index_callee)->args;
+        for (size_t i = 0; i < decl->generic_params.size() && i < call_args.size(); ++i) {
+            subst[decl->generic_params[i].name] = ast_generic_arg_to_string(call_args[i]);
+        }
+
+        return ast_type_to_string(decl->return_types[0], subst);
+    }
+
+    // RAII push/pop for Program::active_generic_env_stack (see shadow_instantiate_and_resolve).
+    struct GenericEnvGuard {
+        sema::Program &program;
+        GenericEnvGuard(sema::Program &p, const sema::GenericBindingEnv &env) : program(p) { program.active_generic_env_stack.push_back(&env); }
+        GenericEnvGuard(const GenericEnvGuard &) = delete;
+        auto operator=(const GenericEnvGuard &) -> GenericEnvGuard & = delete;
+        ~GenericEnvGuard() { program.active_generic_env_stack.pop_back(); }
+    };
+
+    // General fallback for the same "sema never actually checked this expression" problem
+    // describe_generic_call_return_type above targets, but for everything ELSE that can show
+    // up in a never-instantiated generic decl's body - arithmetic, comparisons, ternaries,
+    // size_of/align_of/len, try-unwrapped calls, field access through 'self', method calls on
+    // non-generic fields, and any composition of these. Rather than hand-writing a parallel,
+    // ever-growing AST-only inferencer for each shape, this builds a throwaway ("shadow")
+    // instantiation of the enclosing generic decl - each 'T: type' param bound to a
+    // placeholder concrete type (u8), each value param to a placeholder constant (1) - purely
+    // so REAL sema::check_expr can run. This is correct for anything whose resulting type
+    // doesn't itself depend on WHICH concrete args were chosen (the overwhelming majority of
+    // real generic-body code: 'self.length - 1', 'a * size_of(T)', a ternary between two
+    // usize fields, 'try self.allocator.realloc(...)' ...) - it degrades to a technically-true
+    // but unhelpful concrete answer (e.g. "u8" instead of "T") only for an expression whose
+    // type genuinely IS built from an unbound generic param, which is exactly the shape
+    // describe_generic_call_return_type already handles symbolically and correctly - callers
+    // must try that one FIRST and only reach this as the second, broader fallback.
+    auto shadow_instantiate_and_resolve(const ast::VarDeclStmt &node, const LocalLookupContext &ctx) -> std::optional<sema::ResolvedType> {
+        if (!ctx.tokens || !ctx.program_result) return std::nullopt;
+        const auto mod_it = ctx.program_result->ast_program.modules.find(ctx.module_path);
+        if (mod_it == ctx.program_result->ast_program.modules.end()) return std::nullopt;
+
+        // First pass, no shadow env active yet - just to learn whether 'node' even sits
+        // inside a generic decl, and which one (its own generic_params, and - for a method -
+        // the enclosing impl's target type).
+        const auto probe = find_enclosing_function(mod_it->second, ctx.sema_module, ctx.sema_program, ctx.module_path, ctx.diag, *ctx.tokens, node.location.line);
+        if (!probe.generic_params || probe.generic_params->empty()) return std::nullopt;
+
+        std::vector<sema::GenericArgValue> args;
+        args.reserve(probe.generic_params->size());
+        for (const auto &gp : *probe.generic_params) {
+            if (sema::is_generic_type_param(gp.type)) {
+                args.push_back({.is_type = true, .type_arg = sema::ResolvedType{.kind = sema::TypeKind::U8}});
+            } else {
+                args.push_back({.is_type = false, .value_arg = int64_t{1}, .value_arg_scalar_type = sema::resolve_type(gp.type, ctx.module_path, ctx.sema_program, ctx.diag)});
+            }
+        }
+
+        const auto env = sema::build_generic_binding_env(*probe.generic_params, args);
+        const GenericEnvGuard guard(ctx.sema_program, env);
+
+        // Re-run with the shadow env now active - ordinary params typed directly off a
+        // generic param ('value: T') now resolve to the placeholder too (sema::resolve_type
+        // consults Program::active_generic_env_stack as a fallback - see its own doc
+        // comment), rather than the Invalid the first pass would have left them at.
+        const auto enclosing = find_enclosing_function(mod_it->second, ctx.sema_module, ctx.sema_program, ctx.module_path, ctx.diag, *ctx.tokens, node.location.line);
+        if (!node.init) return std::nullopt;
+
+        sema::LocalScope locals;
+        if (enclosing.self_target) {
+            const auto self_type = sema::instantiate_generic_type(ctx.sema_program, ctx.diag, ctx.module_path, enclosing.self_target->name, args, node.location);
+            locals["self"] = sema::LocalBinding{.type = self_type, .is_mut = true};
+        }
+        for (const auto &p : enclosing.params) {
+            locals[p.name] = sema::LocalBinding{.type = p.type, .is_mut = true};
+        }
+
+        // A 'try' expression (e.g. 'try self.allocator.realloc(...)') needs the enclosing
+        // decl's own declared error return type to validate/unwrap against - without it,
+        // check_expr's TryExpr case errors out immediately ("enclosing function must return
+        // 'error(...)'"), regardless of what the shadow env resolves. Only set when the
+        // resolved type is actually a synthesized error(...) union (is_error_union) - passing
+        // anything else would make that same validation reject a perfectly normal 'try'.
+        sema::ResolvedType fn_error_type_storage{};
+        const sema::ResolvedType *fn_error_type = nullptr;
+        if (enclosing.return_types && !enclosing.return_types->empty()) {
+            fn_error_type_storage = sema::resolve_type(enclosing.return_types->back(), ctx.module_path, ctx.sema_program, ctx.diag);
+            const auto *union_info = fn_error_type_storage.kind == sema::TypeKind::Union ? ctx.sema_program.union_at(fn_error_type_storage.union_index) : nullptr;
+            if (union_info && union_info->is_error_union) fn_error_type = &fn_error_type_storage;
+        }
+
+        return sema::check_expr(*node.init, locals, ctx.module_path, ctx.sema_program, ctx.diag, std::nullopt, 0, -1, fn_error_type);
+    }
+
     // Mirrors sema_check.cpp's own VarDeclStmt handling: when a declared type annotation
     // is present, it - not the initializer's own natural type - is the variable's actual
     // type (`locals[v.name] = LocalBinding{.type = has_declared_ty ? declared_ty : init_ty,
     // ...}`). Without this, hovering a var like `mut p: *T = try alloc(...)` would show
     // `alloc`'s raw return type (e.g. `anyptr`) instead of the declared/coerced-to type.
-    auto resolve_var_decl_type(const ast::VarDeclStmt &node, const LocalLookupContext &ctx) -> sema::ResolvedType {
+    auto resolve_var_decl_type(const ast::VarDeclStmt &node, const LocalLookupContext &ctx) -> VarDeclTypeResult {
         if (const auto declared = sema::resolve_declared_type(node.type, node.init, ctx.module_path, ctx.sema_program, ctx.diag, node.location)) {
-            return *declared;
+            return {.type = *declared};
         }
         if (node.init) {
             if (const auto it = ctx.sema_module.expr_types.find(sema::get_expr_key(*node.init));
                 it != ctx.sema_module.expr_types.end()) {
-                return it->second;
+                return {.type = it->second};
+            }
+            if (const auto display = describe_generic_call_return_type(*node.init, ctx)) {
+                return {.type = {}, .display_override = display};
+            }
+            if (const auto shadow_type = shadow_instantiate_and_resolve(node, ctx); shadow_type && shadow_type->kind != sema::TypeKind::Invalid) {
+                return {.type = *shadow_type};
             }
         }
         return {};
@@ -277,7 +405,8 @@ namespace lsp::handlers {
                     walk_stmt_for_locals(node->body, name, before_line, ctx, best);
                 } else if constexpr (std::is_same_v<U, ast::VarDeclStmt>) {
                     if (node.name == name && node.location.line <= before_line) {
-                        best = LocalInfo{.location = node.location, .type = resolve_var_decl_type(node, ctx)};
+                        const auto result = resolve_var_decl_type(node, ctx);
+                        best = LocalInfo{.location = node.location, .type = result.type, .display_override = result.display_override};
                     }
                 } else if constexpr (std::is_same_v<U, ast::VarDeclGroupStmt>) {
                     if (node.location.line <= before_line) {
@@ -329,7 +458,8 @@ namespace lsp::handlers {
                     collect_stmt_locals(node->body, before_line, ctx, out);
                 } else if constexpr (std::is_same_v<U, ast::VarDeclStmt>) {
                     if (node.location.line <= before_line) {
-                        out[node.name] = LocalInfo{.location = node.location, .type = resolve_var_decl_type(node, ctx)};
+                        const auto result = resolve_var_decl_type(node, ctx);
+                        out[node.name] = LocalInfo{.location = node.location, .type = result.type, .display_override = result.display_override};
                     }
                 } else if constexpr (std::is_same_v<U, ast::VarDeclGroupStmt>) {
                     if (node.location.line <= before_line) {
@@ -433,7 +563,9 @@ namespace lsp::handlers {
         size_t best_start_line = 0;
         bool found = false;
 
-        auto consider = [&](const SourceLocation &decl_location, std::vector<ParamInfo> params, const ast::Stmt *body) {
+        auto consider = [&](const SourceLocation &decl_location, std::vector<ParamInfo> params, const ast::Stmt *body,
+                            const std::vector<ast::GenericParam> *generic_params = nullptr, const ast::NamedType *self_target = nullptr,
+                            const std::vector<ast::Type> *return_types = nullptr) {
             const auto start_line = decl_location.line;
             if (start_line > line) return;
             if (line > end_line_for(decl_location, body)) return;
@@ -444,7 +576,8 @@ namespace lsp::handlers {
             if (!found || start_line >= best_start_line) {
                 best_start_line = start_line;
                 found = true;
-                best = EnclosingFunction{.params = std::move(params), .body = body};
+                best = EnclosingFunction{.params = std::move(params), .body = body, .generic_params = generic_params,
+                                          .self_target = self_target, .return_types = return_types};
             }
         };
 
@@ -465,7 +598,7 @@ namespace lsp::handlers {
                     }
                     params.push_back({fn->params[i].name, type, fn->params[i].location, display_override});
                 }
-                consider(fn->location, std::move(params), &fn->body);
+                consider(fn->location, std::move(params), &fn->body, is_generic ? &fn->generic_params : nullptr, nullptr, &fn->return_types);
             } else if (const auto *ext = std::get_if<ast::ExtFunctionDecl>(&decl)) {
                 const auto sym_it = sema_module.symbols.find(ext->name);
                 const auto *sym = sym_it != sema_module.symbols.end() ? std::get_if<sema::ExtFunctionSymbol>(&sym_it->second) : nullptr;
@@ -515,7 +648,8 @@ namespace lsp::handlers {
                         }
                         params.push_back({fn.params[i].name, type, fn.params[i].location, display_override});
                     }
-                    consider(fn.location, std::move(params), &fn.body);
+                    consider(fn.location, std::move(params), &fn.body, is_generic ? &impl->generic_params : nullptr,
+                             is_generic ? &impl->target : nullptr, &fn.return_types);
                 }
             } else if (const auto *type_decl = std::get_if<ast::TypeDecl>(&decl)) {
                 // A trait method ('type T = trait { fn foo(self, ...) -> ... }') has no body
@@ -1166,7 +1300,8 @@ namespace lsp::handlers {
             }
             if (enclosing.body) {
                 if (const auto local = find_local(*enclosing.body, ctx, name, line)) {
-                    return Resolution{.kind = Resolution::Kind::Local, .name = name, .location = local->location, .type = local->type};
+                    return Resolution{.kind = Resolution::Kind::Local, .name = name, .location = local->location, .type = local->type,
+                                       .display_override = local->display_override};
                 }
             }
             if (const auto sym_it = sema_mod_it->second.symbols.find(name); sym_it != sema_mod_it->second.symbols.end()) {

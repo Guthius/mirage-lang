@@ -92,11 +92,48 @@ namespace lsp::handlers {
     struct EnclosingFunction {
         std::vector<ParamInfo> params;
         const ast::Stmt *body = nullptr;
+
+        // Non-null only when the enclosing decl (or, for a method, its enclosing 'impl'
+        // block) is itself generic - the fn's own generic_params, or the impl's own
+        // generic_params for a method. Together with 'self_target' below, lets
+        // resolve_var_decl_type's shadow-instantiation fallback (see its own doc comment)
+        // build a synthetic instantiation for real sema type-checking of an expression that
+        // was never actually checked because nothing has ever concretely instantiated this
+        // generic decl.
+        const std::vector<ast::GenericParam> *generic_params = nullptr;
+        // Set only for a method belonging to a generic 'impl' block - the impl's own
+        // 'target' NamedType (e.g. 'List' in 'impl List[T: type] {...}'), used to build a
+        // shadow instantiation for 'self'.
+        const ast::NamedType *self_target = nullptr;
+        // The enclosing decl's own declared return types (empty vector for a void fn, never
+        // null unless there's no enclosing decl at all) - shadow_instantiate_and_resolve
+        // needs the last one to reconstruct 'fn_error_type' for a 'try' expression inside a
+        // generic template body (check_expr errors out immediately without it).
+        const std::vector<ast::Type> *return_types = nullptr;
     };
 
     struct LocalInfo {
         SourceLocation location;
         sema::ResolvedType type;
+
+        // See VarDeclTypeResult's doc comment - carried through from resolve_var_decl_type
+        // when a ':='-inferred local's own type could only be recovered via AST fallback.
+        std::optional<std::string> display_override;
+    };
+
+    // resolve_var_decl_type's result: 'type' is the ordinary sema-resolved answer. When even
+    // the initializer's own expr_types entry is missing - meaning sema never actually
+    // type-checked this VarDeclStmt at all, which happens when it sits inside an
+    // UNINSTANTIATED generic function/method template body calling another generic
+    // function/method (e.g. 'mut list := make_list[T](allocator)' inside 'impl List[T:
+    // type] { ... }', where nothing anywhere has ever instantiated the enclosing method) -
+    // 'type' falls back to its TypeKind::Invalid default and 'display_override' carries a
+    // best-effort AST-rendered string instead (e.g. "List[T]"), built by rendering the
+    // called generic function's own declared return type with its generic_params
+    // substituted for the literal args written at the call site.
+    struct VarDeclTypeResult {
+        sema::ResolvedType type;
+        std::optional<std::string> display_override;
     };
 
     // Bundles the mutable sema state a local-variable-type lookup needs:
@@ -164,7 +201,8 @@ namespace lsp::handlers {
 
     // Mirrors sema_check.cpp's own VarDeclStmt handling: when a declared type annotation is
     // present, it - not the initializer's own natural type - is the variable's actual type.
-    auto resolve_var_decl_type(const ast::VarDeclStmt &node, const LocalLookupContext &ctx) -> sema::ResolvedType;
+    // See VarDeclTypeResult's doc comment for the AST-fallback case.
+    auto resolve_var_decl_type(const ast::VarDeclStmt &node, const LocalLookupContext &ctx) -> VarDeclTypeResult;
 
     // Finds the most recent declaration of `name` at or before `before_line` within `body`
     // (a function/method's block statement) - the same "last one wins" shadowing semantics
