@@ -470,8 +470,107 @@ namespace sema {
                                 ensure_condition_modules_declared(*g->decl->init, program, module_path, module, sema_program, diag);
                             }
                         }
+
+                    // Genuine leaves: no nested Expr that could name another module.
+                    } else if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr> || std::is_same_v<V, ast::LiteralFloatExpr> ||
+                                         std::is_same_v<V, ast::LiteralStringExpr> || std::is_same_v<V, ast::LiteralCharExpr> ||
+                                         std::is_same_v<V, ast::LiteralBoolExpr> || std::is_same_v<V, ast::LiteralNilExpr> ||
+                                         std::is_same_v<V, ast::ImportExpr> || std::is_same_v<V, ast::ImportBinExpr> ||
+                                         std::is_same_v<V, ast::IotaExpr> || std::is_same_v<V, ast::DotIdentExpr> ||
+                                         std::is_same_v<V, ast::DefaultExpr> || std::is_same_v<V, ast::UndefinedExpr> ||
+                                         std::is_same_v<V, std::unique_ptr<ast::TypeExpr>> ||
+                                         std::is_same_v<V, std::unique_ptr<ast::AsmExpr>>) {
+                        // A bare ImportExpr with no '.field' is handled by the MemberExpr case
+                        // above; TypeExpr wraps a Type, not a value; an asm body references
+                        // registers and locals only.
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
+                        ensure_condition_modules_declared(v->condition, program, module_path, module, sema_program, diag);
+                        ensure_condition_modules_declared(v->then_expr, program, module_path, module, sema_program, diag);
+                        ensure_condition_modules_declared(v->else_expr, program, module_path, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AssignExpr>>) {
+                        ensure_condition_modules_declared(v->target, program, module_path, module, sema_program, diag);
+                        ensure_condition_modules_declared(v->value, program, module_path, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
+                        ensure_condition_modules_declared(v->callee, program, module_path, module, sema_program, diag);
+                        for (const auto &arg : v->args) {
+                            ensure_condition_modules_declared(arg, program, module_path, module, sema_program, diag);
+                        }
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) {
+                        ensure_condition_modules_declared(v->operand, program, module_path, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>> ||
+                                         std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>> ||
+                                         std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>> ||
+                                         std::is_same_v<V, std::unique_ptr<ast::TypeInfoOfExpr>> ||
+                                         std::is_same_v<V, std::unique_ptr<ast::LenExpr>> ||
+                                         std::is_same_v<V, std::unique_ptr<ast::SpreadExpr>>) {
+                        // 'size_of(mod.SomeType) > 4' is the shape the finding names: a
+                        // cross-module reference nested one level below a BinaryExpr.
+                        ensure_condition_modules_declared(v->operand, program, module_path, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>> ||
+                                         std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
+                        if (v->default_value) {
+                            ensure_condition_modules_declared(*v->default_value, program, module_path, module, sema_program, diag);
+                        }
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StackAllocExpr>>) {
+                        ensure_condition_modules_declared(v->size, program, module_path, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
+                        ensure_condition_modules_declared(v->operand, program, module_path, module, sema_program, diag);
+                        for (const auto &arg : v->args) {
+                            if (const auto *arg_expr = std::get_if<ast::Expr>(&arg.value)) {
+                                ensure_condition_modules_declared(*arg_expr, program, module_path, module, sema_program, diag);
+                            }
+                        }
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
+                        ensure_condition_modules_declared(v->operand, program, module_path, module, sema_program, diag);
+                        ensure_condition_modules_declared(v->start, program, module_path, module, sema_program, diag);
+                        ensure_condition_modules_declared(v->end, program, module_path, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) {
+                        ensure_condition_modules_declared(v->operand, program, module_path, module, sema_program, diag);
+                        for (const auto &arm : v->arms) {
+                            if (const auto *lp = std::get_if<ast::MatchExpr::LiteralPattern>(&arm.pattern); lp && lp->expr) {
+                                ensure_condition_modules_declared(*lp->expr, program, module_path, module, sema_program, diag);
+                            }
+                            ensure_condition_modules_declared(arm.value, program, module_path, module, sema_program, diag);
+                        }
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
+                        std::visit([&]<typename B>(const B &init) {
+                            using BV = std::decay_t<B>;
+                            if constexpr (std::is_same_v<BV, ast::StructExpr>) {
+                                for (const auto &f : init.fields) {
+                                    ensure_condition_modules_declared(f.expr, program, module_path, module, sema_program, diag);
+                                }
+                            } else if constexpr (std::is_same_v<BV, ast::ArrayExpr>) {
+                                for (const auto &val : init.values) {
+                                    ensure_condition_modules_declared(val, program, module_path, module, sema_program, diag);
+                                }
+                            } else if constexpr (std::is_same_v<BV, ast::EmptyExpr> || std::is_same_v<BV, ast::BitsetExpr>) {
+                                // No nested expressions.
+                            } else {
+                                static_assert(!sizeof(BV), "ensure_condition_modules_declared: unhandled BracedInitializerExpr alternative");
+                            }
+                        }, *v);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TaggedVariantExpr>>) {
+                        if (v->payload) {
+                            for (const auto &f : v->payload->fields) {
+                                ensure_condition_modules_declared(f.expr, program, module_path, module, sema_program, diag);
+                            }
+                        }
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TryExpr>>) {
+                        ensure_condition_modules_declared(v->call, program, module_path, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::RangeExpr>>) {
+                        if (v->lower) {
+                            ensure_condition_modules_declared(*v->lower, program, module_path, module, sema_program, diag);
+                        }
+                        ensure_condition_modules_declared(v->upper, program, module_path, module, sema_program, diag);
+                    } else {
+                        // Exhaustiveness guard, matching walk_expr_for_foreign_refs in
+                        // sema_attributes.cpp. This function exists to force-declare a module
+                        // referenced from a 'when' condition before folding it (the fix for the
+                        // cross-module unordered_map iteration-order bug); silently skipping an
+                        // expression shape reintroduces exactly that bug for that shape.
+                        static_assert(!sizeof(V), "ensure_condition_modules_declared: unhandled ast::Expr alternative");
                     }
-                    // literals, DotIdentExpr, etc: nothing to do.
                 },
                 expr);
         }
