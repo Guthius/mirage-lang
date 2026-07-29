@@ -139,6 +139,31 @@ namespace lsp::handlers {
                         }
                     }
                 }
+            } else if (type.kind == sema::TypeKind::Bitset) {
+                // A bitset's completions are its member enum's fields (LSPH-2): the bitset
+                // declares none of its own, so without this 'modes.<complete>' and the
+                // contextual '.<complete>' offered nothing at all.
+                if (const auto *info = program.bitset_at(type.bitset_index)) {
+                    if (const auto *member_enum = program.enum_at(info->member_enum_type.enum_index)) {
+                        for (const auto &field : member_enum->fields) {
+                            if (starts_with(field.name, prefix)) {
+                                out.emplace_back(item(field.name, ItemKind::EnumMember, "bitset flag"));
+                            }
+                        }
+                    }
+                }
+            } else if (type.kind == sema::TypeKind::Trait) {
+                // Dynamic dispatch through a handle (LSPH-1): the methods live on the trait
+                // itself, not on any concrete implementing type, so the method sweep below --
+                // which keys off find_type_module_and_name and ProgramModule::methods -- never
+                // finds them. 'shape.<complete>' where 'shape: Drawable' offered nothing.
+                if (const auto *trait = program.trait_at(type.trait_index)) {
+                    for (const auto &method : trait->methods) {
+                        if (starts_with(method.name, prefix)) {
+                            out.emplace_back(item(method.name, ItemKind::Method, "trait method"));
+                        }
+                    }
+                }
             }
 
             const auto [type_module, type_name] = sema::find_type_module_and_name(type, program);
@@ -167,6 +192,12 @@ namespace lsp::handlers {
         }
     }
 
+    // LSPH-9: there is no completion inside an explicit generic-instantiation argument list
+    // ('List[<cursor>]' offering type names). Deliberately not implemented -- it needs the
+    // cursor classifier below to recognize a '[' context and distinguish it from indexing,
+    // which is a different problem from the member-access and bare-identifier completion this
+    // file is built around. The finding itself rates it the lowest-value item in the review;
+    // recorded as follow-up.
     auto handle_completion(analysis::ProgramResult &result, const std::string &module_path,
                             const std::string &path, const size_t line, const size_t column) -> json {
         DiagnosticEngine throwaway_diag(*result.source_manager);

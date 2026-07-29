@@ -906,7 +906,13 @@ namespace lsp::handlers {
                     if (node->len_expr) return find_expr_by_location(*node->len_expr, target);
                     return nullptr;
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
+                    // Checked before recursing, like the SizeOfExpr/AlignOfExpr/LenExpr cases
+                    // above: a cursor sitting exactly on this node's own defining token could
+                    // not be found as its own node. Sub-expressions are still searched first in
+                    // spirit -- operand is tried immediately below -- but the node itself is no
+                    // longer unreachable.
                     if (const auto *r = find_expr_by_location(node->operand, target)) return r;
+                    if (location_matches(node->location, target)) return &expr;
                     // Type-tagged args (e.g. 'List[SomeType]') aren't searched here, matching
                     // this function's existing scope of only ever finding Expr nodes.
                     for (const auto &arg : node->args) {
@@ -1192,6 +1198,12 @@ namespace lsp::handlers {
     // contains (line, column), returning the same Kind::EnumField/Variant shape a usage-site
     // '.Field' reference resolves to (see match_enum_or_variant) - hover.cpp's rendering for
     // both is shared for free as a result.
+    // LSPH-7: there is deliberately no BitsetType branch below. A bitset declares no members
+    // of its own -- 'bitset(Stream_Mode, u16)' names an enum -- so the only declaration sites
+    // for its flags are that enum's own fields, which the EnumType branch already covers. A
+    // cursor on a flag name therefore lands on the enum declaration, which is correct. Flags
+    // referenced THROUGH the bitset ('modes += .Write') resolve via match_enum_or_variant
+    // instead, which LSPH-2 taught about TypeKind::Bitset.
     auto resolve_type_decl_field_at(const ast::Module &module, const sema::ProgramModule &sema_module,
                                      const size_t line, const size_t column) -> std::optional<Resolution> {
         const auto matches = [&](const SourceLocation &loc, const size_t name_len) {
