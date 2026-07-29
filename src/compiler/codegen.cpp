@@ -3286,6 +3286,17 @@ namespace codegen {
             }
 
             auto emit_call(const ast::CallExpr &call) -> llvm::Value * {
+                // A call resolved by sema to a specific generic function/method instantiation,
+                // reached here directly (bypassing emit_expr's own get_expr_key(expr)-keyed
+                // dispatch just below emit_call's other caller) via 'try'/a multi-return group
+                // declaration - check_group_call_returns keys its own expr_generic_fn_instance
+                // entries by '&call' (the CallExpr's own stable address, same convention
+                // expr_trait_dispatch already uses), since it only ever sees the unwrapped
+                // CallExpr, never the outer Expr variant get_expr_key needs.
+                if (const auto inst_it = current_module_->expr_generic_fn_instance.find(&call); inst_it != current_module_->expr_generic_fn_instance.end()) {
+                    return emit_generic_call(call, inst_it->second);
+                }
+
                 std::string target_module = *current_module_path_;
                 std::string name;
 
@@ -3503,6 +3514,18 @@ namespace codegen {
             }
 
             auto call_return_types(const ast::CallExpr &call) -> std::pair<std::string, std::vector<sema::ResolvedType>> {
+                // A call resolved by sema to a specific generic function/method instantiation
+                // (see emit_call's identical check and its own doc comment for why '&call' is
+                // the right key here) - the TEMPLATE's own return_types (found via the plain
+                // name/method lookups below) is always empty for a generic decl, so this must
+                // be checked first or a 'try'/multi-return grouped call on one would compute
+                // the wrong return arity (e.g. 0 instead of 1), corrupting emit_try_expr's own
+                // CreateExtractValue indexing downstream.
+                if (const auto inst_it = current_module_->expr_generic_fn_instance.find(&call); inst_it != current_module_->expr_generic_fn_instance.end()) {
+                    const auto &instance = *sema_program_.generic_fn_instances[inst_it->second];
+                    return {instance.module_path, instance.return_types};
+                }
+
                 std::string target_module = *current_module_path_;
                 std::string name;
 
@@ -4648,6 +4671,24 @@ namespace codegen {
                             return size_of(*current_module_path_, *ts->resolved);
                         }
                     }
+                    // A bare reference to the CURRENTLY-EMITTING generic instance's own type
+                    // param (e.g. 'T' inside 'size_of(T)') - never a module symbol by the time
+                    // codegen runs (shadow_generic_type_params' temporary module.symbols entry
+                    // is long restored/removed by then - see check_generic_function_instance_
+                    // body), and never given its own expr_types entry either (sema's own
+                    // SizeOfExpr case resolves 'T' via that same temporary shadow and returns
+                    // early, without ever recursing check_expr onto the operand) - resolve it
+                    // the same way sema did, straight off the active substitution env
+                    // (Program::active_generic_env_stack, pushed by emit_generic_function_
+                    // instance/emit_generic_method_instance for the exact duration of this
+                    // instance's own body emission).
+                    if (!sema_program_.active_generic_env_stack.empty()) {
+                        for (const auto &binding : *sema_program_.active_generic_env_stack.back()) {
+                            if (binding.is_type && binding.param_name == ident->name) {
+                                return size_of(*current_module_path_, binding.type_value);
+                            }
+                        }
+                    }
                 }
                 if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr.operand)) {
                     if (const auto ns = try_namespace_chain((*member)->object)) {
@@ -4668,6 +4709,14 @@ namespace codegen {
                     if (const auto it = current_module_->symbols.find(ident->name); it != current_module_->symbols.end()) {
                         if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second); ts && ts->resolved) {
                             return align_of(*current_module_path_, *ts->resolved);
+                        }
+                    }
+                    // See sizeof_operand's identical case above for why this is needed.
+                    if (!sema_program_.active_generic_env_stack.empty()) {
+                        for (const auto &binding : *sema_program_.active_generic_env_stack.back()) {
+                            if (binding.is_type && binding.param_name == ident->name) {
+                                return align_of(*current_module_path_, binding.type_value);
+                            }
                         }
                     }
                 }
