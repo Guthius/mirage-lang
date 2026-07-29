@@ -93,11 +93,17 @@ namespace lsp::handlers {
         }
 
         // Suppresses a parameter-name hint when the argument already spells the parameter's own
-        // name (e.g. 'fn(width: width)') - standard noise-reduction convention other editors'
+        // name - either directly ('fn(width: width)') or as a field/member access ending in
+        // that name ('fn(fd: self.fd)') - standard noise-reduction convention other editors'
         // inlay hints use, since the hint would be pure repetition.
         auto is_redundant_arg_name(const ast::Expr &arg, const std::string &param_name) -> bool {
-            const auto *ident = std::get_if<ast::IdentExpr>(&arg);
-            return ident && ident->name == param_name;
+            if (const auto *ident = std::get_if<ast::IdentExpr>(&arg)) {
+                return ident->name == param_name;
+            }
+            if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&arg)) {
+                return (*member)->member == param_name;
+            }
+            return false;
         }
 
         // Param names for a resolved callee, in call-argument order - already self-excluded for
@@ -156,7 +162,19 @@ namespace lsp::handlers {
             .program_result = &result,
         };
 
-        const auto in_range = [&](const size_t line) { return line >= start_line && line <= end_line; };
+        // A directory-module merges every '.mir' file in it into one ast::Module, so
+        // walk_module_bodies() below walks declarations from every file in the directory, not
+        // just the one currently open (`path`/`source_file`) - a node's line number alone can
+        // coincidentally fall inside the requested range even though it belongs to a
+        // completely different file. 'tokens'/'bracket_index' above are always the CURRENTLY
+        // OPEN file's own token stream, so looking up a foreign-file node's position in them
+        // would find whatever unrelated token happens to sit at that (line, column) in this
+        // file - silently producing a wrong or duplicate hint (see the two-file repro this was
+        // diagnosed with). Filtering on filename here, not just the line range, is what keeps
+        // every node this function goes on to inspect actually addressable in `tokens`.
+        const auto in_range = [&](const SourceLocation &loc) {
+            return loc.filename == source_file.filename && loc.line >= start_line && loc.line <= end_line;
+        };
 
         AstVisitor visitor;
 
@@ -167,7 +185,7 @@ namespace lsp::handlers {
         // re-resolving the initializer call's callee (see common.cpp).
         visitor.on_stmt = [&](const ast::Stmt &stmt) {
             if (const auto *var = std::get_if<ast::VarDeclStmt>(&stmt)) {
-                if (var->type || !var->init || !in_range(var->location.line)) return;
+                if (var->type || !var->init || !in_range(var->location)) return;
 
                 const auto *name_tok = name_token_after(tokens, var->location);
                 if (!name_tok) return;
@@ -184,7 +202,7 @@ namespace lsp::handlers {
             }
 
             if (const auto *group = std::get_if<ast::VarDeclGroupStmt>(&stmt)) {
-                if (!in_range(group->location.line)) return;
+                if (!in_range(group->location)) return;
 
                 const auto name_tokens = group_decl_name_tokens(tokens, group->location);
                 for (size_t i = 0; i < group->names.size() && i < name_tokens.size(); ++i) {
@@ -211,7 +229,7 @@ namespace lsp::handlers {
         // compound argument).
         visitor.on_expr = [&](const ast::Expr &expr) {
             const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&expr);
-            if (!call || !in_range((*call)->location.line)) return;
+            if (!call || !in_range((*call)->location)) return;
 
             const auto callee_loc = callee_name_location((*call)->callee, tokens);
             if (!callee_loc) return;
@@ -231,7 +249,7 @@ namespace lsp::handlers {
             for (size_t i = 0; i < args.size() && i < param_names.size() && i < arg_starts.size(); ++i) {
                 if (param_names[i].empty() || is_redundant_arg_name(args[i], param_names[i])) continue;
                 const auto &arg_loc = tokens[arg_starts[i]].location;
-                if (!in_range(arg_loc.line)) continue;
+                if (!in_range(arg_loc)) continue;
                 hints.push_back(hint_json(arg_loc.line, arg_loc.column, param_names[i] + ":", HintKind::Parameter, false, true));
             }
         };
