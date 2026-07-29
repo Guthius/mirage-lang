@@ -1,0 +1,46 @@
+// example_tagged_union_array_literal.mir — a collection literal whose elements are tagged-union
+// variants built with the positional-payload sugar '.Variant(expr)'.
+//
+// parse_braced_initializer disambiguates a leading '.IDENT' inside '{...}' between a struct
+// initializer ('{.field = expr}') and a bitset literal ('{.A, .B}'). It excluded a following
+// '{' (the braced-payload form '.Variant{...}') but not a following '(', so '{.Some(5), .None}'
+// was steered into the bitset member-list loop, which consumed '.Some' as a flag name and then
+// choked on the '(' with "expected ',', got '('".
+//
+// Both payload spellings are exercised below, since they share the disambiguation.
+//
+// Expected: exit code 105 (5 from .Some(5), 100 from .None).
+
+type Option = union(enum) {
+    Some: i32
+    None
+}
+
+type Boxed = union(enum) {
+    Value: struct { n: i32 }
+    Empty
+}
+
+pub fn main() -> i32 {
+    // Positional-payload sugar: the shape that used to misparse.
+    const opts: [2]Option = {.Some(5), .None}
+
+    mut total: i32 = 0
+    for o in opts {
+        total = total + match o {
+            .Some(v): v,
+            .None:    100
+        }
+    }
+
+    // Braced-payload form in the same position; this already worked and must keep working.
+    const boxes: [2]Boxed = {.Value{.n = 0}, .Empty}
+    for b in boxes {
+        total = total + match b {
+            .Value(s): s.n,
+            .Empty:    0
+        }
+    }
+
+    return total
+}

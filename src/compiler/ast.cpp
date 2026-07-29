@@ -699,11 +699,18 @@ namespace ast {
             }
 
             if (parser.check(TokenKind::Dot) && parser.peek().kind == TokenKind::Identifier &&
-                parser.peek_next().kind != TokenKind::LBrace) {
+                parser.peek_next().kind != TokenKind::LBrace &&
+                parser.peek_next().kind != TokenKind::LParen) {
                 // Disambiguate '{.field = expr, ...}' (StructExpr) from '{.A, .B}' (a bitset
                 // literal, BitsetExpr) by whether '=' follows the first '.IDENT'. A later
                 // field of the "wrong" shape naturally trips the chosen loop's own expect(),
                 // producing a parse error for mixed '.IDENT' / '.IDENT = expr' forms.
+                //
+                // '{' and '(' after the identifier both mean this is not struct/bitset
+                // territory at all but a collection whose first element is a tagged-union
+                // variant -- '.variant{...}' braced payload or '.variant(expr)' positional
+                // payload. Both fall through to ordinary element parsing below, where
+                // parse_primary's own '.' handling parses the variant correctly.
                 if (parser.peek_next().kind == TokenKind::Equal) {
                     std::vector<StructExpr::Field> fields;
                     while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {

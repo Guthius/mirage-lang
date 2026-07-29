@@ -398,6 +398,10 @@
     "action": "run",
     "exit": 0
   },
+  "example_tagged_union_array_literal": {
+    "action": "run",
+    "exit": 105
+  },
   "example_tagged_union_scalar_payload": {
     "action": "run",
     "exit": 0
