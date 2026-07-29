@@ -22,6 +22,12 @@ type TwoWords = struct {
 }
 ext fn sum_two_words(t: TwoWords) -> i64
 
+type Straddle = struct(packed) {
+    a: u8
+    b: i64
+}
+ext fn sum_straddle(s: Straddle) -> i64
+
 pub fn main() -> i32 {
     mut arr: [2]f32 = {3.0, 4.0}
     const s := sum_arr(arr)              // 34
@@ -32,5 +38,8 @@ pub fn main() -> i32 {
     mut tw: TwoWords = {.lo = 4, .hi = 5}
     const u := sum_two_words(tw)         // 45
 
-    return cast(s, i32) + cast(t, i32) + cast(u, i32)
+    mut st: Straddle = {.a = 2, .b = 6}
+    const w := sum_straddle(st)          // 2006
+
+    return cast(s, i32) + cast(t, i32) + cast(u, i32) + cast(w, i32)
 }

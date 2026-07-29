@@ -25,8 +25,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MIRAGE_BINARY = REPO_ROOT / "build" / "mirage"
 FIXTURE = Path(__file__).resolve().parent / "ext_abi_fixture"
 
-# 34 from sum_arr(3.0, 4.0), 123 from sum_big(1, 2, 3), 45 from sum_two_words(4, 5).
-EXPECTED_EXIT = 34 + 123 + 45
+# 34 from sum_arr(3.0, 4.0), 123 from sum_big(1, 2, 3), 45 from sum_two_words(4, 5),
+# 2006 from sum_straddle(2, 6). Taken mod 256 by the shell on the way out.
+EXPECTED_EXIT = (34 + 123 + 45 + 2006) % 256
 
 failures = 0
 
@@ -68,6 +69,10 @@ def main() -> int:
         )
         check("declare float @sum_arr(<2 x float>)" in ir.stdout,
               "by-value [2]f32 is coerced to <2 x float>, not passed as [2 x float]")
+        # A packed field straddling an eightbyte boundary forces MEMORY class; classifying the
+        # two halves independently would put it in registers instead.
+        check("@sum_straddle(ptr byval" in ir.stdout and "align 8)" in ir.stdout,
+              "straddling packed struct is passed byval with align 8, as clang does")
 
         result = subprocess.run(
             [str(MIRAGE_BINARY), "run", str(FIXTURE)],

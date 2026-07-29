@@ -703,9 +703,19 @@ namespace codegen {
                 const uint32_t size = size_of(module_path, type);
                 cls.raw_align = std::max<uint32_t>(1, align_of(module_path, type));
 
-                if (size == 0 || size > 16) {
+                // A MEMORY-class argument is passed on the stack at 8-byte alignment minimum,
+                // regardless of the type's own alignment, so a packed struct passed byval must
+                // still be declared 'align 8' -- which is what clang emits for the equivalent C
+                // type. Declaring the natural alignment (1, for packed) would let LLVM place the
+                // copy at an offset the callee does not expect.
+                const auto mark_indirect = [&] {
                     cls.indirect = true;
+                    cls.raw_align = std::max<uint32_t>(cls.raw_align, 8);
                     return cls;
+                };
+
+                if (size == 0 || size > 16) {
+                    return mark_indirect();
                 }
 
                 std::vector<AbiLeaf> leaves;
@@ -714,8 +724,24 @@ namespace codegen {
                 if (saw_union) {
                     // A union's active member is not knowable statically, so SysV's merge rules
                     // cannot be applied; MEMORY class is the safe answer.
-                    cls.indirect = true;
-                    return cls;
+                    return mark_indirect();
+                }
+
+                // A field crossing an eightbyte boundary forces the whole aggregate to MEMORY
+                // class. Only a packed struct can produce one -- natural alignment guarantees a
+                // scalar sits wholly inside one eightbyte -- and the per-slot loop below would
+                // otherwise classify the two halves of the straddling field independently and
+                // conclude it can travel in registers.
+                //
+                // Verified against clang for 'struct(packed) { a: u8, b: u64 }': clang passes it
+                // as 'ptr byval(...)', while this classifier previously produced '{ i64, i8 }',
+                // i.e. two registers. Nothing on the C side would have read the argument
+                // correctly.
+                for (const auto &leaf : leaves) {
+                    if (leaf.size == 0) continue;
+                    if (leaf.offset / 8 != (leaf.offset + leaf.size - 1) / 8) {
+                        return mark_indirect();
+                    }
                 }
 
                 const uint32_t info_size = size;
@@ -760,6 +786,16 @@ namespace codegen {
                 }
 
                 return cls;
+            }
+
+            // The number of pointer slots in a trait's vtable: one per declared method, plus one
+            // trailing back-pointer per component trait (trait composition). Sizing the array
+            // type and filling its initializer used to recompute this formula independently; a
+            // change to one and not the other would silently desync the declared length from the
+            // element count, corrupting every method-slot and back-pointer index that
+            // emit_trait_handle_dispatch / emit_trait_handle_coercion compute.
+            static auto vtable_slot_count(const sema::TraitInfo &info) -> size_t {
+                return info.methods.size() + info.component_traits.size();
             }
 
             void declare_unions() {
@@ -1301,12 +1337,14 @@ namespace codegen {
                     current_module_path_ = &struct_module;
                     current_module_ = &module_for(struct_module);
 
-                    auto *struct_ll_ty = llvm_type(struct_module, payload_ty);
+                    // The store types itself from struct_val; nothing here needs the payload's
+                    // llvm::Type. The module swap around it is still required, since
+                    // llvm_type/module_for lookups inside CreateStore's operands resolve
+                    // against the payload struct's own declaring module.
                     builder_.CreateStore(struct_val, payload_ptr);
 
                     current_module_path_ = saved_path;
                     current_module_ = saved_module;
-                    (void)struct_ll_ty;
                 }
 
                 return builder_.CreateLoad(ll_ty, slot);
@@ -1661,7 +1699,7 @@ namespace codegen {
                         // now) so Pass 2 can freely forward-reference any other family member's
                         // address — safe since every element type here is opaque 'ptr'.
                         for (auto &fm : family) {
-                            const size_t n = fm.info->methods.size() + fm.info->component_traits.size();
+                            const size_t n = vtable_slot_count(*fm.info);
                             auto *array_ty = llvm::ArrayType::get(llvm::PointerType::getUnqual(*context_), n);
                             fm.global = new llvm::GlobalVariable(
                                 *module_, array_ty, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
@@ -1684,7 +1722,7 @@ namespace codegen {
                         // Pass 2: fill in each family member's real constant array.
                         for (const auto &fm : family) {
                             std::vector<llvm::Constant *> elements;
-                            elements.reserve(fm.info->methods.size() + fm.info->component_traits.size());
+                            elements.reserve(vtable_slot_count(*fm.info));
 
                             for (const auto &trait_method : fm.info->methods) {
                                 llvm::Constant *entry = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
@@ -4346,7 +4384,13 @@ namespace codegen {
                     auto *ref_slot = create_entry_alloca(fn, llvm::PointerType::getUnqual(*context_), *vp.capture_name);
                     builder_.CreateStore(payload_ptr, ref_slot);
                     const auto ptr_ty = find_self_ptr_type(payload_ty);
-                    locals_[*vp.capture_name] = LocalValue{.alloca = ref_slot, .type = ptr_ty, .type_module = *current_module_path_};
+                    // struct_module (the payload's own declaring module), not the match site's:
+                    // the by-value branch below already uses it, and type_module is meant to name
+                    // where '.type' was declared. No observable difference today, since aggregate
+                    // ResolvedTypes resolve through a global index rather than by
+                    // (module_path, name) -- but a latent trap for any future path that starts
+                    // trusting LocalValue::type_module for name-based lookup.
+                    locals_[*vp.capture_name] = LocalValue{.alloca = ref_slot, .type = ptr_ty, .type_module = struct_module};
                 } else {
                     auto *val_slot = create_entry_alloca(fn, payload_ll_ty, *vp.capture_name);
                     auto *loaded = builder_.CreateLoad(payload_ll_ty, payload_ptr);
@@ -5561,6 +5605,18 @@ namespace codegen {
                                     row.push_back(RenderedOperand{.kind = RenderKind::Literal, .literal_text = std::to_string(op.value)});
                                 } else { // ast::AsmVariableOperand
                                     const auto ref = resolve_asm_variable(op.name);
+                                    if (ref.ptr == nullptr || ref.storage_type == nullptr) {
+                                        // sema resolves and validates every asm operand name
+                                        // before codegen runs, so a miss here is an internal
+                                        // inconsistency. Report it: the alternative was passing a
+                                        // null pointer and null element type straight into
+                                        // CreateLoad / the inline-asm argument list, which either
+                                        // crashes LLVM or, for a raw memory operand, silently
+                                        // encodes a wrong address.
+                                        report_codegen_error(diag_, op.location, std::format(
+                                            "internal error: inline asm operand '{}' did not resolve to a variable", op.name));
+                                        return;
+                                    }
                                     if (op.is_address) {
                                         output_args.push_back(ref.ptr);
                                         output_elem_types.push_back(ref.storage_type);
@@ -5682,6 +5738,18 @@ namespace codegen {
                                     row.push_back(RenderedOperand{.kind = RenderKind::Literal, .literal_text = std::to_string(op.value)});
                                 } else { // ast::AsmVariableOperand
                                     const auto ref = resolve_asm_variable(op.name);
+                                    if (ref.ptr == nullptr || ref.storage_type == nullptr) {
+                                        // sema resolves and validates every asm operand name
+                                        // before codegen runs, so a miss here is an internal
+                                        // inconsistency. Report it: the alternative was passing a
+                                        // null pointer and null element type straight into
+                                        // CreateLoad / the inline-asm argument list, which either
+                                        // crashes LLVM or, for a raw memory operand, silently
+                                        // encodes a wrong address.
+                                        report_codegen_error(diag_, op.location, std::format(
+                                            "internal error: inline asm operand '{}' did not resolve to a variable", op.name));
+                                        return;
+                                    }
                                     if (op.is_address) {
                                         output_args.push_back(ref.ptr);
                                         output_elem_types.push_back(ref.storage_type);

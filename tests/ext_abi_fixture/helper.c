@@ -15,3 +15,9 @@ int64_t sum_big(struct Big b) { return b.a * 100 + b.b * 10 + b.c; }
 /* Exactly 16 bytes of INTEGER class: two eightbytes in registers. */
 struct TwoWords { int64_t lo, hi; };
 int64_t sum_two_words(struct TwoWords t) { return t.lo * 10 + t.hi; }
+
+/* Packed, so 'b' spans bytes 1..9 and straddles the eightbyte boundary. SysV forces the whole
+   struct to MEMORY class; clang passes it as 'ptr byval(...) align 8'. Classifying the two
+   halves of 'b' independently would conclude it travels in two registers instead. */
+struct __attribute__((packed)) Straddle { unsigned char a; int64_t b; };
+int64_t sum_straddle(struct Straddle s) { return s.a * 1000 + s.b; }
