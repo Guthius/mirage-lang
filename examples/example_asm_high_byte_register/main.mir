@@ -1,0 +1,23 @@
+// example_asm_high_byte_register.mir — REJECTION CASE. The legacy 8-bit high-byte registers
+// ah/bh/ch/dh are real x86 registers but are out of scope for v1 inline asm, like the SSE/FPU/
+// segment/control registers in example_asm_sse_register. They are not merely another width
+// tier of their family: they alias bits 8-15 rather than 0-7, cannot be encoded alongside a
+// REX prefix (so they are mutually exclusive with dil/sil/spl/bpl and r8-r15), and would need
+// LLVM's separate 'q'/'Q' constraint classes to express.
+//
+// Before they were listed, none of the four appeared in either register table, so 'ah' fell
+// through to being treated as a Mirage identifier and produced a misleading
+// "undefined variable 'ah'" instead of saying it is an unsupported register.
+//
+// Expected: compilation fails, including
+//   error: register 'ah' is not supported in inline asm (v1)
+
+pub fn use_high_byte_register() {
+    asm {
+        mov ah, 1
+    }
+}
+
+pub fn main() {
+    use_high_byte_register()
+}

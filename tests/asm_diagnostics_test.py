@@ -114,6 +114,13 @@ CASES = [
         [],
     ),
     (
+        "example_asm_high_byte_register",
+        "build",
+        False,
+        ["register 'ah' is not supported in inline asm (v1)"],
+        [],
+    ),
+    (
         "example_asm_memory_operand",
         "build",
         False,

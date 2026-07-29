@@ -46,7 +46,15 @@ namespace asm_registers {
     // out of scope for v1 inline asm (see spec.md's "Inline Assembly" section) — kept distinct
     // from an ordinary unrecognized word so callers can emit a precise "not supported in v1"
     // diagnostic instead of a misleading "unknown identifier" error.
-    inline constexpr std::array<std::string_view, 89> unsupported_registers = {{
+    inline constexpr std::array<std::string_view, 93> unsupported_registers = {{
+        // Legacy 8-bit high-byte registers. Listed as unsupported rather than added to
+        // 'registers' above: they are not simply another width tier of their family. They
+        // alias bits 8-15 rather than 0-7, cannot be encoded in an instruction that also
+        // uses a REX prefix (so they are mutually exclusive with dil/sil/spl/bpl and r8-r15),
+        // and would need LLVM's separate 'q'/'Q' constraint classes to express. Naming them
+        // here turns 'asm { mov ah, 1 }' into a precise "not supported in v1" diagnostic
+        // instead of a misleading "undefined variable 'ah'".
+        "ah", "bh", "ch", "dh",
         // SSE/AVX
         "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
         "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
