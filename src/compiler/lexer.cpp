@@ -121,8 +121,8 @@ namespace lexer {
             std::string_view filename_;
             DiagnosticEngine &diagnostics_;
             size_t pos_ = 0;
-            uint32_t line_ = 1;
-            uint32_t col_ = 1;
+            size_t line_ = 1;
+            size_t col_ = 1;
             std::optional<TokenKind> last_real_kind_ = std::nullopt;
             // Set right after a 'KwAsm' token whose immediate lex_asm_block() attempt failed
             // (i.e. the next real char is '-' '>' — the expression form's header, not the
@@ -145,8 +145,8 @@ namespace lexer {
             // back-computing the start from the end position, which is only correct while a
             // token stays on one line. lex_asm_block() has always snapshotted its own start
             // for exactly this reason; these two members generalize that to every token.
-            uint32_t token_start_line_ = 1;
-            uint32_t token_start_col_ = 1;
+            size_t token_start_line_ = 1;
+            size_t token_start_col_ = 1;
 
             LexerImpl(const std::string_view source, const std::string_view filename, DiagnosticEngine &diagnostics) : source_(source), filename_(filename), diagnostics_(diagnostics) {}
 

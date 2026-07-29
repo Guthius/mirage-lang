@@ -6,6 +6,11 @@
 #include <iostream>
 
 void DiagnosticEngine::report(const DiagnosticLevel level, const DiagnosticStage stage, const SourceLocation &location, std::string message) {
+    // Deliberately checked before the level is examined, so once the error cap is reached
+    // warnings stop too. Past that point the compilation has already been abandoned and
+    // later stages are working from a broken program, so their warnings are as likely to be
+    // noise as signal -- and the "too many errors emitted, stopping." line below would
+    // otherwise be followed by more output, which reads as if it had not stopped.
     if (error_count_ >= MAX_ERRORS) {
         return;
     }

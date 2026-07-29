@@ -38,7 +38,7 @@ auto SourceManager::get_source_line(std::string_view filename, size_t line) -> s
         return {};
     }
 
-    auto it = sources_.find(std::string(filename));
+    auto it = sources_.find(filename);
     if (it == sources_.end()) {
         return {};
     }

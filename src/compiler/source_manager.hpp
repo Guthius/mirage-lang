@@ -1,6 +1,8 @@
 #pragma once
 
+#include <functional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 class DiagnosticEngine;
@@ -34,5 +36,15 @@ class SourceManager {
     auto get_source_line(std::string_view filename, size_t line) -> std::string_view;
 
   private:
-    std::unordered_map<std::string, std::string> sources_;
+    // Transparent hashing so get_source_line can look up a string_view key directly.
+    // Without it, every diagnostic printed built a throwaway std::string just to probe
+    // the map.
+    struct StringHash {
+        using is_transparent = void;
+        [[nodiscard]] auto operator()(const std::string_view value) const -> size_t {
+            return std::hash<std::string_view>{}(value);
+        }
+    };
+
+    std::unordered_map<std::string, std::string, StringHash, std::equal_to<>> sources_;
 };
