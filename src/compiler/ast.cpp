@@ -1805,9 +1805,9 @@ namespace ast {
             auto lhs = parse_equality(parser);
 
             while (parser.check(TokenKind::Ampersand) && !parser.check(TokenKind::AmpAmp)) {
-                parser.advance();
-
                 const auto location = parser.current_location();
+
+                parser.advance();
 
                 lhs = make_expr(BinaryExpr{
                     .op = BinaryOp::BitwiseAnd,
@@ -1830,8 +1830,8 @@ namespace ast {
             // operand parse (no lhs yet). Both desugar to the same BinaryOp::BitwiseXor node,
             // so 'a ~ b' and 'a ^ b' are equivalent — see UnaryOp::BitwiseNot for the prefix form.
             while (parser.check(TokenKind::Caret) || parser.check(TokenKind::Tilde)) {
-                parser.advance();
                 const auto location = parser.current_location();
+                parser.advance();
 
                 lhs = make_expr(BinaryExpr{
                     .op = BinaryOp::BitwiseXor,
@@ -1848,9 +1848,9 @@ namespace ast {
             auto lhs = parse_bitwise_xor(parser);
 
             while (parser.check(TokenKind::Pipe) && !parser.check(TokenKind::PipePipe)) {
-                parser.advance();
-
                 const auto location = parser.current_location();
+
+                parser.advance();
 
                 lhs = make_expr(BinaryExpr{
                     .op = BinaryOp::BitwiseOr,
@@ -1872,9 +1872,8 @@ namespace ast {
         auto parse_in_expr(Parser &parser) -> Expr {
             auto lhs = parse_bitwise_or(parser);
 
+            const auto location = parser.current_location();
             if (parser.match(TokenKind::KwIn)) {
-                const auto location = parser.current_location();
-
                 lhs = make_expr(BinaryExpr{
                     .op = BinaryOp::In,
                     .lhs = std::move(lhs),
@@ -1889,8 +1888,10 @@ namespace ast {
         auto parse_logical_and(Parser &parser) -> Expr {
             auto lhs = parse_in_expr(parser);
 
-            while (parser.match(TokenKind::AmpAmp)) {
+            while (parser.check(TokenKind::AmpAmp)) {
                 const auto location = parser.current_location();
+
+                parser.advance();
 
                 lhs = make_expr(BinaryExpr{
                     .op = BinaryOp::LogicalAnd,
@@ -1906,8 +1907,10 @@ namespace ast {
         auto parse_logical_or(Parser &parser) -> Expr {
             auto lhs = parse_logical_and(parser);
 
-            while (parser.match(TokenKind::PipePipe)) {
+            while (parser.check(TokenKind::PipePipe)) {
                 const auto location = parser.current_location();
+
+                parser.advance();
 
                 lhs = make_expr(BinaryExpr{
                     .op = BinaryOp::LogicalOr,
@@ -1923,9 +1926,8 @@ namespace ast {
         auto parse_ternary_expr(Parser &parser) -> Expr {
             auto expr = parse_logical_or(parser);
 
+            const auto location = parser.current_location();
             if (parser.match(TokenKind::Question)) {
-                const auto location = parser.current_location();
-
                 auto then_expr = parse_expr(parser);
                 parser.expect(TokenKind::Colon, "':'");
                 auto else_expr = parse_expr(parser);
@@ -1953,9 +1955,8 @@ namespace ast {
         auto parse_when_expr(Parser &parser) -> Expr {
             auto expr = parse_ternary_expr(parser);
 
+            const auto location = parser.current_location();
             if (parser.match(TokenKind::KwWhen)) {
-                const auto location = parser.current_location();
-
                 auto condition = parse_ternary_expr(parser);
                 parser.expect(TokenKind::KwElse, "'else'");
                 auto else_expr = parse_expr(parser);

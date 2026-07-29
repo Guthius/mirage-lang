@@ -358,6 +358,10 @@
     "action": "build",
     "exit": 1
   },
+  "example_parse_operator_location": {
+    "action": "build",
+    "exit": 1
+  },
   "example_raylib_link": {
     "action": "link-directives",
     "exit": 0

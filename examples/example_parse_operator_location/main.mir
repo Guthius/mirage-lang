@@ -1,0 +1,31 @@
+// example_parse_operator_location.mir — REJECTION CASE, and a location regression fixture.
+//
+// Eight expression-parsing functions used to capture the node's .location *after* consuming
+// the operator token, so the location pointed at the start of the right-hand operand instead
+// of at the operator. sema reports through that same .location (via get_expr_location), so
+// every diagnostic on one of these operators underlined the wrong token.
+//
+// Each line below is padded so the operator starts at column 19 in every case, which makes
+// the expectation uniform: every diagnostic must be reported at column 19. Before the fix
+// they landed at 20, 21 or 23 depending on the operator and operand widths.
+//
+// Covers all eight: & ^ | && || in ?: and when...else.
+//
+// Expected: compilation fails with eight errors, all at column 19.
+
+pub fn main() -> i32 {
+    mut a: i32 = 1
+    mut f: f32 = 1.0
+    mut c: bool = true
+
+    const r1 := a & f
+    const r2 := a ^ f
+    const r3 := a | f
+    const r4 := a && f
+    const r5 := a || f
+    const r6 := a in f
+    const r7 := c ? a : f
+    const r8 := a when c else f
+
+    return 0
+}
