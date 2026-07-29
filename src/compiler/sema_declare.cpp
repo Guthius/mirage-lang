@@ -29,7 +29,7 @@ namespace sema {
     // can be folded, regardless of Program::modules' unordered iteration order. Declared
     // here (external linkage, before the anonymous namespace) so both this file's
     // anonymous-namespace helpers and sema.cpp's check_program can call it.
-    void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag);
+    void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const SourceLocation &trigger_location = {});
 
     // Whether 'type' (a generic_param's declared type) is the builtin 'type' keyword itself
     // — i.e. this is a TYPE parameter ('T: type') rather than a value parameter.
@@ -275,7 +275,7 @@ namespace sema {
             // reading its 'pub' symbols, regardless of Program::modules' unordered
             // iteration order. Also detects/reports mutual-dependency cycles via the
             // shared cycle guard (see ensure_module_declared's generalized message below).
-            ensure_module_declared(program, target_path, sema_program, diag);
+            ensure_module_declared(program, target_path, sema_program, diag, decl.location);
 
             const auto target_it = sema_program.modules.find(target_path);
             if (target_it == sema_program.modules.end()) return; // unresolved-sentinel module etc.
@@ -429,7 +429,7 @@ namespace sema {
                         if (const auto *ident = std::get_if<ast::IdentExpr>(&v->object)) {
                             if (const auto sym_it = module.symbols.find(ident->name); sym_it != module.symbols.end()) {
                                 if (const auto *imp = std::get_if<ImportSymbol>(&sym_it->second)) {
-                                    ensure_module_declared(program, imp->module_path, sema_program, diag);
+                                    ensure_module_declared(program, imp->module_path, sema_program, diag, v->location);
                                 }
                             }
                         } else if (const auto *inline_import = std::get_if<ast::ImportExpr>(&v->object)) {
@@ -440,7 +440,7 @@ namespace sema {
                             // module-scope 'when' is ever reached, since consts are always
                             // declared before it in source order.
                             if (const auto path_it = module.inline_import_paths.find(inline_import); path_it != module.inline_import_paths.end()) {
-                                ensure_module_declared(program, path_it->second, sema_program, diag);
+                                ensure_module_declared(program, path_it->second, sema_program, diag, v->location);
                             }
                         }
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
@@ -579,29 +579,50 @@ namespace sema {
         // and, if 'collect' is true (a LIVE position), appends the resolved directive to
         // Program::link_directives. A dead-branch '#link' is still fully type-checked here
         // (per spec) — 'collect=false' just skips the final push_back.
-        void declare_link_decl(const ast::LinkDecl &link_decl, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const bool collect) {
+        // Type-checks 'expr' as a compile-time-constant '[]u8' and folds it to its string
+        // value. Returns nullopt (having reported) if any step fails. 'evaluate' selects
+        // whether to actually fold: a directive in a dead 'when' branch is still fully
+        // type-checked but must not produce a value.
+        //
+        // 'what' names the argument for diagnostics, e.g. "'#link' data" or "'#warn' message".
+        //
+        // Shared by declare_link_decl and declare_diagnostic_decl, which had byte-for-byte the
+        // same check_expr -> is_assignable([]u8) -> is_constant_expr -> evaluate_const_value ->
+        // extract-string sequence with only the wording differing. This project's own history
+        // ('$env' added beside '$option', '#warn' added beside '#error') says the next
+        // directive would have copied it a third time.
+        auto resolve_constant_u8_slice_arg(const ast::Expr &expr, const SourceLocation &location, const std::string &what,
+                                            const std::string &module_path, Program &sema_program, DiagnosticEngine &diag,
+                                            const bool evaluate) -> std::optional<std::string> {
             LocalScope empty;
             const auto u8_slice = intern_slice(sema_program, ResolvedType{.kind = TypeKind::U8});
-            const auto data_ty = check_expr(link_decl.data, empty, module_path, sema_program, diag, u8_slice, 0);
-            if (!is_assignable(data_ty, u8_slice)) {
-                diag.report_error(DiagnosticStage::Sema, link_decl.location,
-                    "'#link' data argument must be a compile-time constant '[]u8' expression");
-                return;
+            const auto ty = check_expr(expr, empty, module_path, sema_program, diag, u8_slice, 0);
+            if (!is_assignable(ty, u8_slice)) {
+                diag.report_error(DiagnosticStage::Sema, location,
+                    std::format("{} argument must be a compile-time constant '[]u8' expression", what));
+                return std::nullopt;
             }
-            if (!is_constant_expr(link_decl.data, module_path, sema_program)) {
-                diag.report_error(DiagnosticStage::Sema, link_decl.location,
-                    "'#link' data argument must be a compile-time constant expression");
-                return;
+            if (!is_constant_expr(expr, module_path, sema_program)) {
+                diag.report_error(DiagnosticStage::Sema, location,
+                    std::format("{} argument must be a compile-time constant expression", what));
+                return std::nullopt;
             }
-            if (!collect) return;
+            if (!evaluate) return std::nullopt;
 
-            const auto folded = evaluate_const_value(link_decl.data, module_path, sema_program, diag);
+            const auto folded = evaluate_const_value(expr, module_path, sema_program, diag);
             const auto *str = folded ? std::get_if<std::string>(&*folded) : nullptr;
             if (!str) {
-                diag.report_error(DiagnosticStage::Sema, link_decl.location,
-                    "internal error: could not resolve '#link' data to a constant string");
-                return;
+                diag.report_error(DiagnosticStage::Sema, location,
+                    std::format("internal error: could not resolve {} to a constant string", what));
+                return std::nullopt;
             }
+            return *str;
+        }
+
+        void declare_link_decl(const ast::LinkDecl &link_decl, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const bool collect) {
+            const auto data = resolve_constant_u8_slice_arg(link_decl.data, link_decl.location, "'#link' data",
+                                                            module_path, sema_program, diag, collect);
+            if (!data) return;
 
             const auto category = link_decl.category == ast::LinkCategory::Lib ? LinkCategory::Lib
                                  : link_decl.category == ast::LinkCategory::System ? LinkCategory::System
@@ -609,7 +630,7 @@ namespace sema {
 
             sema_program.link_directives.push_back(LinkDirective{
                 .category = category,
-                .data = *str,
+                .data = *data,
                 .source_module = module_path,
                 .location = link_decl.location,
             });
@@ -624,33 +645,15 @@ namespace sema {
         void declare_diagnostic_decl(const ast::DiagnosticDecl &decl, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const bool live) {
             const auto directive = decl.kind == ast::DiagnosticDirectiveKind::Error ? "#error" : "#warn";
 
-            LocalScope empty;
-            const auto u8_slice = intern_slice(sema_program, ResolvedType{.kind = TypeKind::U8});
-            const auto message_ty = check_expr(decl.message, empty, module_path, sema_program, diag, u8_slice, 0);
-            if (!is_assignable(message_ty, u8_slice)) {
-                diag.report_error(DiagnosticStage::Sema, decl.location,
-                    std::format("'{}' message argument must be a compile-time constant '[]u8' expression", directive));
-                return;
-            }
-            if (!is_constant_expr(decl.message, module_path, sema_program)) {
-                diag.report_error(DiagnosticStage::Sema, decl.location,
-                    std::format("'{}' message argument must be a compile-time constant expression", directive));
-                return;
-            }
-            if (!live) return;
-
-            const auto folded = evaluate_const_value(decl.message, module_path, sema_program, diag);
-            const auto *str = folded ? std::get_if<std::string>(&*folded) : nullptr;
-            if (!str) {
-                diag.report_error(DiagnosticStage::Sema, decl.location,
-                    std::format("internal error: could not resolve '{}' message to a constant string", directive));
-                return;
-            }
+            const auto message = resolve_constant_u8_slice_arg(decl.message, decl.location,
+                                                               std::format("'{}' message", directive),
+                                                               module_path, sema_program, diag, live);
+            if (!message) return;
 
             if (decl.kind == ast::DiagnosticDirectiveKind::Error) {
-                diag.report_error(DiagnosticStage::Sema, decl.location, *str);
+                diag.report_error(DiagnosticStage::Sema, decl.location, *message);
             } else {
-                diag.warn(DiagnosticStage::Sema, decl.location, *str);
+                diag.warn(DiagnosticStage::Sema, decl.location, *message);
             }
         }
 
@@ -806,10 +809,10 @@ namespace sema {
         }
     }
 
-    void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag) {
+    void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const SourceLocation &trigger_location) {
         if (sema_program.modules_declared.contains(module_path)) return;
         if (sema_program.resolve_state.when_module_declaring.contains(module_path)) {
-            diag.report_error(DiagnosticStage::Sema, {},
+            diag.report_error(DiagnosticStage::Sema, trigger_location,
                 std::format("circular dependency between modules' declarations involving '{}' "
                             "(caused by a module-scope 'when' condition or a bare import forced "
                             "to declare a module that, transitively, depends back on this one)", module_path));
