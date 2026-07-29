@@ -820,6 +820,13 @@ namespace sema {
     // support for size_of()/align_of()/len().
     auto resolved_type_size(const ResolvedType &t, const Program &program) -> uint32_t;
     auto resolved_type_align(const ResolvedType &t, const Program &program) -> uint32_t;
+
+    // Folds a 'size_of(X)'/'align_of(X)' operand (a type name or a value expression). Needs a
+    // mutable Program because resolving the operand can force a type's layout.
+    auto eval_size_of_operand(const ast::SizeOfExpr &expr, const std::string &module_path, Program &program,
+                              DiagnosticEngine &diag) -> uint64_t;
+    auto eval_align_of_operand(const ast::AlignOfExpr &expr, const std::string &module_path, Program &program,
+                               DiagnosticEngine &diag) -> uint64_t;
     auto error_union_is_subset(const ResolvedType &callee, const ResolvedType &caller, const Program &program) -> bool;
     auto function_params_compatible(const std::vector<ResolvedType> &actual, const std::vector<ResolvedType> &expected) -> bool;
     auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType;

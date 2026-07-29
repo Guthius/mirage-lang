@@ -986,6 +986,21 @@ namespace sema {
                     return evaluate_const_value(v->value, module_path, program, diag);
                 }
 
+                // is_constant_expr_impl above reports both of these as constant, but this
+                // evaluator had no case for either -- so folding silently failed and every
+                // caller treated the result as "not constant". For a 'when' condition that
+                // meant the whole condition evaluated to false and the ELSE branch was
+                // compiled, with no diagnostic: 'when size_of(i64) > 4' took the else branch.
+                // eval_integer_const_expr in type_resolver.cpp has always handled these, which
+                // is why the same expression works as a 'const' initializer or array length.
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
+                    return static_cast<int64_t>(eval_size_of_operand(*v, module_path, program, diag));
+                }
+
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) {
+                    return static_cast<int64_t>(eval_align_of_operand(*v, module_path, program, diag));
+                }
+
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
                     const auto mod_it = program.modules.find(module_path);
                     if (mod_it == program.modules.end()) return std::nullopt;

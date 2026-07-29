@@ -538,6 +538,10 @@
     "action": "build",
     "exit": 1
   },
+  "example_when_size_of": {
+    "action": "run",
+    "exit": 24
+  },
   "fmt": {
     "action": "emit-ir",
     "exit": 0

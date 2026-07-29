@@ -2582,8 +2582,9 @@ namespace sema {
                                 // nothing to fall back on. Floating-point operands are rejected
                                 // earlier, so every pattern reaching here should otherwise fold.
                                 error(diag, arm_loc,
-                                    "match arm pattern is not a representable integer constant "
-                                    "(division overflow, or a shift of 64 or more)");
+                                    "match arm pattern could not be folded to an integer constant "
+                                    "(an overflowing division, a shift of 64 or more, or an "
+                                    "expression this position cannot evaluate)");
                             }
                             if (val) {
                                 if (seen_values.count(*val)) {
@@ -4096,8 +4097,9 @@ namespace sema {
                             if (!val && pattern_is_constant) {
                                 // See the matching comment in the match-expression path above.
                                 diag.report_error(DiagnosticStage::Sema, arm.location,
-                                    "switch arm pattern is not a representable integer constant "
-                                    "(division overflow, or a shift of 64 or more)");
+                                    "switch arm pattern could not be folded to an integer constant "
+                                    "(an overflowing division, a shift of 64 or more, or an "
+                                    "expression this position cannot evaluate)");
                             }
                             if (val) {
                                 if (seen_values.count(*val)) {

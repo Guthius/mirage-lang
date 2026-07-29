@@ -1,0 +1,38 @@
+// example_when_size_of.mir — 'size_of'/'align_of' inside a compile-time 'when' condition,
+// including through a cross-module type reference.
+//
+// Two separate defects made this pick the wrong branch, silently:
+//
+//  1. is_constant_expr_impl reported SizeOfExpr/AlignOfExpr as constant, but
+//     evaluate_const_value — the evaluator 'when' conditions actually fold through — had no
+//     case for either. Folding failed, the condition was treated as false, and the ELSE
+//     branch was compiled with no diagnostic. 'when size_of(i64) > 4' took the else branch.
+//     (eval_integer_const_expr in type_resolver.cpp has always handled them, which is why
+//     'const N := size_of(T)' and '[size_of(T)]u8' worked and this did not.)
+//
+//  2. ensure_condition_modules_declared did not recurse into SizeOfExpr, so
+//     'size_of(opts.Big)' never force-declared the 'opts' module before folding — the
+//     unordered_map iteration-order bug class that function exists to prevent.
+//
+// Expected: exit code 24 — 8 (size_of i64) + 8 (align_of i64) + 8 (a third of size_of Big,
+// which is 16) — reachable only if every 'when' below takes its THEN branch.
+
+const opts := import("opts")
+
+pub fn main() -> i32 {
+    mut total: i32 = 0
+
+    when size_of(i64) > 4 {
+        total = total + 8
+    }
+
+    when align_of(i64) == 8 {
+        total = total + 8
+    }
+
+    when size_of(opts.Big) == 16 {
+        total = total + 8
+    }
+
+    return total
+}

@@ -1709,6 +1709,26 @@ namespace sema {
         return resolver.resolve_type_impl(type, module_path);
     }
 
+    // Folds a 'size_of(X)' / 'align_of(X)' operand, where X is either a type name or a value
+    // expression. Exported so value_resolver.cpp's evaluators can fold these too: they used
+    // to report them as constant (is_constant_expr_impl returns true) while having no case to
+    // actually evaluate them, so a 'when size_of(T) > 4' condition silently folded to false
+    // and took the wrong branch. type_resolver's own eval_integer_const_expr has always
+    // handled them, which is why 'const N := size_of(T)' and '[size_of(T)]u8' worked.
+    auto eval_size_of_operand(const ast::SizeOfExpr &expr, const std::string &module_path, Program &program,
+                              DiagnosticEngine &diag) -> uint64_t {
+        const auto *env = program.active_generic_env_stack.empty() ? nullptr : program.active_generic_env_stack.back();
+        Resolver resolver{program, diag, nullptr, env, nullptr};
+        return resolver.sizeof_expr_operand(module_path, expr);
+    }
+
+    auto eval_align_of_operand(const ast::AlignOfExpr &expr, const std::string &module_path, Program &program,
+                               DiagnosticEngine &diag) -> uint64_t {
+        const auto *env = program.active_generic_env_stack.empty() ? nullptr : program.active_generic_env_stack.back();
+        Resolver resolver{program, diag, nullptr, env, nullptr};
+        return resolver.align_of_expr_operand(module_path, expr);
+    }
+
     // Like resolve_type, but with 'env' active — used to resolve a generic function/method
     // instance's own param/return types (e.g. 'N' in '-> [N]u8'), reusing the exact same
     // generic_env machinery instantiate_generic_type already uses for a generic type's
