@@ -29,7 +29,12 @@ namespace sema {
                         return v->op == ast::UnaryOp::Deref;
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                         return true;
-                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
+                        // Structural approximation only (no declaration lookup here) — a real
+                        // generic instantiation is never addressable, but classifying that
+                        // precisely is check_expr's job (see the IndexOrInstantiateExpr
+                        // handling below); resolve_lvalue re-validates for real, with
+                        // diagnostics, if this expression's address is actually taken.
                         return true;
                     } else {
                         return false;
@@ -377,6 +382,27 @@ namespace sema {
         // via this MethodInfo (i.e. NOT through try_trait_handle_dispatch's dyn
         // Trait handle path) must instead source the defaulted-arg count from the
         // trait's own TraitMethodInfo when this method backs a trait impl.
+        // True when 'ty' is a monomorphized instantiation of a generic struct/enum/union/
+        // bitset declaration (its underlying *Info's 'generic_instance' is set).
+        auto receiver_is_generic_instance(const ResolvedType &ty, const Program &program) -> bool {
+            switch (ty.kind) {
+            case TypeKind::Struct:
+                if (const auto *info = program.struct_at(ty.struct_index)) return info->generic_instance.has_value();
+                return false;
+            case TypeKind::Enum:
+                if (const auto *info = program.enum_at(ty.enum_index)) return info->generic_instance.has_value();
+                return false;
+            case TypeKind::Union:
+                if (const auto *info = program.union_at(ty.union_index)) return info->generic_instance.has_value();
+                return false;
+            case TypeKind::Bitset:
+                if (const auto *info = program.bitset_at(ty.bitset_index)) return info->generic_instance.has_value();
+                return false;
+            default:
+                return false;
+            }
+        }
+
         auto method_required_params(const MethodInfo &method, const Program &program) -> size_t {
             if (method.trait_name) {
                 if (const auto *trait_info = program.trait_at(method.trait_index);
@@ -936,9 +962,18 @@ namespace sema {
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                         return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
 
-                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
+                        // A generic instantiation ('List[i32] = x') is never an assignable
+                        // lvalue — only the ordinary single-Expr-arg index shape is. (Full
+                        // declaration-based classification lives in check_expr's
+                        // IndexOrInstantiateExpr handling; here it's enough to reject anything
+                        // that isn't shaped like an ordinary index.)
+                        if (v->args.size() != 1 || !std::holds_alternative<ast::Expr>(v->args[0].value)) {
+                            error(diag, v->location, "not an assignable expression");
+                            return {ResolvedType{.kind = TypeKind::Invalid}, false};
+                        }
                         const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                        const auto index = check_expr(v->index, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                        const auto index = check_expr(std::get<ast::Expr>(v->args[0].value), locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         if (!index.is_integer()) {
                             error(diag, v->location, "index must be an integer expression");
                         }
@@ -975,6 +1010,440 @@ namespace sema {
     auto check_asm_expr(const ast::AsmExpr &expr, LocalScope &locals, const std::string &module_path,
                          Program &program, DiagnosticEngine &diag,
                          const std::optional<ResolvedType> &expected) -> ResolvedType;
+
+    // Stable, collision-free-enough symbol suffix for a concrete instantiation (e.g.
+    // "__i32", "__16", "__i32_16" for a mixed [T, N] list) — sanitizes describe_type's
+    // human-readable output (which may contain characters illegal in a symbol name, e.g.
+    // '*') down to alnum/underscore.
+    // Builds the substitution env binding each of 'params' (in order) to its concrete
+    // argument — shared by instantiate_generic_function/instantiate_generic_method (for
+    // resolve_type_with_generic_env) and check_generic_function_instance_body (for pushing
+    // onto Program::active_generic_env_stack while checking the body).
+    auto build_generic_binding_env(const std::vector<ast::GenericParam> &params, const std::vector<GenericArgValue> &args) -> GenericBindingEnv {
+        GenericBindingEnv env;
+        env.reserve(args.size());
+        for (size_t i = 0; i < params.size() && i < args.size(); ++i) {
+            const auto &param = params[i];
+            const auto &arg = args[i];
+            env.push_back(GenericBinding{
+                .param_name = param.name, .is_type = arg.is_type, .type_value = arg.type_arg,
+                .const_value = arg.value_arg, .const_value_type = arg.value_arg_scalar_type,
+            });
+        }
+        return env;
+    }
+
+    auto mangle_generic_args(const std::vector<GenericArgValue> &args, const Program &program) -> std::string {
+        std::string out;
+        for (const auto &arg : args) {
+            out += "__";
+            if (arg.is_type) {
+                std::string name = describe_type(arg.type_arg, program);
+                for (char &c : name) {
+                    if (!std::isalnum(static_cast<unsigned char>(c))) c = '_';
+                }
+                out += name;
+            } else if (const auto *iv = std::get_if<int64_t>(&arg.value_arg)) {
+                out += std::to_string(*iv);
+            }
+        }
+        return out;
+    }
+
+    // Temporarily shadows each TYPE generic-param of 'decl_params'/'args' as a TypeSymbol in
+    // 'module's own symbol table, so ordinary type-resolution reached from inside
+    // check_expr/check_stmt (size_of(T), *T casts, local var decl type annotations, ...)
+    // finds the bound concrete type via the exact same lookup path any other named type
+    // uses — the one piece of generic-body support that can't reuse Resolver::generic_env
+    // directly, since check_expr's own internals call the plain (non-generic-env-aware)
+    // resolve_type free function throughout. Returns the shadowed entries so the caller can
+    // restore them afterward via restore_shadowed_symbols.
+    auto shadow_generic_type_params(const std::vector<ast::GenericParam> &decl_params,
+                                     const std::vector<GenericArgValue> &args,
+                                     ProgramModule &module) -> std::vector<std::pair<std::string, std::optional<Symbol>>> {
+        std::vector<std::pair<std::string, std::optional<Symbol>>> shadowed;
+        for (size_t i = 0; i < decl_params.size() && i < args.size(); ++i) {
+            if (!args[i].is_type) continue;
+            const auto &name = decl_params[i].name;
+            std::optional<Symbol> prior;
+            if (const auto it = module.symbols.find(name); it != module.symbols.end()) prior = it->second;
+            shadowed.emplace_back(name, prior);
+            module.symbols[name] = TypeSymbol{.decl = nullptr, .resolved = args[i].type_arg, .is_pub = false, .location = {}};
+        }
+        return shadowed;
+    }
+
+    void restore_shadowed_symbols(ProgramModule &module, const std::vector<std::pair<std::string, std::optional<Symbol>>> &shadowed) {
+        for (const auto &[name, prior] : shadowed) {
+            if (prior) module.symbols[name] = *prior;
+            else module.symbols.erase(name);
+        }
+    }
+
+    // One immutable LocalScope binding per VALUE generic-param — mirrors
+    // Resolver::generic_env_locals (type_resolver.cpp), duplicated here since check_expr's
+    // LocalScope isn't reachable from that file's Resolver.
+    void add_generic_value_param_locals(const std::vector<ast::GenericParam> &decl_params,
+                                         const std::vector<GenericArgValue> &args, LocalScope &locals) {
+        for (size_t i = 0; i < decl_params.size() && i < args.size(); ++i) {
+            if (args[i].is_type) continue;
+            locals[decl_params[i].name] = LocalBinding{.type = args[i].value_arg_scalar_type, .is_mut = false};
+        }
+    }
+
+    // Checks a generic function/method instance's body exactly once (idempotent —
+    // body_checked guards re-entry, including a recursive generic call reaching the same
+    // instance while its own body is still being checked). No "eagerly check every possible
+    // instantiation" step exists anywhere (unlike 'when', which always checks both
+    // branches) — an instantiation is checked only once actually requested; see spec.md §22,
+    // "No Bounds in v1".
+    void check_generic_function_instance_body(GenericFunctionInstance &instance, Program &program, DiagnosticEngine &diag) {
+        if (instance.body_checked) return;
+        instance.body_checked = true;
+        if (!instance.decl && !instance.impl_decl) return;
+
+        auto &module = program.modules.at(instance.module_path);
+        const auto &generic_params = instance.decl ? instance.decl->generic_params
+                                                     : *instance.generic_params_for_method;
+
+        auto shadowed = shadow_generic_type_params(generic_params, instance.args, module);
+
+        // Pushed for the duration of body-checking so any nested resolve_type/
+        // resolve_declared_type call reached from inside check_stmt/check_expr (a local var
+        // decl's type annotation, size_of's operand, a cast target, ...) can find this
+        // instance's value/type bindings too — see Program::active_generic_env_stack's doc
+        // comment. Complements shadow_generic_type_params above (TYPE params only) and
+        // add_generic_value_param_locals below (ordinary check_expr IdentExpr lookup only);
+        // this stack is what makes bare-type-position resolution (not just value-expression
+        // lookup) inside the body work.
+        const auto env = build_generic_binding_env(generic_params, instance.args);
+        program.active_generic_env_stack.push_back(&env);
+
+        LocalScope locals;
+        for (auto &[gname, gsym] : module.symbols) {
+            if (auto *g = std::get_if<GlobalSymbol>(&gsym)) {
+                locals[gname] = LocalBinding{.type = g->type, .is_mut = g->is_mut};
+            }
+        }
+        add_generic_value_param_locals(generic_params, instance.args, locals);
+
+        if (instance.decl) {
+            for (size_t i = 0; i < instance.decl->params.size(); ++i) {
+                locals[instance.decl->params[i].name] = LocalBinding{.type = instance.param_types[i], .is_mut = instance.decl->params[i].is_mut};
+            }
+            check_stmt(instance.decl->body, locals, instance.module_path, program, diag, instance.return_types, 0);
+        } else {
+            const auto self_ptr = intern_pointer(program, *instance.self_type);
+            locals["self"] = LocalBinding{.type = self_ptr, .is_mut = instance.impl_decl->is_mut_self};
+            for (size_t i = 0; i < instance.impl_decl->params.size(); ++i) {
+                locals[instance.impl_decl->params[i].name] = LocalBinding{.type = instance.param_types[i], .is_mut = instance.impl_decl->params[i].is_mut};
+            }
+            check_stmt(instance.impl_decl->body, locals, instance.module_path, program, diag, instance.return_types, 0);
+        }
+
+        program.active_generic_env_stack.pop_back();
+        restore_shadowed_symbols(module, shadowed);
+    }
+
+    auto instantiate_generic_function(Program &program, DiagnosticEngine &diag, const std::string &module_path,
+                                       const std::string &decl_name, std::vector<GenericArgValue> args,
+                                       const SourceLocation &use_loc) -> size_t {
+        const GenericInstanceKey key{.module_path = module_path, .decl_name = decl_name, .args = args};
+
+        for (const auto &[k, idx] : program.generic_fn_instance_lookup) {
+            if (k == key) return idx;
+        }
+
+        auto push_invalid = [&]() -> size_t {
+            program.generic_fn_instances.push_back(std::make_unique<GenericFunctionInstance>());
+            const size_t idx = program.generic_fn_instances.size() - 1;
+            program.generic_fn_instance_lookup.push_back({key, idx});
+            return idx;
+        };
+
+        const auto mod_it = program.modules.find(module_path);
+        if (mod_it == program.modules.end()) {
+            diag.report_error(DiagnosticStage::Sema, use_loc, std::format("internal error: module '{}' not found", module_path));
+            return push_invalid();
+        }
+        const auto sym_it = mod_it->second.symbols.find(decl_name);
+        if (sym_it == mod_it->second.symbols.end()) {
+            diag.report_error(DiagnosticStage::Sema, use_loc, std::format("unknown function '{}'", decl_name));
+            return push_invalid();
+        }
+        const auto *fs = std::get_if<FunctionSymbol>(&sym_it->second);
+        if (!fs || !fs->decl) {
+            diag.report_error(DiagnosticStage::Sema, use_loc, std::format("'{}' is not a function", decl_name));
+            return push_invalid();
+        }
+        const ast::FunctionDecl &decl = *fs->decl;
+
+        if (args.size() != decl.generic_params.size()) {
+            diag.report_error(DiagnosticStage::Sema, use_loc, std::format(
+                "'{}' expects {} generic argument(s), got {}", decl_name, decl.generic_params.size(), args.size()));
+            return push_invalid();
+        }
+
+        const auto env = build_generic_binding_env(decl.generic_params, args);
+
+        auto instance = std::make_unique<GenericFunctionInstance>();
+        instance->decl = &decl;
+        instance->module_path = module_path;
+        instance->args = args;
+        instance->mangled_name = decl_name + mangle_generic_args(args, program);
+
+        for (auto &p : decl.params) {
+            ResolvedType pt;
+            if (p.type) {
+                pt = resolve_type_with_generic_env(*p.type, module_path, program, diag, env, &decl.generic_params);
+            } else {
+                // ':=' inferred-type param — infer from the default expr. Value generic-param
+                // locals are bound so the default expr may itself reference them; type
+                // generic-params are not shadowed here (best-effort — matches the scope of
+                // v1's inference support, which doesn't extend to ':='-inferred generic
+                // params referencing type params in their default expression).
+                LocalScope empty;
+                add_generic_value_param_locals(decl.generic_params, args, empty);
+                pt = check_expr(*p.default_value, empty, module_path, program, diag, std::nullopt, 0);
+            }
+            if (p.is_variadic) {
+                instance->is_variadic = true;
+                instance->variadic_element_type = pt;
+                instance->param_types.push_back(intern_slice(program, pt));
+            } else {
+                instance->param_types.push_back(pt);
+            }
+        }
+        for (auto &rt : decl.return_types) {
+            instance->return_types.push_back(resolve_type_with_generic_env(rt, module_path, program, diag, env, &decl.generic_params));
+        }
+
+        check_param_defaults(decl.params, instance->param_types, instance->required_params,
+                              instance->param_default_is_const, module_path, program, diag);
+
+        program.generic_fn_instances.push_back(std::move(instance));
+        const size_t idx = program.generic_fn_instances.size() - 1;
+        program.generic_fn_instance_lookup.push_back({key, idx});
+        program.generic_fn_instances_needed.insert(idx);
+
+        check_generic_function_instance_body(*program.generic_fn_instances[idx], program, diag);
+
+        return idx;
+    }
+
+    auto instantiate_generic_method(Program &program, DiagnosticEngine &diag, const ResolvedType &receiver_instantiation,
+                                     const std::string &method_name, const SourceLocation &use_loc) -> std::optional<size_t> {
+        const auto [type_module, type_name] = find_type_module_and_name(receiver_instantiation, program);
+        if (type_module.empty()) return std::nullopt;
+
+        const auto *template_method = find_method(receiver_instantiation, method_name, program);
+        if (!template_method) return std::nullopt;
+
+        // The receiver's own concrete args (read off its ResolvedType's *Info.generic_instance,
+        // already resolved by find_type_module_and_name's fast path above via the type
+        // itself) — re-derive them directly here since GenericInstanceInfo isn't returned by
+        // that lookup.
+        std::vector<GenericArgValue> args;
+        switch (receiver_instantiation.kind) {
+        case TypeKind::Struct:
+            if (const auto *info = program.struct_at(receiver_instantiation.struct_index); info && info->generic_instance) args = info->generic_instance->args;
+            break;
+        case TypeKind::Enum:
+            if (const auto *info = program.enum_at(receiver_instantiation.enum_index); info && info->generic_instance) args = info->generic_instance->args;
+            break;
+        case TypeKind::Union:
+            if (const auto *info = program.union_at(receiver_instantiation.union_index); info && info->generic_instance) args = info->generic_instance->args;
+            break;
+        case TypeKind::Bitset:
+            if (const auto *info = program.bitset_at(receiver_instantiation.bitset_index); info && info->generic_instance) args = info->generic_instance->args;
+            break;
+        default:
+            break;
+        }
+
+        const GenericInstanceKey key{.module_path = type_module, .decl_name = type_name + "::" + method_name, .args = args};
+        for (const auto &[k, idx] : program.generic_fn_instance_lookup) {
+            if (k == key) return idx;
+        }
+
+        static const std::vector<ast::GenericParam> empty_generic_params;
+        const auto &impl_generic_params = template_method->impl_generic_params ? *template_method->impl_generic_params
+                                                                                : empty_generic_params;
+        if (args.size() != impl_generic_params.size()) {
+            diag.report_error(DiagnosticStage::Sema, use_loc, std::format(
+                "internal error: method '{}' impl generic arity ({}) does not match receiver's instantiation arity ({})",
+                method_name, impl_generic_params.size(), args.size()));
+            return std::nullopt;
+        }
+
+        const auto env = build_generic_binding_env(impl_generic_params, args);
+
+        auto instance = std::make_unique<GenericFunctionInstance>();
+        instance->impl_decl = template_method->decl;
+        instance->module_path = type_module;
+        instance->args = args;
+        instance->self_type = receiver_instantiation;
+        instance->generic_params_for_method = &impl_generic_params;
+        instance->mangled_name = type_name + mangle_generic_args(args, program) + "::" + method_name;
+
+        for (auto &p : template_method->decl->params) {
+            ResolvedType pt;
+            if (p.type) {
+                pt = resolve_type_with_generic_env(*p.type, type_module, program, diag, env, &impl_generic_params);
+            } else {
+                LocalScope empty;
+                add_generic_value_param_locals(impl_generic_params, args, empty);
+                pt = check_expr(*p.default_value, empty, type_module, program, diag, std::nullopt, 0);
+            }
+            if (p.is_variadic) {
+                instance->is_variadic = true;
+                instance->variadic_element_type = pt;
+                instance->param_types.push_back(intern_slice(program, pt));
+            } else {
+                instance->param_types.push_back(pt);
+            }
+        }
+        for (auto &rt : template_method->decl->return_types) {
+            instance->return_types.push_back(resolve_type_with_generic_env(rt, type_module, program, diag, env, &impl_generic_params));
+        }
+
+        check_param_defaults(template_method->decl->params, instance->param_types, instance->required_params,
+                              instance->param_default_is_const, type_module, program, diag);
+
+        program.generic_fn_instances.push_back(std::move(instance));
+        const size_t idx = program.generic_fn_instances.size() - 1;
+        program.generic_fn_instance_lookup.push_back({key, idx});
+        program.generic_fn_instances_needed.insert(idx);
+
+        check_generic_function_instance_body(*program.generic_fn_instances[idx], program, diag);
+
+        return idx;
+    }
+
+    // Resolves an explicit generic_args list ('make_list[i32]', 'Fixed[u8, 16]') against
+    // 'params' in declared order — arity + per-arg kind checking, matching the exact
+    // diagnostic style used for #option/array-size compile-time-constant checks elsewhere.
+    // Shared by generic function and (indirectly, via the caller pre-checking arity)
+    // explicit-instantiation call sites; type-position instantiation ('List[i32]' as a
+    // NamedType) uses type_resolver.cpp's own, independent copy of this same logic
+    // (Resolver::resolve_generic_named_type) since it additionally needs generic_env-aware
+    // nested resolution that only Resolver provides.
+    auto resolve_explicit_generic_args(const std::vector<ast::GenericParam> &params,
+                                        const std::vector<ast::GenericArg> &args, const std::string &module_path,
+                                        Program &program, DiagnosticEngine &diag, const SourceLocation &loc,
+                                        const std::string &decl_name) -> std::optional<std::vector<GenericArgValue>> {
+        if (args.size() != params.size()) {
+            diag.report_error(DiagnosticStage::Sema, loc, std::format(
+                "'{}' expects {} generic argument(s), got {}", decl_name, params.size(), args.size()));
+            return std::nullopt;
+        }
+        std::vector<GenericArgValue> result;
+        result.reserve(params.size());
+        bool ok = true;
+        for (size_t i = 0; i < params.size(); ++i) {
+            const auto &param = params[i];
+            const auto &arg = args[i];
+            if (is_generic_type_param(param.type)) {
+                const auto *type_arg = std::get_if<ast::Type>(&arg.value);
+                if (!type_arg) {
+                    diag.report_error(DiagnosticStage::Sema, arg.location, std::format(
+                        "generic argument {} for '{}' must be a type (parameter '{}: type')", i + 1, decl_name, param.name));
+                    ok = false;
+                    continue;
+                }
+                result.push_back(GenericArgValue{.is_type = true, .type_arg = resolve_type(*type_arg, module_path, program, diag)});
+            } else {
+                const auto *expr_arg = std::get_if<ast::Expr>(&arg.value);
+                if (!expr_arg) {
+                    diag.report_error(DiagnosticStage::Sema, arg.location, std::format(
+                        "generic argument {} for '{}' must be a compile-time constant expression", i + 1, decl_name));
+                    ok = false;
+                    continue;
+                }
+                const auto scalar_ty = resolve_type(param.type, module_path, program, diag);
+                const auto value = evaluate_integer_constant(*expr_arg, module_path, program);
+                if (!value) {
+                    diag.report_error(DiagnosticStage::Sema, arg.location, std::format(
+                        "generic argument {} for '{}' must be a compile-time constant expression of type '{}'",
+                        i + 1, decl_name, describe_type(scalar_ty, program)));
+                    ok = false;
+                    continue;
+                }
+                result.push_back(GenericArgValue{.is_type = false, .value_arg = *value, .value_arg_scalar_type = scalar_ty});
+            }
+        }
+        if (!ok) return std::nullopt;
+        return result;
+    }
+
+    // Infers a generic function's args when called with no explicit generic_args at all
+    // ('make_list()', not 'make_list[]()' or 'make_list[i32]()'). Two passes, per spec.md
+    // §22 "Explicit vs. Inferred Instantiation": (1) unify each type param that appears
+    // literally as a parameter's own bare ': T' against that call argument's checked type;
+    // (2) for anything still unbound, try the call's own expected-type context — supports a
+    // bare ': T' return type (binds T directly to 'expected'), and a '-> [N]ElemType' return
+    // type whose size is a bare generic value-param reference (binds N from 'expected's
+    // array count). This is a deliberately narrow v1 subset of "expected-type context",
+    // covering exactly the shapes spec.md's own worked examples use — not a general
+    // structural unifier.
+    auto infer_generic_function_args(const ast::FunctionDecl &decl, const std::vector<ast::Expr> &call_args,
+                                      const std::optional<ResolvedType> &expected, LocalScope &locals,
+                                      const std::string &module_path, Program &program, DiagnosticEngine &diag,
+                                      const SourceLocation &loc, const int loop_depth, const int defer_loop_base,
+                                      const ResolvedType *fn_error_type) -> std::optional<std::vector<GenericArgValue>> {
+        std::vector<std::optional<GenericArgValue>> bound(decl.generic_params.size());
+
+        for (size_t i = 0; i < decl.params.size() && i < call_args.size(); ++i) {
+            const auto &p = decl.params[i];
+            if (!p.type) continue;
+            const auto *named = std::get_if<ast::NamedType>(&*p.type);
+            if (!named || named->member != nullptr || !named->generic_args.empty()) continue;
+            for (size_t gi = 0; gi < decl.generic_params.size(); ++gi) {
+                if (bound[gi] || decl.generic_params[gi].name != named->name || !is_generic_type_param(decl.generic_params[gi].type)) continue;
+                const auto arg_ty = check_expr(call_args[i], locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                bound[gi] = GenericArgValue{.is_type = true, .type_arg = arg_ty};
+            }
+        }
+
+        if (expected && decl.return_types.size() == 1) {
+            const auto &rt = decl.return_types[0];
+            if (const auto *named = std::get_if<ast::NamedType>(&rt); named && named->member == nullptr && named->generic_args.empty()) {
+                for (size_t gi = 0; gi < decl.generic_params.size(); ++gi) {
+                    if (!bound[gi] && decl.generic_params[gi].name == named->name && is_generic_type_param(decl.generic_params[gi].type)) {
+                        bound[gi] = GenericArgValue{.is_type = true, .type_arg = *expected};
+                    }
+                }
+            } else if (const auto *arr = std::get_if<std::unique_ptr<ast::ArrayType>>(&rt);
+                       arr && *arr && (*arr)->size && expected->kind == TypeKind::Array) {
+                if (const auto *size_ident = std::get_if<ast::IdentExpr>(&*(*arr)->size)) {
+                    for (size_t gi = 0; gi < decl.generic_params.size(); ++gi) {
+                        if (bound[gi] || decl.generic_params[gi].name != size_ident->name || is_generic_type_param(decl.generic_params[gi].type)) continue;
+                        if (const auto *array_info = program.array_at(expected->array_index)) {
+                            bound[gi] = GenericArgValue{
+                                .is_type = false,
+                                .value_arg = static_cast<int64_t>(array_info->count),
+                                .value_arg_scalar_type = resolve_type(decl.generic_params[gi].type, module_path, program, diag),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        std::vector<GenericArgValue> result;
+        result.reserve(bound.size());
+        for (size_t gi = 0; gi < bound.size(); ++gi) {
+            if (!bound[gi]) {
+                diag.report_error(DiagnosticStage::Sema, loc, std::format(
+                    "could not infer generic parameter '{}' for '{}' — provide it explicitly ('{}[...]()') or use it "
+                    "in a context with a known expected type",
+                    decl.generic_params[gi].name, decl.name, decl.name));
+                return std::nullopt;
+            }
+            result.push_back(*bound[gi]);
+        }
+        return result;
+    }
 
     auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
         const auto ty = std::visit(
@@ -1271,6 +1740,44 @@ namespace sema {
                     return target.type;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
+                    // Explicit generic-function instantiation call ('make_fixed[16]()',
+                    // 'make_list[i32]()') — the callee is an IndexOrInstantiateExpr whose
+                    // operand names a generic function. Only intercepted when 'operand'
+                    // actually IS a generic function; anything else (ordinary indexing whose
+                    // result happens to be called, e.g. 'fn_table[i]()') falls through to the
+                    // general-expression-callee path below unchanged.
+                    if (auto *index_callee = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&v->callee)) {
+                        const ast::FunctionDecl *generic_decl = nullptr;
+                        if (const auto *op_ident = std::get_if<ast::IdentExpr>(&(*index_callee)->operand);
+                            op_ident && !locals.contains(op_ident->name)) {
+                            if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
+                                if (const auto sym_it = mod_it->second.symbols.find(op_ident->name); sym_it != mod_it->second.symbols.end()) {
+                                    if (const auto *fs = std::get_if<FunctionSymbol>(&sym_it->second); fs && fs->decl && !fs->decl->generic_params.empty()) {
+                                        generic_decl = fs->decl;
+                                    }
+                                }
+                            }
+                        }
+                        if (generic_decl) {
+                            const auto &fn_name = std::get<ast::IdentExpr>((*index_callee)->operand).name;
+                            std::optional<std::vector<GenericArgValue>> resolved_args;
+                            if (!(*index_callee)->args.empty()) {
+                                resolved_args = resolve_explicit_generic_args(generic_decl->generic_params, (*index_callee)->args, module_path, program, diag, v->location, fn_name);
+                            } else {
+                                resolved_args = infer_generic_function_args(*generic_decl, v->args, expected, locals, module_path, program, diag, v->location, loop_depth, defer_loop_base, fn_error_type);
+                            }
+                            if (!resolved_args) return ResolvedType{.kind = TypeKind::Invalid};
+                            const size_t idx = instantiate_generic_function(program, diag, module_path, fn_name, std::move(*resolved_args), v->location);
+                            const auto &instance = *program.generic_fn_instances[idx];
+                            check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
+                            program.modules.at(module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
+                            if (instance.return_types.size() > 1) {
+                                return error(diag, v->location, "multi-value capture is not yet supported here");
+                            }
+                            return instance.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : instance.return_types.front();
+                        }
+                    }
+
                     if (auto *member_callee = std::get_if<std::unique_ptr<ast::MemberExpr>>(&v->callee)) {
                         if (auto target_module = try_resolve_namespace_chain((*member_callee)->object, module_path, locals, program)) {
                             auto mod_it = program.modules.find(*target_module);
@@ -1346,6 +1853,25 @@ namespace sema {
                             }
                             return error(diag, v->location, std::format("no method '{}' on type", (*member_callee)->member));
                         }
+                        // A method call on a generic type's concrete instantiation ('self.reserve(...)'
+                        // where 'self: List[i32]') — 'method' above is the unspecialized TEMPLATE
+                        // (find_method's bare "List"/"reserve" keying never changes), so its own
+                        // param_types/return_types are never populated for a generic type (see
+                        // resolve_impl_signatures_for_module's skip) — instantiate_generic_method
+                        // resolves the real, per-instantiation signature on demand instead.
+                        if (receiver_is_generic_instance(receiver_type, program)) {
+                            const auto idx = instantiate_generic_method(program, diag, receiver_type, (*member_callee)->member, v->location);
+                            if (!idx) {
+                                return error(diag, v->location, std::format("no method '{}' on type", (*member_callee)->member));
+                            }
+                            const auto &instance = *program.generic_fn_instances[*idx];
+                            check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
+                            program.modules.at(module_path).expr_generic_fn_instance[get_expr_key(expr)] = *idx;
+                            if (instance.return_types.size() > 1) {
+                                return error(diag, v->location, "multi-value capture is not yet supported here");
+                            }
+                            return instance.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : instance.return_types.front();
+                        }
                         check_call_args(v->args, method->param_types, false, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type, method->is_variadic, method_required_params(*method, program));
                         if (method->return_types.size() > 1) {
                             return error(diag, v->location, "multi-value capture is not yet supported here");
@@ -1396,6 +1922,21 @@ namespace sema {
                         [&]<typename T1>(const T1 &sym) -> ResolvedType {
                             using S = std::decay_t<T1>;
                             if constexpr (std::is_same_v<S, FunctionSymbol>) {
+                                // A bare call to a generic function with NO brackets at all
+                                // ('make_list()', not 'make_list[]()') — inference only, per
+                                // spec.md §22 "Explicit vs. Inferred Instantiation".
+                                if (sym.decl && !sym.decl->generic_params.empty()) {
+                                    auto resolved_args = infer_generic_function_args(*sym.decl, v->args, expected, locals, module_path, program, diag, v->location, loop_depth, defer_loop_base, fn_error_type);
+                                    if (!resolved_args) return ResolvedType{.kind = TypeKind::Invalid};
+                                    const size_t idx = instantiate_generic_function(program, diag, module_path, callee_ident->name, std::move(*resolved_args), v->location);
+                                    const auto &instance = *program.generic_fn_instances[idx];
+                                    check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
+                                    program.modules.at(module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
+                                    if (instance.return_types.size() > 1) {
+                                        return error(diag, v->location, "multi-value capture is not yet supported here");
+                                    }
+                                    return instance.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : instance.return_types.front();
+                                }
                                 auto &resolved_fn = ensure_function_signature_resolved(module_path, callee_ident->name, program, diag);
                                 check_call_args(v->args, resolved_fn.params, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
                                 if (resolved_fn.return_types.size() > 1) {
@@ -1644,9 +2185,20 @@ namespace sema {
                     }
                     return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type, /*need_writable=*/false).type;
 
-                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
+                    // TODO(generics): full IndexOrInstantiateExpr classification (does
+                    // 'operand' name a decl with generic_params?) and instantiation
+                    // (arity/kind checking, inference, monomorphization) lands with the rest
+                    // of the generics sema support — see instantiate_generic_type/
+                    // instantiate_generic_function. Until then, the ordinary-index shape
+                    // (exactly one Expr-tagged arg) behaves exactly as IndexExpr always did;
+                    // any other shape (multi-arg or a type-tagged arg) is generic-argument
+                    // syntax with no instantiation support wired up yet.
+                    if (v->args.size() != 1 || !std::holds_alternative<ast::Expr>(v->args[0].value)) {
+                        return error(diag, v->location, "generic-argument instantiation is not yet supported here");
+                    }
                     const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                    const auto index = check_expr(v->index, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    const auto index = check_expr(std::get<ast::Expr>(v->args[0].value), locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     if (!index.is_integer()) {
                         error(diag, v->location, "index must be an integer expression");
                     }

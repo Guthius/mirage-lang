@@ -625,9 +625,16 @@ namespace lsp::handlers {
                     if (const auto *r = find_expr_by_location(node->value, target)) return r;
                     if (node->len_expr) return find_expr_by_location(*node->len_expr, target);
                     return nullptr;
-                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IndexExpr>>) {
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
                     if (const auto *r = find_expr_by_location(node->operand, target)) return r;
-                    return find_expr_by_location(node->index, target);
+                    // Type-tagged args (e.g. 'List[SomeType]') aren't searched here, matching
+                    // this function's existing scope of only ever finding Expr nodes.
+                    for (const auto &arg : node->args) {
+                        if (const auto *expr_arg = std::get_if<ast::Expr>(&arg.value)) {
+                            if (const auto *r = find_expr_by_location(*expr_arg, target)) return r;
+                        }
+                    }
+                    return nullptr;
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SliceExpr>>) {
                     if (const auto *r = find_expr_by_location(node->operand, target)) return r;
                     if (const auto *r = find_expr_by_location(node->start, target)) return r;

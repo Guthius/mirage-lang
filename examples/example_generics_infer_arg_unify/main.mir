@@ -1,0 +1,18 @@
+// example_generics_infer_arg_unify.mir — a type parameter inferred by unifying a
+// parameter's declared bare ': T' type against the actual call argument's static type (no
+// explicit brackets, no expected-type context needed — 'identity(5)' infers T=i32 purely
+// from the argument).
+//
+// Expected: compiles and runs, exit code 9.
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+fn identity[T: type](v: T) -> T {
+    return v
+}
+
+pub fn main() -> i32 {
+    const x := identity(9)   // T inferred from the argument's type (i32), no brackets at all
+    printf("x = %d\n", x)
+    return x
+}

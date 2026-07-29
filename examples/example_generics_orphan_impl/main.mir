@@ -1,0 +1,26 @@
+// example_generics_orphan_impl.mir — REJECTION CASE (coherence/arity, the generic-trait-impl
+// analog of the orphan-impl rule extension described in spec.md §22 "Coherence"). A generic
+// trait-impl block whose generic_params arity doesn't match the target type's own declared
+// arity is a sema error — the same "impl generic parameter lists must match the target
+// type's own arity exactly" rule a bare 'impl' block enforces, applied to the
+// 'impl TRAIT for TYPE[...]' form.
+//
+// Expected: compilation fails with
+//   error: 'impl Drawable for Box[T: type, U: type]' has 2 generic parameter(s), but 'Box'
+//          is declared with 1 — ...
+
+pub type Drawable = trait {
+    fn draw(self)
+}
+
+pub type Box[T: type] = struct {
+    value: T
+}
+
+impl Drawable for Box[T: type, U: type] {
+    fn draw(self) { }
+}
+
+pub fn main() -> i32 {
+    return 0
+}

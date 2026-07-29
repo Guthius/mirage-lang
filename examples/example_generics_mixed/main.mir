@@ -1,0 +1,28 @@
+// example_generics_mixed.mir — a generic type mixing a type parameter and a value
+// parameter in one list ('type Fixed[T: type, N: usize]'), with a generic method summing
+// over the fixed-size array field.
+//
+// Expected: compiles and runs, exit code 10 (1+2+3+4).
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub type Fixed[T: type, N: usize] = struct {
+    data: [N]T
+}
+
+impl Fixed[T: type, N: usize] {
+    pub fn sum(self) -> T {
+        mut total: T = default
+        for v in self.data {
+            total += v
+        }
+        return total
+    }
+}
+
+pub fn main() -> i32 {
+    const nums: Fixed[i32, 4] = { .data = {1, 2, 3, 4} }
+    const s := nums.sum()
+    printf("sum = %d\n", s)
+    return s
+}

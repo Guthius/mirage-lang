@@ -1,0 +1,29 @@
+// example_generics_self_instantiation.mir — implicit self-instantiation: a bare reference
+// to a generic name inside a declaration whose own generic_params list has matching arity
+// is sugar for applying the enclosing declaration's own params, in order ('-> Box' inside
+// 'fn make_box[T: type]' means '-> Box[T]'; bare 'Box'/'T' inside 'impl Box[T: type] {}'
+// resolve against the impl's own binding).
+//
+// Expected: compiles and runs, exit code 42.
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub type Box[T: type] = struct {
+    value: T
+}
+
+fn make_box[T: type](v: T) -> Box {
+    return { .value = v }
+}
+
+impl Box[T: type] {
+    pub fn get(self) -> T {
+        return self.value
+    }
+}
+
+pub fn main() -> i32 {
+    const b := make_box[i32](42)
+    printf("value = %d\n", b.get())
+    return b.get()
+}

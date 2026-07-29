@@ -1,0 +1,21 @@
+// example_generics_const.mir — a const-generic function ('fn make_fixed[N: usize]() ->
+// [N]u8'), exercising both explicit ('make_fixed[16]()') and inferred (from an expected
+// array-typed declaration) value-parameter instantiation.
+//
+// Expected: compiles and runs, exit code 12 (5 + 7).
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+fn make_fixed[N: usize](fill: u8) -> [N]u8 {
+    mut buf: [N]u8 = default
+    buf[0] = fill
+    return buf
+}
+
+pub fn main() -> i32 {
+    const a := make_fixed[16](5)          // explicit
+    mut b: [8]u8 = make_fixed(7)          // inferred from the expected array size
+
+    printf("a[0]=%d b[0]=%d\n", cast(a[0], i32), cast(b[0], i32))
+    return cast(a[0], i32) + cast(b[0], i32)
+}

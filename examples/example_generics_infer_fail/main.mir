@@ -1,0 +1,19 @@
+// example_generics_infer_fail.mir — REJECTION CASE. A generic function called with no
+// explicit generic_args, where a parameter can't be inferred from either argument
+// unification (it never appears as a bare ': T'/': N'-shaped parameter) or expected-type
+// context (no expected type is available at this call site), is a sema error naming the
+// specific unresolved parameter. See spec.md §22, "Explicit vs. Inferred Instantiation".
+//
+// Expected: compilation fails with
+//   error: could not infer generic parameter 'N' for 'make_fixed' — provide it explicitly
+//          ('make_fixed[...]()') or use it in a context with a known expected type
+
+fn make_fixed[N: usize]() -> [N]u8 {
+    mut buf: [N]u8 = default
+    return buf
+}
+
+pub fn main() -> i32 {
+    const b := make_fixed()   // no explicit args, no expected-type context
+    return cast(b[0], i32)
+}

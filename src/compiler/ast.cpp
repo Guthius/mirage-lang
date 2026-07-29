@@ -9,23 +9,43 @@
 
 namespace ast {
     namespace {
-        auto parse_named_type(Parser &parser) -> NamedType {
+        // Defined further below (after 'starts_type_only', which parse_generic_arg needs);
+        // forward-declared here so parse_named_type can use them.
+        auto parse_generic_args(Parser &parser) -> std::vector<GenericArg>;
+        auto parse_generic_params(Parser &parser) -> std::vector<GenericParam>;
+
+        // 'allow_generic_args' is false only when called from parse_impl_decl for an impl's
+        // own target/trait/type NamedType operands — there, a following '[...]' is always
+        // impl_decl's own 'generic_params' clause (parsed separately by the caller), never
+        // this NamedType's 'generic_args'. See grammar.md note 17. Only the leaf segment of a
+        // dotted chain (the one with no following '.') ever consumes generic_args; the flag
+        // itself is threaded unchanged through the recursion for '.'-qualified chains.
+        auto parse_named_type(Parser &parser, bool allow_generic_args = true) -> NamedType {
             const auto location = parser.current_location();
             const auto name = parser.expect_identifier();
 
             if (parser.match(TokenKind::Dot)) {
-                auto member = parse_named_type(parser);
+                auto member = parse_named_type(parser, allow_generic_args);
 
                 return NamedType{
                     .name = name,
                     .member = std::make_unique<NamedType>(std::move(member)),
+                    .generic_args = {},
                     .location = location,
                 };
+            }
+
+            std::vector<std::unique_ptr<GenericArg>> generic_args;
+            if (allow_generic_args && parser.check(TokenKind::LBracket)) {
+                for (auto &arg : parse_generic_args(parser)) {
+                    generic_args.push_back(std::make_unique<GenericArg>(std::move(arg)));
+                }
             }
 
             return NamedType{
                 .name = name,
                 .member = nullptr,
+                .generic_args = std::move(generic_args),
                 .location = location,
             };
         }
@@ -115,6 +135,83 @@ namespace ast {
             Parser &parser_;
             size_t start_offset_;
         };
+
+        // A single 'generic_arg' — 'type' for a 'T: type' parameter, 'expr' for a value
+        // parameter. Dispatched with exactly the same one-token lookahead rule size_of's
+        // operand uses (grammar note 12): a builtin type keyword, or a token that can only
+        // ever begin a type, parses as 'type'; anything else (including a plain identifier
+        // that may itself simply name a type, e.g. a type parameter passed through
+        // unchanged) parses as 'expr'. See grammar.md note 18.
+        auto parse_generic_arg(Parser &parser) -> GenericArg {
+            const auto location = parser.current_location();
+
+            if (starts_type_only(parser)) {
+                return GenericArg{
+                    .value = parse_type(parser),
+                    .location = location,
+                };
+            }
+
+            return GenericArg{
+                .value = parse_expr(parser),
+                .location = location,
+            };
+        }
+
+        // 'generic_args ::= '[' generic_arg { ',' generic_arg } ']''
+        auto parse_generic_args(Parser &parser) -> std::vector<GenericArg> {
+            parser.expect(TokenKind::LBracket, "'['");
+
+            std::vector<GenericArg> args;
+            while (!parser.check(TokenKind::RBracket) && !parser.at_end()) {
+                const LoopProgressGuard progress_guard(parser);
+
+                args.push_back(parse_generic_arg(parser));
+
+                if (!parser.check(TokenKind::RBracket)) {
+                    parser.expect(TokenKind::Comma, "','");
+                }
+            }
+
+            parser.expect(TokenKind::RBracket, "']'");
+
+            return args;
+        }
+
+        // 'generic_param ::= IDENT ':' type' — sema (not the parser) validates the declared
+        // type resolves to the builtin 'type' keyword or a builtin scalar type.
+        auto parse_generic_param(Parser &parser) -> GenericParam {
+            const auto location = parser.current_location();
+            const auto name = parser.expect_identifier();
+
+            parser.expect(TokenKind::Colon, "':'");
+
+            return GenericParam{
+                .name = name,
+                .type = parse_type(parser),
+                .location = location,
+            };
+        }
+
+        // 'generic_params ::= '[' generic_param { ',' generic_param } ']''
+        auto parse_generic_params(Parser &parser) -> std::vector<GenericParam> {
+            parser.expect(TokenKind::LBracket, "'['");
+
+            std::vector<GenericParam> params;
+            while (!parser.check(TokenKind::RBracket) && !parser.at_end()) {
+                const LoopProgressGuard progress_guard(parser);
+
+                params.push_back(parse_generic_param(parser));
+
+                if (!parser.check(TokenKind::RBracket)) {
+                    parser.expect(TokenKind::Comma, "','");
+                }
+            }
+
+            parser.expect(TokenKind::RBracket, "']'");
+
+            return params;
+        }
 
         auto parse_struct_type(Parser &parser) -> Type {
             const auto location = parser.current_location();
@@ -1326,29 +1423,54 @@ namespace ast {
             };
         }
 
+        // Ordinary indexing ('arr[i]'), slicing ('arr[i..j]'), and explicit generic-argument
+        // instantiation ('List[i32]', 'Fixed[u8, 16]') all share this one postfix '['...']'
+        // production and cannot be told apart by shape alone for a single-item, non-slice
+        // bracket — see IndexOrInstantiateExpr's doc comment in ast.hpp and grammar.md note
+        // 16. A comma-separated bracket is unambiguously generic_args (a slice/index bound is
+        // always exactly one item, never comma-separated), so only the single-item, non-'..'
+        // case is genuinely deferred to sema; a slice range ('..') is detected immediately
+        // after the first item and always wins when present, since generic_args never
+        // contains '..'.
         auto parse_index_or_slice_expr(Expr operand, Parser &parser) -> Expr {
             const auto location = parser.current_location();
 
             parser.expect(TokenKind::LBracket, "'['");
 
-            auto index = parse_expr(parser);
-            if (parser.match(TokenKind::DotDot)) {
+            auto first_arg = parse_generic_arg(parser);
+
+            if (auto *first_expr = std::get_if<Expr>(&first_arg.value); first_expr != nullptr && parser.match(TokenKind::DotDot)) {
                 auto end = parse_expr(parser);
                 parser.expect(TokenKind::RBracket, "']'");
 
                 return make_expr(SliceExpr{
                     .operand = std::move(operand),
-                    .start = std::move(index),
+                    .start = std::move(*first_expr),
                     .end = std::move(end),
                     .location = location,
                 });
             }
 
+            std::vector<GenericArg> args;
+            args.push_back(std::move(first_arg));
+            if (!parser.check(TokenKind::RBracket)) {
+                parser.expect(TokenKind::Comma, "','");
+            }
+            while (!parser.check(TokenKind::RBracket) && !parser.at_end()) {
+                const LoopProgressGuard progress_guard(parser);
+
+                args.push_back(parse_generic_arg(parser));
+
+                if (!parser.check(TokenKind::RBracket)) {
+                    parser.expect(TokenKind::Comma, "','");
+                }
+            }
+
             parser.expect(TokenKind::RBracket, "']'");
 
-            return make_expr(IndexExpr{
+            return make_expr(IndexOrInstantiateExpr{
                 .operand = std::move(operand),
-                .index = std::move(index),
+                .args = std::move(args),
                 .location = location,
             });
         }
@@ -2519,6 +2641,12 @@ namespace ast {
             parser.expect(TokenKind::KwFn, "'fn'");
 
             auto fn_name = parser.expect_identifier();
+
+            std::vector<GenericParam> fn_generic_params;
+            if (parser.check(TokenKind::LBracket)) {
+                fn_generic_params = parse_generic_params(parser);
+            }
+
             auto fn_params = parse_function_params(parser);
             auto fn_return_types = parse_function_return_types(parser);
             auto fn_body = parse_stmt(parser);
@@ -2527,6 +2655,7 @@ namespace ast {
                 .is_pub = is_pub,
                 .attributes = std::move(attributes),
                 .name = fn_name,
+                .generic_params = std::move(fn_generic_params),
                 .params = std::move(fn_params),
                 .return_types = std::move(fn_return_types.types),
                 .return_names = std::move(fn_return_types.names),
@@ -2715,11 +2844,17 @@ namespace ast {
 
             const auto type_name = parser.expect_identifier();
 
+            std::vector<GenericParam> type_generic_params;
+            if (parser.check(TokenKind::LBracket)) {
+                type_generic_params = parse_generic_params(parser);
+            }
+
             parser.expect(TokenKind::Equal, "'='");
 
             return TypeDecl{
                 .is_pub = is_pub,
                 .name = type_name,
+                .generic_params = std::move(type_generic_params),
                 .type = parse_type(parser),
                 .location = location,
             };
@@ -3140,12 +3275,20 @@ namespace ast {
     auto parse_impl_decl(Parser &parser) -> Decl {
         const auto location = parser.current_location();
         parser.expect(TokenKind::KwImpl, "'impl'");
-        auto target = parse_named_type(parser);
+        // generic_args suppressed: the bracket immediately following an impl target/trait/type
+        // name is always this decl's own trailing 'generic_params' clause below, never
+        // NamedType's own 'generic_args' — see grammar.md note 17.
+        auto target = parse_named_type(parser, /*allow_generic_args=*/false);
 
         if (parser.match(TokenKind::KwFor)) {
             // 'impl TRAIT for TYPE { ... }' — 'target' parsed above was actually the trait name.
             auto trait_name = std::move(target);
-            auto type_name = parse_named_type(parser);
+            auto type_name = parse_named_type(parser, /*allow_generic_args=*/false);
+
+            std::vector<GenericParam> impl_generic_params;
+            if (parser.check(TokenKind::LBracket)) {
+                impl_generic_params = parse_generic_params(parser);
+            }
 
             parser.expect(TokenKind::LBrace, "'{'");
 
@@ -3166,9 +3309,15 @@ namespace ast {
             return TraitImplDecl{
                 .trait_name = std::move(trait_name),
                 .type_name = std::move(type_name),
+                .generic_params = std::move(impl_generic_params),
                 .functions = std::move(functions),
                 .location = location,
             };
+        }
+
+        std::vector<GenericParam> impl_generic_params;
+        if (parser.check(TokenKind::LBracket)) {
+            impl_generic_params = parse_generic_params(parser);
         }
 
         parser.expect(TokenKind::LBrace, "'{'");
@@ -3189,6 +3338,7 @@ namespace ast {
 
         return ImplDecl{
             .target = std::move(target),
+            .generic_params = std::move(impl_generic_params),
             .functions = std::move(functions),
             .location = location,
         };

@@ -331,9 +331,16 @@ namespace sema {
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                     walk_expr_for_foreign_refs(v->value, locals, module_path, program, on_foreign_ref);
                     if (v->len_expr) walk_expr_for_foreign_refs(*v->len_expr, locals, module_path, program, on_foreign_ref);
-                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
                     walk_expr_for_foreign_refs(v->operand, locals, module_path, program, on_foreign_ref);
-                    walk_expr_for_foreign_refs(v->index, locals, module_path, program, on_foreign_ref);
+                    // Type-tagged args (a generic type argument) name types, not values, so
+                    // they can never be a foreign (module-scope) value reference — only
+                    // Expr-tagged args (value arguments, or a not-yet-classified index) can be.
+                    for (const auto &arg : v->args) {
+                        if (const auto *expr_arg = std::get_if<ast::Expr>(&arg.value)) {
+                            walk_expr_for_foreign_refs(*expr_arg, locals, module_path, program, on_foreign_ref);
+                        }
+                    }
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
                     walk_expr_for_foreign_refs(v->operand, locals, module_path, program, on_foreign_ref);
                     walk_expr_for_foreign_refs(v->start, locals, module_path, program, on_foreign_ref);

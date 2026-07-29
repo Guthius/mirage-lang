@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Generics — Mirage</title>
+  <meta name="description" content="Parametric generics in Mirage: type parameters, const-generic value parameters, explicit and inferred instantiation, implicit self-instantiation, and monomorphization.">
+  <script src="theme-init.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="topbar">
+  <button class="nav-toggle" aria-label="Toggle navigation"><span></span><span></span><span></span></button>
+  <a href="index.html" class="topbar-logo">mir<span>age</span></a>
+</div>
+<div class="sidebar-backdrop"></div>
+
+<div class="layout">
+
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <a href="index.html" class="sidebar-logo">mir<span>age</span></a>
+      <button class="theme-toggle" aria-label="Toggle color theme">
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
+    </div>
+    <nav>
+      <div class="sidebar-section">Introduction</div>
+      <ul>
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="getting-started.html">Getting Started</a></li>
+      </ul>
+      <div class="sidebar-section">Language</div>
+      <ul>
+        <li><a href="types.html">Types</a></li>
+        <li><a href="functions.html">Functions</a></li>
+        <li><a href="control-flow.html">Control Flow</a></li>
+        <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
+        <li><a href="traits.html">Traits</a></li>
+        <li><a href="generics.html" class="active">Generics</a></li>
+        <li><a href="error-handling.html">Error Handling</a></li>
+        <li><a href="modules.html">Modules</a></li>
+        <li><a href="comptime-config.html">Compile-Time Config</a></li>
+        <li><a href="inline-assembly.html">Inline Assembly</a></li>
+        <li><a href="attributes.html">Declaration Attributes</a></li>
+        <li><a href="reflection.html">Reflection</a></li>
+      </ul>
+      <div class="sidebar-section">Reference</div>
+      <ul>
+        <li><a href="grammar.html">Grammar</a></li>
+      </ul>
+    </nav>
+    <div class="sidebar-footer">Mirage Language<br>Documentation</div>
+  </aside>
+
+  <main class="main">
+    <div class="content">
+
+      <h1>Generics</h1>
+      <p class="subtitle">Parametric types and functions, monomorphized at compile time.</p>
+
+      <p>
+        A <code>type</code>, <code>fn</code>, or <code>impl</code> declaration may carry a
+        bracketed list of generic parameters. Each parameter is either a <strong>type
+        parameter</strong> (<code>T: type</code>) or a <strong>value parameter</strong>
+        (<code>N: usize</code>, or any other builtin scalar type) — a "const-generic"
+        parameter, in the style of a C++ non-type template parameter. A declaration with
+        generic parameters is never usable on its own; it must be instantiated with concrete
+        arguments, either explicitly or, for functions, inferred from context. Every
+        instantiation is compiled separately (monomorphization) — there's no runtime type
+        erasure or boxing involved.
+      </p>
+
+      <h2>Declaring Generic Types</h2>
+      <pre><code><span class="kw">pub type</span> <span class="ty">List</span>[<span class="ty">T</span>: <span class="kw">type</span>] = <span class="kw">struct</span> {
+    <span class="var">allocator</span>: <span class="ty">Allocator</span>
+    <span class="var">data</span>: *<span class="ty">T</span>
+    <span class="var">length</span>: <span class="ty">usize</span>
+    <span class="var">capacity</span>: <span class="ty">usize</span>
+}</code></pre>
+      <p>
+        The <code>generic_params</code> clause follows the type's name and precedes
+        <code>=</code>. Each parameter's declared type must be either the builtin
+        <code>type</code> keyword (a type parameter) or one of the builtin scalar types —
+        <code>bool</code>, an integer kind, or <code>usize</code> (a value parameter).
+      </p>
+      <div class="callout">
+        <div class="callout-title">A generic type name alone is never a valid type</div>
+        <code>List</code> by itself is a compile error naming the required arity — every use
+        requires generic arguments in declared parameter order: <code>List[i32]</code>, or
+        <code>Fixed[u8, 16]</code> for a mixed parameter list. The one exception is inside the
+        declaration's own body/signature — see "Implicit Self-Instantiation" below.
+      </div>
+
+      <h2>Declaring Generic Functions</h2>
+      <pre><code><span class="cmt">// Const-generic: the parameter's declared type is a builtin scalar, not 'type' itself.</span>
+<span class="kw">fn</span> <span class="fn">make_fixed</span>[<span class="ty">N</span>: <span class="ty">usize</span>]() -&gt; [<span class="ty">N</span>]<span class="ty">u8</span> {
+    <span class="kw">mut</span> <span class="var">buf</span>: [<span class="ty">N</span>]<span class="ty">u8</span> = <span class="kw">default</span>
+    <span class="kw">return</span> <span class="var">buf</span>
+}
+
+<span class="kw">const</span> <span class="var">b</span> := <span class="fn">make_fixed</span>[<span class="num">16</span>]()   <span class="cmt">// b: [16]u8</span></code></pre>
+      <p>
+        Inside the body and signature, each type parameter is a compile-time constant of type
+        <code>type</code>, and each value parameter is a compile-time constant of its declared
+        scalar type — usable anywhere a compile-time constant of that kind is legal:
+        <code>*T</code>, <code>size_of(T)</code>, a parameter's own <code>: T</code>,
+        <code>[N]u8</code>, <code>N * 2</code>, a <code>match</code>/<code>switch</code> literal
+        pattern, and so on. <code>ext fn</code> and <code>macro</code> declarations may not
+        carry generic parameters — the grammar gives them no syntax position to write one.
+      </p>
+
+      <h2>Generic Impl Blocks</h2>
+      <pre><code><span class="kw">impl</span> <span class="ty">List</span>[<span class="ty">T</span>: <span class="kw">type</span>] {
+    <span class="kw">pub fn</span> <span class="fn">reserve</span>(<span class="var">self</span>, <span class="var">min_capacity</span>: <span class="ty">usize</span>) -&gt; <span class="ty">Allocator_Error</span> {
+        <span class="kw">if</span> <span class="var">min_capacity</span> &lt;= <span class="var">self</span>.<span class="var">capacity</span> {
+            <span class="kw">return_ok</span>
+        }
+        <span class="kw">const</span> <span class="var">new_data_len</span> := <span class="var">min_capacity</span> * <span class="fn">size_of</span>(<span class="ty">T</span>)
+        <span class="kw">const</span> <span class="var">new_data</span>: *<span class="ty">T</span> = <span class="kw">try</span> <span class="var">self</span>.<span class="var">allocator</span>.<span class="fn">realloc</span>(<span class="var">self</span>.<span class="var">data</span>, <span class="var">new_data_len</span>)
+        <span class="var">self</span>.<span class="var">data</span> = <span class="var">new_data</span>
+        <span class="var">self</span>.<span class="var">capacity</span> = <span class="var">min_capacity</span>
+        <span class="kw">return_ok</span>
+    }
+
+    <span class="kw">pub fn</span> <span class="fn">get</span>(<span class="var">self</span>, <span class="var">index</span>: <span class="ty">usize</span>) -&gt; (<span class="var">elem</span>: <span class="ty">T</span>, <span class="ty">List_Error</span>) {
+        <span class="kw">if</span> <span class="var">index</span> &gt;= <span class="var">self</span>.<span class="var">length</span> {
+            <span class="kw">return_err</span> .<span class="ty">Out_Of_Range</span>
+        }
+        <span class="kw">return_ok</span> <span class="var">self</span>.<span class="var">data</span>[<span class="var">index</span>]
+    }
+}</code></pre>
+      <p>
+        An <code>impl</code> block for a generic type is written <strong>once</strong>, against
+        the unspecialized declaration, with its own generic-parameter clause immediately after
+        the target type name — never against a concrete instantiation. The block's own
+        parameter list must match the target type's declared arity exactly (matched by count,
+        not by parameter kind or name). A method inside a generic <code>impl</code> block never
+        declares its own generic parameters — its parameters are tied entirely to whichever
+        concrete instantiation the enclosing block is applied to.
+      </p>
+      <div class="callout warning">
+        <div class="callout-title">Per-instantiation specialization impls are not legal in v1</div>
+        <code>impl List[i32] { ... }</code> (a body specific to just one instantiation) is a
+        parse error — the bracket immediately after an <code>impl</code> target is always the
+        block's own generic-parameter clause, never a set of concrete arguments. Always write
+        <code>impl List[T: type] { ... }</code> once against the unspecialized declaration.
+      </div>
+      <p>
+        A generic struct may still implement a non-generic <strong>trait</strong>, once per
+        concrete instantiation — traits themselves are not made generic (see
+        <a href="traits.html">Traits</a>).
+      </p>
+
+      <h2>Type Parameters vs. Value Parameters</h2>
+      <table>
+        <tr><th>Form</th><th>Meaning</th><th>Usable as</th></tr>
+        <tr><td><code>T: type</code></td><td>Type parameter</td><td>A compile-time <code>type</code> constant — <code>*T</code>, <code>size_of(T)</code>, a field/param's own <code>: T</code>, etc.</td></tr>
+        <tr><td><code>N: usize</code></td><td>Value parameter</td><td>A compile-time constant of that scalar type — an array size <code>[N]u8</code>, an ordinary constant expression <code>N * 2</code>, a match/switch literal pattern.</td></tr>
+      </table>
+      <p>
+        A parameter list may freely mix both kinds, in any order —
+        <code>Fixed[T: type, N: usize]</code>. A generic argument at an instantiation site is
+        correspondingly either a <code>type</code> (for a <code>T: type</code> slot) or a
+        compile-time constant expression of the matching scalar type (for an
+        <code>N: SomeScalar</code> slot), checked the same way any other compile-time-constant
+        expression is checked elsewhere in the language (e.g. an array-size expression).
+      </p>
+
+      <h2>Explicit vs. Inferred Instantiation</h2>
+      <pre><code><span class="kw">const</span> <span class="var">a</span> := <span class="fn">make_list</span>[<span class="ty">i32</span>]()   <span class="cmt">// explicit</span>
+
+<span class="kw">const</span> <span class="var">typed</span>: <span class="ty">List</span>[<span class="ty">i32</span>] = <span class="fn">make_list</span>()   <span class="cmt">// T inferred from the declared type</span>
+
+<span class="kw">mut</span> <span class="var">buf</span>: [<span class="num">16</span>]<span class="ty">u8</span> = <span class="fn">make_fixed</span>()      <span class="cmt">// N inferred from the expected array size</span></code></pre>
+      <p>
+        A generic function call accepts explicit arguments, or infers them — with or without an
+        empty trailing <code>[]</code>. <strong>Type parameters</strong> infer by unifying the
+        parameter's declared type against an actual argument's static type wherever that
+        parameter appears literally as a parameter's own <code>: T</code> in the signature, or
+        (failing that) from the call's own expected-type context. <strong>Value
+        parameters</strong> infer <em>only</em> from expected-type context — there's generally
+        no argument shape to unify a value parameter against. If any parameter remains unbound
+        after both passes, it's a compile error naming the specific unresolved parameter.
+      </p>
+
+      <h2>Implicit Self-Instantiation</h2>
+      <pre><code><span class="kw">pub fn</span> <span class="fn">make_list</span>[<span class="ty">T</span>: <span class="kw">type</span>](<span class="var">allocator</span> := <span class="fn">heap_allocator</span>()) -&gt; <span class="ty">List</span> {
+    <span class="cmt">// '-> List' here is sugar for '-> List[T]'</span>
+    <span class="kw">return</span> { .<span class="var">allocator</span> = <span class="var">allocator</span>, .<span class="var">data</span> = <span class="kw">nil</span>, .<span class="var">length</span> = <span class="num">0</span>, .<span class="var">capacity</span> = <span class="num">0</span> }
+}</code></pre>
+      <p>
+        Inside a declaration whose own generic-parameter list has arity <em>N</em>, a bare
+        reference to a generic name — including a self-reference to the enclosing declaration
+        itself — is sugar for applying the enclosing declaration's own parameters, in order,
+        provided the referenced name's own arity is also <em>N</em> (matched by count, not by
+        parameter kind or name). Inside <code>impl List[T: type] { ... }</code>, a bare
+        <code>List</code> or <code>T</code> likewise resolves against the impl's own binding.
+        Explicit brackets are always still accepted — implicit self-instantiation only applies
+        to a bare reference with no brackets written at all.
+      </p>
+
+      <h2>Monomorphization and Type Identity</h2>
+      <p>
+        <code>Name[Args]</code> for a fixed declaration and a fixed, value-equal argument tuple
+        denotes exactly <strong>one</strong> concrete instantiation program-wide — every
+        occurrence of <code>List[i32]</code> anywhere in the program refers to the same
+        underlying type. This is nominal per declaration, not deep structural interning across
+        different declarations: two different generic declarations instantiated with identical
+        arguments and identical resulting layouts are still two different, mutually
+        non-assignable types — the same rule ordinary non-generic named types already follow.
+      </p>
+      <p>
+        Codegen generates an instantiation only when it's actually reachable from a live call or
+        type use, the same "unselected branch never visited" posture <code>when</code> uses for
+        dead branches — except stricter: an unreached generic instantiation is never
+        type-checked at all in v1, not merely never emitted (see "No Bounds in v1" below).
+      </p>
+
+      <h2>Coherence</h2>
+      <p>
+        <code>impl TRAIT for List[T: type] { ... }</code> is written once against the
+        unspecialized declaration and governs every concrete instantiation of <code>List</code>.
+        The same single-impl-per-<code>(TRAIT, TYPE)</code> coherence rule traits use elsewhere
+        applies at this unspecialized level: at most one such impl exists anywhere in the
+        program, and it must live in the module that defines the trait or the module that
+        defines <code>List</code> itself.
+      </p>
+
+      <h2>No Bounds in v1</h2>
+      <div class="callout warning">
+        <div class="callout-title">Generic parameters are unconstrained</div>
+        There is no way in v1 to declare that a type parameter must implement a given trait, or
+        that a value parameter must satisfy some predicate. An operation a given instantiation's
+        body can't actually support is only caught when that specific instantiation is generated
+        and checked — not at the generic declaration's own point of definition. This is a real
+        departure from the "both branches always type-checked" posture the rest of the language
+        uses for <code>when</code>: a generic body that's never instantiated is never checked at
+        all, not merely never emitted.
+      </div>
+
+      <h2>Full Example</h2>
+      <pre><code><span class="kw">pub type</span> <span class="ty">Fixed</span>[<span class="ty">T</span>: <span class="kw">type</span>, <span class="ty">N</span>: <span class="ty">usize</span>] = <span class="kw">struct</span> {
+    <span class="var">data</span>: [<span class="ty">N</span>]<span class="ty">T</span>
+}
+
+<span class="kw">impl</span> <span class="ty">Fixed</span>[<span class="ty">T</span>: <span class="kw">type</span>, <span class="ty">N</span>: <span class="kw">usize</span>] {
+    <span class="kw">pub fn</span> <span class="fn">sum</span>(<span class="var">self</span>) -&gt; <span class="ty">T</span> {
+        <span class="kw">mut</span> <span class="var">total</span>: <span class="ty">T</span> = <span class="kw">default</span>
+        <span class="kw">for</span> <span class="var">v</span> <span class="kw">in</span> <span class="var">self</span>.<span class="var">data</span> {
+            <span class="var">total</span> += <span class="var">v</span>
+        }
+        <span class="kw">return</span> <span class="var">total</span>
+    }
+}
+
+<span class="kw">pub fn</span> <span class="fn">main</span>() {
+    <span class="kw">const</span> <span class="var">nums</span>: <span class="ty">Fixed</span>[<span class="ty">i32</span>, <span class="num">4</span>] = { .<span class="var">data</span> = {<span class="num">1</span>, <span class="num">2</span>, <span class="num">3</span>, <span class="num">4</span>} }
+    <span class="fn">printf</span>(<span class="str">"sum = %d\n"</span>, <span class="var">nums</span>.<span class="fn">sum</span>())
+}
+<span class="cmt">// Output:
+// sum = 10</span></code></pre>
+
+      <div class="page-nav">
+        <a href="traits.html" class="prev"><span class="label">Previous</span>Traits</a>
+        <a href="error-handling.html" class="next"><span class="label">Next</span>Error Handling</a>
+      </div>
+
+    </div>
+  </main>
+
+</div>
+<script src="site.js" defer></script>
+</body>
+</html>

@@ -215,6 +215,7 @@ namespace codegen {
                 declare_globals_and_functions();
                 declare_methods();
                 declare_trait_methods();
+                declare_generic_functions();
                 declare_vtables();
                 declare_type_info_globals();
                 const sema::FunctionSymbol *entry_main = nullptr;
@@ -225,6 +226,7 @@ namespace codegen {
                 emit_functions();
                 emit_methods();
                 emit_trait_methods();
+                emit_generic_functions();
                 // Generated in BOTH hosted and freestanding builds whenever at least one
                 // '@init' function exists (and '--noinit' wasn't passed) — freestanding just
                 // doesn't get a synthesized '_start' to call it from (unchanged below), so the
@@ -871,6 +873,12 @@ namespace codegen {
                                 global->is_pub ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::InternalLinkage,
                                 nullptr, gname);
                         } else if (const auto *fn = std::get_if<sema::FunctionSymbol>(&sym)) {
+                            // A generic function has no single "the" signature to declare here
+                            // — 'fn->params'/'fn->return_types' were never resolved for it (see
+                            // sema.cpp's resolve_signatures_for_module skip); each concrete
+                            // instantiation gets its own llvm::Function via
+                            // declare_generic_functions() instead.
+                            if (fn->decl && !fn->decl->generic_params.empty()) continue;
                             const bool entry_symbol = path == ast_program_.root_module_path && (name == "main" || (options_.freestanding && name == "_start"));
                             const auto fname = symbol_name(path, name, entry_symbol);
                             auto *llvm_fn = llvm::Function::Create(
@@ -1461,6 +1469,10 @@ namespace codegen {
                         if (!fn) {
                             continue;
                         }
+                        // See the identical skip in declare_globals_and_functions() above —
+                        // a generic function's body is emitted per-instantiation instead, by
+                        // emit_generic_functions().
+                        if (fn->decl && !fn->decl->generic_params.empty()) continue;
                         emit_function(path, name, *fn);
                     }
                 }
@@ -1522,6 +1534,34 @@ namespace codegen {
                             }
                         }
                     }
+                }
+            }
+
+            // Declares one llvm::Function per reachable generic function/method instantiation
+            // — mirrors declare_globals_and_functions()/declare_methods() exactly, just
+            // walking sema_program_.generic_fn_instances_needed (the "sema decided this is
+            // live" set — see Program::generic_type_instances_needed's doc comment for the
+            // same posture applied to types) instead of ProgramModule::symbols/methods. Only
+            // ever emits the instantiations sema actually recorded as reached — the same
+            // "unselected branch never visited" posture 'when' uses for dead branches,
+            // except stricter (an instantiation not in this set was never even checked, not
+            // merely never emitted — see spec.md §22, "No Bounds in v1").
+            void declare_generic_functions() {
+                for (const size_t idx : sema_program_.generic_fn_instances_needed) {
+                    const auto &instance = *sema_program_.generic_fn_instances[idx];
+                    const auto &module_path = instance.module_path;
+
+                    std::vector<llvm::Type *> param_types;
+                    if (instance.impl_decl) {
+                        param_types.push_back(llvm::PointerType::getUnqual(*context_)); // self
+                    }
+                    for (const auto &p : instance.param_types) {
+                        param_types.push_back(llvm_type(module_path, p));
+                    }
+                    auto *fn_type = llvm::FunctionType::get(return_type(module_path, instance.return_types), param_types, false);
+                    const auto fname = symbol_name(module_path, instance.mangled_name);
+                    auto *llvm_fn = llvm::Function::Create(fn_type, llvm::GlobalValue::InternalLinkage, fname, *module_);
+                    functions_[FunctionKey{module_path, instance.mangled_name}] = llvm_fn;
                 }
             }
 
@@ -1751,6 +1791,40 @@ namespace codegen {
                 return build_struct_constant(ty->struct_index, values);
             }
 
+            auto build_type_info_generic_arg_entry(const std::string &module_path, const sema::GenericArgValue &arg) -> llvm::Constant * {
+                const auto ty = find_resolved_type_by_name(module_path, "Type_Info_Generic_Arg");
+                if (!ty || ty->kind != sema::TypeKind::Struct) return nullptr;
+                auto *null_ptr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
+                int64_t raw_value = 0;
+                if (!arg.is_type) {
+                    if (const auto *iv = std::get_if<int64_t>(&arg.value_arg)) raw_value = *iv;
+                }
+                auto values = build_type_info_payload_values(sema_program_.structs.at(ty->struct_index), {
+                    {"is_type", builder_.getInt1(arg.is_type)},
+                    {"type_arg", arg.is_type ? type_info_ptr_for(arg.type_arg) : null_ptr},
+                    {"value_arg", builder_.getInt64(static_cast<uint64_t>(raw_value))},
+                    {"value_arg_type", arg.is_type ? null_ptr : type_info_ptr_for(arg.value_arg_scalar_type)},
+                });
+                return build_struct_constant(ty->struct_index, values);
+            }
+
+            // Pushes 'is_generic'/'generic_args' onto 'assignments' for a Struct/Enum/Union/
+            // Tagged_Union/Bitset Type_Info payload — shared by every aggregate case in
+            // emit_type_info_global below, since all five gained these fields identically
+            // (see runtime/type_info/type_info.mir). Empty/false for a non-generic type,
+            // matching this file's existing empty-slice conventions elsewhere.
+            void push_generic_args_assignments(const std::string &module_path, const std::optional<sema::GenericInstanceInfo> &generic_instance,
+                                                std::vector<TypeInfoFieldAssignment> &assignments) {
+                std::vector<llvm::Constant *> arg_entries;
+                if (generic_instance) {
+                    for (const auto &arg : generic_instance->args) {
+                        arg_entries.push_back(build_type_info_generic_arg_entry(module_path, arg));
+                    }
+                }
+                assignments.push_back({"is_generic", builder_.getInt1(generic_instance.has_value())});
+                assignments.push_back({"generic_args", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Generic_Arg"), arg_entries, ".type_info_generic_args")});
+            }
+
             // Builds the Type_Info union's own constant value: {tag, [pad], payload, [pad]} as
             // a bespoke packed struct type sized/offset exactly per UnionInfo (D4 — never
             // reused/named, just a one-off literal LLVM type; safe because every consumer only
@@ -1863,6 +1937,7 @@ namespace codegen {
                     assignments.push_back({"size", builder_.getInt64(info.size)});
                     assignments.push_back({"align", builder_.getInt64(info.align)});
                     assignments.push_back({"packed", builder_.getInt1(info.is_packed)});
+                    push_generic_args_assignments(module_path, info.generic_instance, assignments);
                     break;
                 }
                 case sema::TypeKind::Enum: {
@@ -1877,6 +1952,7 @@ namespace codegen {
                     assignments.push_back({"variants", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Enum_Variant"), variant_entries, ".type_info_variants")});
                     assignments.push_back({"storage_kind", builder_.getInt32(mirage_type_kind_value(info.underlying_type.kind))});
                     assignments.push_back({"size", builder_.getInt64(primitive_size(info.underlying_type.kind))});
+                    push_generic_args_assignments(module_path, info.generic_instance, assignments);
                     break;
                 }
                 case sema::TypeKind::Union: {
@@ -1902,6 +1978,7 @@ namespace codegen {
                         assignments.push_back({"variants", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Tagged_Variant"), variant_entries, ".type_info_tagged_variants")});
                         assignments.push_back({"size", builder_.getInt64(info.size)});
                         assignments.push_back({"align", builder_.getInt64(info.align)});
+                        push_generic_args_assignments(module_path, info.generic_instance, assignments);
                     } else {
                         variant_name = "Union";
                         std::vector<llvm::Constant *> member_entries;
@@ -1912,6 +1989,7 @@ namespace codegen {
                         assignments.push_back({"members", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Field"), member_entries, ".type_info_umembers")});
                         assignments.push_back({"size", builder_.getInt64(info.size)});
                         assignments.push_back({"align", builder_.getInt64(info.align)});
+                        push_generic_args_assignments(module_path, info.generic_instance, assignments);
                     }
                     break;
                 }
@@ -1923,6 +2001,7 @@ namespace codegen {
                     assignments.push_back({"member_type", type_info_ptr_for(info.member_enum_type)});
                     assignments.push_back({"storage_kind", builder_.getInt32(mirage_type_kind_value(info.storage_type.kind))});
                     assignments.push_back({"size", builder_.getInt64(primitive_size(info.storage_type.kind))});
+                    push_generic_args_assignments(module_path, info.generic_instance, assignments);
                     break;
                 }
                 case sema::TypeKind::Function: {
@@ -2189,6 +2268,104 @@ namespace codegen {
                         }
                     }
                 }
+            }
+
+            // Emits every reachable generic function/method instantiation's body, mirroring
+            // emit_functions()/emit_methods() exactly — the ONE piece of extra machinery a
+            // generic instance's body needs beyond an ordinary function/method's is pushing
+            // its own substitution env onto Program::active_generic_env_stack first: sema's
+            // check_generic_function_instance_body already populated this instance's own
+            // 'expr_types' (and every other side table emit_stmt/emit_expr read from) with
+            // fully-CONCRETE ResolvedTypes during body-checking, so ordinary emit_stmt/
+            // emit_expr work completely unchanged here — the ambient stack is needed only
+            // for the few codegen call sites (a local var decl's own type annotation, e.g.
+            // 'mut buf: [N]u8 = default') that re-derive a type directly from an ast::Type
+            // node via sema::resolve_type/resolve_declared_type instead of reading
+            // 'expr_types' — see those two free functions' own doc comments in
+            // type_resolver.cpp for why they consult this same stack.
+            void emit_generic_functions() {
+                for (const size_t idx : sema_program_.generic_fn_instances_needed) {
+                    emit_generic_function_instance(idx);
+                }
+            }
+
+            void emit_generic_function_instance(size_t idx) {
+                auto &instance = *sema_program_.generic_fn_instances[idx];
+                const auto &module_path = instance.module_path;
+                current_module_path_ = &module_path;
+                current_module_ = &module_for(module_path);
+                current_function_ = functions_.at(FunctionKey{module_path, instance.mangled_name});
+                current_returns_ = instance.return_types;
+                locals_.clear();
+                macro_args_.clear();
+                continue_targets_.clear();
+                break_targets_.clear();
+                defer_scopes_.clear();
+                next_block_is_loop_body_ = false;
+
+                auto *entry = llvm::BasicBlock::Create(*context_, "entry", current_function_);
+                builder_.SetInsertPoint(entry);
+
+                const auto &generic_params = instance.decl ? instance.decl->generic_params
+                                                             : *instance.generic_params_for_method;
+                const auto env = build_generic_binding_env(generic_params, instance.args);
+                const_cast<sema::Program &>(sema_program_).active_generic_env_stack.push_back(&env);
+
+                auto arg_it = current_function_->arg_begin();
+                if (instance.impl_decl) {
+                    arg_it->setName("self");
+                    auto *self_slot = create_entry_alloca(current_function_, llvm::PointerType::getUnqual(*context_), "self");
+                    builder_.CreateStore(arg_it, self_slot);
+                    locals_["self"] = LocalValue{
+                        .alloca = self_slot,
+                        .type = find_self_ptr_type(*instance.self_type),
+                        .type_module = module_path,
+                    };
+                    ++arg_it;
+
+                    size_t index = 0;
+                    for (; arg_it != current_function_->arg_end(); ++arg_it, ++index) {
+                        const auto &param = instance.impl_decl->params[index];
+                        arg_it->setName(param.name);
+                        auto *slot = create_entry_alloca(current_function_, llvm_type(module_path, instance.param_types[index]), param.name);
+                        builder_.CreateStore(arg_it, slot);
+                        locals_[param.name] = LocalValue{
+                            .alloca = slot,
+                            .type = instance.param_types[index],
+                            .type_module = param.type
+                                               ? type_module_for_ast_type(*param.type, module_path, instance.param_types[index])
+                                               : module_path,
+                        };
+                    }
+                    emit_stmt(instance.impl_decl->body);
+                } else {
+                    size_t index = 0;
+                    for (; arg_it != current_function_->arg_end(); ++arg_it, ++index) {
+                        const auto &param = instance.decl->params[index];
+                        arg_it->setName(param.name);
+                        auto *slot = create_entry_alloca(current_function_, llvm_type(module_path, instance.param_types[index]), param.name);
+                        builder_.CreateStore(arg_it, slot);
+                        locals_[param.name] = LocalValue{
+                            .alloca = slot,
+                            .type = instance.param_types[index],
+                            .type_module = param.type
+                                               ? type_module_for_ast_type(*param.type, module_path, instance.param_types[index])
+                                               : module_path,
+                        };
+                    }
+                    emit_stmt(instance.decl->body);
+                }
+
+                if (!builder_.GetInsertBlock()->getTerminator()) {
+                    if (instance.return_types.empty()) {
+                        builder_.CreateRetVoid();
+                    } else {
+                        report_codegen_error(diag_, {}, std::format("generic instantiation '{}' may fall through without returning a value", instance.mangled_name));
+                        builder_.CreateUnreachable();
+                    }
+                }
+
+                const_cast<sema::Program &>(sema_program_).active_generic_env_stack.pop_back();
             }
 
             // Pass by value: emit_stmt called inside can push/pop defer_scopes_,
@@ -2822,7 +2999,7 @@ namespace codegen {
                             }
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                             return expr_type_module_hint(v->object);
-                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
                             const auto operand_ty = current_module_->expr_types.at(sema::get_expr_key(v->operand));
                             if (operand_ty.kind == sema::TypeKind::Pointer || operand_ty.kind == sema::TypeKind::Array || operand_ty.kind == sema::TypeKind::Slice) {
                                 return expr_type_module_hint(v->operand);
@@ -2850,7 +3027,7 @@ namespace codegen {
                             return v->op == ast::UnaryOp::Deref;
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                             return true;
-                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
                             return true;
                         } else {
                             return false;
@@ -2889,7 +3066,7 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                             return emit_member_lvalue(*v);
 
-                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
                             return emit_index_lvalue(*v);
                         }
 
@@ -2959,12 +3136,18 @@ namespace codegen {
                 return LValue{.ptr = ptr, .type = field_it->type, .type_module = struct_module, .storage_type = llvm_type_for(field_it->type, struct_module)};
             }
 
-            auto emit_index_lvalue(const ast::IndexExpr &index) -> LValue {
+            // 'index.args' is guaranteed exactly one Expr-tagged element here — sema's
+            // IndexOrInstantiateExpr classification (see check_expr) only ever emits an
+            // 'expr_types' entry (and thus reaches codegen) for the ordinary-index shape;
+            // a real generic-instantiation use is resolved to a concrete type/symbol
+            // entirely within sema and never reaches this lvalue path.
+            auto emit_index_lvalue(const ast::IndexOrInstantiateExpr &index) -> LValue {
+                const auto &index_expr = std::get<ast::Expr>(index.args[0].value);
                 const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(index.operand));
                 const auto type_module = expr_type_module_hint(index.operand);
-                auto *idx = emit_expr(index.index);
+                auto *idx = emit_expr(index_expr);
                 if (!idx->getType()->isIntegerTy(64)) {
-                    idx = integer_cast(idx, llvm::Type::getInt64Ty(*context_), current_module_->expr_types.at(sema::get_expr_key(index.index)));
+                    idx = integer_cast(idx, llvm::Type::getInt64Ty(*context_), current_module_->expr_types.at(sema::get_expr_key(index_expr)));
                 }
 
                 if (operand_type.kind == sema::TypeKind::Pointer) {
@@ -3065,6 +3248,41 @@ namespace codegen {
                     return std::nullopt;
                 }
                 return std::nullopt;
+            }
+
+            // Emits a call already resolved by sema to a specific generic function/method
+            // instantiation (see ProgramModule::expr_generic_fn_instance) — bypasses
+            // emit_call's entire name-based resolution below, since the callee is already
+            // known exactly: 'instance.mangled_name' was declared as an ordinary
+            // llvm::Function by declare_generic_functions(). A method instance's callee AST
+            // shape is always a MemberExpr (self.reserve(...)); a free-function instance's is
+            // an IdentExpr or IndexOrInstantiateExpr (make_fixed()/make_fixed[16]()) — self
+            // is only ever computed for the former.
+            auto emit_generic_call(const ast::CallExpr &call, size_t instance_idx) -> llvm::Value * {
+                const auto &instance = *sema_program_.generic_fn_instances[instance_idx];
+                auto *llvm_fn = functions_.at(FunctionKey{instance.module_path, instance.mangled_name});
+
+                std::vector<llvm::Value *> args;
+                if (instance.impl_decl) {
+                    const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee);
+                    const auto obj_type = current_module_->expr_types.at(sema::get_expr_key((*member)->object));
+                    llvm::Value *self_ptr = obj_type.kind == sema::TypeKind::Pointer
+                        ? emit_expr((*member)->object)
+                        : emit_lvalue((*member)->object).ptr;
+                    args.push_back(self_ptr);
+                    for (size_t i = 0; i < instance.param_types.size(); ++i) {
+                        args.push_back(i < call.args.size()
+                            ? emit_value_as(call.args[i], instance.param_types[i], instance.module_path)
+                            : emit_default_arg(*instance.impl_decl->params[i].default_value, instance.param_default_is_const[i], instance.module_path, instance.param_types[i]));
+                    }
+                } else {
+                    for (size_t i = 0; i < instance.param_types.size(); ++i) {
+                        args.push_back(i < call.args.size()
+                            ? emit_value_as(call.args[i], instance.param_types[i], instance.module_path)
+                            : emit_default_arg(*instance.decl->params[i].default_value, instance.param_default_is_const[i], instance.module_path, instance.param_types[i]));
+                    }
+                }
+                return builder_.CreateCall(llvm_fn, args);
             }
 
             auto emit_call(const ast::CallExpr &call) -> llvm::Value * {
@@ -3641,6 +3859,10 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AssignExpr>>) {
                             return emit_assign(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
+                            if (const auto inst_it = current_module_->expr_generic_fn_instance.find(sema::get_expr_key(expr));
+                                inst_it != current_module_->expr_generic_fn_instance.end()) {
+                                return emit_generic_call(*v, inst_it->second);
+                            }
                             return emit_call(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) {
                             return emit_incr_decr(*v);
@@ -3717,7 +3939,7 @@ namespace codegen {
                                 return builder_.CreateExtractValue(emit_expr(v->value), {1});
                             }
                             return emit_cast(emit_expr(v->value), from, ty);
-                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexExpr>>) {
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
                             const auto lv = emit_lvalue(expr);
                             return builder_.CreateLoad(lv.storage_type, lv.ptr);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {

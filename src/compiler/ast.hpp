@@ -39,10 +39,19 @@ namespace ast {
 
     struct PointerType;
     struct FunctionType;
+    struct GenericArg;
 
     struct NamedType {
         std::string name;
         std::unique_ptr<NamedType> member;
+        // empty unless followed by '[ generic_arg, ... ]'; only ever populated on the leaf
+        // segment of a dotted chain (member == nullptr) — see parse_named_type's
+        // 'allow_generic_args' param. Stored behind unique_ptr (not by value) because
+        // NamedType must be a complete type at the point 'Type' (below) is defined, but
+        // GenericArg's own definition needs 'Type' complete first — the same
+        // completeness cycle PointerType/StructType/etc. below are already stored behind
+        // unique_ptr in the 'Type' variant to break.
+        std::vector<std::unique_ptr<GenericArg>> generic_args;
         SourceLocation location;
     };
 
@@ -156,7 +165,7 @@ namespace ast {
     struct LenExpr;
     struct StackAllocExpr;
     struct CastExpr;
-    struct IndexExpr;
+    struct IndexOrInstantiateExpr;
     struct SliceExpr;
     struct MemberExpr;
     struct MatchExpr;
@@ -233,7 +242,7 @@ namespace ast {
         std::unique_ptr<LenExpr>,
         std::unique_ptr<StackAllocExpr>,
         std::unique_ptr<CastExpr>,
-        std::unique_ptr<IndexExpr>,
+        std::unique_ptr<IndexOrInstantiateExpr>,
         std::unique_ptr<SliceExpr>,
         std::unique_ptr<MemberExpr>,
         IotaExpr,
@@ -247,6 +256,28 @@ namespace ast {
         std::unique_ptr<RangeExpr>,
         std::unique_ptr<SpreadExpr>,
         std::unique_ptr<AsmExpr>>;
+
+    // 'name : type' inside a 'generic_params' clause ('[T: type]' / '[N: usize]'). The
+    // declared type is parsed as an ordinary 'type' production; sema (not the parser)
+    // validates it resolves to either the builtin 'type' keyword (a type parameter) or one
+    // of the builtin scalar types bool/an integer kind/usize (a value, "const-generic"
+    // parameter) — anything else is a sema error. See TypeDecl/FunctionDecl/ImplDecl/
+    // TraitImplDecl's own 'generic_params' fields below, and spec.md §22 "Generics".
+    struct GenericParam {
+        std::string name;
+        Type type;
+        SourceLocation location;
+    };
+
+    // A single generic argument at an instantiation site ('List[i32]', 'make_fixed[16]').
+    // 'value' holds a Type for a 'T: type' parameter, or an Expr (a compile-time constant of
+    // the parameter's declared scalar type) for a value parameter — which alternative the
+    // parser produces is decided per-item by the same type-vs-expr lookahead rule
+    // 'size_of_operand' uses (starts_type_only); see parse_generic_args.
+    struct GenericArg {
+        std::variant<Type, Expr> value;
+        SourceLocation location;
+    };
 
     struct StructType {
         struct Field {
@@ -512,9 +543,17 @@ namespace ast {
         SourceLocation location;
     };
 
-    struct IndexExpr {
+    // A postfix '[' arg { ',' arg } ']' immediately following an operand. Ordinary indexing
+    // ('arr[i]') and explicit generic-argument instantiation ('List[i32]') are syntactically
+    // indistinguishable to the parser for a single-item bracket (a comma-separated bracket is
+    // unambiguously generic_args, since ordinary indexing is always exactly one expr with no
+    // comma) — so both readings are captured here and classified in sema once 'operand's
+    // declaration, if any, is known (see sema_check.cpp's IndexOrInstantiateExpr handling).
+    // Fully replaces the old single-arg IndexExpr node; SliceExpr (never ambiguous) is
+    // untouched. See spec.md §22 "Generics" and grammar.md note 16.
+    struct IndexOrInstantiateExpr {
         Expr operand;
-        Expr index;
+        std::vector<GenericArg> args;
         SourceLocation location;
     };
 
@@ -851,6 +890,9 @@ namespace ast {
         bool is_pub;
         std::vector<Attribute> attributes; // empty if none; see 'attribute_clause' in the parser
         std::string name;
+        std::vector<GenericParam> generic_params; // empty unless 'fn name[T: type](...)'; never
+                                                    // populated on an ImplDecl::Function/method —
+                                                    // only the enclosing 'impl' block carries one
         std::vector<Param> params;
         std::vector<Type> return_types;
         std::vector<std::string> return_names; // parallel to return_types; "" = unnamed.
@@ -903,6 +945,7 @@ namespace ast {
     struct TypeDecl {
         bool is_pub;
         std::string name;
+        std::vector<GenericParam> generic_params; // empty unless 'type Name[T: type] = ...'
         Type type;
         SourceLocation location;
     };
@@ -935,7 +978,16 @@ namespace ast {
             SourceLocation self_location; // the 'self' token itself
         };
 
-        NamedType target;
+        NamedType target; // always parsed with generic_args suppressed — see parse_named_type's
+                           // 'allow_generic_args' param; the bracket after 'target' is always
+                           // this decl's own 'generic_params' below, never NamedType::generic_args
+        std::vector<GenericParam> generic_params; // empty unless 'impl Name[T: type] { ... }';
+                                                    // arity must match 'target's own declared
+                                                    // arity exactly — see spec.md §22, "Generic
+                                                    // Impl Blocks". Per-instantiation
+                                                    // specialization ('impl Name[i32] {}') is not
+                                                    // legal — this is always a parameter list,
+                                                    // never a concrete argument list.
         std::vector<Function> functions;
         SourceLocation location;
     };
@@ -943,8 +995,11 @@ namespace ast {
     // 'impl TRAIT for TYPE { ... }' — a trait implementation. Distinct from the bare
     // 'impl TYPE { ... }' form (ImplDecl) above, which is left untouched.
     struct TraitImplDecl {
-        NamedType trait_name;
-        NamedType type_name;
+        NamedType trait_name; // parsed with generic_args suppressed, same as ImplDecl::target
+        NamedType type_name;  // parsed with generic_args suppressed, same as ImplDecl::target
+        std::vector<GenericParam> generic_params; // parametrizes 'type_name' only — traits
+                                                    // themselves are not made generic; see
+                                                    // spec.md §22, "Generic Impl Blocks"
         std::vector<ImplDecl::Function> functions;
         SourceLocation location;
     };

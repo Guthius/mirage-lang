@@ -56,6 +56,17 @@ pub type Type_Info_Method = struct {
     type_info: anyptr
 }
 
+// One concrete generic argument a monomorphized instantiation was created with, in
+// declared parameter order. 'is_type' distinguishes a type argument (carries 'type_arg',
+// the argument's own Type_Info) from a value argument (carries the raw scalar 'value_arg'
+// plus 'value_arg_type', the Type_Info of its own scalar type).
+pub type Type_Info_Generic_Arg = struct {
+    is_type:        bool
+    type_arg:       anyptr
+    value_arg:      i64
+    value_arg_type: anyptr
+}
+
 pub type Type_Info = union(enum) {
     Pointer: struct {
         base_type: anyptr
@@ -76,11 +87,13 @@ pub type Type_Info = union(enum) {
     }
 
     Struct: struct {
-        name:   []u8
-        fields: []Type_Info_Field
-        size:   usize
-        align:  usize
-        packed: bool
+        name:         []u8
+        fields:       []Type_Info_Field
+        size:         usize
+        align:        usize
+        packed:       bool
+        is_generic:   bool
+        generic_args: []Type_Info_Generic_Arg
     }
 
     Enum: struct {
@@ -88,20 +101,26 @@ pub type Type_Info = union(enum) {
         variants:     []Type_Info_Enum_Variant
         storage_kind: Type_Kind
         size:         usize
+        is_generic:   bool
+        generic_args: []Type_Info_Generic_Arg
     }
 
     Union: struct {
-        name:    []u8
-        members: []Type_Info_Field
-        size:    usize
-        align:   usize
+        name:         []u8
+        members:      []Type_Info_Field
+        size:         usize
+        align:        usize
+        is_generic:   bool
+        generic_args: []Type_Info_Generic_Arg
     }
 
     Tagged_Union: struct {
-        name:     []u8
-        variants: []Type_Info_Tagged_Variant
-        size:     usize
-        align:    usize
+        name:         []u8
+        variants:     []Type_Info_Tagged_Variant
+        size:         usize
+        align:        usize
+        is_generic:   bool
+        generic_args: []Type_Info_Generic_Arg
     }
 
     Bitset: struct {
@@ -109,6 +128,8 @@ pub type Type_Info = union(enum) {
         member_type:  anyptr
         storage_kind: Type_Kind
         size:         usize
+        is_generic:   bool
+        generic_args: []Type_Info_Generic_Arg
     }
 
     Function: struct {

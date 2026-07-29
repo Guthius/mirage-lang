@@ -12,8 +12,59 @@
 #include <set>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace sema {
+    // A '--opt key=value' or environment-variable value coerced (per #option's/#env's
+    // target-type coercion rules) or folded from a default expression: an integer/bool/
+    // enum-underlying value, or a []u8 string. Used for '#option'/'#env' themselves and for
+    // constant-folding 'when' conditions and '#link' data expressions that reference an
+    // '#option'/'#env'-backed const. Defined here (ahead of VariantCoercion/AsmStmtInfo
+    // etc. further below, which used to be its original home) so the generics structures
+    // immediately following — which also need it — can be declared next to the
+    // ResolvedType-adjacent structs above rather than split across the file.
+    using ConstFoldValue = std::variant<int64_t, std::string>;
+
+    // Substitution environment active while resolving one specific generic instantiation's
+    // signature/layout/body: one entry per the generic declaration's own params, binding
+    // each param name to either a concrete ResolvedType (a 'T: type' parameter) or a
+    // concrete compile-time constant of the parameter's declared scalar type (an
+    // 'N: usize'-style value parameter). Generalizes eval_integer_const_expr's existing
+    // 'macro_args' name->AST-node substitution map (type_resolver.cpp, used for iota/
+    // array-length const-folding) from "const-int folding only" to "any type/expr
+    // resolution reachable while walking a generic decl's own AST." Small (== the decl's
+    // own arity) — linear lookup by name is intentional, not a missed optimization.
+    struct GenericBinding {
+        std::string param_name;
+        bool is_type = true;
+        ResolvedType type_value{};       // valid when is_type
+        ConstFoldValue const_value{};    // valid when !is_type
+        ResolvedType const_value_type{}; // the param's declared scalar type, e.g. USize
+    };
+    using GenericBindingEnv = std::vector<GenericBinding>;
+
+    // The resolved, cacheable form of one generic argument — no param name (unlike
+    // GenericBinding above), since this is used as a monomorphization-cache key and for
+    // RTTI/name-mangling, not for substitution during a single resolution pass.
+    struct GenericArgValue {
+        bool is_type = true;
+        ResolvedType type_arg{};
+        ConstFoldValue value_arg{};
+        ResolvedType value_arg_scalar_type{};
+
+        auto operator==(const GenericArgValue &) const -> bool = default;
+    };
+
+    // Tags a monomorphized struct/enum/union/bitset slot with where it came from: the
+    // UNSPECIALIZED declaration's own (module, name) plus the concrete args this
+    // instantiation was created with, in declared parameter order. Never set on a
+    // non-generic slot (std::optional<GenericInstanceInfo> on each *Info struct below).
+    struct GenericInstanceInfo {
+        std::string decl_module;
+        std::string decl_name;
+        std::vector<GenericArgValue> args;
+    };
+
     struct StructField {
         std::string name;
         ResolvedType type;
@@ -29,6 +80,9 @@ namespace sema {
         uint32_t align = 1;
         bool is_packed = false;
         bool layout_done = false;
+        // Set only when this slot is a monomorphized instantiation of a generic 'type
+        // Name[...] = struct {...}' declaration — see instantiate_generic_type.
+        std::optional<GenericInstanceInfo> generic_instance;
     };
 
     struct ArrayInfo {
@@ -52,6 +106,8 @@ namespace sema {
         ResolvedType underlying_type;
         std::vector<EnumFieldInfo> fields;
         bool layout_done = false;
+        // See StructInfo::generic_instance above.
+        std::optional<GenericInstanceInfo> generic_instance;
     };
 
     // 'bitset(EnumType, StorageType)' — a distinct nominal type over an integer,
@@ -64,6 +120,8 @@ namespace sema {
         ResolvedType storage_type;
         uint32_t storage_bits = 0;
         bool layout_done = false;
+        // See StructInfo::generic_instance above.
+        std::optional<GenericInstanceInfo> generic_instance;
     };
 
     struct UnionMember {
@@ -103,6 +161,10 @@ namespace sema {
         // (empty) unless is_error_union is true.
         bool is_error_union = false;
         std::vector<ResolvedType> error_member_types;
+
+        // See StructInfo::generic_instance above. Never set alongside is_error_union —
+        // error(...) unions are synthesized, not user-declared generic types.
+        std::optional<GenericInstanceInfo> generic_instance;
     };
 
     // The tag field of a tagged union is always u32.
@@ -126,6 +188,13 @@ namespace sema {
         std::string impl_module;               // module where this impl is defined
         std::string type_name;                 // type name this method belongs to
         ResolvedType self_type;                // resolved type of self (the struct/enum type)
+        // Non-null only when the enclosing 'impl' block carries its own generic_params
+        // (an ImplDecl::Function never has its own — see ast.hpp). Points into the AST
+        // (same lifetime as 'decl'). Needed because a method body's 'T'/'N' references bind
+        // to the IMPL block's own chosen param names (which may differ from the target
+        // type's own, e.g. 'impl List[U: type] { ... }'), not the type's — see
+        // instantiate_generic_method.
+        const std::vector<ast::GenericParam> *impl_generic_params = nullptr;
         std::vector<ResolvedType> param_types; // non-self params
         std::vector<ResolvedType> return_types;
         bool is_mut_self = false;
@@ -154,6 +223,44 @@ namespace sema {
         // signature, never from the impl (which is never allowed to declare its own).
         int trait_index = -1;
         int trait_method_index = -1;
+    };
+
+    // Identifies one generic function/method instantiation for cache lookup: the
+    // unspecialized declaration's own (module, name) plus its concrete args, in declared
+    // parameter order. Mirrors GenericInstanceInfo above but as a lookup key rather than a
+    // tag stored on the result.
+    struct GenericInstanceKey {
+        std::string module_path;
+        std::string decl_name;
+        std::vector<GenericArgValue> args;
+
+        auto operator==(const GenericInstanceKey &) const -> bool = default;
+    };
+
+    // One concrete instantiation of a generic function OR method — both share this one
+    // shape (a method additionally sets 'self_type' and 'impl_decl'; a free function
+    // instantiation leaves those unset and uses 'decl' instead). Signature (param/return
+    // types, mangled name) is resolved eagerly when the instance is first created;
+    // 'body_checked' guards against re-checking/re-emitting the body if the same concrete
+    // instantiation is reached again from a different call site.
+    struct GenericFunctionInstance {
+        const ast::FunctionDecl *decl = nullptr;            // set for a free-function instance
+        const ast::ImplDecl::Function *impl_decl = nullptr;  // set for a method instance
+        std::string module_path; // module where the generic decl itself lives
+        std::vector<GenericArgValue> args;
+        std::optional<ResolvedType> self_type; // set only for a method instance
+        // Set only for a method instance (mirrors MethodInfo::impl_generic_params) — 'decl's
+        // own generic_params is used directly for a free-function instance instead, since
+        // FunctionDecl carries its own list.
+        const std::vector<ast::GenericParam> *generic_params_for_method = nullptr;
+        std::vector<ResolvedType> param_types; // non-self params
+        std::vector<ResolvedType> return_types;
+        std::string mangled_name; // e.g. "make_fixed__16", "List__i32::reserve" — see codegen
+        bool body_checked = false;
+        bool is_variadic = false;
+        ResolvedType variadic_element_type{};
+        size_t required_params = 0;
+        std::vector<bool> param_default_is_const; // parallel to param_types
     };
 
     // A single trait method's resolved signature (no body — trait methods are
@@ -238,13 +345,6 @@ namespace sema {
         ResolvedType effective_type;
     };
 
-    // A '--opt key=value' or environment-variable value coerced (per #option's/#env's
-    // target-type coercion rules) or folded from a default expression: an integer/bool/
-    // enum-underlying value, or a []u8 string. Used for '#option'/'#env' themselves and for
-    // constant-folding 'when' conditions and '#link' data expressions that reference an
-    // '#option'/'#env'-backed const.
-    using ConstFoldValue = std::variant<int64_t, std::string>;
-
     // Sema's resolved view of one 'asm { ... }' instruction, computed by check_asm_stmt
     // (sema_check.cpp) and consumed by codegen's emit_asm_stmt — parallel to
     // ast::AsmInstruction::operands; populated only for ast::AsmVariableOperand entries
@@ -295,6 +395,11 @@ namespace sema {
         std::unordered_map<const void *, TraitCoercion> expr_trait_coercions;
         std::unordered_map<const void *, AnyCoercion> expr_any_coercions;
         std::unordered_map<const void *, TraitDispatchInfo> expr_trait_dispatch;
+        // A call-site CallExpr node -> the index into Program::generic_fn_instances it
+        // resolved to (explicit or inferred instantiation of a generic function, or a
+        // generic method call) — populated by check_expr's CallExpr handling, consumed by
+        // codegen to find the pre-resolved, pre-mangled callee instead of re-deriving it.
+        std::unordered_map<const void *, size_t> expr_generic_fn_instance;
         // 'type_info_of(type_of(T))' EXPRESSION -> T's compile-time-constant type id, present
         // only for this exact syntactic shape (see check_expr's TypeInfoOfExpr case) — the fast
         // path that resolves directly to a specific '__type_info_<id>' global at codegen time,
@@ -350,6 +455,13 @@ namespace sema {
         // on-demand, out of Program::modules' unordered iteration order; this detects a
         // circular dependency between modules' 'when' conditions.
         std::set<std::string> when_module_declaring;
+        // Cycle guard for instantiate_generic_type, keyed by (decl, concrete args) — a
+        // recursive generic type (e.g. 'type Node[T: type] = struct { next: *Node[T] }')
+        // is fine (pointer indirection breaks the cycle, same as any non-generic recursive
+        // struct — the pointee is resolved lazily, no layout forced), but a genuinely
+        // infinite instantiation chain (no indirection anywhere) must still be caught.
+        // Linear-scan (small, rare), not a set, since GenericInstanceKey has no operator<.
+        std::vector<GenericInstanceKey> generic_type_resolving;
     };
 
     // Compiler-driver-supplied configuration read by '#option' during sema. Threaded
@@ -440,6 +552,48 @@ namespace sema {
         // location, used purely to detect and report duplicate impls.
         std::map<std::tuple<std::string, std::string, std::string, std::string>, SourceLocation> trait_impl_registry;
 
+        // Generic type instantiation cache: (unspecialized decl's module+name, concrete
+        // args) -> the monomorphized ResolvedType, linear-scan-and-reuse exactly like
+        // intern_pointer/intern_slice's existing structural-interning idiom (type_resolver.cpp)
+        // extended to a keyed lookup instead of plain equality. Populated by
+        // instantiate_generic_type; consulted before ever allocating a new struct/enum/
+        // union/bitset slot for a given (decl, args) pair.
+        std::vector<std::pair<GenericInstanceKey, ResolvedType>> generic_type_instance_lookup;
+        // Which monomorphized type slots were actually reached during sema (the same
+        // "sema decides what's live, codegen only replays" split types_needing_info uses
+        // above) — codegen's instantiation loop walks only these, mirroring emit_when_stmt's
+        // "unselected branch never visited" posture, except stricter: an instantiation not
+        // in this set was never even type-checked, not merely never emitted (see spec.md
+        // §22, "No Bounds in v1"). A ResolvedType here is always Struct/Enum/Union/Bitset
+        // with generic_instance set on the corresponding *Info.
+        std::unordered_set<ResolvedType> generic_type_instances_needed;
+
+        // Generic function/method instantiation cache + liveness, mirroring the type-side
+        // tables immediately above. 'generic_fn_instance_lookup' maps a GenericInstanceKey to
+        // an index into 'generic_fn_instances' (linear scan, same interning idiom). Each
+        // instance is heap-allocated (unique_ptr, not stored by value) so a REFERENCE
+        // returned by instantiate_generic_function/instantiate_generic_method stays valid
+        // even if a later, nested/recursive instantiation triggers another push_back on this
+        // vector — only the vector of pointers would reallocate, never the pointee objects.
+        std::vector<std::pair<GenericInstanceKey, size_t>> generic_fn_instance_lookup;
+        std::vector<std::unique_ptr<GenericFunctionInstance>> generic_fn_instances;
+        std::set<size_t> generic_fn_instances_needed;
+
+        // Ambient "currently active generic substitution" stack, pushed/popped around
+        // checking one generic function/method instance's body (see
+        // check_generic_function_instance_body, sema_check.cpp). Exists because check_expr/
+        // check_stmt's own internals (a local var decl's type annotation, size_of's operand,
+        // a cast target, ...) all eventually call type_resolver.cpp's free 'resolve_type'
+        // function, which constructs its own fresh Resolver with no way to receive an
+        // explicit generic_env parameter without threading one through every check_expr/
+        // check_stmt call site in the compiler. 'resolve_type'/'resolve_declared_type'
+        // consult the top of this stack as a fallback instead — the same role
+        // Resolver::generic_env plays when generic_env IS available directly (struct/enum/
+        // union/bitset field resolution, a generic instance's own signature resolution via
+        // resolve_type_with_generic_env). A stack (not a single pointer) because checking one
+        // instance's body can recursively trigger another instantiation before returning.
+        std::vector<const GenericBindingEnv *> active_generic_env_stack;
+
         // Bounds-checked table lookups, returning nullptr for an out-of-range
         // index instead of the undefined behavior of raw operator[]. Under
         // normal compilation every *_index on a ResolvedType is guaranteed
@@ -522,6 +676,16 @@ namespace sema {
     // Program::modules' unordered iteration order. Every other (post-declare-phase)
     // caller safely omits it.
     auto resolve_type(const ast::Type &type, const std::string &module_path, Program &program, DiagnosticEngine &diag, const ast::Program *ast_program = nullptr) -> ResolvedType;
+    // Like resolve_type, but resolves inside 'env' — used for a generic function/method
+    // instance's own param/return types. See instantiate_generic_function/
+    // instantiate_generic_method (sema_check.cpp). 'enclosing_generic_params', when
+    // non-null, is the DECLARATION's own generic_params list (not the instance's concrete
+    // args) — enables implicit self-instantiation for a bare reference appearing in the
+    // declaration's own signature/body (e.g. 'fn make_list[T: type](...) -> List' meaning
+    // '-> List[T]').
+    auto resolve_type_with_generic_env(const ast::Type &type, const std::string &module_path, Program &program,
+                                        DiagnosticEngine &diag, const GenericBindingEnv &env,
+                                        const std::vector<ast::GenericParam> *enclosing_generic_params = nullptr) -> ResolvedType;
     auto resolve_declared_type(const std::optional<ast::Type> &type, const std::optional<ast::Expr> &init,
                                 const std::string &module_path, Program &program, DiagnosticEngine &diag,
                                 const SourceLocation &decl_loc) -> std::optional<ResolvedType>;
@@ -572,9 +736,66 @@ namespace sema {
     // reference other consts).
     auto ensure_function_signature_resolved(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag) -> FunctionSymbol &;
     auto resolve_macro_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> MacroSymbol &;
+
+    // Whether 'type' (a generic_param's declared type) is the builtin 'type' keyword itself
+    // — i.e. this is a TYPE parameter ('T: type') rather than a value parameter. Defined in
+    // sema_declare.cpp; shared by declare_type, type_resolver.cpp's generic_args resolution,
+    // and sema_check.cpp's inference/instantiation logic.
+    auto is_generic_type_param(const ast::Type &type) -> bool;
+    // Whether 'type' is a legal declared type for a VALUE generic parameter in v1: bool, an
+    // integer kind, or usize — see spec.md §22, "Declaring Generic Types" for the v1 scope
+    // decision. Defined in sema_declare.cpp.
+    auto is_legal_generic_value_param_type(const ast::Type &type) -> bool;
+    // Reports a sema error for each of 'generic_params' whose declared type is neither
+    // 'type' nor a legal builtin scalar. Shared by every decl kind that can carry
+    // generic_params (type/fn/impl/trait-impl). Defined in sema_declare.cpp.
+    void validate_generic_param_types(const std::vector<ast::GenericParam> &generic_params, DiagnosticEngine &diag);
+
+    // Returns (or lazily creates, on first request) the concrete monomorphized ResolvedType
+    // for 'decl_name[args]' — a generic 'type'/struct/enum/union/bitset declaration
+    // instantiated with 'args', in declared parameter order. Linear-scans
+    // Program::generic_type_instance_lookup for a cache hit first (intern_pointer's idiom,
+    // keyed rather than plain-equality); on miss, allocates a fresh struct/enum/union/bitset
+    // slot exactly like a non-generic declare_type, resolves the declaration's RHS with a
+    // GenericBindingEnv built from (decl's generic_params, args) active, and records the new
+    // slot in Program::generic_type_instances_needed. Cycle-guarded by (decl_name, args) —
+    // see type_resolver.cpp. Reports a sema error and returns TypeKind::Invalid if 'args'
+    // doesn't match 'decl_name's declared arity/param kinds.
+    auto instantiate_generic_type(Program &program, DiagnosticEngine &diag, const std::string &module_path,
+                                   const std::string &decl_name, std::vector<GenericArgValue> args,
+                                   const SourceLocation &use_loc) -> ResolvedType;
+    // Same cache-or-create shape as instantiate_generic_type, for a generic free function.
+    // Resolves the instance's signature eagerly (so its param/return types are immediately
+    // usable for call-checking); returns its stable INDEX into
+    // Program::generic_fn_instances — not a reference/pointer, since each instance is
+    // individually heap-allocated (unique_ptr) specifically so an index (or a pointer
+    // obtained via 'program.generic_fn_instances[idx].get()' immediately before use) stays
+    // valid even if a later, nested/recursive instantiation grows the vector.
+    auto instantiate_generic_function(Program &program, DiagnosticEngine &diag, const std::string &module_path,
+                                       const std::string &decl_name, std::vector<GenericArgValue> args,
+                                       const SourceLocation &use_loc) -> size_t;
+    // Same as instantiate_generic_function, but for a method of a generic type's 'impl'
+    // block — 'receiver_instantiation' is the already-resolved concrete receiver type (e.g.
+    // 'List[i32]'), which supplies the args (read off its ResolvedType's *Info.generic_instance).
+    // Returns nullopt if 'method_name' doesn't name a method on the receiver's unspecialized
+    // generic type at all (an ordinary "no such method" sema error, reported by the caller).
+    auto instantiate_generic_method(Program &program, DiagnosticEngine &diag, const ResolvedType &receiver_instantiation,
+                                     const std::string &method_name, const SourceLocation &use_loc) -> std::optional<size_t>;
+    // Builds the substitution env binding each of 'params' (in order) to its concrete
+    // argument. Shared by instantiate_generic_function/instantiate_generic_method
+    // (sema_check.cpp) and codegen.cpp's generic-instance body emission, which both need to
+    // push the exact same env shape onto Program::active_generic_env_stack.
+    auto build_generic_binding_env(const std::vector<ast::GenericParam> &params, const std::vector<GenericArgValue> &args) -> GenericBindingEnv;
     auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, std::optional<ResolvedType> expected, int loop_depth, int defer_loop_base = -1, const ResolvedType *fn_error_type = nullptr) -> ResolvedType;
     auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth, int defer_loop_base = -1) -> void;
-    auto is_constant_expr(const ast::Expr &expr, const std::string &module_path, const Program &program) -> bool;
+    // 'extra_const_names' is treated exactly like a name already known to fold to a
+    // compile-time constant (mirrors is_constant_expr_impl's internal 'treated_as_const' set,
+    // used for macro-parameter substitution) — used to recognize a generic value-parameter
+    // reference (e.g. 'N' inside 'fn make_fixed[N: usize]()') as constant while resolving
+    // inside that declaration's own body/signature. Empty for every ordinary (non-generic)
+    // caller.
+    auto is_constant_expr(const ast::Expr &expr, const std::string &module_path, const Program &program,
+                           const std::unordered_set<std::string> &extra_const_names = {}) -> bool;
 
     // Returns the attribute named 'name' in 'attrs' (see ast::Attribute), or nullptr if none
     // matches. Shared by sema_attributes.cpp's own per-attribute validation, sema_declare.cpp

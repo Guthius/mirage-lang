@@ -1,0 +1,18 @@
+// example_generics_bad_param_type.mir — REJECTION CASE. A generic_param's declared type
+// must be exactly the builtin 'type' keyword, or one of bool/an integer kind/usize — an
+// enum (or any other non-scalar type) is a sema error. See spec.md §22, "Declaring Generic
+// Types".
+//
+// Expected: compilation fails with
+//   error: generic parameter 'E' declared type must be 'type' or a builtin scalar type
+//          (bool, an integer kind, or usize)
+
+pub type Color = enum { Red Green Blue }
+
+pub type Bad[E: Color] = struct {
+    value: i32
+}
+
+pub fn main() -> i32 {
+    return 0
+}

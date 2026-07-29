@@ -40,6 +40,7 @@
         <li><a href="control-flow.html">Control Flow</a></li>
         <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
         <li><a href="traits.html">Traits</a></li>
+        <li><a href="generics.html">Generics</a></li>
         <li><a href="error-handling.html">Error Handling</a></li>
         <li><a href="modules.html">Modules</a></li>
         <li><a href="comptime-config.html">Compile-Time Config</a></li>
@@ -107,7 +108,11 @@
         </div>
         <div class="feature-card">
           <h3>Traits &amp; Dynamic Dispatch</h3>
-          <p>Opt-in runtime polymorphism through lightweight trait handles — no generics required.</p>
+          <p>Opt-in runtime polymorphism through lightweight trait handles.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Generics</h3>
+          <p>Parametric types and functions — <code>[T: type]</code> and const-generic <code>[N: usize]</code> parameters, monomorphized at compile time.</p>
         </div>
         <div class="feature-card">
           <h3>Function Pointers</h3>
@@ -174,7 +179,7 @@
         <tr><td>Type system</td><td>Static, nominally-typed composites</td></tr>
         <tr><td>Memory model</td><td>Manual (no GC); <code>anyptr</code> for raw memory, <code>stackalloc</code> for runtime-sized stack buffers</td></tr>
         <tr><td>Loops</td><td><code>while</code>, <code>for ... in</code></td></tr>
-        <tr><td>Generics</td><td>Not yet implemented</td></tr>
+        <tr><td>Generics</td><td><a href="generics.html">Parametric types &amp; functions</a>, monomorphized at compile time</td></tr>
         <tr><td>Polymorphism</td><td>Traits (dynamic dispatch via fat-pointer handles)</td></tr>
         <tr><td>Closures</td><td>Not yet implemented (function pointers only)</td></tr>
         <tr><td>Exceptions</td><td>No — use <code>error(T)</code> + <code>try</code>/<code>return_ok</code>/<code>return_err</code></td></tr>

@@ -39,6 +39,7 @@
         <li><a href="control-flow.html">Control Flow</a></li>
         <li><a href="structs-and-types.html">Structs &amp; Types</a></li>
         <li><a href="traits.html" class="active">Traits</a></li>
+        <li><a href="generics.html">Generics</a></li>
         <li><a href="error-handling.html">Error Handling</a></li>
         <li><a href="modules.html">Modules</a></li>
         <li><a href="comptime-config.html">Compile-Time Config</a></li>
@@ -61,11 +62,13 @@
       <p class="subtitle">Dynamic dispatch through lightweight trait handles.</p>
 
       <p>
-        Mirage has no generics. When you need one function to work over several unrelated types —
-        without a big <code>switch</code> over every possibility — traits give you that, through
+        Traits themselves are not generic (see <a href="generics.html">Generics</a> for parametric
+        types and functions) — but when you need one function to work over several unrelated types
+        without a big <code>switch</code> over every possibility, traits give you that through
         runtime dynamic dispatch. If you've used Go's interfaces or Rust's <code>dyn Trait</code>,
         this will feel familiar: a trait is a set of method signatures, and any type that implements
-        all of them can be used wherever that trait is expected.
+        all of them can be used wherever that trait is expected. A generic struct may still
+        implement a non-generic trait, once per concrete instantiation.
       </p>
 
       <h2>Declaring a Trait</h2>
@@ -249,7 +252,7 @@
 
       <div class="page-nav">
         <a href="structs-and-types.html" class="prev"><span class="label">Previous</span>Structs &amp; Types</a>
-        <a href="error-handling.html" class="next"><span class="label">Next</span>Error Handling</a>
+        <a href="generics.html" class="next"><span class="label">Next</span>Generics</a>
       </div>
 
     </div>

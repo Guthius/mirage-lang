@@ -124,7 +124,11 @@ namespace sema {
         void resolve_signatures_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
             for (auto &[name, sym] : module.symbols) {
                 if (!std::holds_alternative<TypeSymbol>(sym)) continue;
-                const auto loc = std::get<TypeSymbol>(sym).decl->location;
+                const auto &ts = std::get<TypeSymbol>(sym);
+                // A generic type declaration has no ResolvedType of its own to force layout
+                // for — see the identical skip in sema_declare.cpp's ensure_module_declared.
+                if (ts.decl && !ts.decl->generic_params.empty()) continue;
+                const auto loc = ts.decl->location;
                 // A bare-import alias's '.resolved' already shares the origin's GLOBAL
                 // struct/enum/union/bitset/trait index (copied verbatim at declare time),
                 // so no copy-back is needed here — forcing layout via the origin's own
@@ -140,6 +144,12 @@ namespace sema {
 
             for (auto &[name, sym] : module.symbols) {
                 if (auto *fn = std::get_if<FunctionSymbol>(&sym)) {
+                    // A generic function's signature has no single "the" resolution to force
+                    // eagerly here — 'N' in '-> [N]u8' only means anything once a concrete
+                    // instantiation is requested (see instantiate_generic_function,
+                    // sema_check.cpp), which resolves each instance's own signature fresh
+                    // with its own GenericBindingEnv active.
+                    if (fn->decl && !fn->decl->generic_params.empty()) continue;
                     if (const auto origin = module.bare_import_origins.find(name); origin != module.bare_import_origins.end()) {
                         auto &origin_sym = ensure_function_signature_resolved(origin->second.module_path, origin->second.symbol_name, program, diag);
                         *fn = origin_sym;
@@ -186,6 +196,18 @@ namespace sema {
 
         void resolve_impl_signatures_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
             for (auto &[type_name, method_map] : module.methods) {
+                // A generic type's methods have no single "the" signature to resolve eagerly
+                // here — a method's param/return/self types only make sense once a concrete
+                // instantiation is known. Leave every MethodInfo in this map untouched
+                // (self_type/param_types/return_types/is_resolved all stay at their defaults);
+                // instantiate_generic_method builds a fresh, fully-substituted signature
+                // directly from 'info.decl' on demand, per concrete instantiation, instead.
+                if (const auto sym_it = module.symbols.find(type_name); sym_it != module.symbols.end()) {
+                    if (const auto *ts = std::get_if<TypeSymbol>(&sym_it->second)) {
+                        if (ts->decl && !ts->decl->generic_params.empty()) continue;
+                    }
+                }
+
                 // Resolve the self type for this type name
                 const auto self_type = resolve_type_symbol(module_path, type_name, program, diag, {});
 
@@ -397,6 +419,13 @@ namespace sema {
                 if (!fn) {
                     continue;
                 }
+                // A generic function's body is checked lazily, per concrete instantiation,
+                // the first time that instantiation is actually requested — see
+                // instantiate_generic_function -> check_generic_function_instance_body
+                // (sema_check.cpp). There is no "check every possible instantiation" pass
+                // here, unlike 'when', which always checks both branches — see spec.md §22,
+                // "No Bounds in v1".
+                if (fn->decl && !fn->decl->generic_params.empty()) continue;
 
                 LocalScope locals;
                 for (auto &[gname, gsym] : module.symbols) {
@@ -550,16 +579,40 @@ namespace sema {
         // importing module that resolves to the same ResolvedType (an alias's '.resolved'
         // is a verbatim copy of the origin's, sharing the same global index).
         const std::string *defining_module = nullptr;
+        const GenericInstanceInfo *generic_instance = nullptr;
         if (ty.kind == TypeKind::Struct) {
-            if (const auto *info = program.struct_at(ty.struct_index)) defining_module = &info->module_path;
+            if (const auto *info = program.struct_at(ty.struct_index)) {
+                defining_module = &info->module_path;
+                generic_instance = info->generic_instance ? &*info->generic_instance : nullptr;
+            }
         } else if (ty.kind == TypeKind::Union) {
-            if (const auto *info = program.union_at(ty.union_index)) defining_module = &info->module_path;
+            if (const auto *info = program.union_at(ty.union_index)) {
+                defining_module = &info->module_path;
+                generic_instance = info->generic_instance ? &*info->generic_instance : nullptr;
+            }
         } else if (ty.kind == TypeKind::Enum) {
-            if (const auto *info = program.enum_at(ty.enum_index)) defining_module = &info->module_path;
+            if (const auto *info = program.enum_at(ty.enum_index)) {
+                defining_module = &info->module_path;
+                generic_instance = info->generic_instance ? &*info->generic_instance : nullptr;
+            }
         } else if (ty.kind == TypeKind::Bitset) {
-            if (const auto *info = program.bitset_at(ty.bitset_index)) defining_module = &info->module_path;
+            if (const auto *info = program.bitset_at(ty.bitset_index)) {
+                defining_module = &info->module_path;
+                generic_instance = info->generic_instance ? &*info->generic_instance : nullptr;
+            }
         } else if (ty.kind == TypeKind::Trait) {
             if (const auto *info = program.trait_at(ty.trait_index)) defining_module = &info->module_path;
+        }
+
+        // A monomorphized generic instantiation has no TypeSymbol of its own to find via
+        // the scan below — its TypeSymbol::resolved is left nullopt (see declare_type/
+        // instantiate_generic_type), since 'List' alone is never itself a valid type.
+        // Return the UNSPECIALIZED declaration's own name directly instead: this is what
+        // keeps find_method's existing bare-name keying ("List"/"reserve") working
+        // completely unchanged for a generic type's methods (per-instantiation
+        // substitution happens after that lookup, at the call site).
+        if (generic_instance) {
+            return {generic_instance->decl_module, generic_instance->decl_name};
         }
 
         if (defining_module && !defining_module->empty()) {

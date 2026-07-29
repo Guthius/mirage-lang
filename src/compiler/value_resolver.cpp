@@ -496,8 +496,20 @@ namespace sema {
         return *m;
     }
 
-    auto is_constant_expr(const ast::Expr &expr, const std::string &module_path, const Program &program) -> bool {
-        return is_constant_expr_impl(expr, module_path, program, {});
+    auto is_constant_expr(const ast::Expr &expr, const std::string &module_path, const Program &program,
+                           const std::unordered_set<std::string> &extra_const_names) -> bool {
+        // Merge in the ambient 'currently checking this generic instance's body' env's value
+        // generic-param names too (see Program::active_generic_env_stack), so e.g. 'const x
+        // := N * 2' inside a generic body recognizes 'N' as constant without every caller
+        // needing to pass it explicitly.
+        if (program.active_generic_env_stack.empty()) {
+            return is_constant_expr_impl(expr, module_path, program, extra_const_names);
+        }
+        auto names = extra_const_names;
+        for (const auto &binding : *program.active_generic_env_stack.back()) {
+            if (!binding.is_type) names.insert(binding.param_name);
+        }
+        return is_constant_expr_impl(expr, module_path, program, names);
     }
 
     auto evaluate_integer_constant(const ast::Expr &expr, const std::string &module_path, const Program &program) -> std::optional<int64_t> {

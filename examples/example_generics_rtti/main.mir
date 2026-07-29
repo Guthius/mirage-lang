@@ -1,0 +1,35 @@
+// example_generics_rtti.mir — 'is_generic'/'generic_args' RTTI correctness for both a
+// generic instantiation and a non-generic type, via type_info_of(type_of(...)).
+//
+// Expected: compiles and runs, prints "box: is_generic=1 args=1" and
+// "plain: is_generic=0 args=0", exit code 0.
+
+const rt := import("../../runtime/type_info")
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub type Box[T: type] = struct {
+    value: T
+}
+
+pub type Plain = struct {
+    x: i32
+}
+
+pub fn main() -> i32 {
+    mut b: Box[i32] = { .value = 1 }
+    mut p: Plain = { .x = 1 }
+
+    const box_info: *rt.Type_Info = cast(type_info_of(type_of(b)), *rt.Type_Info)
+    const plain_info: *rt.Type_Info = cast(type_info_of(type_of(p)), *rt.Type_Info)
+
+    match box_info.* {
+        .Struct(s): printf("box: is_generic=%d args=%d\n", cast(s.is_generic, i32), cast(len(s.generic_args), i32)),
+        _: printf("box: not a struct\n")
+    }
+    match plain_info.* {
+        .Struct(s): printf("plain: is_generic=%d args=%d\n", cast(s.is_generic, i32), cast(len(s.generic_args), i32)),
+        _: printf("plain: not a struct\n")
+    }
+    return 0
+}

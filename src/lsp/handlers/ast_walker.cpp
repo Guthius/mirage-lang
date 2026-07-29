@@ -48,9 +48,16 @@ namespace lsp::handlers {
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::CastExpr>>) {
                     walk_expr(node->value, visitor);
                     if (node->len_expr) walk_expr(*node->len_expr, visitor);
-                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IndexExpr>>) {
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
                     walk_expr(node->operand, visitor);
-                    walk_expr(node->index, visitor);
+                    // Type-tagged args (e.g. 'List[SomeType]') aren't walked here, matching
+                    // this visitor's existing scope — it only ever walks Expr nodes (e.g.
+                    // CastExpr's 'as_type' isn't walked either).
+                    for (const auto &arg : node->args) {
+                        if (const auto *expr_arg = std::get_if<ast::Expr>(&arg.value)) {
+                            walk_expr(*expr_arg, visitor);
+                        }
+                    }
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SliceExpr>>) {
                     walk_expr(node->operand, visitor);
                     walk_expr(node->start, visitor);

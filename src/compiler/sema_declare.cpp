@@ -31,8 +31,67 @@ namespace sema {
     // anonymous-namespace helpers and sema.cpp's check_program can call it.
     void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag);
 
+    // Whether 'type' (a generic_param's declared type) is the builtin 'type' keyword itself
+    // — i.e. this is a TYPE parameter ('T: type') rather than a value parameter.
+    auto is_generic_type_param(const ast::Type &type) -> bool {
+        const auto *builtin = std::get_if<ast::BuiltinType>(&type);
+        return builtin != nullptr && builtin->kind == ast::BuiltinTypeKind::Type;
+    }
+
+    // Whether 'type' is a legal declared type for a VALUE generic parameter in v1: bool, an
+    // integer kind, or usize. Deliberately narrower than '#option'/'#env's full coercible-type
+    // set (which also allows []u8 and enum) — see spec.md §22, "Declaring Generic Types" for
+    // the v1 scope decision (keeps the monomorphization cache key / name-mangling / RTTI
+    // value encoding pure-integer comparison).
+    auto is_legal_generic_value_param_type(const ast::Type &type) -> bool {
+        const auto *builtin = std::get_if<ast::BuiltinType>(&type);
+        if (!builtin) return false;
+        switch (builtin->kind) {
+        case ast::BuiltinTypeKind::Bool:
+        case ast::BuiltinTypeKind::U8:
+        case ast::BuiltinTypeKind::U16:
+        case ast::BuiltinTypeKind::U32:
+        case ast::BuiltinTypeKind::U64:
+        case ast::BuiltinTypeKind::I8:
+        case ast::BuiltinTypeKind::I16:
+        case ast::BuiltinTypeKind::I32:
+        case ast::BuiltinTypeKind::I64:
+        case ast::BuiltinTypeKind::Usize:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    // Reports a sema error for each of 'generic_params' whose declared type is neither
+    // 'type' nor a legal builtin scalar — shared by declare_type/parse_function_decl's
+    // caller (declare_one_decl for fn) and the impl-decl paths below, since all four decl
+    // kinds that can carry generic_params (type/fn/impl/trait-impl) validate identically.
+    void validate_generic_param_types(const std::vector<ast::GenericParam> &generic_params, DiagnosticEngine &diag) {
+        for (const auto &param : generic_params) {
+            if (!is_generic_type_param(param.type) && !is_legal_generic_value_param_type(param.type)) {
+                diag.report_error(DiagnosticStage::Sema, param.location, std::format(
+                    "generic parameter '{}' declared type must be 'type' or a builtin scalar type "
+                    "(bool, an integer kind, or usize)", param.name));
+            }
+        }
+    }
+
     namespace {
         void declare_type(const ast::TypeDecl &decl, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
+            if (!decl.generic_params.empty()) {
+                validate_generic_param_types(decl.generic_params, diag);
+                // No slot is allocated yet — there is no "the" type for a generic declaration
+                // until a concrete instantiation is actually requested (see
+                // instantiate_generic_type, type_resolver.cpp). TypeSymbol::resolved stays
+                // nullopt; a bare reference to this name with no generic_args is a separate
+                // sema error, reported where the NamedType is resolved.
+                declare_symbol(module.symbols, decl.name,
+                    TypeSymbol{.decl = &decl, .resolved = std::nullopt, .is_pub = decl.is_pub, .location = decl.location},
+                    decl.location, diag);
+                return;
+            }
+
             std::optional<ResolvedType> resolved = std::nullopt;
 
             int struct_slot = -1;
@@ -555,6 +614,30 @@ namespace sema {
                         // Pre-register each method as unresolved in the module's method table.
                         // The target type name is the leaf of the named type chain.
                         const std::string &type_name = v.target.name;
+
+                        validate_generic_param_types(v.generic_params, diag);
+                        // Arity check: an 'impl' block's own generic_params must match the
+                        // target type's own declared arity exactly (matched by count, not by
+                        // parameter kind or name — see spec.md §22, "Generic Impl Blocks").
+                        // Best-effort: only checked when 'type_name' is already declared in
+                        // THIS module by this point (the common case) — a forward reference to
+                        // a same-module type declared later in the file, or a cross-module
+                        // target, isn't caught here (declare_one_decl runs in source order with
+                        // no lookahead); instantiate_generic_type/instantiate_generic_method
+                        // still reject a genuinely wrong arity later, just with a less precise
+                        // diagnostic location.
+                        if (const auto sym_it = module.symbols.find(type_name); sym_it != module.symbols.end()) {
+                            if (const auto *ts = std::get_if<TypeSymbol>(&sym_it->second)) {
+                                const size_t target_arity = ts->decl ? ts->decl->generic_params.size() : 0;
+                                if (v.generic_params.size() != target_arity) {
+                                    diag.report_error(DiagnosticStage::Sema, v.location, std::format(
+                                        "'impl {}' has {} generic parameter(s), but '{}' is declared with {} — impl "
+                                        "generic parameter lists must match the target type's own arity exactly",
+                                        type_name, v.generic_params.size(), type_name, target_arity));
+                                }
+                            }
+                        }
+
                         for (auto &fn : v.functions) {
                             if (find_attribute(fn.attributes, "init")) {
                                 diag.report_error(DiagnosticStage::Sema, fn.location,
@@ -564,6 +647,7 @@ namespace sema {
                                 .decl = &fn,
                                 .impl_module = module_path,
                                 .type_name = type_name,
+                                .impl_generic_params = v.generic_params.empty() ? nullptr : &v.generic_params,
                                 .is_mut_self = fn.is_mut_self,
                                 .is_pub = fn.is_pub,
                                 .is_resolved = false,
@@ -622,8 +706,12 @@ namespace sema {
         // '--opt' string against it. Harmless to repeat later — layout_done guards make
         // the eventual real step 3 pass a no-op for a module already resolved here.
         for (auto &[name, sym] : module.symbols) {
-            if (std::holds_alternative<TypeSymbol>(sym)) {
-                resolve_type_symbol(module_path, name, sema_program, diag, std::get<TypeSymbol>(sym).decl->location, &program);
+            if (const auto *ts = std::get_if<TypeSymbol>(&sym)) {
+                // A generic type declaration has no ResolvedType of its own to force layout
+                // for — 'List' alone is never a valid type, and there is no "the" instantiation
+                // to eagerly resolve (see declare_type/instantiate_generic_type).
+                if (ts->decl && !ts->decl->generic_params.empty()) continue;
+                resolve_type_symbol(module_path, name, sema_program, diag, ts->decl->location, &program);
             }
         }
 
@@ -712,8 +800,24 @@ namespace sema {
                     diag.report_error(DiagnosticStage::Sema, timpl->trait_name.location, std::format("'{}' is not a trait", trait_ref->name));
                     continue;
                 }
-                if (!type_ref->symbol->resolved || type_ref->symbol->resolved->kind == TypeKind::Trait) {
+
+                // A generic type's TypeSymbol has no 'resolved' ResolvedType of its own (see
+                // declare_type) — 'List' alone is never itself a valid type, but it IS a
+                // legal 'impl TRAIT for List[T: type] { ... }' target, parametrizing the
+                // TYPE side only (traits themselves are not made generic).
+                const bool type_is_generic_decl = type_ref->symbol->decl && !type_ref->symbol->decl->generic_params.empty();
+                if (!type_is_generic_decl && (!type_ref->symbol->resolved || type_ref->symbol->resolved->kind == TypeKind::Trait)) {
                     diag.report_error(DiagnosticStage::Sema, timpl->type_name.location, std::format("'{}' is not a struct, enum, or union type", type_ref->name));
+                    continue;
+                }
+
+                validate_generic_param_types(timpl->generic_params, diag);
+                const size_t target_arity = type_is_generic_decl ? type_ref->symbol->decl->generic_params.size() : 0;
+                if (timpl->generic_params.size() != target_arity) {
+                    diag.report_error(DiagnosticStage::Sema, timpl->location, std::format(
+                        "'impl {} for {}' has {} generic parameter(s), but '{}' is declared with {} — impl "
+                        "generic parameter lists must match the target type's own arity exactly",
+                        trait_ref->name, type_ref->name, timpl->generic_params.size(), type_ref->name, target_arity));
                     continue;
                 }
 

@@ -124,7 +124,7 @@ const rt := import("runtime/type_info")
 const info: *rt.Type_Info = cast(type_info_of(type_of(my_var)), *rt.Type_Info)
 ```
 
-`type_info_of` returns `nil` for every builtin scalar type (`u8`..`f64`, `usize`, `bool`, `byte`, `anyptr`, `error`) — only compound and user-defined types (pointers, slices, arrays, structs, enums, unions, tagged unions, bitsets, function types, traits) get a real `Type_Info`. `type_info_of` requires importing a module that defines `pub type Type_Info = union(enum) {...}` (i.e. `runtime/type_info`) — using it without that import is a sema error.
+`type_info_of` returns `nil` for every builtin scalar type (`u8`..`f64`, `usize`, `bool`, `byte`, `anyptr`, `error`) — only compound and user-defined types (pointers, slices, arrays, structs, enums, unions, tagged unions, bitsets, function types, traits) get a real `Type_Info`. `type_info_of` requires importing a module that defines `pub type Type_Info = union(enum) {...}` (i.e. `runtime/type_info`) — using it without that import is a sema error. `Type_Info`'s aggregate payloads (`Struct`/`Enum`/`Union`/`Tagged_Union`/`Bitset`) additionally carry `is_generic`/`generic_args` fields — see [Generics, "RTTI"](#rtti-is_generic-and-generic_args).
 
 ---
 
@@ -687,7 +687,7 @@ Returns the operand's unique `type` identity. Operand disambiguation is identica
 type_info_of(expr)
 ```
 
-Returns a runtime `*Type_Info` descriptor (as `anyptr`) for a `type`- or `any`-typed operand — any other operand type is a sema error. `nil` for builtin scalar types. See [The `type` Type](#1-primitive-types) above and `runtime/type_info` for `Type_Info`'s definition.
+Returns a runtime `*Type_Info` descriptor (as `anyptr`) for a `type`- or `any`-typed operand — any other operand type is a sema error. `nil` for builtin scalar types. See [The `type` Type](#1-primitive-types) above and `runtime/type_info` for `Type_Info`'s definition, and [Generics, "RTTI"](#rtti-is_generic-and-generic_args) for the `is_generic`/`generic_args` fields on aggregate-type descriptors.
 
 ### `len`
 
@@ -1184,6 +1184,12 @@ A `fn` declaration, or a method inside an `impl` block, may be preceded by an `@
 attribute clause (`@naked`, `@no_return`, `@always_inline`, `@section("...")`, `@init`) — see
 [Declaration Attributes](#21-declaration-attributes) for the full syntax and semantics.
 
+### Generic Functions
+
+A `fn` may carry a bracketed generic-parameter list (`fn make_list[T: type](...)`) —
+see [Generics](#22-generics) for the full semantics, including inference and implicit
+self-instantiation. `ext fn` and `macro` may not.
+
 ---
 
 ## 8. Match and Switch
@@ -1262,15 +1268,19 @@ impl TypeName {
 - Methods are called as `value.method(args)` or `pointer.method(args)`.
 - Cross-module: `module_name.TypeName` struct can have methods defined in the type's own module.
 - Non-`self` parameters may declare [default parameter values](#default-parameter-values), following the same rules as free functions.
+- An `impl` block for a generic type carries its own `generic_params` clause
+  (`impl List[T: type] { ... }`), written once against the unspecialized
+  declaration — see [Generics](#22-generics), "Generic Impl Blocks."
 
 ---
 
 ## 10. Traits and Dynamic Dispatch
 
-Mirage has no generics. Traits exist for exactly one purpose: dynamic
-dispatch through a uniform handle type — the same model as Go interfaces or
-Rust `dyn Trait`. There is no compile-time monomorphization and no type
-parameters.
+Traits provide dynamic dispatch through a uniform handle type — the same
+model as Go interfaces or Rust `dyn Trait`. Traits themselves are not
+generic (see [Generics](#22-generics) for parametric types and functions);
+a generic struct may still implement a non-generic trait, once per concrete
+instantiation.
 
 ### Declaring a Trait
 
@@ -1814,9 +1824,20 @@ ext fn InitWindow(width: i32, height: i32, title: *u8)
 ```mirage
 type Name = TypeExpression
 pub type Name = TypeExpression
+type Name[T: type] = TypeExpression   // generic — see §22, "Generics"
 ```
 
-Creates a named type alias. The named type is structural: two declarations with the same structure resolve to the same underlying type.
+Creates a named type alias. Re-referencing the same declaration's name always
+resolves to the same identity — but this is **nominal per declaration**, not
+deep structural interning: two separate declarations with identical
+structure (e.g. two structurally-identical `struct {...}` bodies under
+different `type` names) are still two distinct, mutually non-assignable
+types. True structural interning (dedup by content, independent of which
+declaration wrote it) is reserved for compiler-synthesized shape types —
+pointer, slice, array, and function-pointer types — not for named
+declarations like this one. A `type` declaration may carry a generic-parameter
+list (`type Name[T: type] = ...`); see [Generics](#22-generics) for how
+identity works for a generic type's concrete instantiations.
 
 ---
 
@@ -1828,6 +1849,7 @@ Creates a named type alias. The named type is structural: two declarations with 
 - Function parameter types, return types, and `const`/`mut` with an explicit type annotation always resolve exactly.
 - `default`, `undefined`, `.field` enum literals, and braced initializers require an expected type (from annotation or context) to be set.
 - When calling a function that takes a known type, argument expressions are type-checked against that expected type.
+- A generic function's type and value parameters may additionally be inferred from expected-type context or argument unification — see [Generics, "Explicit vs. Inferred Instantiation"](#explicit-vs-inferred-instantiation).
 
 ---
 
@@ -2766,3 +2788,388 @@ Some combinations are rejected outright:
 - `@init` + `@no_return` — an initializer must return control so the next one can run.
 - `@init` + `@always_inline` — init functions are called once, from generated code; inlining
   them defeats the purpose.
+
+---
+
+## 22. Generics
+
+A `type`, `fn`, or `impl` declaration may carry a bracketed list of generic
+parameters, each of which is either a **type parameter** (`T: type`) or a
+**value parameter** (`N: usize`, or any other builtin scalar type — a
+"const-generic" parameter, in the style of a C++ non-type template
+parameter). A declaration with generic parameters is never usable on its own
+— it must be instantiated with concrete arguments, either explicitly
+(`List[i32]`) or, for functions, inferred from context.
+
+```mirage
+pub type List[T: type] = struct {
+    allocator: Allocator
+    data: *T
+    length: usize
+    capacity: usize
+}
+
+fn make_fixed[N: usize]() -> [N]u8 {
+    mut buf: [N]u8 = default
+    return buf
+}
+
+const b := make_fixed[16]()   // b: [16]u8
+```
+
+### Declaring Generic Types
+
+```mirage
+pub type List[T: type] = struct { ... }
+pub type Fixed[T: type, N: usize] = struct { data: [N]T }
+```
+
+A `generic_params` clause (`[ name ':' type { ',' name ':' type } ]`) follows
+the type's name and precedes `=`. Each parameter's declared type must be
+either the builtin `type` keyword (a type parameter) or one of the builtin
+scalar types `bool`, an integer kind (`u8`..`u64`, `i8`..`i64`), or `usize`
+(a value parameter):
+
+```
+error: generic parameter 'E' declared type must be 'type' or a builtin
+       scalar type (bool, an integer kind, or usize) — got 'Some_Enum'
+```
+
+`f32`/`f64` and every other non-scalar type (a struct, enum, union, another
+generic type, a trait, ...) are rejected the same way — this is a deliberate
+v1 restriction (see "No Bounds in v1" below); it may be lifted for `f32`/
+`f64` in a future revision.
+
+A generic type name alone is **never** a valid type — `List` by itself is a
+sema error naming the required arity; every use requires `generic_args` in
+declared parameter order: `List[i32]`, or `Fixed[u8, 16]` for a mixed list.
+The one exception is inside the declaration's own body/signature, where
+[Implicit Self-Instantiation](#implicit-self-instantiation) applies.
+
+### Declaring Generic Functions
+
+```mirage
+fn make_list[T: type](allocator := heap_allocator()) -> List {
+    return { .allocator = allocator, .data = nil, .length = 0, .capacity = 0 }
+}
+```
+
+A `generic_params` clause follows the function's name and precedes its
+parameter list. Inside the body and signature, each type parameter is a
+compile-time constant of type `type` and each value parameter is a
+compile-time constant of its declared scalar type — usable anywhere a
+compile-time constant of that kind is legal (`*T`, `size_of(T)`, a
+parameter's own `: T`, `[N]u8`, `N * 2`, a `match`/`switch` literal pattern,
+...). `ext fn` and `macro` declarations may not carry `generic_params` — the
+grammar simply gives them no place to write one (see [Restrictions](#restrictions)
+below).
+
+Calling a generic function accepts either explicit or inferred arguments,
+freely mixed across call sites:
+
+```mirage
+const a := make_list[i32]()   // explicit
+const b := make_list()        // inferred — see "Explicit vs. Inferred Instantiation"
+```
+
+### Generic Impl Blocks
+
+```mirage
+impl List[T: type] {
+    pub fn reserve(self, min_capacity: usize) -> Allocator_Error {
+        if min_capacity <= self.capacity {
+            return_ok
+        }
+        const new_data_len := min_capacity * size_of(T)
+        const new_data: *T = try self.allocator.realloc(self.data, new_data_len)
+        self.data = new_data
+        self.capacity = min_capacity
+        return_ok
+    }
+
+    pub fn get(self, index: usize) -> (elem: T, List_Error) {
+        if index >= self.length {
+            return_err .Out_Of_Range
+        }
+        return_ok self.data[index]
+    }
+}
+```
+
+An `impl` block for a generic type is written **once**, against the
+unspecialized declaration, with its own `generic_params` clause immediately
+after the target type name (`impl List[T: type] { ... }`) — never against a
+concrete instantiation. `impl List[i32] { ... }` (a per-instantiation
+specialization impl) is **not legal in v1**: see grammar.md note 17 for the
+parse-time reason (the bracket there is always `impl_decl`'s own
+`generic_params` clause, never `named_type`'s `generic_args`). A method
+inside a generic `impl` block never declares its own `generic_params` — its
+parameters are tied entirely to whichever concrete instantiation the
+enclosing `impl` block is applied to.
+
+The `impl` block's `generic_params` arity must match the target type's own
+declared arity exactly (matched by count, not by parameter kind or name):
+
+```
+error: 'impl List[T: type, N: usize]' has 2 generic parameters, but 'List'
+       is declared with 1 — impl generic parameter lists must match the
+       target type's own arity exactly
+```
+
+A generic struct may still implement a non-generic **trait**, once per
+concrete instantiation — traits themselves are not made generic in this
+pass (see [Traits and Dynamic Dispatch](#10-traits-and-dynamic-dispatch)).
+The `impl TRAIT for TYPE [ generic_params ]` form parametrizes the `TYPE`
+side only; coherence for it is checked at the unspecialized level, exactly
+like a bare `impl` block — see [Coherence](#coherence) below.
+
+### Type Parameters vs. Value Parameters
+
+`[T: type]` declares a **type parameter**: `T` is a compile-time constant of
+type `type`, usable everywhere a type value is legal — `*T`, `size_of(T)`,
+`align_of(T)`, a parameter or field's own `: T`, `type_of(T)`, etc.
+
+`[N: usize]` (or `bool`, or any integer kind) declares a **value
+parameter**: `N` is a compile-time constant of that declared scalar type,
+usable anywhere an ordinary compile-time constant of that type is legal —
+most notably as an array size (`[N]u8`), but also in any other
+constant-expression position (`N * 2`, a `match`/`switch` literal pattern,
+a default parameter value, ...).
+
+A `generic_params` list may freely mix the two kinds, in any order:
+
+```mirage
+pub type Fixed[T: type, N: usize] = struct { data: [N]T }
+```
+
+Generic **arguments** at an instantiation site are correspondingly either a
+`type` (for a `T: type` slot) or a compile-time constant expression of the
+matching scalar type (for an `N: SomeScalar` slot), checked the same way an
+ordinary compile-time-constant expression is checked elsewhere (e.g.
+`#option`/`#env`, or an array-size expression):
+
+```
+error: generic argument 2 for 'Fixed' must be a compile-time constant
+       expression of type 'usize' — got a non-constant expression
+```
+
+### Explicit vs. Inferred Instantiation
+
+Explicit generic arguments are always accepted: `List[i32]`,
+`make_list[i32]()`, `make_fixed[16]()`.
+
+For a **generic function call**, arguments may instead be inferred — with
+or without an empty trailing `[]` — from two sources, applied per parameter:
+
+- **Type parameters** infer from whichever is available: unifying the
+  parameter's declared type against the actual argument's static type
+  wherever that parameter appears literally as a parameter's own `: T` in
+  the signature, or (if it never appears that way) from the call's own
+  expected-type context.
+- **Value parameters** infer **only** from expected-type context — there is
+  no argument shape to unify a value parameter against in general, so a
+  value parameter must be inferable from the call's own expected type:
+
+```mirage
+const list := make_list()               // T inferred from... nothing here; needs
+                                          // either explicit '[i32]' or expected-type
+                                          // context, e.g.:
+const typed: List[i32] = make_list()     // T = i32, inferred from the declared type
+
+mut buf: [16]u8 = make_fixed()           // N = 16, inferred from the expected array size
+```
+
+If any parameter remains unbound after both inference passes, this is a
+sema error naming the specific unresolved parameter:
+
+```
+error: could not infer generic parameter 'N' for 'make_fixed' — provide it
+       explicitly ('make_fixed[16]()') or use it in a context with a known
+       expected type
+```
+
+### Implicit Self-Instantiation
+
+Inside a declaration whose own `generic_params` list has arity N, a bare
+reference to a generic name — including a self-reference to the enclosing
+declaration itself — is sugar for applying the enclosing declaration's own
+parameters, in order, **provided the referenced name's own arity is also
+N** (matched by count, not by parameter kind or name):
+
+```mirage
+pub fn make_list[T: type](allocator := heap_allocator()) -> List {
+    //                                                     ^^^^ sugar for List[T]
+    return { .allocator = allocator, .data = nil, .length = 0, .capacity = 0 }
+}
+
+impl List[T: type] {
+    // inside here, a bare 'List' or 'T' resolves against this impl's own binding
+}
+```
+
+Explicit brackets are always still accepted in these positions — `-> List[T]`
+is exactly equivalent to `-> List` inside `make_list[T: type]`'s own
+signature. Implicit self-instantiation only ever applies to a **bare**
+reference (no `generic_args` written at all); once any bracket is written,
+ordinary explicit-or-inferred resolution takes over.
+
+### Monomorphization and Type Identity
+
+`Name[Args]` for a fixed declaration `Name` and a fixed, value-equal `Args`
+tuple denotes exactly **one** concrete instantiation program-wide — every
+occurrence of `List[i32]` anywhere in the program, in any module, refers to
+the same underlying type, the same way re-referencing an ordinary named
+type's declaration always resolves to the same identity.
+
+This is **nominal per declaration**, not deep structural interning across
+different declarations: two different generic declarations instantiated
+with identical arguments and identical resulting field layouts are still
+two different types, exactly as two structurally-identical ordinary `type X
+= struct {...}` / `type Y = struct {...}` declarations are two different,
+mutually non-assignable types today (see [Type Declarations](#13-type-declarations),
+which uses this same nominal-per-declaration rule — despite that section's
+wording, Mirage's named types were never deeply structurally interned; only
+compiler-synthesized shape types — pointers, slices, arrays, function types
+— are, via an internal linear-scan-and-reuse mechanism unrelated to user
+declarations).
+
+Codegen generates an instantiation only when it's actually reachable from a
+live call or type use — the same "unselected branch never visited" posture
+`when` uses for dead branches (see [`when` Statement](#when-statement-1)),
+except **stricter**: unlike `when`, which always type-checks both branches
+even though only one is emitted, an unreached generic instantiation is
+**never type-checked at all** in v1 — see "No Bounds in v1" below.
+
+### Coherence
+
+`impl List[T: type] { ... }` (or `impl TRAIT for List[T: type] { ... }`) is
+written once against the unspecialized declaration and governs **every**
+concrete instantiation of `List`. The existing single-impl-per-`(TRAIT,
+TYPE)` coherence rule (see [Traits and Dynamic Dispatch, Coherence](#implementing-a-trait))
+applies at this unspecialized level: at most one `impl TRAIT for List[...]`
+exists anywhere in the program, and it must live in the module that defines
+`TRAIT` or the module that defines `List` (the orphan-impl rule's "type's
+module" means `List`'s own unspecialized declaring module, not any
+particular instantiation).
+
+### No Bounds in v1
+
+A generic parameter — type or value — is **unconstrained** in v1: there is
+no way to declare that a type parameter must implement a given trait, or
+that a value parameter must satisfy some predicate. This is a deliberate
+scope decision, not an oversight.
+
+Consequently, an operation a given instantiation's body cannot actually
+support (e.g. calling a method `T` doesn't have) is only caught when that
+specific instantiation is actually generated and its body is checked — not
+at the generic declaration's own point of definition. This is a real
+departure from the "both branches are always type-checked, even if only one
+is emitted" posture the rest of the language uses for `when` (see [`when`
+Statement](#when-statement-1)) — a generic body that is never instantiated
+is **never checked**, not merely never emitted. A future revision may add a
+bounds/constraints mechanism (e.g. `[T: Some_Trait]`) that restores
+eager checking for constrained parameters; v1 has none.
+
+### RTTI: `is_generic` and `generic_args`
+
+`type_info_of`'s `Type_Info` (see [`type_info_of`](#type_info_of)) gains two
+fields on its `Struct`, `Enum`, `Union`, `Tagged_Union`, and `Bitset`
+payloads:
+
+- `is_generic: bool` — `true` when this `Type_Info` describes a concrete
+  instantiation of a generic declaration.
+- `generic_args: []Type_Info_Generic_Arg` — the concrete arguments this
+  instantiation was created with, in declared parameter order. Empty when
+  `is_generic` is `false`.
+
+```mirage
+pub type Type_Info_Generic_Arg = struct {
+    is_type: bool          // true: a type argument; false: a value argument
+    type_arg: anyptr        // *Type_Info of the type argument; nil when !is_type
+    value_arg: i64           // the value argument's raw value; 0 when is_type
+    value_arg_type: anyptr  // *Type_Info of the value argument's own scalar type; nil when is_type
+}
+```
+
+For a non-generic type, `is_generic` is `false` and `generic_args` is empty
+— the same convention used elsewhere in this file for a field-less struct's
+`fields` slice.
+
+There is no `Type_Info` for an *unspecialized* generic declaration in v1 —
+`List` alone is never a valid type (see above), so it never has a
+`ResolvedType` of its own to build a `Type_Info` from; only concrete
+instantiations are ever reachable through `type_info_of`. This settles, by
+construction, which "side" of a generic declaration is ever seen with
+`is_generic = true`: only instantiations, never the template.
+
+Functions have no separate RTTI descriptor to extend — `Type_Info`'s
+`Function` payload is a purely structural, anonymous descriptor already
+shared by every function of the same signature (see `type_info_of`'s
+existing description above) — so `is_generic`/`generic_args` are not added
+there; a generic function's monomorphized instantiations are only
+observable through their mangled symbol names, not through RTTI.
+
+### Restrictions
+
+```
+error: 'ext fn' declarations may not have generic parameters
+```
+`ext fn` may never carry `generic_params` — there is no C ABI representation
+for an uninstantiated declaration, and the grammar gives `ext fn` no syntax
+position to write one in the first place.
+
+```
+error: 'macro' declarations may not have generic parameters
+```
+`macro` declarations are not made generic in this pass, for the same
+structural reason.
+
+```
+error: 'trait' declarations may not have generic parameters
+```
+`trait { ... }` declarations are not made generic in this pass — dispatch
+stays monomorphic/vtable-based (see [Traits and Dynamic Dispatch](#10-traits-and-dynamic-dispatch)).
+A generic struct may still implement a non-generic trait, once per concrete
+instantiation.
+
+```
+error: generic parameter 'E' declared type must be 'type' or a builtin
+       scalar type (bool, an integer kind, or usize) — got 'Some_Enum'
+```
+A `generic_param`'s declared type must be exactly the builtin `type`
+keyword, or one of `bool`/an integer kind/`usize` — see [Declaring Generic
+Types](#declaring-generic-types) above.
+
+```
+error: 'List' used without generic arguments — expected 1 ('List[T: type]')
+```
+A generic type name is never valid on its own outside implicit
+self-instantiation — see [Declaring Generic Types](#declaring-generic-types).
+
+```
+error: 'impl List[T: type, N: usize]' has 2 generic parameters, but 'List'
+       is declared with 1 — impl generic parameter lists must match the
+       target type's own arity exactly
+```
+See [Generic Impl Blocks](#generic-impl-blocks) above.
+
+```
+error: could not infer generic parameter 'N' for 'make_fixed' — provide it
+       explicitly ('make_fixed[16]()') or use it in a context with a known
+       expected type
+```
+See [Explicit vs. Inferred Instantiation](#explicit-vs-inferred-instantiation)
+above.
+
+**Default parameter values may reference the enclosing declaration's own
+generic parameters.** [Default Parameter Values](#default-parameter-values)'
+rule that a default expression cannot reference another parameter of the
+same function still holds for ordinary parameters, but a default expression
+*may* reference the enclosing declaration's own `generic_params` (type or
+value) — this is the one exception to that scoping rule:
+
+```mirage
+fn make_fixed[N: usize](fill: [N]u8 = default) -> [N]u8 { ... }   // 'N' in the
+                                                                    // default is
+                                                                    // legal
+```

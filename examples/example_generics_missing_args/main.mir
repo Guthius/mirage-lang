@@ -1,0 +1,16 @@
+// example_generics_missing_args.mir — REJECTION CASE. A generic type name is never valid
+// on its own — every use requires generic_args in declared parameter order (the one
+// exception, implicit self-instantiation, doesn't apply here since 'main' isn't itself a
+// generic declaration). See spec.md §22, "Declaring Generic Types".
+//
+// Expected: compilation fails with
+//   error: 'Box' used without generic arguments — expected 1 ('Box[...]')
+
+pub type Box[T: type] = struct {
+    value: T
+}
+
+pub fn main() -> i32 {
+    mut b: Box = { .value = 1 }
+    return 0
+}

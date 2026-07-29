@@ -37,7 +37,8 @@ bare_import_decl ::= 'import' '(' STRING ')'
 ### Function Declaration
 
 ```ebnf
-fn_decl       ::= [ attribute ] 'fn' IDENT '(' [ param { ',' param } ] ')' [ return_types ] stmt
+fn_decl       ::= [ attribute ] 'fn' IDENT [ generic_params ]
+                  '(' [ param { ',' param } ] ')' [ return_types ] stmt
 
 param         ::= [ 'mut' ] IDENT ':' type [ '=' expr ]  (* typed, optional default *)
                | [ 'mut' ] IDENT ':=' expr               (* inferred type, default required *)
@@ -113,7 +114,7 @@ valid on an `ext fn` declaration. There is no `':='` inferred-type form for
 ### Type Declaration
 
 ```ebnf
-type_decl     ::= 'type' IDENT '=' type
+type_decl     ::= 'type' IDENT [ generic_params ] '=' type
 ```
 
 ### Variable Declaration (top-level)
@@ -137,8 +138,18 @@ macro_param   ::= IDENT ':' type
 ### Impl Block
 
 ```ebnf
-impl_decl     ::= 'impl' named_type '{' { method_decl } '}'                    (* bare impl *)
-               | 'impl' named_type 'for' named_type '{' { method_decl } '}'  (* trait impl *)
+impl_decl     ::= 'impl' named_type [ generic_params ] '{' { method_decl } '}'                    (* bare impl *)
+               | 'impl' named_type 'for' named_type [ generic_params ] '{' { method_decl } '}'  (* trait impl *)
+
+generic_params ::= '[' generic_param { ',' generic_param } ']'
+
+generic_param  ::= IDENT ':' type   (* the type after ':' must resolve, in sema, to either the
+                                        builtin 'type' keyword (a type parameter) or one of the
+                                        builtin scalar types 'bool'/an integer kind/'usize' (a
+                                        value, "const-generic" parameter, e.g. 'N: usize') —
+                                        anything else (a struct, enum, another generic type,
+                                        f32/f64, ...) is a sema error. See spec.md §22
+                                        "Generics" for the full semantics. *)
 
 method_decl   ::= [ attribute ] [ 'pub' ] 'fn' IDENT
                   '(' ( 'self' | 'mut' 'self' )
@@ -148,6 +159,10 @@ method_decl   ::= [ attribute ] [ 'pub' ] 'fn' IDENT
                   [ return_types ]
                   stmt
 ```
+
+`method_decl` never carries its own `generic_params` — only the enclosing `impl`
+block does (a method's parameters are tied to whichever concrete instantiation
+the `impl` block itself is applied to; see spec.md §22 "Generics").
 
 An attribute clause on a `method_decl` follows the same ordering as `fn_decl` (attribute
 before `pub`) and accepts the same five known names, though sema rejects `init` specifically
@@ -256,7 +271,15 @@ fn_type_params ::= fn_type_param { ',' fn_type_param } [ ',' '...' ]
 
 fn_type_param ::= [ IDENT ':' ] type
 
-named_type    ::= IDENT { '.' IDENT }
+named_type    ::= IDENT { '.' IDENT } [ generic_args ]
+
+generic_args  ::= '[' generic_arg { ',' generic_arg } ']'
+
+generic_arg   ::= type   (* for a 'T: type' parameter *)
+               | expr    (* for a value parameter — must be a compile-time constant expression
+                             of the corresponding parameter's declared scalar type; same
+                             type-vs-expr lookahead disambiguation as size_of_operand (note 12)
+                             applies here token-for-token *)
 
 builtin_type  ::= 'u8' | 'u16' | 'u32' | 'u64'
                | 'i8' | 'i16' | 'i32' | 'i64'
@@ -288,6 +311,8 @@ the handle — and is resolved before the vtable call.
 Note: Struct, enum, and union fields/variants need no separator token between them at all (see Notes on Syntax Conventions, note 1) — commas are not valid there.
 
 `bitset_type`'s first argument must resolve (in sema) to a named enum type — a plain `enum {}` with no parenthesized backing type is fine and defaults to `i32`, same as an ordinary enum declaration. The second argument, if present, must resolve to one of `u8`/`u16`/`u32`/`u64`; if omitted it defaults to `u32`. Unlike `named_type` alone, a `bitset(...)` type always declares a new, distinct type — never an alias. See spec.md's "Bitset Types" section for the full semantics.
+
+A `named_type` naming a declaration with `generic_params` is never complete without `generic_args` — `List` alone is not a valid type; `List[i32]` (or `Fixed[u8, 16]` for a mixed parameter list) is required at every use, in declared parameter order, except inside the declaration's own body/signature where the implicit self-instantiation rule applies (see spec.md §22 "Generics", and notes 15-18 below for the parse-time disambiguations this construct requires).
 
 ---
 
@@ -503,8 +528,11 @@ postfix_op    ::= '(' [ arg { ',' arg } ] ')'    (* call *)
                | '.' IDENT                        (* member access — auto-derefs through a pointer *)
                | '.' IDENT '{.' field_init { ',' field_init } '}'  (* qualified tagged variant constructor *)
                | '.' '*'                           (* dereference: 'p.*' reads/writes the pointee *)
-               | '[' expr ']'                     (* index *)
-               | '[' expr '..' expr ']'           (* slice *)
+               | '[' expr ']'                     (* index — see note 16: a single-item, non-slice
+                                                       '[...]' here is syntactically ambiguous with
+                                                       explicit generic-argument instantiation and is
+                                                       classified in sema, not by the parser *)
+               | '[' expr '..' expr ']'           (* slice — never ambiguous, see note 16 *)
                | '++'
                | '--'
 
@@ -734,3 +762,11 @@ comment, it always starts a directive.
 13. **`stackalloc` vs. `import_bin`**: both are primary expressions shaped like a builtin call (`'ident' '(' ... ')'`), same as `size_of`/`len`/`cast`, but neither takes a type argument: `stackalloc` takes a single size `expr` and evaluates to `anyptr`; `import_bin` takes a single `STRING` path and evaluates to a compile-time `[N]u8` constant.
 
 14. **`type_of`'s operand disambiguation matches `size_of`/`align_of`**: `type_of(u64)`, `type_of(*u8)`, and `type_of(SomeStruct)` are all valid, using the exact same type-vs-expr lookahead rule as note 12. `type_of`'s result is always the builtin `type` — a compile-time-unique identifier for the operand's type. It is a compile-time constant for every operand except one whose resolved type is `any`, which lowers to a runtime read of the `any` value's type id instead. `type_info_of`'s operand, by contrast, is always parsed as a plain `expr` (never type-disambiguated) — it must resolve to `type` or `any`, and always evaluates to `anyptr` (nil if no `Type_Info` exists for the referenced type, e.g. a builtin scalar).
+
+15. **`generic_args` never conflicts with array-type syntax**: `[N]T`/`[]T`/`[?]T` are only ever reached by `parse_type`'s own dispatch on a *bare* leading `[` token (a `type` production alternative in its own right); `generic_args` is only ever reached as an optional suffix immediately following an `IDENT` that has already been parsed as `named_type`'s leaf segment. These are different grammar positions, so a type-position `[` is never ambiguous between the two: `List[i32]` is `named_type` `List` followed by `generic_args`; `[4]List` is the array-type production with element type `List`.
+
+16. **`IDENT '[' ... ']'` at an expression/call site is ambiguous between ordinary indexing and explicit generic-argument instantiation, and the parser does not resolve it.** Ordinary indexing (`postfix_op`'s `'[' expr ']'`) is always exactly one `expr` with no comma; `generic_args` is a comma-separated list. So a bracket containing a comma can only be `generic_args` — no ambiguity there. A single-item bracket, however, is genuinely ambiguous by shape alone (`arr[i]` vs. `List[i32]` look identical at this point in parsing), and this parser has no symbol-table lookup available during parsing to resolve it the way `size_of`/`type_of`'s operand disambiguation can (that lookahead only needs token shape, not declaration knowledge). The parser instead emits one shared node capturing both possible readings, and sema classifies it once `IDENT`'s declaration is known — see spec.md §22 "Generics" for the resolution rule (does the identifier name a declaration with `generic_params`?).
+
+17. **`impl_decl`'s own `generic_params` clause, not `named_type`'s `generic_args`, governs the bracket after an impl target.** `named_type`'s `generic_args` is not consulted when parsing `impl_decl`'s `named_type` operand(s) — the `[...]` immediately following `impl SOME_TYPE` (or, in the trait-impl form, following either `named_type`) is always parsed as `impl_decl`'s own trailing `generic_params` clause. Consequently `impl List[T: type] { ... }` (declaring the impl's own parameters, written once against the unspecialized declaration) is the only legal form — `impl List[i32] { ... }` (a per-instantiation specialization impl) is not legal in v1.
+
+18. **Each `generic_arg`'s type-vs-expr parse reuses note 12's lookahead rule verbatim**: a builtin type keyword, or a token that can only begin a type, parses as `type`; anything else parses as `expr`. This is the same rule `size_of_operand` and `generic_arg` both use, applied independently to each comma-separated item inside `generic_args`.

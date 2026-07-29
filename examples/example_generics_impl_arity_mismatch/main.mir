@@ -1,0 +1,21 @@
+// example_generics_impl_arity_mismatch.mir — REJECTION CASE. A bare 'impl' block's own
+// generic_params must match the target type's own declared arity exactly (matched by
+// count, not by parameter kind or name) — see spec.md §22, "Generic Impl Blocks".
+//
+// Expected: compilation fails with
+//   error: 'impl Box' has 2 generic parameter(s), but 'Box' is declared with 1 — impl
+//          generic parameter lists must match the target type's own arity exactly
+
+pub type Box[T: type] = struct {
+    value: T
+}
+
+impl Box[T: type, N: usize] {
+    pub fn get(self) -> T {
+        return self.value
+    }
+}
+
+pub fn main() -> i32 {
+    return 0
+}

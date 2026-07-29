@@ -202,6 +202,23 @@ namespace sema {
             // comment in sema.hpp. Lets a cross-module reference declare its target
             // module on demand instead of failing on iteration-order bad luck.
             const ast::Program *ast_program = nullptr;
+            // Non-null only while resolving inside a specific generic instantiation's own
+            // body/signature (see instantiate_generic_type/instantiate_generic_function) —
+            // binds each of that instantiation's generic param names to its concrete
+            // type/value. Consulted by resolve_type_impl's NamedType case (a bare param
+            // reference like 'T') and eval_integer_const_expr's IdentExpr case (a value
+            // param reference like 'N').
+            const GenericBindingEnv *generic_env = nullptr;
+            // Non-null only while resolving inside a declaration that itself carries
+            // generic_params (a generic type/fn/impl's own body/signature, NOT one of its
+            // instantiations) — supports implicit self-instantiation: a bare reference to a
+            // generic name whose arity matches this list is sugar for applying these same
+            // params, in order. Mutually exclusive with generic_env being non-null in
+            // practice (an instantiation's body has concrete bindings, not its own
+            // still-abstract params) but kept as a separate field since they answer
+            // different questions (what IS this name bound to vs. what are the enclosing
+            // decl's OWN param names, for implicit self-instantiation sugar).
+            const std::vector<ast::GenericParam> *enclosing_generic_params = nullptr;
 
             auto find_type_symbol(ProgramModule &mod, const std::string &name, const SourceLocation &loc) const -> TypeSymbol * {
                 const auto it = mod.symbols.find(name);
@@ -217,6 +234,160 @@ namespace sema {
                 }
 
                 return ts;
+            }
+
+            // Non-diagnosing lookup (unlike find_type_symbol above) — nullptr for "not a
+            // type symbol" or "not found", used purely to decide whether a NamedType names a
+            // generic declaration before committing to a resolution strategy.
+            auto find_type_decl_for(const std::string &module_path, const std::string &name) const -> const ast::TypeDecl * {
+                const auto mod_it = program.modules.find(module_path);
+                if (mod_it == program.modules.end()) return nullptr;
+                const auto sym_it = mod_it->second.symbols.find(name);
+                if (sym_it == mod_it->second.symbols.end()) return nullptr;
+                const auto *ts = std::get_if<TypeSymbol>(&sym_it->second);
+                return ts ? ts->decl : nullptr;
+            }
+
+            // A bare (undotted, no generic_args) reference to the active generic_env's own
+            // type-param binding (e.g. 'T' inside 'fn make_list[T: type](...)', or a struct
+            // field 'data: *T' inside 'type List[T: type] = struct {...}') resolves directly
+            // to the bound concrete type. Returns nullopt for anything else (no active
+            // generic_env, a dotted/generic_args-bearing name, or a name generic_env doesn't
+            // bind), letting the caller fall through to ordinary module-symbol resolution.
+            [[nodiscard]] auto find_generic_type_binding(const ast::NamedType &named) const -> std::optional<ResolvedType> {
+                if (!generic_env || named.member != nullptr || !named.generic_args.empty()) {
+                    return std::nullopt;
+                }
+                for (const auto &binding : *generic_env) {
+                    if (binding.is_type && binding.param_name == named.name) {
+                        return binding.type_value;
+                    }
+                }
+                return std::nullopt;
+            }
+
+            // Resolves a NamedType known to be either an explicit generic-argument
+            // instantiation ('List[i32]') or a bare reference to a generic declaration
+            // relying on implicit self-instantiation ('List' inside 'fn make_list[T: type]
+            // (...) -> List'). Shared by resolve_type_impl's own NamedType case and
+            // resolve_field_type below (a struct field's type needs the exact same logic,
+            // just reached via a different caller that also wants full, forced layout —
+            // which instantiate_generic_type always provides, since a fresh instantiation is
+            // laid out synchronously the same way an anonymous inline struct/enum/union/
+            // bitset type already is).
+            auto resolve_generic_named_type(const ast::NamedType &named, const std::string &module_path,
+                                             const std::string &target_module, const std::string &target_name,
+                                             const ast::TypeDecl &target_decl) -> ResolvedType {
+                const auto &params = target_decl.generic_params;
+
+                std::vector<const ast::GenericArg *> args_to_resolve;
+                // Owns any synthesized (implicit-self-instantiation) GenericArgs for the
+                // duration of this call only — a plain local, not shared/static, so nested
+                // recursive calls (e.g. resolving one generic arg that itself triggers
+                // another implicit self-instantiation) each get their own storage.
+                std::vector<ast::GenericArg> synthesized;
+                if (!named.generic_args.empty()) {
+                    for (const auto &a : named.generic_args) args_to_resolve.push_back(a.get());
+                } else if (enclosing_generic_params && enclosing_generic_params->size() == params.size()) {
+                    // Implicit self-instantiation: synthesize one GenericArg per enclosing
+                    // param, referencing that same param by name — reusing the exact same
+                    // resolution logic below (rather than a separate code path) for both the
+                    // "already had a binding" (generic_env swap-through) and "needs its own
+                    // fresh evaluation" cases.
+                    synthesized.reserve(enclosing_generic_params->size());
+                    for (const auto &ep : *enclosing_generic_params) {
+                        if (is_generic_type_param(ep.type)) {
+                            synthesized.push_back(ast::GenericArg{
+                                .value = ast::Type{ast::NamedType{.name = ep.name, .member = nullptr, .generic_args = {}, .location = named.location}},
+                                .location = named.location,
+                            });
+                        } else {
+                            synthesized.push_back(ast::GenericArg{
+                                .value = ast::Expr{ast::IdentExpr{.name = ep.name, .location = named.location}},
+                                .location = named.location,
+                            });
+                        }
+                    }
+                    for (auto &a : synthesized) args_to_resolve.push_back(&a);
+                } else {
+                    return error(diag, named.location, std::format(
+                        "'{}' used without generic arguments — expected {} ('{}[...]')",
+                        target_name, params.size(), target_name));
+                }
+
+                if (args_to_resolve.size() != params.size()) {
+                    return error(diag, named.location, std::format(
+                        "'{}' expects {} generic argument(s), got {}",
+                        target_name, params.size(), args_to_resolve.size()));
+                }
+
+                std::vector<GenericArgValue> resolved_args;
+                resolved_args.reserve(params.size());
+                bool arg_error = false;
+                for (size_t i = 0; i < params.size(); ++i) {
+                    const auto &param = params[i];
+                    const auto &arg = *args_to_resolve[i];
+
+                    if (is_generic_type_param(param.type)) {
+                        const auto *type_arg = std::get_if<ast::Type>(&arg.value);
+                        if (!type_arg) {
+                            error(diag, arg.location, std::format(
+                                "generic argument {} for '{}' must be a type (parameter '{}: type')",
+                                i + 1, target_name, param.name));
+                            arg_error = true;
+                            continue;
+                        }
+                        resolved_args.push_back(GenericArgValue{.is_type = true, .type_arg = resolve_type_impl(*type_arg, module_path)});
+                    } else {
+                        const auto *expr_arg = std::get_if<ast::Expr>(&arg.value);
+                        if (!expr_arg) {
+                            error(diag, arg.location, std::format(
+                                "generic argument {} for '{}' must be a compile-time constant expression",
+                                i + 1, target_name));
+                            arg_error = true;
+                            continue;
+                        }
+                        const auto param_scalar_type = resolve_builtin(std::get<ast::BuiltinType>(param.type).kind);
+                        const auto value = eval_integer_const_expr(*expr_arg, module_path, {});
+                        if (!value) {
+                            error(diag, arg.location, std::format(
+                                "generic argument {} for '{}' must be a compile-time constant expression of type '{}'",
+                                i + 1, target_name, describe_type(param_scalar_type, program)));
+                            arg_error = true;
+                            continue;
+                        }
+                        resolved_args.push_back(GenericArgValue{
+                            .is_type = false,
+                            .value_arg = static_cast<int64_t>(*value),
+                            .value_arg_scalar_type = param_scalar_type,
+                        });
+                    }
+                }
+                if (arg_error) return ResolvedType{.kind = TypeKind::Invalid};
+
+                return instantiate_generic_type(program, diag, target_module, target_name, std::move(resolved_args), named.location);
+            }
+
+            // Resolves a NamedType appearing in an ordinary type-position (a pointer
+            // pointee, resolve_type_impl's own NamedType case) — handles the generic_env
+            // binding, explicit/implicit generic instantiation, and plain-alias cases, then
+            // falls through to resolve_final_shallow for the ordinary non-generic case
+            // (lazy — does not force full layout; callers needing full layout, like a
+            // by-value struct field, use resolve_field_type instead).
+            auto resolve_named_type_shallow(const ast::NamedType &named, const std::string &module_path) -> ResolvedType {
+                if (const auto binding = find_generic_type_binding(named)) {
+                    return *binding;
+                }
+
+                auto target = walk_namespace_chain(module_path, named, program, diag, ast_program);
+                if (!target) return ResolvedType{.kind = TypeKind::Invalid};
+
+                if (const auto *target_decl = find_type_decl_for(target->module_path, target->name);
+                    target_decl && !target_decl->generic_params.empty()) {
+                    return resolve_generic_named_type(named, module_path, target->module_path, target->name, *target_decl);
+                }
+
+                return resolve_final_shallow(target->module_path, target->name, target->crossed_boundary, target->location);
             }
 
             [[nodiscard]] auto resolve_final_shallow(const std::string &module_path, const std::string &name, const bool check_pub, const SourceLocation &loc) const -> ResolvedType {
@@ -407,10 +578,35 @@ namespace sema {
 
             auto resolve_field_type(const std::string &module_path, const ast::Type &field_type, SourceLocation loc) -> ResolvedType {
                 if (auto *named = std::get_if<ast::NamedType>(&field_type)) {
+                    if (const auto binding = find_generic_type_binding(*named)) {
+                        return *binding;
+                    }
+
+                    // Explicit generic_args on a field's type ('child: List[i32]') always
+                    // routes through resolve_generic_named_type below, which — via
+                    // instantiate_generic_type — always produces an already-FULLY-laid-out
+                    // result (a fresh instantiation is laid out synchronously, the same way
+                    // an anonymous inline struct/enum/union/bitset already is), so it's safe
+                    // to use directly as a struct field's type exactly like the plain
+                    // resolve_final_full path below.
+                    if (!named->generic_args.empty()) {
+                        return resolve_type_impl(field_type, module_path);
+                    }
+
                     const auto target = walk_namespace_chain(module_path, *named, program, diag, ast_program);
                     if (!target) {
                         return ResolvedType{.kind = TypeKind::Invalid};
                     }
+
+                    if (const auto *target_decl = find_type_decl_for(target->module_path, target->name);
+                        target_decl && !target_decl->generic_params.empty()) {
+                        // Bare reference to a generic type as a field's type — only legal via
+                        // implicit self-instantiation (or else a sema error) — both handled by
+                        // resolve_type_impl's own NamedType case; reuse it rather than
+                        // duplicating that decision here.
+                        return resolve_type_impl(field_type, module_path);
+                    }
+
                     return resolve_final_full(target->module_path, target->name, target->crossed_boundary, target->location);
                 }
                 return resolve_type_impl(field_type, module_path);
@@ -559,6 +755,21 @@ namespace sema {
                             return v.value ? 1 : 0;
 
                         } else if constexpr (std::is_same_v<V, ast::IdentExpr>) {
+                            // A value generic-param reference (e.g. 'N' inside 'fn
+                            // make_fixed[N: usize]() -> [N]u8') folds to its bound constant —
+                            // checked before macro_args/globals, mirroring how
+                            // find_generic_type_binding takes priority for type params.
+                            if (generic_env) {
+                                for (const auto &binding : *generic_env) {
+                                    if (!binding.is_type && binding.param_name == v.name) {
+                                        if (const auto *iv = std::get_if<int64_t>(&binding.const_value)) {
+                                            return static_cast<uint64_t>(*iv);
+                                        }
+                                        return std::nullopt;
+                                    }
+                                }
+                            }
+
                             if (const auto arg = macro_args.find(v.name); arg != macro_args.end()) {
                                 return eval_integer_const_expr(*arg->second, module_path, macro_args);
                             }
@@ -646,14 +857,44 @@ namespace sema {
                     expr);
             }
 
+            // A LocalScope containing one immutable entry per VALUE binding in the active
+            // generic_env, so ordinary check_expr identifier lookup resolves a value
+            // generic-param reference (e.g. 'N' in '[N]u8') exactly like any other in-scope
+            // constant — no change to check_expr itself needed. Empty when generic_env is
+            // null (the ordinary, non-generic case).
+            [[nodiscard]] auto generic_env_locals() const -> LocalScope {
+                LocalScope locals;
+                if (generic_env) {
+                    for (const auto &binding : *generic_env) {
+                        if (!binding.is_type) {
+                            locals[binding.param_name] = LocalBinding{.type = binding.const_value_type, .is_mut = false};
+                        }
+                    }
+                }
+                return locals;
+            }
+
+            // The active generic_env's value-param names, for is_constant_expr's
+            // 'extra_const_names' — a value generic-param is always a compile-time constant
+            // by construction. Empty when generic_env is null.
+            [[nodiscard]] auto generic_env_const_names() const -> std::unordered_set<std::string> {
+                std::unordered_set<std::string> names;
+                if (generic_env) {
+                    for (const auto &binding : *generic_env) {
+                        if (!binding.is_type) names.insert(binding.param_name);
+                    }
+                }
+                return names;
+            }
+
             auto array_len_expr_value(const ast::Expr &expr, const std::string &module_path) -> uint64_t {
-                LocalScope no_locals;
-                const auto len_type = check_expr(expr, no_locals, module_path, program, diag, ResolvedType{.kind = TypeKind::USize}, 0);
+                auto locals = generic_env_locals();
+                const auto len_type = check_expr(expr, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::USize}, 0);
                 if (!len_type.is_integer()) {
                     diag.report_error(DiagnosticStage::Sema, expr_location(expr), "array length must be an integer constant expression");
                     return 0;
                 }
-                if (!is_constant_expr(expr, module_path, program)) {
+                if (!is_constant_expr(expr, module_path, program, generic_env_const_names())) {
                     diag.report_error(DiagnosticStage::Sema, expr_location(expr), "array length must be a compile-time constant expression");
                     return 0;
                 }
@@ -1122,19 +1363,14 @@ namespace sema {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::PointerType>>) {
                             ResolvedType pointee;
                             if (auto *named = std::get_if<ast::NamedType>(&v->pointee)) {
-                                auto target = walk_namespace_chain(module_path, *named, program, diag, ast_program);
-                                pointee = target
-                                              ? resolve_final_shallow(target->module_path, target->name, target->crossed_boundary, target->location)
-                                              : ResolvedType{.kind = TypeKind::Invalid};
+                                pointee = resolve_named_type_shallow(*named, module_path);
                             } else {
                                 pointee = resolve_type_impl(v->pointee, module_path);
                             }
                             return intern_pointer(program, pointee);
 
                         } else if constexpr (std::is_same_v<V, ast::NamedType>) {
-                            auto target = walk_namespace_chain(module_path, v, program, diag, ast_program);
-                            if (!target) return ResolvedType{.kind = TypeKind::Invalid};
-                            return resolve_final_shallow(target->module_path, target->name, target->crossed_boundary, target->location);
+                            return resolve_named_type_shallow(v, module_path);
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StructType>>) {
                             int slot = static_cast<int>(program.structs.size());
@@ -1267,8 +1503,120 @@ namespace sema {
     }
 
     auto resolve_type(const ast::Type &type, const std::string &module_path, Program &program, DiagnosticEngine &diag, const ast::Program *ast_program) -> ResolvedType {
-        Resolver resolver{program, diag, ast_program};
+        // Falls back to the ambient 'currently checking this generic instance's body'
+        // env (see Program::active_generic_env_stack's doc comment) when no explicit
+        // generic_env is available at this call site — this is what makes a local var
+        // decl's type annotation, a cast target, size_of's operand, etc. inside a generic
+        // function/method body resolve a bare type/value generic-param reference correctly,
+        // without threading a new parameter through check_expr/check_stmt.
+        const auto *env = program.active_generic_env_stack.empty() ? nullptr : program.active_generic_env_stack.back();
+        Resolver resolver{program, diag, ast_program, env, nullptr};
         return resolver.resolve_type_impl(type, module_path);
+    }
+
+    // Like resolve_type, but with 'env' active — used to resolve a generic function/method
+    // instance's own param/return types (e.g. 'N' in '-> [N]u8'), reusing the exact same
+    // generic_env machinery instantiate_generic_type already uses for a generic type's
+    // fields.
+    auto resolve_type_with_generic_env(const ast::Type &type, const std::string &module_path, Program &program,
+                                        DiagnosticEngine &diag, const GenericBindingEnv &env,
+                                        const std::vector<ast::GenericParam> *enclosing_generic_params) -> ResolvedType {
+        Resolver resolver{program, diag, nullptr, &env, enclosing_generic_params};
+        return resolver.resolve_type_impl(type, module_path);
+    }
+
+    auto instantiate_generic_type(Program &program, DiagnosticEngine &diag, const std::string &module_path,
+                                   const std::string &decl_name, std::vector<GenericArgValue> args,
+                                   const SourceLocation &use_loc) -> ResolvedType {
+        const GenericInstanceKey key{.module_path = module_path, .decl_name = decl_name, .args = args};
+
+        for (const auto &[k, ty] : program.generic_type_instance_lookup) {
+            if (k == key) return ty;
+        }
+
+        for (const auto &resolving_key : program.resolve_state.generic_type_resolving) {
+            if (resolving_key == key) {
+                diag.report_error(DiagnosticStage::Sema, use_loc,
+                    std::format("generic type instantiation cycle detected at '{}'", decl_name));
+                return ResolvedType{.kind = TypeKind::Invalid};
+            }
+        }
+
+        const auto mod_it = program.modules.find(module_path);
+        if (mod_it == program.modules.end()) {
+            diag.report_error(DiagnosticStage::Sema, use_loc, std::format("internal error: module '{}' not found", module_path));
+            return ResolvedType{.kind = TypeKind::Invalid};
+        }
+        const auto sym_it = mod_it->second.symbols.find(decl_name);
+        if (sym_it == mod_it->second.symbols.end()) {
+            diag.report_error(DiagnosticStage::Sema, use_loc, std::format("unknown type '{}'", decl_name));
+            return ResolvedType{.kind = TypeKind::Invalid};
+        }
+        const auto *ts = std::get_if<TypeSymbol>(&sym_it->second);
+        if (!ts || !ts->decl) {
+            diag.report_error(DiagnosticStage::Sema, use_loc, std::format("'{}' is not a type", decl_name));
+            return ResolvedType{.kind = TypeKind::Invalid};
+        }
+        const ast::TypeDecl &decl = *ts->decl;
+
+        if (args.size() != decl.generic_params.size()) {
+            diag.report_error(DiagnosticStage::Sema, use_loc, std::format(
+                "'{}' expects {} generic argument(s), got {}", decl_name, decl.generic_params.size(), args.size()));
+            return ResolvedType{.kind = TypeKind::Invalid};
+        }
+
+        // Bind each declared param name to its concrete argument, matched in declared order.
+        GenericBindingEnv env;
+        env.reserve(args.size());
+        for (size_t i = 0; i < args.size(); ++i) {
+            const auto &param = decl.generic_params[i];
+            const auto &arg = args[i];
+            env.push_back(GenericBinding{
+                .param_name = param.name,
+                .is_type = arg.is_type,
+                .type_value = arg.type_arg,
+                .const_value = arg.value_arg,
+                .const_value_type = arg.value_arg_scalar_type,
+            });
+        }
+
+        // Resolve the declaration's RHS with the substitution env active. Deliberately does
+        // NOT pre-allocate a slot first: resolve_type_impl's own StructType/EnumType/
+        // UnionType/BitsetType cases already allocate-and-lay-out a fresh slot for any
+        // by-value type expression they see (the same path an anonymous inline type takes)
+        // — this instantiation just reuses that machinery as-is, then tags the resulting
+        // slot below.
+        program.resolve_state.generic_type_resolving.push_back(key);
+        Resolver inner{program, diag, nullptr, &env, &decl.generic_params};
+        const auto result = inner.resolve_type_impl(decl.type, module_path);
+        program.resolve_state.generic_type_resolving.pop_back();
+
+        GenericInstanceInfo instance_info{.decl_module = module_path, .decl_name = decl_name, .args = args};
+        switch (result.kind) {
+        case TypeKind::Struct:
+            if (result.struct_index >= 0 && static_cast<size_t>(result.struct_index) < program.structs.size())
+                program.structs[result.struct_index].generic_instance = instance_info;
+            break;
+        case TypeKind::Enum:
+            if (result.enum_index >= 0 && static_cast<size_t>(result.enum_index) < program.enums.size())
+                program.enums[result.enum_index].generic_instance = instance_info;
+            break;
+        case TypeKind::Union:
+            if (result.union_index >= 0 && static_cast<size_t>(result.union_index) < program.unions.size())
+                program.unions[result.union_index].generic_instance = instance_info;
+            break;
+        case TypeKind::Bitset:
+            if (result.bitset_index >= 0 && static_cast<size_t>(result.bitset_index) < program.bitsets.size())
+                program.bitsets[result.bitset_index].generic_instance = instance_info;
+            break;
+        default:
+            break;
+        }
+
+        program.generic_type_instance_lookup.push_back({key, result});
+        program.generic_type_instances_needed.insert(result);
+
+        return result;
     }
 
     auto resolve_declared_type(const std::optional<ast::Type> &type, const std::optional<ast::Expr> &init,
@@ -1294,7 +1642,8 @@ namespace sema {
             return error(diag, array_lit->location, "cannot infer array length: initializer must not use '...' to fill remaining elements");
         }
 
-        Resolver resolver{program, diag};
+        const auto *env = program.active_generic_env_stack.empty() ? nullptr : program.active_generic_env_stack.back();
+        Resolver resolver{program, diag, nullptr, env, nullptr};
         const auto element = resolver.resolve_type_impl((*array_type)->base_type, module_path);
         const auto count = static_cast<uint64_t>(array_lit->values.size());
         return intern_array(program, element, count,
