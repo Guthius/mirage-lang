@@ -21,6 +21,7 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <optional>
 #include <string>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -64,7 +65,11 @@ namespace {
                      << "  --help               Show this help message\n";
     }
 
-    auto parse_options(const int argc, char *argv[]) -> Options {
+    // Returns nullopt on malformed input, having already reported why. Previously every
+    // one of these cases did a bare 'return options', so a mistake was silently accepted:
+    // 'mirage build p -o' (a shell-quoting slip) wrote to the default a.out, and a stray
+    // positional token stopped argument parsing entirely, so any flag after it was ignored.
+    auto parse_options(const int argc, char *argv[]) -> std::optional<Options> {
         Options options{};
 
         for (int i = 1; i < argc; ++i) {
@@ -84,25 +89,28 @@ namespace {
                 options.dump_ast = true;
             } else if (arg == "--opt") {
                 if (i + 1 >= argc) {
-                    return options;
+                    llvm::errs() << "mirage: '--opt' requires an argument of the form 'key=value'\n";
+                    return std::nullopt;
                 }
                 const std::string kv = argv[++i];
                 const auto eq = kv.find('=');
                 if (eq == std::string::npos) {
                     llvm::errs() << "mirage: --opt requires 'key=value'\n";
-                    return options;
+                    return std::nullopt;
                 }
                 options.opt_values[kv.substr(0, eq)] = kv.substr(eq + 1);
             } else if (arg == "-o" || arg == "--output") {
                 if (i + 1 >= argc) {
-                    return options;
+                    llvm::errs() << "mirage: '" << arg << "' requires an output filename\n";
+                    return std::nullopt;
                 }
                 options.output = argv[++i];
             } else if (arg.starts_with("--std=")) {
                 options.std_path = arg.substr(6);
             } else if (arg == "-l") {
                 if (i + 1 >= argc) {
-                    return options;
+                    llvm::errs() << "mirage: '-l' requires a library name\n";
+                    return std::nullopt;
                 }
                 options.libs.push_back(argv[++i]);
             } else if (arg.starts_with("-l") && arg.size() > 2) {
@@ -114,12 +122,13 @@ namespace {
                     options.action = Action::Run;
                 } else {
                     llvm::errs() << "mirage: unknown action '" << arg << "'; expected 'build' or 'run'\n";
-                    return options;
+                    return std::nullopt;
                 }
             } else if (options.module_path.empty()) {
                 options.module_path = arg;
             } else {
-                break;
+                llvm::errs() << "mirage: unexpected argument '" << arg << "'\n";
+                return std::nullopt;
             }
         }
 
@@ -411,12 +420,16 @@ namespace {
 }
 
 auto main(const int argc, char *argv[]) -> int {
-    if (argc < 3) {
-        print_usage(argv[0]);
-        return 1;
+    // Parse first, then validate. The old 'argc < 3' gate ran BEFORE parse_options, so
+    // 'mirage --help' (argc == 2) never reached the --help branch that exits 0: it printed
+    // the same usage text but exited 1, which any tooling checking the exit status reads as
+    // a failure.
+    auto parsed = parse_options(argc, argv);
+    if (!parsed) {
+        return 1; // parse_options already reported what was wrong
     }
 
-    auto options = parse_options(argc, argv);
+    auto options = *parsed;
     if (options.action == Action::None || options.module_path.empty()) {
         print_usage(argv[0]);
         return 1;
