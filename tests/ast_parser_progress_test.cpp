@@ -48,6 +48,27 @@ auto main() -> int {
     expect_terminates_with_errors("trait_method_params_stray_token", "type T = trait { fn foo(self, &x: i32) }\n");
     expect_terminates_with_errors("impl_method_params_stray_token", "impl T { fn foo(self, &x: i32) {} }\n");
 
+    // Shape 3: braced-initializer member loops. '{.A: 1}' enters the bitset member-list loop,
+    // whose expect(',') fails on the ':' without consuming it - and neither does the
+    // expect('.')/expect_identifier() pair at the top of the next iteration, so the loop sat
+    // on the same token forever. Found via examples/lexer/token.mir, which reaches it through
+    // a postfix 'kind match { ... }' form the grammar does not define.
+    expect_terminates_with_errors("bitset_member_list_bad_separator", "fn f() { const x := {.A: 1} }\n");
+    expect_terminates_with_errors("bitset_member_list_stray_token", "fn f() { const x := {.A ! .B} }\n");
+    expect_terminates_with_errors("match_operand_braced_initializer", "fn f() { match { .A: 1 } }\n");
+    expect_terminates_with_errors("postfix_match_form", "fn f(k: i32) -> i32 { return k match { .A: 1, .B: 2 } }\n");
+    expect_terminates_with_errors("struct_field_list_bad_separator", "fn f() { const x := {.a = 1 : 2} }\n");
+
+    // Shape 4: the remaining delimiter-terminated list loops that were still unguarded.
+    expect_terminates_with_errors("call_args_stray_token", "fn f() { g(1 ! 2) }\n");
+    expect_terminates_with_errors("multi_return_stray_token", "fn f() -> ( ! ) {}\n");
+    expect_terminates_with_errors("fnptr_params_stray_token", "type F = fn( ! ) -> i32\n");
+    expect_terminates_with_errors("fnptr_multi_return_stray_token", "type F = fn() -> ( ! )\n");
+    expect_terminates_with_errors("switch_arms_stray_token", "fn f() { switch y { ! } }\n");
+    expect_terminates_with_errors("tagged_payload_stray_token", "fn f() { const x := .V{.a = 1 ! } }\n");
+    expect_terminates_with_errors("qualified_payload_stray_token", "fn f() { const x := T.V{.a = 1 ! } }\n");
+    expect_terminates_with_errors("match_arms_stray_token", "fn f() { const x := match y { ! } }\n");
+
     if (failures > 0) {
         std::fprintf(stderr, "%d test(s) failed\n", failures);
         return 1;

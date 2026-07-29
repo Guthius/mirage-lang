@@ -714,6 +714,7 @@ namespace ast {
                 if (parser.peek_next().kind == TokenKind::Equal) {
                     std::vector<StructExpr::Field> fields;
                     while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                        const LoopProgressGuard progress_guard(parser);
                         parser.expect(TokenKind::Dot, "'.'");
                         const auto value_name = parser.expect_identifier();
 
@@ -745,6 +746,7 @@ namespace ast {
 
                 std::vector<std::string> members;
                 while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                    const LoopProgressGuard progress_guard(parser);
                     parser.expect(TokenKind::Dot, "'.'");
                     members.push_back(parser.expect_identifier());
 
@@ -1314,6 +1316,7 @@ namespace ast {
                     parser.advance(); // consume '{'
                     std::vector<StructExpr::Field> fields;
                     while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                        const LoopProgressGuard progress_guard(parser);
                         parser.expect(TokenKind::Dot, "'.'");
                         const auto field_name = parser.expect_identifier();
                         parser.expect(TokenKind::Equal, "'='");
@@ -1389,6 +1392,7 @@ namespace ast {
 
                 std::vector<MatchExpr::Arm> arms;
                 while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                    const LoopProgressGuard progress_guard(parser);
                     const auto arm_location = parser.current_location();
 
                     // Parse arm pattern
@@ -1548,6 +1552,7 @@ namespace ast {
 
                     std::vector<Expr> args;
                     while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                        const LoopProgressGuard progress_guard(parser);
                         // '...' here is call-argument spread (position 5, see parse_function_params'
                         // comment for the full list of '...' positions) — forwards an existing slice
                         // as a variadic argument, written as a postfix suffix: 'expr...'. Legality
@@ -1601,6 +1606,7 @@ namespace ast {
                             parser.advance(); // consume '{'
                             std::vector<StructExpr::Field> fields;
                             while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                                const LoopProgressGuard progress_guard(parser);
                                 parser.expect(TokenKind::Dot, "'.'");
                                 const auto field_name = parser.expect_identifier();
                                 parser.expect(TokenKind::Equal, "'='");
@@ -2482,6 +2488,7 @@ namespace ast {
                 if (parser.match(TokenKind::LParen)) {
                     // Multi-return: -> (T1, T2, ...) or -> (name1: T1, name2: T2, ...)
                     while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                        const LoopProgressGuard progress_guard(parser);
                         parse_one();
                         skip_semicolons(parser);
                         if (!parser.check(TokenKind::RParen)) {
@@ -2645,6 +2652,7 @@ namespace ast {
             bool is_variadic = false;
 
             while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                const LoopProgressGuard progress_guard(parser);
                 if (parser.check(TokenKind::DotDotDot)) {
                     parser.advance();
                     is_variadic = true;
@@ -2674,6 +2682,7 @@ namespace ast {
                 if (parser.match(TokenKind::LParen)) {
                     // Multi-return: -> (T1, T2, ...)
                     while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                        const LoopProgressGuard progress_guard(parser);
                         return_types.push_back(parse_type(parser));
                         skip_semicolons(parser);
                         if (!parser.check(TokenKind::RParen)) {
@@ -3057,6 +3066,7 @@ namespace ast {
 
         std::vector<SwitchStmt::Arm> arms;
         while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+            const LoopProgressGuard progress_guard(parser);
             const auto arm_location = parser.current_location();
 
             auto arm_pattern = [&]() -> MatchExpr::ArmPattern {

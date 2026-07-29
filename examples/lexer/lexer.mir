@@ -1,5 +1,5 @@
-
-
-pub fn tokenize(source: []u8, filename: []u8) -> []token {
-
+// Sketch of a tokenizer front-end for the Token/TokenKind types in token.mir. The body is
+// still a stub; it exists so the module type-checks and codegens as a library.
+pub fn tokenize(source: []u8, filename: []u8) -> []Token {
+    return default
 }

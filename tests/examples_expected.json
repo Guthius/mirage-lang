@@ -532,9 +532,7 @@
   },
   "lexer": {
     "action": "emit-ir",
-    "exit": "timeout",
-    "known_broken": "pre-existing on master: token.mir:16 uses a postfix 'kind match {...}' form that docs/grammar.md:646 does not define (match_expr is prefix-only); the parser spins forever instead of rejecting it",
-    "timeout": 5
+    "exit": 0
   },
   "mem": {
     "action": "emit-ir",
