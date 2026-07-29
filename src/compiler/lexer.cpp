@@ -74,10 +74,15 @@ namespace lexer {
             {"any",       TokenKind::KwAny      },
         };
 
-        auto is_digit(const char ch) -> bool { return std::isdigit(ch) != 0; }
-        auto is_hex_digit(const char ch) -> bool { return std::isxdigit(ch) != 0; }
-        auto is_alpha(const char ch) -> bool { return std::isalpha(ch) != 0; }
-        auto is_alpha_numeric(const char ch) -> bool { return std::isalnum(ch) != 0; }
+        // The <cctype> classifiers take an int whose value must be representable as
+        // unsigned char (or EOF); passing a plain char is undefined behaviour for any byte
+        // with the high bit set -- non-ASCII text, a stray UTF-8 continuation byte, or a
+        // UTF-8 BOM at the start of a file. asm_lexer.cpp already casts everywhere; these
+        // four are the main lexer's equivalents.
+        auto is_digit(const char ch) -> bool { return std::isdigit(static_cast<unsigned char>(ch)) != 0; }
+        auto is_hex_digit(const char ch) -> bool { return std::isxdigit(static_cast<unsigned char>(ch)) != 0; }
+        auto is_alpha(const char ch) -> bool { return std::isalpha(static_cast<unsigned char>(ch)) != 0; }
+        auto is_alpha_numeric(const char ch) -> bool { return std::isalnum(static_cast<unsigned char>(ch)) != 0; }
 
         // Go-style automatic semicolon insertion: a virtual ';' is inserted after the last
         // token on a line if that token could legally end a statement/expression. Kept in sync

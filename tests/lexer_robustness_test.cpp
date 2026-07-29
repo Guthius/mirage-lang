@@ -166,6 +166,28 @@ namespace {
         check(semicolons == 2, "ASI still fires across a stray byte");
     }
 
+    // The <cctype> classifiers are undefined for a plain char with the high bit set, so
+    // any high-bit byte reaching is_digit/is_alpha/... was UB. These exercise the three
+    // realistic sources of such bytes.
+    void test_high_bit_bytes_are_handled() {
+        // A UTF-8 BOM before otherwise valid source.
+        const auto bom = lex("\xEF\xBB\xBFpub fn f() {}\n");
+        check(find_first(bom.tokens, TokenKind::Identifier) != nullptr,
+              "source after a UTF-8 BOM is still lexed");
+
+        // Non-ASCII inside a string literal is just payload bytes.
+        const auto in_string = lex("s = \"caf\xC3\xA9\"\n");
+        check(in_string.error_count == 0, "non-ASCII inside a string literal is not an error");
+        check(find_first(in_string.tokens, TokenKind::StringLiteral) != nullptr,
+              "string literal with non-ASCII content still lexes");
+
+        // Non-ASCII inside a comment is skipped with the rest of the comment.
+        const auto in_comment = lex("// caf\xC3\xA9\nx = 1\n");
+        check(in_comment.error_count == 0, "non-ASCII inside a comment is not an error");
+        check(find_first(in_comment.tokens, TokenKind::Identifier) != nullptr,
+              "code after a comment containing non-ASCII still lexes");
+    }
+
     // Escapes inside a well-formed literal must keep working unchanged.
     void test_valid_escapes_still_lex() {
         const auto result = lex("a = \"x\\\"y\"\nb = '\\n'\nc = '\\x41'\n");
@@ -182,6 +204,7 @@ auto main() -> int {
     test_backslash_before_newline_does_not_continue_literal();
     test_stray_byte_does_not_truncate_the_file();
     test_stray_byte_preserves_asi_state();
+    test_high_bit_bytes_are_handled();
     test_valid_escapes_still_lex();
 
     if (failures > 0) {
