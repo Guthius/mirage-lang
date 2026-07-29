@@ -21,6 +21,22 @@ namespace sema {
                                       const SourceLocation &loc, const int loop_depth, const int defer_loop_base,
                                       const ResolvedType *fn_error_type) -> std::optional<std::vector<GenericArgValue>>;
 
+    // Which error-typed local a condition narrows, and to what state in each branch.
+    // Declared up here, at the same scope as its definition further below, so check_expr's
+    // TernaryExpr/WhenExpr cases can apply the same narrowing check_stmt's IfStmt/WhileStmt do.
+    struct ConditionNarrowing {
+        std::string var_name;
+        ErrorState then_state;
+        ErrorState else_state;
+        // Set only for the two SIMPLE (non-compound) shapes 'err' / '!err'. Gates both the
+        // early-return-narrowing rule and the redundant-check warning — per spec, neither
+        // applies to compound conditions like 'err && x'.
+        bool is_exact_err = false;
+        bool is_exact_not_err = false;
+    };
+
+    auto compute_condition_narrowing(const ast::Expr &condition, LocalScope &locals, const Program &program) -> std::optional<ConditionNarrowing>;
+
     namespace {
         struct LvalueInfo {
             ResolvedType type;
@@ -317,6 +333,7 @@ namespace sema {
         }
 
         auto contains_undefined(const ast::Expr &expr) -> bool;
+
 
         auto contains_undefined_in_braced(const ast::BracedInitializerExpr &bi) -> bool {
             return std::visit([]<typename BV>(const BV &bv) -> bool {
@@ -1921,6 +1938,25 @@ namespace sema {
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
                     check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
+                    // Typestate narrowing, mirroring IfStmt/WhileStmt in check_stmt: inside
+                    // 'e ? ... : ...' the then-branch knows 'e' is Failed and the else-branch
+                    // knows it is Ok, exactly as the statement form does. Without this the
+                    // typed-error system was invisible in expression position -- 'if e { match e
+                    // {...} }' compiled while the identical 'e ? match e {...} : 0' failed with
+                    // "cannot match on an error value of unknown state".
+                    //
+                    // Each branch gets its own copy of locals, as IfStmt does, so a narrowing
+                    // cannot leak into the sibling branch or outward. No merge afterwards: an
+                    // expression's branches do not join back into the enclosing scope's state
+                    // the way statement branches do.
+                    const auto narrowing = compute_condition_narrowing(v->condition, locals, program);
+                    auto then_locals = locals;
+                    auto else_locals = locals;
+                    if (narrowing) {
+                        if (auto *b = find_error_local(narrowing->var_name, then_locals, program)) b->err_state = narrowing->then_state;
+                        if (auto *b = find_error_local(narrowing->var_name, else_locals, program)) b->err_state = narrowing->else_state;
+                    }
+
                     // Check the non-literal branch first when exactly one branch is a coercible
                     // literal, so the literal unifies against the other branch's real type --
                     // the same ordering swap BinaryExpr does above. Without it, 'cond ? 5 : x'
@@ -1930,11 +1966,11 @@ namespace sema {
                     // its operands swapped, compiled fine.
                     ResolvedType then_ty, else_ty;
                     if (is_coercible_literal(v->then_expr) && !is_coercible_literal(v->else_expr)) {
-                        else_ty = check_expr(v->else_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
-                        then_ty = check_expr(v->then_expr, locals, module_path, program, diag, else_ty, loop_depth, defer_loop_base, fn_error_type);
+                        else_ty = check_expr(v->else_expr, else_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+                        then_ty = check_expr(v->then_expr, then_locals, module_path, program, diag, else_ty, loop_depth, defer_loop_base, fn_error_type);
                     } else {
-                        then_ty = check_expr(v->then_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
-                        else_ty = check_expr(v->else_expr, locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
+                        then_ty = check_expr(v->then_expr, then_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+                        else_ty = check_expr(v->else_expr, else_locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
                     }
                     if (then_ty != else_ty) {
                         return error(diag, v->location, "ternary branches have different types");
@@ -1949,14 +1985,23 @@ namespace sema {
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
                     check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
-                    // Same literal-coercion ordering as TernaryExpr above.
+                    // Same literal-coercion ordering and same per-branch typestate narrowing as
+                    // TernaryExpr above.
+                    const auto narrowing = compute_condition_narrowing(v->condition, locals, program);
+                    auto then_locals = locals;
+                    auto else_locals = locals;
+                    if (narrowing) {
+                        if (auto *b = find_error_local(narrowing->var_name, then_locals, program)) b->err_state = narrowing->then_state;
+                        if (auto *b = find_error_local(narrowing->var_name, else_locals, program)) b->err_state = narrowing->else_state;
+                    }
+
                     ResolvedType then_ty, else_ty;
                     if (is_coercible_literal(v->then_expr) && !is_coercible_literal(v->else_expr)) {
-                        else_ty = check_expr(v->else_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
-                        then_ty = check_expr(v->then_expr, locals, module_path, program, diag, else_ty, loop_depth, defer_loop_base, fn_error_type);
+                        else_ty = check_expr(v->else_expr, else_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+                        then_ty = check_expr(v->then_expr, then_locals, module_path, program, diag, else_ty, loop_depth, defer_loop_base, fn_error_type);
                     } else {
-                        then_ty = check_expr(v->then_expr, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
-                        else_ty = check_expr(v->else_expr, locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
+                        then_ty = check_expr(v->then_expr, then_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+                        else_ty = check_expr(v->else_expr, else_locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
                     }
                     if (then_ty != else_ty) {
                         return error(diag, v->location, "'when' expression branches have different types");
@@ -3556,16 +3601,6 @@ namespace sema {
     // '!err && x', '!err || x') narrows its subject variable to in the then/else branches.
     // 'is_exact_not_err' gates the early-return-narrowing rule below — per spec it applies
     // ONLY to a condition that is exactly '!err', not any compound form.
-    struct ConditionNarrowing {
-        std::string var_name;
-        ErrorState then_state;
-        ErrorState else_state;
-        // Set only for the two SIMPLE (non-compound) shapes 'err' / '!err'. Gates both the
-        // early-return-narrowing rule and the redundant-check warning — per spec, neither
-        // applies to compound conditions like 'err && x'.
-        bool is_exact_err = false;
-        bool is_exact_not_err = false;
-    };
 
     auto compute_condition_narrowing(const ast::Expr &condition, LocalScope &locals, const Program &program) -> std::optional<ConditionNarrowing> {
         if (const auto *ident = std::get_if<ast::IdentExpr>(&condition)) {

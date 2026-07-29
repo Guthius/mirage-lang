@@ -1,0 +1,39 @@
+// example_error_typestate_expr.mir — the typed-error system's typestate narrowing applied in
+// EXPRESSION position (ternary and 'when'), not just statement position.
+//
+// check_stmt's IfStmt/WhileStmt call compute_condition_narrowing, so inside 'if e { ... }' the
+// body knows 'e' is Failed and may match on it. TernaryExpr and WhenExpr never did, so the
+// semantically identical expression form failed with "cannot match on an error value of
+// unknown state" — the error system was simply invisible to expressions.
+//
+// Both branches get their own copy of the local scope, as the statement form does, so a
+// narrowing cannot leak into the sibling branch.
+//
+// Expected: exit code 3 — 1 from the 'if' form, 1 from the ternary, 1 from the 'when'.
+
+type Fault = enum { Bad Worse }
+
+pub fn risky(flag: bool) -> error(Fault) {
+    if flag {
+        return_err .Bad
+    }
+    return_ok
+}
+
+pub fn main() -> i32 {
+    const e := risky(true)
+
+    // Statement form: always worked.
+    mut a: i32 = 0
+    if e {
+        a = match e { .Bad: 1, .Worse: 2 }
+    }
+
+    // Ternary form: used to fail to compile.
+    const b := e ? match e { .Bad: 1, .Worse: 2 } : 0
+
+    // 'when' expression form: same gap.
+    const c := match e { .Bad: 1, .Worse: 2 } when e else 0
+
+    return a + b + c
+}

@@ -278,6 +278,10 @@
     "action": "run",
     "exit": 0
   },
+  "example_error_typestate_expr": {
+    "action": "run",
+    "exit": 3
+  },
   "example_error_union": {
     "action": "run",
     "exit": 0
