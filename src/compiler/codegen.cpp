@@ -1585,8 +1585,8 @@ namespace codegen {
             // Declares one llvm::Function per reachable generic function/method instantiation
             // — mirrors declare_globals_and_functions()/declare_methods() exactly, just
             // walking sema_program_.generic_fn_instances_needed (the "sema decided this is
-            // live" set — see Program::generic_type_instances_needed's doc comment for the
-            // same posture applied to types) instead of ProgramModule::symbols/methods. Only
+            // live" set; note the type side has no equivalent gating — see the note where
+            // that set would live in sema.hpp) instead of ProgramModule::symbols/methods. Only
             // ever emits the instantiations sema actually recorded as reached — the same
             // "unselected branch never visited" posture 'when' uses for dead branches,
             // except stricter (an instantiation not in this set was never even checked, not

@@ -659,14 +659,17 @@ namespace sema {
         // instantiate_generic_type; consulted before ever allocating a new struct/enum/
         // union/bitset slot for a given (decl, args) pair.
         std::vector<std::pair<GenericInstanceKey, ResolvedType>> generic_type_instance_lookup;
-        // Which monomorphized type slots were actually reached during sema (the same
-        // "sema decides what's live, codegen only replays" split types_needing_info uses
-        // above) — codegen's instantiation loop walks only these, mirroring emit_when_stmt's
-        // "unselected branch never visited" posture, except stricter: an instantiation not
-        // in this set was never even type-checked, not merely never emitted (see spec.md
-        // §22, "No Bounds in v1"). A ResolvedType here is always Struct/Enum/Union/Bitset
-        // with generic_instance set on the corresponding *Info.
-        std::unordered_set<ResolvedType> generic_type_instances_needed;
+        // NOTE: there is deliberately no 'generic_type_instances_needed' liveness set here,
+        // unlike generic_fn_instances_needed below. One existed and was written on every type
+        // instantiation, but nothing ever read it: codegen's declare_structs()/declare_unions()
+        // iterate all of program.structs/unions/enums/bitsets unconditionally, so a
+        // monomorphized type slot is emitted because it exists, not because sema marked it
+        // reached. Its doc comment claimed the opposite, which was the actual harm.
+        //
+        // Over-inclusive codegen is correct, just not minimal — a generic type instantiated
+        // only in an unselected 'when' branch is never created in the first place, since sema
+        // never resolves that branch. If dead-type elimination is wanted later, reintroduce
+        // the set *and* the codegen loop that consults it in the same change.
 
         // Generic function/method instantiation cache + liveness, mirroring the type-side
         // tables immediately above. 'generic_fn_instance_lookup' maps a GenericInstanceKey to
@@ -877,7 +880,7 @@ namespace sema {
     // keyed rather than plain-equality); on miss, allocates a fresh struct/enum/union/bitset
     // slot exactly like a non-generic declare_type, resolves the declaration's RHS with a
     // GenericBindingEnv built from (decl's generic_params, args) active, and records the new
-    // slot in Program::generic_type_instances_needed. Cycle-guarded by (decl_name, args) —
+    // slot in Program::generic_type_instance_lookup. Cycle-guarded by (decl_name, args) —
     // see type_resolver.cpp. Reports a sema error and returns TypeKind::Invalid if 'args'
     // doesn't match 'decl_name's declared arity/param kinds.
     auto instantiate_generic_type(Program &program, DiagnosticEngine &diag, const std::string &module_path,
