@@ -962,6 +962,30 @@ namespace ast {
         // attribute names, no per-name argument list (an argument list here, e.g.
         // '@(section("..."))', is a parse error — only the single '@name(args)' form in
         // parse_single_attribute takes arguments).
+        // Consumes a '(' ... ')' span (best-effort depth tracking) so a single malformed
+        // construct doesn't cascade into spurious follow-on parse errors. Mirrors
+        // asm_parser.cpp's skip_bracketed_span. No-op unless positioned on a '('.
+        auto skip_parenthesized_span(Parser &parser) -> void {
+            if (!parser.check(TokenKind::LParen)) {
+                return;
+            }
+
+            parser.advance(); // '('
+            int depth = 1;
+            while (!parser.at_end() && depth > 0) {
+                if (parser.check(TokenKind::LParen)) {
+                    ++depth;
+                } else if (parser.check(TokenKind::RParen)) {
+                    --depth;
+                    if (depth == 0) {
+                        parser.advance();
+                        return;
+                    }
+                }
+                parser.advance();
+            }
+        }
+
         auto parse_grouped_attributes(Parser &parser) -> std::vector<Attribute> {
             parser.expect(TokenKind::At, "'@'");
             parser.expect(TokenKind::LParen, "'('");
@@ -976,6 +1000,10 @@ namespace ast {
                     parser.report_error(parser.current_location(),
                         "a grouped attribute ('@(...)') cannot take arguments; use the single "
                         "'@name(args)' form instead");
+                    // Consume the offending argument list. Leaving it made the recovery loop
+                    // exit, expect(RParen) fail on the same '(', and control return to
+                    // parse_decl still sitting on it -- one mistake produced seven diagnostics.
+                    skip_parenthesized_span(parser);
                 }
 
                 attrs.push_back(Attribute{.name = name, .args = {}, .location = location});

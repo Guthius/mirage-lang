@@ -1,0 +1,21 @@
+// example_attr_grouped_with_args.mir — REJECTION CASE. The grouped attribute clause
+// '@(name1, name2)' takes bare names only; an argument list belongs to the single
+// '@name(args)' form. Writing '@(section("x"))' is a parse error.
+//
+// This fixture exists for the *recovery*, not the rule. The offending '(...)' span used to
+// be reported but not consumed, so the recovery loop exited, expect(')') failed on the same
+// '(', and control returned to parse_decl still sitting on it — one mistake produced seven
+// diagnostics ("cannot take arguments", "expected ')'", "attributes are only allowed on 'fn'
+// declarations", then four "expected declaration" errors walking the leftover tokens).
+//
+// Expected: compilation fails with exactly one error:
+//   error: a grouped attribute ('@(...)') cannot take arguments; use the single
+//          '@name(args)' form instead
+
+@(naked, section("x"), no_return)
+pub fn f() {
+}
+
+pub fn main() -> i32 {
+    return 0
+}

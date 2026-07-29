@@ -112,6 +112,10 @@
     "action": "build",
     "exit": 1
   },
+  "example_attr_grouped_with_args": {
+    "action": "build",
+    "exit": 1
+  },
   "example_attr_init_bad_return": {
     "action": "build",
     "exit": 1
