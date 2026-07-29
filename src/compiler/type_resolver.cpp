@@ -1341,6 +1341,15 @@ namespace sema {
                     return a.union_index < b.union_index;
                 });
 
+                // Drop the duplicates the loop above reported. Keeping them built a union with
+                // two identical variants, so the error-recovery path carried a type that could
+                // never be valid. No correct program observes this (ok is already false by
+                // now), but it keeps the recovery type internally consistent -- and it means
+                // 'error(A|A)' interns to the same entry as 'error(A)' rather than a second,
+                // parallel one.
+                const auto duplicates = std::ranges::unique(sorted_members);
+                sorted_members.erase(duplicates.begin(), duplicates.end());
+
                 for (const auto &[key, index] : program.error_unions) {
                     if (key == sorted_members) {
                         return ResolvedType{.kind = TypeKind::Union, .union_index = index};
@@ -1604,7 +1613,13 @@ namespace sema {
                             layout_bitset(module_path, slot, v);
                             return ResolvedType{.kind = TypeKind::Bitset, .bitset_index = slot};
                         } else {
-                            return ResolvedType{.kind = TypeKind::Invalid};
+                            // Exhaustiveness guard, matching walk_expr_for_foreign_refs in
+                            // sema_attributes.cpp. All 13 ast::Type alternatives are handled
+                            // above; a 14th added later would previously have fallen in here and
+                            // silently resolved to Invalid, surfacing as a confusing "unknown
+                            // type" much further along. Now it is a compile error at the site
+                            // that needs updating.
+                            static_assert(!sizeof(V), "resolve_type_impl: unhandled ast::Type alternative");
                         }
                     },
                     type);
@@ -1793,7 +1808,6 @@ namespace sema {
         }
 
         program.generic_type_instance_lookup.push_back({key, result});
-        program.generic_type_instances_needed.insert(result);
 
         return result;
     }
