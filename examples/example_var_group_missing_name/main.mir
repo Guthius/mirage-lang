@@ -1,0 +1,25 @@
+// example_var_group_missing_name.mir — REJECTION CASE. A declaration group must name every
+// slot; '_' is the documented way to discard one (grammar.md note 7).
+//
+// The comma-scanning loop used to silently accept an empty name slot whenever two commas
+// appeared back to back or a trailing comma preceded ':='. sema treats an empty name exactly
+// like '_', so 'a,, b := f()' and 'a, := f()' compiled as if '_' had been written — a second,
+// undocumented spelling of the discard that is far more often a stray keystroke than an
+// intentional one.
+//
+// Expected: compilation fails with
+//   error: expected a name or '_' in a declaration group; use '_' to discard a value
+
+pub fn pair() -> (i32, i32) {
+    return 1, 2
+}
+
+pub fn main() -> i32 {
+    // Double comma: the middle slot has no name.
+    const a,, b := pair()
+
+    // Trailing comma before ':=': the last slot has no name.
+    const c, := pair()
+
+    return a + b + c
+}

@@ -502,6 +502,10 @@
     "action": "run",
     "exit": 0
   },
+  "example_var_group_missing_name": {
+    "action": "build",
+    "exit": 1
+  },
   "example_varargs": {
     "action": "run",
     "exit": 0

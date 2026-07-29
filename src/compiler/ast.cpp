@@ -2116,12 +2116,18 @@ namespace ast {
 
             names.push_back(std::move(first_name));
             while (parser.match(TokenKind::Comma) && !parser.at_end()) {
-                if (parser.check(TokenKind::ColonEqual)) {
+                // A missing name is an error, not a second spelling of the '_' discard.
+                // Both of these gaps used to be accepted silently and treated exactly like
+                // '_' by sema, which meant 'a,, b := f()' and 'a, := f()' -- far more often
+                // a stray keystroke than an intentional discard -- compiled without comment.
+                // '_' is the documented discard (grammar.md note 7) and stays required.
+                if (parser.check(TokenKind::ColonEqual) || parser.check(TokenKind::Comma)) {
+                    parser.report_error(parser.current_location(),
+                        "expected a name or '_' in a declaration group; use '_' to discard a value");
                     names.emplace_back();
-                    break;
-                }
-                if (parser.check(TokenKind::Comma)) {
-                    names.emplace_back();
+                    if (parser.check(TokenKind::ColonEqual)) {
+                        break;
+                    }
                     continue;
                 }
                 names.push_back(parser.expect_identifier());
