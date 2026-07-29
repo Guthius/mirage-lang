@@ -3651,6 +3651,16 @@ namespace sema {
                 }
             }
         }
+        // No narrowing for any other condition shape. Deliberate v1 scope, not an oversight:
+        // the error variable is recognized only as the whole condition ('err', '!err') or as
+        // the LEFTMOST operand of a single '&&'/'||'. So 'x && err', 'err1 && err2' and any
+        // deeper nesting narrow nothing, and the subsequent 'match err' reports "unknown
+        // state" with no hint that the condition's shape is why.
+        //
+        // Widening this means deciding what a compound condition proves about each operand --
+        // '||' in particular proves nothing about either in the then-branch -- which is a spec
+        // question, not a code change. Consistent with the other narrow-v1-subset admissions
+        // in this file (generic inference); recorded as follow-up work.
         return std::nullopt;
     }
 
@@ -4256,6 +4266,16 @@ namespace sema {
                     }
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SwitchStmt>>) {
+                    // Exhaustiveness note: unlike 'match', 'switch' does NOT require an enum or
+                    // tagged-union operand to cover every variant, and a switch with no '_' arm
+                    // and a missing variant compiles silently. That is deliberate and follows
+                    // from what the two constructs are: 'match' is an EXPRESSION and must
+                    // produce a value on every path, so a gap has no answer; 'switch' is a
+                    // STATEMENT, and falling through all arms is simply doing nothing. The same
+                    // reasoning is already stated in-code for the bool case below.
+                    //
+                    // Called out here because the asymmetry with match's headline exhaustiveness
+                    // checking is surprising enough to look like an oversight.
                     auto operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
 
                     // Transparent error-value matching — see the identical comment in
