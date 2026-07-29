@@ -175,6 +175,8 @@ add_executable(mirage-lsp
         src/lsp/handlers/definition.cpp
         src/lsp/handlers/completion.hpp
         src/lsp/handlers/completion.cpp
+        src/lsp/handlers/references.hpp
+        src/lsp/handlers/references.cpp
         src/lsp/handlers/inlay_hint.hpp
         src/lsp/handlers/inlay_hint.cpp
         $<TARGET_OBJECTS:mirage_core>

@@ -42,11 +42,17 @@ namespace lsp::handlers {
             case Resolution::Kind::UnionMember:
                 return a.union_member == b.union_member;
             case Resolution::Kind::Method:
-                return a.method == b.method;
+                // A trait-handle dispatch resolves to a TraitMethodInfo with no MethodInfo, so
+                // comparing 'method' alone would call two different trait methods identical
+                // (both null).
+                return a.method == b.method && a.trait_method == b.trait_method;
             case Resolution::Kind::EnumField:
             case Resolution::Kind::Variant:
+                // bitset_index is compared too: a bitset flag resolves to Kind::EnumField with
+                // the BITSET as its type (enum_index/union_index both -1), so without it two
+                // unrelated bitsets' same-named flags would be treated as the same declaration.
                 return a.name == b.name && a.type.kind == b.type.kind && a.type.enum_index == b.type.enum_index &&
-                       a.type.union_index == b.type.union_index;
+                       a.type.union_index == b.type.union_index && a.type.bitset_index == b.type.bitset_index;
             default:
                 return false; // Builtin/None are not meaningful reference targets
             }
@@ -92,6 +98,41 @@ namespace lsp::handlers {
                     }
                     return;
                 }
+                // Bare '.Variant' / '.Flag'. This is the dominant spelling in real code --
+                // every enum, tagged-union and bitset example in the repo uses it -- and the
+                // walker did not look at it at all, so "Find All References" on an enum field
+                // or a variant found only the rare fully-qualified 'Type.Variant' usages and
+                // typically reported zero results for a symbol used everywhere.
+                //
+                // The contextual type is recorded on the expression itself by sema, so the same
+                // match_enum_or_variant path the qualified form uses applies directly. That
+                // also means bitset flags are covered as soon as LSPH-2 taught that function
+                // about TypeKind::Bitset.
+                if (const auto *dot = std::get_if<ast::DotIdentExpr>(&expr)) {
+                    if (const auto ty_it = ctx.sema_module.expr_types.find(sema::get_expr_key(expr));
+                        ty_it != ctx.sema_module.expr_types.end()) {
+                        if (auto res = match_enum_or_variant(ty_it->second, dot->name, program);
+                            res.kind != Resolution::Kind::None && same_declaration(res, target)) {
+                            out.push_back(location_json(dot->location));
+                        }
+                    }
+                    return;
+                }
+
+                // '.Variant{...}' / '.Variant(...)' -- the payload-carrying spelling of the
+                // same thing.
+                if (const auto *tagged_ptr = std::get_if<std::unique_ptr<ast::TaggedVariantExpr>>(&expr)) {
+                    const auto &tagged = **tagged_ptr;
+                    if (const auto ty_it = ctx.sema_module.expr_types.find(sema::get_expr_key(expr));
+                        ty_it != ctx.sema_module.expr_types.end()) {
+                        if (auto res = match_enum_or_variant(ty_it->second, tagged.variant_name, program);
+                            res.kind != Resolution::Kind::None && same_declaration(res, target)) {
+                            out.push_back(location_json(tagged.location));
+                        }
+                    }
+                    return;
+                }
+
                 const auto *member_ptr = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr);
                 if (!member_ptr) return;
                 const auto &member = **member_ptr;
@@ -119,14 +160,26 @@ namespace lsp::handlers {
                     }
                 }
             };
-            walk_stmt(scope.body ? *scope.body : ast::Stmt{ast::ExprStmt{}}, visitor);
+            // Was 'walk_stmt(scope.body ? *scope.body : ast::Stmt{ast::ExprStmt{}}, visitor)',
+            // which does not compile: the ternary's operands are a const lvalue reference and a
+            // temporary, so it materializes a copy of ast::Stmt -- a variant of unique_ptrs,
+            // whose copy constructor is deleted. It went unnoticed because this file was never
+            // in the build.
+            if (scope.body) {
+                walk_stmt(*scope.body, visitor);
+            }
         }
     }
 
     auto handle_references(analysis::ProgramResult &result, const std::string &module_path, const std::string &path,
                             const size_t line, const size_t column, const bool include_declaration) -> json {
         const auto target = resolve_at(result, module_path, path, line, column);
-        if (target.kind == Resolution::Kind::None || target.kind == Resolution::Kind::Builtin) {
+        // AsmRegister joins None/Builtin here (LSPH-11): it is synthetic, has no declaration
+        // site, and same_declaration's default arm rejects it anyway -- so without this guard
+        // the request walked every module in the import closure doing real resolution work
+        // before returning the empty array it was always going to return.
+        if (target.kind == Resolution::Kind::None || target.kind == Resolution::Kind::Builtin ||
+            target.kind == Resolution::Kind::AsmRegister) {
             return json::array();
         }
 
@@ -219,12 +272,36 @@ namespace lsp::handlers {
                         }
                     }
                 } else if (const auto *trait_impl = std::get_if<ast::TraitImplDecl>(&decl)) {
+                    // Look the method's own MethodInfo up so 'self' gets its real type and, with
+                    // includeDeclaration, the 'fn' line itself is reported -- both of which the
+                    // ImplDecl branch above already did. Without it, "Find All References" on a
+                    // trait-impl method never included its declaration.
+                    const sema::TraitImplInfo *impl_info = nullptr;
+                    if (const auto it = result.sema_program.trait_impls_by_type.find({mod_path, trait_impl->type_name.name});
+                        it != result.sema_program.trait_impls_by_type.end()) {
+                        for (const auto &candidate : it->second) {
+                            if (candidate.trait_name == trait_impl->trait_name.name) {
+                                impl_info = &candidate;
+                                break;
+                            }
+                        }
+                    }
+
                     for (const auto &fn : trait_impl->functions) {
+                        const sema::MethodInfo *sym = nullptr;
+                        if (impl_info) {
+                            if (const auto mit = impl_info->methods.find(fn.name); mit != impl_info->methods.end()) {
+                                sym = &mit->second;
+                            }
+                        }
                         std::vector<ParamInfo> params;
-                        params.push_back({"self", {}, fn.self_location});
+                        params.push_back({"self", sym ? sym->self_type : sema::ResolvedType{}, fn.self_location});
                         for (const auto &p : fn.params) params.push_back({p.name, {}, p.location});
                         collect_references_in_scope({.params = std::move(params), .body = &fn.body}, ctx, mod_path,
                                                      result.sema_program, target, out);
+                        if (include_declaration && target.kind == Resolution::Kind::Method && target.method == sym) {
+                            out.push_back(location_json(fn.location));
+                        }
                     }
                 }
             }

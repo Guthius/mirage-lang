@@ -7,6 +7,7 @@
 #include "handlers/diagnostics.hpp"
 #include "handlers/hover.hpp"
 #include "handlers/inlay_hint.hpp"
+#include "handlers/references.hpp"
 #include "task_queue.hpp"
 #include "transport.hpp"
 #include "uri.hpp"

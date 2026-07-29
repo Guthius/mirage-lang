@@ -143,6 +143,31 @@ namespace lsp::handlers {
                     };
                 }
             }
+        } else if (type.kind == sema::TypeKind::Bitset && type.bitset_index >= 0 &&
+                   static_cast<size_t>(type.bitset_index) < program.bitsets.size()) {
+            // A bitset declares no members of its own -- its flags ARE its member enum's
+            // fields, which is why this needs its own branch rather than falling through to
+            // the Enum case above. Both the qualified form ('Modes.Write') and the dominant
+            // bare contextual form ('modes += .Write', '{.Close, .Flush}') route through here,
+            // so without it hover, go-to-definition, find-references and completion on any
+            // bitset flag silently returned nothing.
+            const auto &member_enum = program.bitsets[type.bitset_index].member_enum_type;
+            if (member_enum.kind == sema::TypeKind::Enum && member_enum.enum_index >= 0 &&
+                static_cast<size_t>(member_enum.enum_index) < program.enums.size()) {
+                for (const auto &field : program.enums[member_enum.enum_index].fields) {
+                    if (field.name == member) {
+                        return Resolution{
+                            .kind = Resolution::Kind::EnumField,
+                            .name = member,
+                            // The flag is declared on the member ENUM, so go-to-definition must
+                            // land there; '.type' stays the bitset, which is what hover should
+                            // report for the expression itself.
+                            .location = type_decl_location(member_enum, program),
+                            .type = type,
+                        };
+                    }
+                }
+            }
         } else if (type.kind == sema::TypeKind::Union && type.union_index >= 0 &&
                    static_cast<size_t>(type.union_index) < program.unions.size()) {
             const auto &info = program.unions[type.union_index];
@@ -194,6 +219,33 @@ namespace lsp::handlers {
                 .location = method->decl ? method->decl->location : SourceLocation{},
                 .method = method,
             };
+        }
+
+        // Dynamic dispatch through a trait handle: 'shape.draw()' where 'shape: Drawable'.
+        // sema::find_method has only two tiers -- a bare 'impl TYPE {}' block, and
+        // trait_impls_by_type keyed by the CONCRETE implementing type ("Circle") -- so a
+        // receiver whose own kind is Trait matched neither, and the single most central
+        // trait-dispatch call shape resolved to nothing at all.
+        //
+        // The trait's own declared methods live in TraitInfo::methods; this is the same
+        // "Tier-3" lookup sema_check.cpp's try_trait_handle_dispatch performs.
+        if (type.kind == sema::TypeKind::Trait) {
+            if (const auto *trait = program.trait_at(type.trait_index)) {
+                for (const auto &trait_method : trait->methods) {
+                    if (trait_method.name != member) continue;
+                    return Resolution{
+                        .kind = Resolution::Kind::Method,
+                        .name = member,
+                        // TraitMethodInfo carries its own resolved location; prefer it over the
+                        // AST node's so go-to-definition lands on 'fn draw(self)' inside the
+                        // trait declaration.
+                        .location = trait_method.location.filename.empty()
+                                        ? type_decl_location(type, program)
+                                        : trait_method.location,
+                        .trait_method = &trait_method,
+                    };
+                }
+            }
         }
         return {};
     }
@@ -650,6 +702,59 @@ namespace lsp::handlers {
                     }
                     consider(fn.location, std::move(params), &fn.body, is_generic ? &impl->generic_params : nullptr,
                              is_generic ? &impl->target : nullptr, &fn.return_types);
+                }
+            } else if (const auto *trait_impl = std::get_if<ast::TraitImplDecl>(&decl)) {
+                // 'impl TRAIT for TYPE { ... }' is a distinct AST node from a bare
+                // 'impl TYPE { ... }' and was missing here entirely, so every method body in
+                // every trait impl produced an empty EnclosingFunction. That silently disabled
+                // hover, completion, go-to-definition, find-references and inlay hints for
+                // 'self', every parameter and every local inside them -- for what is the
+                // central pattern of the whole trait feature.
+                //
+                // ast_walker.cpp and references.cpp both already handle this node, which is
+                // what makes it an oversight here rather than deliberate scope.
+                //
+                // Method types come from Program::trait_impls_by_type, keyed by
+                // (type_module, type_name); the entry whose impl_module is this module and
+                // whose trait matches is the one describing this block.
+                const sema::TraitImplInfo *impl_info = nullptr;
+                if (const auto it = program.trait_impls_by_type.find({module_path, trait_impl->type_name.name});
+                    it != program.trait_impls_by_type.end()) {
+                    for (const auto &candidate : it->second) {
+                        if (candidate.trait_name == trait_impl->trait_name.name) {
+                            impl_info = &candidate;
+                            break;
+                        }
+                    }
+                }
+
+                const bool is_generic = !trait_impl->generic_params.empty();
+                for (const auto &fn : trait_impl->functions) {
+                    const sema::MethodInfo *sym = nullptr;
+                    if (impl_info) {
+                        if (const auto mit = impl_info->methods.find(fn.name); mit != impl_info->methods.end()) {
+                            sym = &mit->second;
+                        }
+                    }
+
+                    std::vector<ParamInfo> params;
+                    if (is_generic) push_generic_params(trait_impl->generic_params, params);
+                    // Same reasoning as the ImplDecl branch above: a generic impl's template has
+                    // no resolved self_type, so omit 'self' rather than show a wrong placeholder.
+                    if (sym && !is_generic) params.push_back({"self", sym->self_type, fn.self_location});
+                    for (size_t i = 0; i < fn.params.size(); ++i) {
+                        sema::ResolvedType type{};
+                        std::optional<std::string> display_override;
+                        if (!is_generic && sym && i < sym->param_types.size()) type = sym->param_types[i];
+                        else if (is_generic) {
+                            type = resolve_param_type_fallback(fn.params[i].type);
+                            if (fn.params[i].type) display_override = ast_type_to_string(*fn.params[i].type);
+                        }
+                        params.push_back({fn.params[i].name, type, fn.params[i].location, display_override});
+                    }
+                    consider(fn.location, std::move(params), &fn.body,
+                             is_generic ? &trait_impl->generic_params : nullptr,
+                             is_generic ? &trait_impl->type_name : nullptr, &fn.return_types);
                 }
             } else if (const auto *type_decl = std::get_if<ast::TypeDecl>(&decl)) {
                 // A trait method ('type T = trait { fn foo(self, ...) -> ... }') has no body

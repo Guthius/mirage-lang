@@ -52,6 +52,10 @@ namespace lsp::handlers {
         const sema::StructField *struct_field = nullptr;
         const sema::UnionMember *union_member = nullptr;
         const sema::MethodInfo *method = nullptr;
+        // Kind::Method reached through a TRAIT HANDLE receiver ('shape.draw()' where
+        // 'shape: Drawable'). The method is declared on the trait itself, so there is no
+        // MethodInfo for it -- 'method' stays null and this is set instead.
+        const sema::TraitMethodInfo *trait_method = nullptr;
 
         // Kind::Builtin only: the operand's own resolved type (e.g. 'size_of(Point)''s
         // 'Point', 'len(arr)''s array/slice type) and, when statically known (size_of/align_of
@@ -168,6 +172,12 @@ namespace lsp::handlers {
     // variant, or method - transparently dereferencing one level of pointer first (so
     // `p.field`/`p.method()` resolve whether `p` is `T` or `*T`). Kind::None if `member`
     // doesn't match anything.
+    // Resolves 'member' as an enum field, a tagged-union variant, or a bitset flag of
+    // 'type'. Shared by resolve_member and by the reference walker, which needs the same
+    // matching for bare '.Variant'/'.Flag' expressions.
+    auto match_enum_or_variant(const sema::ResolvedType &type, const std::string &member,
+                               const sema::Program &program) -> Resolution;
+
     auto resolve_member(const sema::ResolvedType &type_in, const std::string &member,
                         const sema::Program &program) -> Resolution;
 
