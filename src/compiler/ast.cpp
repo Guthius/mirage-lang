@@ -159,10 +159,11 @@ namespace ast {
         }
 
         // 'generic_args ::= '[' generic_arg { ',' generic_arg } ']''
-        auto parse_generic_args(Parser &parser) -> std::vector<GenericArg> {
-            parser.expect(TokenKind::LBracket, "'['");
-
-            std::vector<GenericArg> args;
+        // Parses 'generic_arg { ',' generic_arg }' up to but not including the closing ']',
+        // appending to 'args'. Shared by parse_generic_args and parse_index_or_slice_expr,
+        // which differ only in how the first argument is obtained -- the latter has to parse
+        // it before it can tell an index/instantiation from a slice.
+        auto parse_generic_arg_list_tail(Parser &parser, std::vector<GenericArg> &args) -> void {
             while (!parser.check(TokenKind::RBracket) && !parser.at_end()) {
                 const LoopProgressGuard progress_guard(parser);
 
@@ -172,6 +173,13 @@ namespace ast {
                     parser.expect(TokenKind::Comma, "','");
                 }
             }
+        }
+
+        auto parse_generic_args(Parser &parser) -> std::vector<GenericArg> {
+            parser.expect(TokenKind::LBracket, "'['");
+
+            std::vector<GenericArg> args;
+            parse_generic_arg_list_tail(parser, args);
 
             parser.expect(TokenKind::RBracket, "']'");
 
@@ -923,6 +931,15 @@ namespace ast {
             return std::nullopt;
         }
 
+        // Whether a '#link(...)' directive starts at the CURRENT token (the '#' itself, not yet
+        // consumed). Mirrors peek_diagnostic_directive_kind above; both module-scope and
+        // statement-position dispatch use it, which previously spelled the lookahead out
+        // verbatim at each site.
+        auto peek_link_decl(const Parser &parser) -> bool {
+            return parser.check(TokenKind::Hash) && parser.peek().kind == TokenKind::Identifier &&
+                   parser.peek().lexeme == "link";
+        }
+
         // Reports a parser-stage "unknown attribute" error if 'name' isn't one of the five
         // known declaration-attribute names (see Attribute's doc comment in ast.hpp) — a pure
         // lexical fact, checked identically for both the bare/single-with-args form and the
@@ -1496,15 +1513,7 @@ namespace ast {
             if (!parser.check(TokenKind::RBracket)) {
                 parser.expect(TokenKind::Comma, "','");
             }
-            while (!parser.check(TokenKind::RBracket) && !parser.at_end()) {
-                const LoopProgressGuard progress_guard(parser);
-
-                args.push_back(parse_generic_arg(parser));
-
-                if (!parser.check(TokenKind::RBracket)) {
-                    parser.expect(TokenKind::Comma, "','");
-                }
-            }
+            parse_generic_arg_list_tail(parser, args);
 
             parser.expect(TokenKind::RBracket, "']'");
 
@@ -3185,7 +3194,7 @@ namespace ast {
         // "module scope only" diagnostic. '$option(...)' is NOT special-cased here —
         // it falls through to parse_expr_stmt below, which reaches parse_primary's
         // own '$' handling for the option-expression form.
-        if (parser.check(TokenKind::Hash) && parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "link") {
+        if (peek_link_decl(parser)) {
             return parse_link_decl(parser);
         }
 
@@ -3540,7 +3549,7 @@ namespace ast {
             return Decl{parse_when_decl(parser)};
         }
 
-        if (parser.check(TokenKind::Hash) && parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "link") {
+        if (peek_link_decl(parser)) {
             if (is_pub) {
                 parser.report_error(parser.current_location(), "'#link' directives cannot be 'pub'");
             }

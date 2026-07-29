@@ -559,6 +559,14 @@ namespace ast {
         SourceLocation location;
     };
 
+    // 'operand[start..end]'. Both bounds are required, deliberately unlike RangeExpr::lower
+    // (which is optional, so 'for x in ..upper' means "from 0"). So 'arr[..5]' does not parse
+    // even though the conceptually identical range form does.
+    //
+    // This asymmetry is scope, not an oversight: making 'start' optional here is a language
+    // change needing spec.md, grammar.md and the docs site updated alongside the parser, not
+    // a parser fix. 'arr[..5]' currently fails with a plain "expected expression, got '..'",
+    // which is a clear diagnostic rather than a misparse. Recorded as follow-up work.
     struct SliceExpr {
         Expr operand;
         Expr start;
