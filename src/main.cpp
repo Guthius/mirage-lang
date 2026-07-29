@@ -41,6 +41,7 @@ namespace {
         std::string module_path;
         std::string output = "a.out";
         std::string std_path;
+        std::string cc; // linker driver; see resolve_cc()
         std::vector<std::string> libs;
         std::unordered_map<std::string, std::string> opt_values;
     };
@@ -56,6 +57,7 @@ namespace {
                      << "  -o, --output <file>  Output file name (default: a.out)\n"
                      << "  -l <lib>             Link with additional library (may be repeated)\n"
                      << "  --std=<path>         Override the standard library path (takes precedence over MIRAGE_PATH)\n"
+                     << "  --cc=<program>       Linker driver to invoke (default: clang, or $MIRAGE_CC)\n"
                      << "  --emit-ir            Print LLVM IR to stdout instead of compiling\n"
                      << "  --freestanding       Compile without standard library\n"
                      << "  --noinit             Skip generating/calling the synthesized '@init'-runner '_init'\n"
@@ -107,6 +109,8 @@ namespace {
                 options.output = argv[++i];
             } else if (arg.starts_with("--std=")) {
                 options.std_path = arg.substr(6);
+            } else if (arg.starts_with("--cc=")) {
+                options.cc = arg.substr(5);
             } else if (arg == "-l") {
                 if (i + 1 >= argc) {
                     llvm::errs() << "mirage: '-l' requires a library name\n";
@@ -167,19 +171,6 @@ namespace {
         return std::filesystem::path(tmpl);
     }
 
-    auto shell_quote(const std::string &value) -> std::string {
-        std::string out = "'";
-        for (const char c : value) {
-            if (c == '\'') {
-                out += "'\\''";
-            } else {
-                out += c;
-            }
-        }
-        out += "'";
-        return out;
-    }
-
     auto emit_object_file(llvm::Module &module, const std::filesystem::path &object_path) -> bool {
         llvm::InitializeNativeTarget();
         llvm::InitializeNativeTargetAsmPrinter();
@@ -220,6 +211,20 @@ namespace {
 
         pass_manager.run(module);
         out.flush();
+
+        // CLI-12 asks for pass_manager.run()'s discarded result to be checked. It is
+        // deliberately not checked: legacy::PassManager::run returns whether any pass MODIFIED
+        // the module, not whether emission succeeded, so treating false as failure would reject
+        // valid output. The genuine failure signal for this step is the output stream's error
+        // state -- a write that failed partway (a full disk, a revoked file) would otherwise
+        // leave a truncated object for the linker to choke on with no explanation from here.
+        // The real emission-setup failure is already caught by addPassesToEmitFile above.
+        if (out.has_error()) {
+            llvm::errs() << "mirage: failed writing object file '" << object_path.string()
+                         << "': " << out.error().message() << "\n";
+            out.clear_error();
+            return false;
+        }
         return true;
     }
 
@@ -246,9 +251,22 @@ namespace {
         }
     }
 
+    // The linker driver, in precedence order: '--cc=', then $MIRAGE_CC, then clang. Mirrors
+    // how '--std=' overrides MIRAGE_PATH, which previously had no equivalent here -- the
+    // driver was hardcoded, so a cross-compile or a non-default toolchain had no way in.
+    auto resolve_cc(const Options &options) -> std::string {
+        if (!options.cc.empty()) {
+            return options.cc;
+        }
+        if (const char *env_value = std::getenv("MIRAGE_CC"); env_value != nullptr && *env_value != '\0') {
+            return env_value;
+        }
+        return "clang";
+    }
+
     auto link_executable(const std::filesystem::path &object_path, const std::filesystem::path &output_path,
                           const Options &options, const std::vector<sema::LinkDirective> &link_directives) -> bool {
-        std::vector<std::string> args{"clang"};
+        std::vector<std::string> args{resolve_cc(options)};
         if (options.freestanding) {
             args.emplace_back("-ffreestanding");
             args.emplace_back("-nostdlib");
@@ -283,15 +301,48 @@ namespace {
         args.emplace_back("-o");
         args.push_back(output_path.string());
 
-        std::string command;
-        for (size_t i = 0; i < args.size(); ++i) {
-            if (i > 0) {
-                command += " ";
-            }
-            command += shell_quote(args[i]);
+        // fork + execvp with an argv array, not std::system with a quoted string. The 'run'
+        // action two functions below already does exactly this; going through a shell here
+        // meant every argument's correctness depended on shell_quote, for no benefit --
+        // nothing in this command line needs shell expansion.
+        //
+        // On failure the driver's own exit status (or the signal that killed it) is reported,
+        // rather than a bare "linker failed" that says nothing about what went wrong (CLI-7).
+        std::vector<char *> argv;
+        argv.reserve(args.size() + 1);
+        for (auto &arg : args) {
+            argv.push_back(arg.data());
+        }
+        argv.push_back(nullptr);
+
+        const pid_t pid = fork();
+        if (pid < 0) {
+            llvm::errs() << "mirage: fork failed: " << std::strerror(errno) << "\n";
+            return false;
+        }
+        if (pid == 0) {
+            execvp(argv[0], argv.data());
+            // Only reached if exec failed; the parent sees this as exit status 127.
+            llvm::errs() << "mirage: cannot execute '" << args[0] << "': " << std::strerror(errno) << "\n";
+            _exit(127);
         }
 
-        return std::system(command.c_str()) == 0;
+        int status = 0;
+        if (waitpid(pid, &status, 0) < 0) {
+            llvm::errs() << "mirage: waitpid failed: " << std::strerror(errno) << "\n";
+            return false;
+        }
+        if (WIFSIGNALED(status)) {
+            llvm::errs() << "mirage: linker '" << args[0] << "' was killed by signal "
+                         << WTERMSIG(status) << " (" << strsignal(WTERMSIG(status)) << ")\n";
+            return false;
+        }
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            llvm::errs() << "mirage: linker '" << args[0] << "' exited with status "
+                         << WEXITSTATUS(status) << "\n";
+            return false;
+        }
+        return true;
     }
 
     // Minimal recursive AST dumper for '--dump-ast', a debug-only affordance added so the
@@ -514,6 +565,10 @@ auto main(const int argc, char *argv[]) -> int {
     }
     const auto object_start = std::chrono::steady_clock::now();
     if (!emit_object_file(*llvm_module, object_path)) {
+        // Clean up the partial/empty temp object, as the link-failure and success paths below
+        // both do. mkstemp already created the file, so returning here always leaked one.
+        std::error_code object_error;
+        std::filesystem::remove(object_path, object_error);
         return 1;
     }
     const auto object_elapsed = std::chrono::steady_clock::now() - object_start;
@@ -575,6 +630,14 @@ auto main(const int argc, char *argv[]) -> int {
             const int code = WEXITSTATUS(status);
             llvm::errs() << std::format("process exited with code {}\n", code);
             return code;
+        }
+        if (WIFSIGNALED(status)) {
+            // Previously this fell through to a bare 'return 1', so a compiled program that
+            // segfaulted looked like an ordinary non-zero exit -- which is exactly how
+            // CODEGEN-1's stack-exhaustion crash stayed invisible through 'mirage run'.
+            const int sig = WTERMSIG(status);
+            llvm::errs() << std::format("process was killed by signal {} ({})\n", sig, strsignal(sig));
+            return 128 + sig;
         }
         return 1;
     }

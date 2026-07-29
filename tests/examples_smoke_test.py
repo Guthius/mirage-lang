@@ -67,6 +67,11 @@ def warn(message: str) -> None:
 # to verify it, so that is what we pin.
 SPECIAL_CASES: dict[str, dict] = {
     "example_raylib_link": {"action": "link-directives"},
+    # Build-only by design: its own header says "Deliberately not run (only built) — actually
+    # executing this would perform an 8-byte write into a 4-byte stack slot". Auto-derivation
+    # cannot see that (it compiles and has a 'fn main'), so it ran the program and pinned the
+    # resulting crash as a plain exit code. It really does die with SIGSEGV.
+    "example_asm_width_mismatch": {"action": "build"},
     # Parsing 'examples/lexer/token.mir' never terminates: line 16 uses a postfix
     # 'kind match { ... }' form that docs/grammar.md:646 does not define (match_expr is
     # prefix-only), and the parser spins on it instead of reporting a syntax error.
