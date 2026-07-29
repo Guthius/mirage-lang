@@ -370,6 +370,10 @@
     "action": "build",
     "exit": 1
   },
+  "example_import_absolute": {
+    "action": "build",
+    "exit": 1
+  },
   "example_integer_literal_range": {
     "action": "build",
     "exit": 1

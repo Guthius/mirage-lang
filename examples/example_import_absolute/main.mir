@@ -1,0 +1,15 @@
+// example_import_absolute.mir — REJECTION CASE. An absolute import path escapes the module
+// tree: per fs::path::operator/ an absolute right-hand side discards the left, so the
+// importer directory was never consulted and import("/etc") resolved straight to /etc. The
+// stdlib fallback branch has always had a containment check; the local branch had none.
+//
+// Upward ".." traversal is deliberately still allowed — see resolve_import_path.
+//
+// Expected: compilation fails with
+//   error: cannot resolve import path '/etc'
+
+const etc := import("/etc")
+
+pub fn main() -> i32 {
+    return 0
+}

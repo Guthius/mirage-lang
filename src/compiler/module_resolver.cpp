@@ -30,6 +30,9 @@ namespace ast {
             Module combined;
             for (const auto &file : files) {
                 const auto source_file = source_manager.load(file.string(), diagnostics);
+                // An empty .mir file is legal and contributes nothing. A file that failed to
+                // load is not -- but SourceManager::load already reported "cannot open module
+                // file" for that case, so the only thing needed here is to not count it.
                 if (source_file.text.empty()) continue;
                 const auto errors_before = diagnostics.error_count();
                 auto tokens = lexer::tokenize(source_file.text, source_file.filename, diagnostics);
@@ -70,6 +73,22 @@ namespace ast {
         }
 
         auto resolve_import_path(const std::string &importer_path, const std::string &import_path, const std::string &mirage_path) -> std::string {
+            // An absolute import path escapes the module tree entirely. Per
+            // fs::path::operator/ an absolute right-hand side DISCARDS the left, so
+            // 'import("/etc")' resolved straight to /etc -- the importer's directory was never
+            // consulted, and unlike the stdlib fallback below there was no containment check to
+            // catch it.
+            //
+            // Only absolute paths are rejected. Upward '..' traversal stays allowed, and is
+            // deliberately not treated as an escape: it is how the corpus's own sibling-module
+            // imports work (examples/example_reflection and others reach the shared runtime with
+            // 'import("../../runtime/type_info")', and example_attr_init_cycle/b uses
+            // 'import("..")'). Constraining that would break working multi-directory projects,
+            // which is a language-design decision, not a bug fix.
+            if (std::filesystem::path(import_path).is_absolute()) {
+                return {};
+            }
+
             auto candidate = std::filesystem::path(importer_path) / import_path;
             if (std::filesystem::is_directory(candidate)) {
                 return canonicalize(candidate.string());
@@ -97,10 +116,8 @@ namespace ast {
         }
 
         void visit(const std::string &path, Program &program, SourceManager &source_manager, DiagnosticEngine &diagnostics, const std::string &mirage_path) {
-            if (program.modules.contains(path)) {
-                return;
-            }
-
+            // try_emplace already reports whether the key was present, so a preceding
+            // contains() was a second hash+probe for the same answer.
             auto [it, inserted] = program.modules.try_emplace(path);
             if (!inserted) {
                 return;
@@ -183,6 +200,17 @@ namespace ast {
             auto candidate = canonicalize(env_value);
             if (!candidate.empty() && std::filesystem::is_directory(candidate)) {
                 mirage_path = candidate;
+            } else {
+                // Warn rather than error, mirroring '--std=' above but one severity lower: an
+                // explicit flag naming a bad directory is a mistake in this invocation, whereas
+                // a stale MIRAGE_PATH in the environment should not stop a build that does not
+                // use the standard library at all. Silence was the wrong answer either way --
+                // every later 'import("std")' then failed with a generic "cannot resolve import
+                // path" that gave no hint the real cause was the environment variable.
+                diagnostics.warn(
+                    DiagnosticStage::Parser, {},
+                    std::format("MIRAGE_PATH is set to '{}', which is not a directory; "
+                                "standard-library imports will not resolve", env_value));
             }
         }
 
