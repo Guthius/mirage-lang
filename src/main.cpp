@@ -477,7 +477,12 @@ auto main(const int argc, char *argv[]) -> int {
     const auto to_ms = [](auto elapsed) {
         return std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
     };
-    llvm::outs() << std::format(
+    // Progress and timing reporting goes to stderr, not stdout. stdout carries only
+    // what was actually asked for -- the IR under --emit-ir, the AST under --dump-ast,
+    // the directive list under --print-link-directives, and under 'run' the compiled
+    // program's own output. Otherwise 'mirage build p --emit-ir > out.ll' prepends this
+    // banner to the module and produces a file that is not valid LLVM IR.
+    llvm::errs() << std::format(
         "Processed {} file(s), {} token(s)\n"
         "  parsing: {}ms\n"
         "  sema:    {}ms\n"
@@ -521,7 +526,7 @@ auto main(const int argc, char *argv[]) -> int {
     std::error_code remove_error;
     std::filesystem::remove(object_path, remove_error);
 
-    llvm::outs() << std::format(
+    llvm::errs() << std::format(
         "  object:  {}ms\n"
         "  link:    {}ms\n",
         to_ms(object_elapsed), to_ms(link_elapsed));
@@ -529,11 +534,14 @@ auto main(const int argc, char *argv[]) -> int {
     const auto elapsed = std::chrono::steady_clock::now() - start_time;
     const auto secs = std::chrono::duration<double>(elapsed).count();
     if (options.action == Action::Run) {
-        llvm::outs() << std::format("Compiled '{}' in {:.2f}s\n", options.module_path, secs);
+        llvm::errs() << std::format("Compiled '{}' in {:.2f}s\n", options.module_path, secs);
     } else {
-        llvm::outs() << std::format("Compiled '{}' -> '{}' in {:.2f}s\n", options.module_path, options.output, secs);
+        llvm::errs() << std::format("Compiled '{}' -> '{}' in {:.2f}s\n", options.module_path, options.output, secs);
     }
+    // Flush before fork() so nothing still buffered here is inherited by the child and
+    // written out a second time from the child's copy of the buffer.
     llvm::outs().flush();
+    llvm::errs().flush();
 
     if (options.action == Action::Run) {
         const pid_t pid = fork();
@@ -552,7 +560,7 @@ auto main(const int argc, char *argv[]) -> int {
         std::filesystem::remove(exe_path, remove_error);
         if (WIFEXITED(status)) {
             const int code = WEXITSTATUS(status);
-            llvm::outs() << std::format("process exited with code {}\n", code);
+            llvm::errs() << std::format("process exited with code {}\n", code);
             return code;
         }
         return 1;
