@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Traits — Mirage</title>
-  <meta name="description" content="Dynamic dispatch in Mirage through trait handles: declaring traits, impl TRAIT for TYPE, coherence, and static vs dynamic dispatch.">
+  <meta name="description" content="Dynamic dispatch in Mirage through trait handles: declaring traits, trait composition, impl TRAIT for TYPE, coherence, and static vs dynamic dispatch.">
   <script src="theme-init.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -96,6 +96,72 @@
         "a Drawable object."
       </div>
 
+      <h2 id="trait-composition">Trait Composition</h2>
+      <p>
+        A trait can declare that it <strong>composes</strong> one or more other traits —
+        <code>trait(A, B, ...) { ... }</code>. The brace body is optional when a composition list
+        is present, but if written must be non-empty, same as the bare form above:
+      </p>
+      <pre><code><span class="kw">type</span> <span class="ty">Reader</span> = <span class="kw">trait</span> {
+    <span class="kw">fn</span> <span class="fn">read</span>(<span class="var">self</span>) -&gt; <span class="ty">i32</span>
+}
+<span class="kw">type</span> <span class="ty">Writer</span> = <span class="kw">trait</span> {
+    <span class="kw">fn</span> <span class="fn">write</span>(<span class="kw">mut</span> <span class="var">self</span>, <span class="var">b</span>: <span class="ty">i32</span>)
+}
+<span class="kw">type</span> <span class="ty">Stream</span> = <span class="kw">trait</span>(<span class="ty">Reader</span>, <span class="ty">Writer</span>) {
+    <span class="kw">fn</span> <span class="fn">flush</span>(<span class="kw">mut</span> <span class="var">self</span>)
+}</code></pre>
+      <p>
+        A composing trait's effective method set is the union of its own methods (if any) plus
+        every method reachable, transitively, through its composed traits — this flattened set is
+        what <code>impl</code> conformance, dispatch, and vtable layout all see, not just a
+        trait's own literal body.
+      </p>
+
+      <div class="callout tip">
+        <div class="callout-title">Diamonds merge safely</div>
+        If <code>Top</code> composes both <code>Left</code> and <code>Right</code>, and both of
+        those compose a common <code>Base</code>, <code>Base</code>'s methods appear exactly once
+        in <code>Top</code>'s flattened set — reaching the same method through two different paths
+        is not an error, as long as every path agrees on its signature.
+      </div>
+
+      <p>
+        When two same-named methods disagree on signature (self/mut-self, parameter types, or
+        return types — default values don't count), composing them is a compile error naming both
+        contributors:
+      </p>
+      <pre><code>error: trait 'Z' composes both 'X' and 'Y', which each declare 'run' with
+       incompatible signatures ('fn(self) -&gt; i32' vs 'fn(self) -&gt; bool').
+       Rename one of them to disambiguate.</code></pre>
+      <p>A trait's own method colliding with a composed one is worded the same way:</p>
+      <pre><code>error: trait 'Z' declares 'run' itself and also composes 'X', which
+       declares 'run' with an incompatible signature ('fn(self) -&gt; i32' vs
+       'fn(self) -&gt; bool'). Rename one of them to disambiguate.</code></pre>
+      <p>A composition cycle — including a trait composing itself — is also a compile error, naming the full chain:</p>
+      <pre><code>error: circular trait composition: 'A' composes 'B', which composes 'A'</code></pre>
+
+      <div class="callout warning">
+        <div class="callout-title">Redundant single composition</div>
+        A trait that composes exactly one other trait and declares no methods of its own is
+        identical to the trait it composes — this is a warning, not an error, suggesting you
+        either drop it or spell it as a type alias instead:
+        <pre><code>warning: trait 'X' composes only 'Y' and declares no methods of its own,
+         making it identical to 'Y'. Either remove 'X' and use 'Y' directly,
+         or declare it as a type alias:
+             pub type X = Y</code></pre>
+        The warning doesn't fire once a second composed trait is present, or once the trait
+        declares at least one method of its own.
+      </div>
+
+      <p>
+        Coherence and conformance are otherwise unaffected: <code>impl</code> orphan rules, the
+        one-impl-per-<code>(TRAIT, TYPE)</code> rule, and exact-signature conformance all apply to
+        a composing trait's flattened surface exactly as they would to a non-composing trait.
+      </p>
+
+      <hr>
+
       <h2>Implementing a Trait</h2>
       <p>
         Use <code>impl TRAIT for TYPE</code> to implement a trait for a concrete struct, enum, or
@@ -181,6 +247,34 @@
         compile error, as is coercing a pointer to a type that doesn't implement the trait. And it
         only works one way: once a concrete pointer has become a handle, <strong>there is no
         downcasting</strong> back to the concrete type or pointer.
+      </p>
+
+      <p>
+        When the impl'd trait is a <a href="#trait-composition">composed</a> one, a pointer coerces
+        directly to any trait it composes too — no standalone <code>impl</code> of that component
+        is required:
+      </p>
+      <pre><code><span class="kw">mut</span> <span class="var">m</span>: <span class="ty">MemStream</span> = {.<span class="var">value</span> = <span class="num">100</span>, .<span class="var">pos</span> = <span class="num">0</span>}   <span class="cmt">// impl Stream for MemStream only</span>
+<span class="kw">const</span> <span class="var">r</span>: <span class="ty">Reader</span> = &amp;<span class="var">m</span>                              <span class="cmt">// OK — Stream composes Reader</span></code></pre>
+      <p>
+        An exact, directly-written <code>impl D for TYPE</code> always wins over a composed-derived
+        route to <code>D</code>. If no exact impl exists and more than one of <code>TYPE</code>'s
+        impl'd traits composes <code>D</code>, the coercion is ambiguous:
+      </p>
+      <pre><code>error: ambiguous implicit coercion to trait 'D': type 'TYPE' implements it
+       via both 'X' and 'Y'; implement 'D' directly for 'TYPE' to
+       disambiguate</code></pre>
+      <p>
+        An existing handle can also be <strong>narrowed</strong> to a handle of any trait it
+        composes, through the same expected-type positions — the data pointer carries over
+        unchanged and only the vtable pointer is swapped, with no runtime check:
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">s</span>: <span class="ty">Stream</span> = &amp;<span class="var">m</span>      <span class="cmt">// pointer-to-handle: builds the Stream handle</span>
+<span class="kw">const</span> <span class="var">r</span>: <span class="ty">Reader</span> = <span class="var">s</span>       <span class="cmt">// handle-to-handle: narrows Stream down to Reader</span>
+<span class="var">r</span>.<span class="fn">read</span>()                  <span class="cmt">// dispatches to the same underlying function 's' would have called</span></code></pre>
+      <p>
+        This narrowing is one-directional — there is no path from a component back to the
+        composing trait's own handle.
       </p>
 
       <div class="callout tip">

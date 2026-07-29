@@ -1,0 +1,8 @@
+const traits_mod := import("traits_mod")
+const types_mod := import("types_mod")
+
+impl traits_mod.Composed for types_mod.Impl {
+    fn base(self) -> i32 { return self.v }
+}
+
+pub fn main() -> i32 { return 0 }

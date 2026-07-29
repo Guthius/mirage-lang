@@ -1,0 +1,1 @@
+pub type Impl = struct { v: i32 }

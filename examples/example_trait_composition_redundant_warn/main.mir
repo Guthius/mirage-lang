@@ -1,0 +1,9 @@
+pub type Y = trait { fn run(self) -> i32 }
+pub type X = trait(Y)
+pub type Impl = struct { v: i32 }
+impl X for Impl { fn run(self) -> i32 { return self.v } }
+pub fn main() -> i32 {
+    mut i: Impl = { .v = 3 }
+    const x: X = &i
+    return x.run() - 3
+}

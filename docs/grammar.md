@@ -253,7 +253,7 @@ type          ::= '*' type                              (* pointer *)
                | 'union' '(' 'enum' ')' '{'             (* tagged union *)
                    { IDENT [ ':' type ] }
                  '}'
-               | 'trait' '{' { trait_method_decl } '}'  (* trait handle; see Traits below *)
+               | trait_type                             (* trait handle; see Traits below *)
                | error_type
                | bitset_type
                | fn_type
@@ -287,6 +287,9 @@ builtin_type  ::= 'u8' | 'u16' | 'u32' | 'u64'
                | 'usize' | 'bool' | 'byte' | 'anyptr'
                | 'type' | 'any'
 
+trait_type    ::= 'trait' '{' { trait_method_decl } '}'
+               | 'trait' '(' named_type { ',' named_type } ')' [ '{' { trait_method_decl } '}' ]
+
 trait_method_decl ::= 'fn' IDENT
                       '(' ( 'self' | 'mut' 'self' )
                           { ',' ( IDENT ':' type [ '=' expr ] | IDENT ':=' expr ) }
@@ -301,6 +304,19 @@ governs) or a native-variadic (`...T`) parameter (a parse error — variadic
 trait methods have no vtable entry representation). Unlike `method_decl`
 above, `trait_method_decl`'s non-self params do **not** accept a `mut`
 prefix.
+
+**Trait composition**: `trait_type`'s second alternative, `trait(A, B, ...)
+{ ... }`, declares that this trait *composes* one or more other traits — each
+entry is a `named_type` (`allow_generic_args` suppressed, same as
+`impl_decl`'s trait/type operands above, since traits are never generic). The
+brace body is optional when a composition list is present, but if written
+must be non-empty (the same empty-body rule as the bare form above). A
+composing trait's effective method set is the union of its own declared
+methods (if any) plus every method reachable, transitively, through its
+composed traits — see spec.md's "Trait Composition" section for flattening,
+collision, and cycle-detection semantics, none of which are syntactic (a
+composed-list entry that doesn't name a trait, a duplicate entry, or a cycle
+are all sema errors, not parse errors).
 
 A trait method may declare default parameter values, following the same
 rules as `fn_decl`'s `param` above. When a trait handle (`dyn`-style dynamic

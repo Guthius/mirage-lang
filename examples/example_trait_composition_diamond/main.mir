@@ -1,0 +1,24 @@
+pub type Base = trait {
+    fn base(self) -> i32
+}
+pub type Left = trait(Base) {
+    fn left(self) -> i32
+}
+pub type Right = trait(Base) {
+    fn right(self) -> i32
+}
+pub type Top = trait(Left, Right) {
+    fn top(self) -> i32
+}
+pub type Impl = struct { v: i32 }
+impl Top for Impl {
+    fn base(self) -> i32 { return self.v }
+    fn left(self) -> i32 { return self.v + 1 }
+    fn right(self) -> i32 { return self.v + 2 }
+    fn top(self) -> i32 { return self.v + 3 }
+}
+pub fn main() -> i32 {
+    mut x: Impl = { .v = 10 }
+    const t: Top = &x
+    return t.base() + t.left() + t.right() + t.top() - 10 - 11 - 12 - 13
+}

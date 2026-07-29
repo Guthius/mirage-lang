@@ -234,7 +234,15 @@ union_type    ::= 'union' '{'                          <span class="bnf-cm">-- u
                   '}'
 
 trait_type    ::= 'trait' '{' { trait_method_decl } '}'
-                  <span class="bnf-cm">-- a trait handle type; must declare at least one method (empty trait{} is an error)</span>
+               | 'trait' '(' named_type { ',' named_type } ')' [ '{' { trait_method_decl } '}' ]
+                  <span class="bnf-cm">-- a trait handle type; must declare at least one method (empty trait{} is an
+                  -- error). The second form COMPOSES one or more other traits (each a
+                  -- named_type, no generic_args — traits are never generic); the brace body
+                  -- is optional when a composition list is present, but if written must be
+                  -- non-empty, same as the bare form. A composed-list entry that doesn't
+                  -- resolve to a trait, a duplicate entry, or a composition cycle are sema
+                  -- errors, not parse errors — see the Traits page's "Trait Composition"
+                  -- section for flattening/collision/cycle semantics.</span>
 
 trait_method_decl ::= 'fn' IDENT
                       '(' ( 'self' | 'mut' 'self' ) { ',' IDENT ':' type } ')'

@@ -1375,11 +1375,17 @@ namespace sema {
             }
 
             // Resolves each trait method's non-self param/return types, in declaration
-            // order. That order IS the vtable layout and is recorded here once, in
-            // TraitInfo::methods — codegen must read it, never re-derive it.
+            // order, then resolves this trait's composition list (if any) — flattening
+            // composed traits' methods in, detecting composition cycles, and computing the
+            // transitive component-trait set. TraitInfo::methods ends up holding the FULL
+            // FLATTENED set (own methods followed by each composed trait's own flattened
+            // methods) — that order IS the vtable layout and is recorded here once; codegen
+            // and every other consumer must read it, never re-derive it.
             void layout_trait(const std::string &module_path, const int slot, const std::unique_ptr<ast::TraitType> &decl) {
                 TraitInfo info;
                 info.module_path = module_path;
+                info.name = program.traits[slot].name; // set at declare time (sema_declare.cpp); preserved here since
+                                                        // we fully replace program.traits[slot] at the end.
 
                 for (auto &method : decl->methods) {
                     TraitMethodInfo m;
@@ -1403,7 +1409,122 @@ namespace sema {
                     info.methods.push_back(std::move(m));
                 }
 
+                // ---- Trait composition: resolve, detect cycles, flatten ----
+                //
+                // 'contributor[method_name]' is "" for a method 'info' already declares itself,
+                // else the name of whichever composed trait first contributed it — used only to
+                // pick the right collision-message wording (own-vs-composed vs composed-vs-composed).
+                std::unordered_map<std::string, std::string> contributor;
+                for (const auto &m : info.methods) contributor[m.name] = "";
+
+                std::vector<ComposedTraitRef> direct_composed;
+                std::vector<ComposedTraitRef> component_traits;
+                std::vector<int> seen_direct;
+                std::vector<int> seen_component;
+
+                program.resolve_state.trait_composition_stack.push_back(slot);
+
+                for (const auto &named : decl->composed_traits) {
+                    const auto target = walk_namespace_chain(module_path, named, program, diag, ast_program);
+                    if (!target) continue; // walk_namespace_chain already reported its own diagnostic
+
+                    const auto rt = resolve_final_full(target->module_path, target->name, target->crossed_boundary, target->location);
+                    if (rt.kind == TypeKind::Invalid) continue; // already diagnosed
+
+                    if (rt.kind != TypeKind::Trait) {
+                        diag.report_error(DiagnosticStage::Sema, named.location, std::format("'{}' is not a trait", named.name));
+                        continue;
+                    }
+
+                    const int composed_slot = rt.trait_index;
+
+                    if (const auto it = std::ranges::find(program.resolve_state.trait_composition_stack, composed_slot);
+                        it != program.resolve_state.trait_composition_stack.end()) {
+                        // Genuine composition cycle: build the full chain from where
+                        // 'composed_slot' first appears on the ancestor stack through the
+                        // current top, closing with a repeat of that first name.
+                        std::vector<std::string> chain;
+                        for (auto s = it; s != program.resolve_state.trait_composition_stack.end(); ++s) {
+                            const auto *ancestor = program.trait_at(*s);
+                            chain.push_back(ancestor ? ancestor->name : "?");
+                        }
+                        chain.push_back(chain.front());
+
+                        std::string message = std::format("circular trait composition: '{}' composes '{}'", chain[0], chain[1]);
+                        for (size_t i = 2; i < chain.size(); ++i) {
+                            message += std::format(", which composes '{}'", chain[i]);
+                        }
+                        diag.report_error(DiagnosticStage::Sema, named.location, message);
+                        continue;
+                    }
+
+                    if (std::ranges::find(seen_direct, composed_slot) != seen_direct.end()) {
+                        diag.report_error(DiagnosticStage::Sema, named.location,
+                            std::format("duplicate trait '{}' in composition list of '{}'", named.name, info.name));
+                        continue;
+                    }
+                    seen_direct.push_back(composed_slot);
+
+                    const auto *composed_info = program.trait_at(composed_slot);
+                    if (!composed_info) continue;
+                    direct_composed.push_back(ComposedTraitRef{
+                        .module_path = composed_info->module_path, .name = named.name, .trait_index = composed_slot});
+
+                    for (const auto &m : composed_info->methods) {
+                        const auto existing = std::ranges::find_if(info.methods, [&](const TraitMethodInfo &e) { return e.name == m.name; });
+                        if (existing == info.methods.end()) {
+                            info.methods.push_back(m);
+                            contributor[m.name] = named.name;
+                            continue;
+                        }
+                        if (!trait_methods_conflict(*existing, m)) continue; // identical signature — diamond-safe merge, no-op
+
+                        const auto &prior = contributor.at(m.name);
+                        if (prior.empty()) {
+                            diag.report_error(DiagnosticStage::Sema, decl->location, std::format(
+                                "trait '{}' declares '{}' itself and also composes '{}', which declares '{}' with an "
+                                "incompatible signature ('fn{}' vs 'fn{}'). Rename one of them to disambiguate.",
+                                info.name, m.name, named.name, m.name,
+                                describe_signature(existing->is_mut_self, existing->params, existing->return_types, program),
+                                describe_signature(m.is_mut_self, m.params, m.return_types, program)));
+                        } else {
+                            diag.report_error(DiagnosticStage::Sema, decl->location, std::format(
+                                "trait '{}' composes both '{}' and '{}', which each declare '{}' with incompatible "
+                                "signatures ('fn{}' vs 'fn{}'). Rename one of them to disambiguate.",
+                                info.name, prior, named.name, m.name,
+                                describe_signature(existing->is_mut_self, existing->params, existing->return_types, program),
+                                describe_signature(m.is_mut_self, m.params, m.return_types, program)));
+                        }
+                    }
+
+                    for (const auto &c : composed_info->component_traits) {
+                        if (std::ranges::find(seen_component, c.trait_index) == seen_component.end()) {
+                            seen_component.push_back(c.trait_index);
+                            component_traits.push_back(c);
+                        }
+                    }
+                    if (std::ranges::find(seen_component, composed_slot) == seen_component.end()) {
+                        seen_component.push_back(composed_slot);
+                        component_traits.push_back(ComposedTraitRef{
+                            .module_path = composed_info->module_path, .name = named.name, .trait_index = composed_slot});
+                    }
+                }
+
+                program.resolve_state.trait_composition_stack.pop_back();
+
+                if (direct_composed.size() == 1 && decl->methods.empty()) {
+                    diag.warn(DiagnosticStage::Sema, decl->location, std::format(
+                        "trait '{}' composes only '{}' and declares no methods of its own, making it identical to "
+                        "'{}'. Either remove '{}' and use '{}' directly, or declare it as a type alias:\n"
+                        "    pub type {} = {}",
+                        info.name, direct_composed[0].name, direct_composed[0].name, info.name,
+                        direct_composed[0].name, info.name, direct_composed[0].name));
+                }
+
+                info.composed_traits = std::move(direct_composed);
+                info.component_traits = std::move(component_traits);
                 info.layout_done = true;
+                info.composition_done = true;
                 program.traits[slot] = std::move(info);
             }
 

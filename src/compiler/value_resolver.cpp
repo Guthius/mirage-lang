@@ -43,6 +43,9 @@ namespace sema {
                 if (mod_it->second.expr_trait_coercions.contains(get_expr_key(expr))) {
                     return false; // implicit pointer-to-trait-handle coercion has runtime stores
                 }
+                if (mod_it->second.expr_trait_handle_coercions.contains(get_expr_key(expr))) {
+                    return false; // implicit handle-to-handle trait narrowing has a runtime load + store
+                }
                 if (mod_it->second.expr_any_coercions.contains(get_expr_key(expr))) {
                     return false; // implicit any-coercion materializes a runtime {id, data} value
                 }

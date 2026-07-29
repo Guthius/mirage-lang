@@ -1,0 +1,4 @@
+pub type A = trait(A) {
+    fn a(self)
+}
+pub fn main() -> i32 { return 0 }

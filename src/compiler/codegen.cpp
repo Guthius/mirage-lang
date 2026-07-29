@@ -284,7 +284,17 @@ namespace codegen {
             std::unordered_map<int, llvm::Type *> unions_; // union_index -> [N x i8] ArrayType
             // (trait_module, trait_name, type_module, type_name) -> the impl's vtable global,
             // a constant array of function pointers in TraitInfo::methods declaration order.
+            // When the impl'd trait composes others, this array's tail additionally carries one
+            // pointer per TraitInfo::component_traits entry, pointing at that component's own
+            // synthesized sub-vtable in component_vtables_ below — see declare_vtables().
             std::map<std::tuple<std::string, std::string, std::string, std::string>, llvm::GlobalVariable *> vtables_;
+            // (composing_trait_module, composing_trait_name, component_trait_module,
+            // component_trait_name, type_module, type_name) -> a synthesized sub-vtable, shaped
+            // to the component trait's own (flattened) method list, populated from the SAME
+            // impl's underlying functions. Keyed by the composing trait too (not just the
+            // component+type) so this stays independent from any separate standalone
+            // 'impl ComponentTrait for TYPE' — see declare_vtables().
+            std::map<std::tuple<std::string, std::string, std::string, std::string, std::string, std::string>, llvm::GlobalVariable *> component_vtables_;
             size_t string_counter_ = 0;
             size_t vtable_counter_ = 0;
 
@@ -1349,8 +1359,12 @@ namespace codegen {
             // TraitCoercion's doc comment in sema.hpp): word 0 = the source pointer (already
             // an opaque 'ptr' — pointer-like casts are no-ops at the IR level, see
             // is_pointer_like's callers — so no cast instruction is needed), word 1 = the
-            // (trait, pointee-type) vtable global's address, looked up by vtables_ (built by
-            // declare_vtables(), never re-derived here).
+            // right vtable global's address. 'provider_trait_index' tells us which: equal to
+            // 'trait_index' for a direct exact-match impl (today's ordinary vtables_ lookup,
+            // unchanged), or the composing trait actually impl'd when this was resolved
+            // indirectly through composition — in which case the SAME synthesized sub-vtable
+            // handle-narrowing uses (component_vtables_, built by declare_vtables()) is reused
+            // here directly, so the two coercion paths share one mechanism with no duplication.
             auto emit_trait_coercion(const ast::Expr &expr, const sema::TraitCoercion &tc) -> llvm::Value * {
                 auto *data_ptr = emit_expr(expr);
 
@@ -1361,13 +1375,44 @@ namespace codegen {
                 const sema::ResolvedType trait_ty{.kind = sema::TypeKind::Trait, .trait_index = tc.trait_index};
                 const auto [trait_module, trait_name] = sema::find_type_module_and_name(trait_ty, sema_program_);
 
-                const auto it = vtables_.find({trait_module, trait_name, pointee_module, pointee_name});
-                if (it == vtables_.end()) {
+                llvm::GlobalVariable *vtable = nullptr;
+                if (tc.provider_trait_index == tc.trait_index) {
+                    if (const auto it = vtables_.find({trait_module, trait_name, pointee_module, pointee_name}); it != vtables_.end()) {
+                        vtable = it->second;
+                    }
+                } else {
+                    const sema::ResolvedType provider_ty{.kind = sema::TypeKind::Trait, .trait_index = tc.provider_trait_index};
+                    const auto [provider_module, provider_name] = sema::find_type_module_and_name(provider_ty, sema_program_);
+                    if (const auto it = component_vtables_.find({provider_module, provider_name, trait_module, trait_name, pointee_module, pointee_name});
+                        it != component_vtables_.end()) {
+                        vtable = it->second;
+                    }
+                }
+
+                if (!vtable) {
                     report_codegen_error(diag_, {}, "internal error: missing vtable for trait coercion");
                     return llvm::UndefValue::get(llvm_type(*current_module_path_, trait_ty));
                 }
 
-                return build_trait_handle_value(data_ptr, it->second, trait_ty, *current_module_path_);
+                return build_trait_handle_value(data_ptr, vtable, trait_ty, *current_module_path_);
+            }
+
+            // Materializes a handle-to-handle composed-trait narrowing coercion sema already
+            // decided (see TraitHandleCoercion's doc comment in sema.hpp): the source handle's
+            // data pointer passes through unchanged; the vtable pointer is replaced by loading
+            // the address stored at the source vtable's pre-computed trailing slot (built by
+            // declare_vtables() — see component_vtables_). Zero runtime checks.
+            auto emit_trait_handle_coercion(const ast::Expr &expr, const sema::TraitHandleCoercion &thc) -> llvm::Value * {
+                auto *handle = emit_expr(expr);
+                auto *data_ptr = builder_.CreateExtractValue(handle, {0});
+                auto *vtable_ptr = builder_.CreateExtractValue(handle, {1});
+
+                auto *ptr_ty = llvm::PointerType::getUnqual(*context_);
+                auto *slot_ptr = builder_.CreateInBoundsGEP(ptr_ty, vtable_ptr, {builder_.getInt32(thc.slot_index)});
+                auto *sub_vtable_ptr = builder_.CreateLoad(ptr_ty, slot_ptr);
+
+                const sema::ResolvedType to_trait_ty{.kind = sema::TypeKind::Trait, .trait_index = thc.to_trait_index};
+                return build_trait_handle_value(data_ptr, sub_vtable_ptr, to_trait_ty, *current_module_path_);
             }
 
             // Materializes an implicit value-to-'any' coercion sema already decided (see
@@ -1579,30 +1624,92 @@ namespace codegen {
                         const auto *trait_info = sema_program_.trait_at(impl_info.trait_index);
                         if (!trait_info) continue;
 
-                        std::vector<llvm::Constant *> elements;
-                        elements.reserve(trait_info->methods.size());
-                        for (const auto &trait_method : trait_info->methods) {
-                            llvm::Constant *entry = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
-                            if (const auto method_it = impl_info.methods.find(trait_method.name); method_it != impl_info.methods.end()) {
-                                const auto key = method_fn_key_for(method_it->second);
-                                if (const auto fn_it = functions_.find(FunctionKey{impl_info.impl_module, key}); fn_it != functions_.end()) {
-                                    entry = fn_it->second;
-                                }
-                            }
-                            // A missing entry here means sema already reported a conformance
-                            // error for this impl (missing method / signature mismatch) — the
-                            // null placeholder just keeps the vtable's shape well-formed so
-                            // codegen doesn't crash; diag_.has_errors() aborts the compile
-                            // before this module is ever handed back to the caller.
-                            elements.push_back(entry);
+                        // The "family" for this impl: the impl'd trait itself, plus one entry
+                        // per trait it composes (direct or transitive — TraitInfo::component_traits
+                        // is already the deduped transitive closure). For a non-composing trait
+                        // this is just {impl'd trait}, so the loop below degenerates to exactly
+                        // today's single-vtable behavior with zero extra tail slots.
+                        struct FamilyMember {
+                            const sema::TraitInfo *info;
+                            std::string module_path, name;
+                            int trait_index;
+                            llvm::GlobalVariable *global = nullptr;
+                        };
+                        std::vector<FamilyMember> family;
+                        family.push_back({trait_info, impl_info.trait_module, impl_info.trait_name, impl_info.trait_index});
+                        for (const auto &c : trait_info->component_traits) {
+                            const auto *c_info = sema_program_.trait_at(c.trait_index);
+                            if (!c_info) continue;
+                            family.push_back({c_info, c.module_path, c.name, c.trait_index});
                         }
 
-                        auto *array_ty = llvm::ArrayType::get(llvm::PointerType::getUnqual(*context_), elements.size());
-                        auto *init = llvm::ConstantArray::get(array_ty, elements);
-                        auto *global = new llvm::GlobalVariable(
-                            *module_, array_ty, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage, init,
-                            std::format(".vtable.{}", vtable_counter_++));
-                        vtables_[{impl_info.trait_module, impl_info.trait_name, impl_info.type_module, impl_info.type_name}] = global;
+                        // Pass 1: create every family member's global up front (undef body for
+                        // now) so Pass 2 can freely forward-reference any other family member's
+                        // address — safe since every element type here is opaque 'ptr'.
+                        for (auto &fm : family) {
+                            const size_t n = fm.info->methods.size() + fm.info->component_traits.size();
+                            auto *array_ty = llvm::ArrayType::get(llvm::PointerType::getUnqual(*context_), n);
+                            fm.global = new llvm::GlobalVariable(
+                                *module_, array_ty, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
+                                /*Initializer=*/nullptr, std::format(".vtable.{}", vtable_counter_++));
+
+                            if (fm.trait_index == impl_info.trait_index) {
+                                // The impl'd trait's own vtable — existing key shape, unchanged,
+                                // so every existing lookup (dispatch, direct pointer coercion)
+                                // keeps working untouched.
+                                vtables_[{impl_info.trait_module, impl_info.trait_name, impl_info.type_module, impl_info.type_name}] = fm.global;
+                            } else {
+                                // A synthesized sub-vtable, keyed by the ORIGINATING composing
+                                // trait too — this is what keeps it independent from any separate
+                                // standalone 'impl ComponentTrait for TYPE' on the same type.
+                                component_vtables_[{impl_info.trait_module, impl_info.trait_name, fm.module_path, fm.name,
+                                                     impl_info.type_module, impl_info.type_name}] = fm.global;
+                            }
+                        }
+
+                        // Pass 2: fill in each family member's real constant array.
+                        for (const auto &fm : family) {
+                            std::vector<llvm::Constant *> elements;
+                            elements.reserve(fm.info->methods.size() + fm.info->component_traits.size());
+
+                            for (const auto &trait_method : fm.info->methods) {
+                                llvm::Constant *entry = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
+                                if (const auto method_it = impl_info.methods.find(trait_method.name); method_it != impl_info.methods.end()) {
+                                    const auto key = method_fn_key_for(method_it->second);
+                                    if (const auto fn_it = functions_.find(FunctionKey{impl_info.impl_module, key}); fn_it != functions_.end()) {
+                                        entry = fn_it->second;
+                                    }
+                                }
+                                // A missing entry here means sema already reported a conformance
+                                // error for this impl (missing method / signature mismatch) — the
+                                // null placeholder just keeps the vtable's shape well-formed so
+                                // codegen doesn't crash; diag_.has_errors() aborts the compile
+                                // before this module is ever handed back to the caller.
+                                elements.push_back(entry);
+                            }
+
+                            // Trailing back-pointer slots, one per this family member's own
+                            // component_traits, in that vector's order — each one is the address
+                            // of that (further-nested) component's own family global, always
+                            // already built by Pass 1 above.
+                            for (const auto &c : fm.info->component_traits) {
+                                llvm::Constant *sub = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
+                                if (c.trait_index == impl_info.trait_index) {
+                                    if (const auto it = vtables_.find({impl_info.trait_module, impl_info.trait_name, impl_info.type_module, impl_info.type_name});
+                                        it != vtables_.end()) {
+                                        sub = it->second;
+                                    }
+                                } else if (const auto it = component_vtables_.find({impl_info.trait_module, impl_info.trait_name, c.module_path,
+                                                                                    c.name, impl_info.type_module, impl_info.type_name});
+                                           it != component_vtables_.end()) {
+                                    sub = it->second;
+                                }
+                                elements.push_back(sub);
+                            }
+
+                            auto *array_ty = llvm::ArrayType::get(llvm::PointerType::getUnqual(*context_), elements.size());
+                            fm.global->setInitializer(llvm::ConstantArray::get(array_ty, elements));
+                        }
                     }
                 }
             }
@@ -2878,6 +2985,9 @@ namespace codegen {
                 }
                 if (const auto it = current_module_->expr_trait_coercions.find(sema::get_expr_key(expr)); it != current_module_->expr_trait_coercions.end()) {
                     return emit_trait_coercion(expr, it->second);
+                }
+                if (const auto it = current_module_->expr_trait_handle_coercions.find(sema::get_expr_key(expr)); it != current_module_->expr_trait_handle_coercions.end()) {
+                    return emit_trait_handle_coercion(expr, it->second);
                 }
                 if (const auto it = current_module_->expr_any_coercions.find(sema::get_expr_key(expr)); it != current_module_->expr_any_coercions.end()) {
                     return emit_any_coercion(expr, it->second);

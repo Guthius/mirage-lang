@@ -3114,44 +3114,96 @@ namespace sema {
             }
         }
 
-        // Implicit pointer-to-trait-handle coercion: applies through the same
-        // expected-type channel as the tagged-union coercion above (call args, return
-        // statements, var-decl initializers, struct/array/union field init). The source
-        // must be a pointer to a type that implements the trait; see TraitCoercion's doc
-        // comment in sema.hpp for why this is recorded in a side table rather than
-        // overwriting expr_types for this node.
+        // Implicit trait-handle coercion: applies through the same expected-type channel as
+        // the tagged-union coercion above (call args, return statements, var-decl
+        // initializers, struct/array/union field init). Two independent source shapes:
+        //   - a POINTER to a type that implements the trait (directly, or indirectly via a
+        //     composed trait it implements — see the two-tier search below), or
+        //   - an existing TRAIT HANDLE whose own trait composes the expected trait (a
+        //     handle-to-handle narrowing coercion).
+        // See TraitCoercion/TraitHandleCoercion's doc comments in sema.hpp for why each is
+        // recorded in its own side table rather than overwriting expr_types for this node.
         if (expected && expected->kind == TypeKind::Trait && ty.kind != TypeKind::Invalid && ty != *expected) {
-            if (ty.kind != TypeKind::Pointer) {
+            if (ty.kind == TypeKind::Trait) {
+                // Handle-to-handle narrowing: zero runtime checks, no concrete-type knowledge
+                // needed — the target's synthesized sub-vtable address is read straight out of
+                // the source handle's own vtable's trailing slots at codegen time (see
+                // component_vtables_ in codegen.cpp).
+                if (const auto *from_info = program.trait_at(ty.trait_index)) {
+                    const auto it = std::ranges::find_if(from_info->component_traits,
+                        [&](const auto &c) { return c.trait_index == expected->trait_index; });
+                    if (it != from_info->component_traits.end()) {
+                        const int ordinal = static_cast<int>(std::distance(from_info->component_traits.begin(), it));
+                        program.modules.at(module_path).expr_trait_handle_coercions[get_expr_key(expr)] = TraitHandleCoercion{
+                            .from_trait_index = ty.trait_index,
+                            .to_trait_index = expected->trait_index,
+                            .slot_index = static_cast<int>(from_info->methods.size()) + ordinal,
+                        };
+                        return *expected;
+                    }
+                }
+                // Not a reachable composed trait: fall through to the caller's own
+                // "expected X, got Y" mismatch error — NOT the pointer-required error below,
+                // which would be misleading for a source that's already a trait handle.
+            } else if (ty.kind != TypeKind::Pointer) {
                 const auto [trait_module, trait_name] = find_type_module_and_name(*expected, program);
                 return error(diag, get_expr_location(expr), std::format(
                     "cannot coerce non-pointer value to trait handle '{}'; a pointer to a type implementing the trait is required",
                     trait_name.empty() ? "<trait>" : trait_name));
-            }
+            } else {
+                const auto *pointee = program.pointee_at(ty.pointee_index);
+                const auto [pointee_module, pointee_name] = pointee ? find_type_module_and_name(*pointee, program) : std::pair<std::string, std::string>{};
 
-            const auto *pointee = program.pointee_at(ty.pointee_index);
-            const auto [pointee_module, pointee_name] = pointee ? find_type_module_and_name(*pointee, program) : std::pair<std::string, std::string>{};
+                // Tier 1: an exact, directly-written 'impl D for TYPE' always wins over any
+                // composed-derived route to D — this is what keeps every pre-existing
+                // direct-impl program byte-for-byte unaffected by the search below.
+                int provider_trait_index = -1;
+                if (const auto it = program.trait_impls_by_type.find({pointee_module, pointee_name}); it != program.trait_impls_by_type.end()) {
+                    for (const auto &impl_info : it->second) {
+                        if (impl_info.trait_index == expected->trait_index) {
+                            provider_trait_index = expected->trait_index;
+                            break;
+                        }
+                    }
 
-            bool implemented = false;
-            if (const auto it = program.trait_impls_by_type.find({pointee_module, pointee_name}); it != program.trait_impls_by_type.end()) {
-                for (const auto &impl_info : it->second) {
-                    if (impl_info.trait_index == expected->trait_index) {
-                        implemented = true;
-                        break;
+                    // Tier 2: no exact impl — search every impl on this type whose trait
+                    // composes the expected trait (direct or transitive).
+                    if (provider_trait_index < 0) {
+                        std::vector<std::string> candidate_names;
+                        for (const auto &impl_info : it->second) {
+                            const auto *candidate_info = program.trait_at(impl_info.trait_index);
+                            if (!candidate_info) continue;
+                            const bool reaches = std::ranges::any_of(candidate_info->component_traits,
+                                [&](const auto &c) { return c.trait_index == expected->trait_index; });
+                            if (!reaches) continue;
+                            if (provider_trait_index < 0) provider_trait_index = impl_info.trait_index;
+                            candidate_names.push_back(impl_info.trait_name);
+                        }
+                        if (candidate_names.size() > 1) {
+                            const auto [trait_module, trait_name] = find_type_module_and_name(*expected, program);
+                            return error(diag, get_expr_location(expr), std::format(
+                                "ambiguous implicit coercion to trait '{}': type '{}' implements it via both '{}' and "
+                                "'{}'; implement '{}' directly for '{}' to disambiguate",
+                                trait_name.empty() ? "<trait>" : trait_name, pointee_name.empty() ? "<type>" : pointee_name,
+                                candidate_names[0], candidate_names[1],
+                                trait_name.empty() ? "<trait>" : trait_name, pointee_name.empty() ? "<type>" : pointee_name));
+                        }
                     }
                 }
-            }
 
-            if (!implemented) {
-                const auto [trait_module, trait_name] = find_type_module_and_name(*expected, program);
-                return error(diag, get_expr_location(expr), std::format(
-                    "type '{}' does not implement trait '{}'",
-                    pointee_name.empty() ? "<type>" : pointee_name, trait_name.empty() ? "<trait>" : trait_name));
-            }
+                if (provider_trait_index < 0) {
+                    const auto [trait_module, trait_name] = find_type_module_and_name(*expected, program);
+                    return error(diag, get_expr_location(expr), std::format(
+                        "type '{}' does not implement trait '{}'",
+                        pointee_name.empty() ? "<type>" : pointee_name, trait_name.empty() ? "<trait>" : trait_name));
+                }
 
-            program.modules.at(module_path).expr_trait_coercions[get_expr_key(expr)] = TraitCoercion{
-                .trait_index = expected->trait_index,
-            };
-            return *expected;
+                program.modules.at(module_path).expr_trait_coercions[get_expr_key(expr)] = TraitCoercion{
+                    .trait_index = expected->trait_index,
+                    .provider_trait_index = provider_trait_index,
+                };
+                return *expected;
+            }
         }
 
         // Implicit value-to-'any' coercion: applies through the same expected-type channel as

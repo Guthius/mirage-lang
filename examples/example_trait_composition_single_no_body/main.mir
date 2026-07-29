@@ -1,0 +1,14 @@
+pub type A = trait {
+    fn a(self) -> i32
+}
+pub type B = trait(A)
+
+pub type Impl = struct { v: i32 }
+impl B for Impl {
+    fn a(self) -> i32 { return self.v }
+}
+pub fn main() -> i32 {
+    mut x: Impl = { .v = 5 }
+    const b: B = &x
+    return b.a()
+}

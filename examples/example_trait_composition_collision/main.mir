@@ -1,0 +1,4 @@
+pub type X = trait { fn run(self) -> i32 }
+pub type Y = trait { fn run(self) -> bool }
+pub type Z = trait(X, Y)
+pub fn main() -> i32 { return 0 }

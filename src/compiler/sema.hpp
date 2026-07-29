@@ -278,10 +278,36 @@ namespace sema {
         std::vector<bool> param_default_is_const;        // parallel to params
     };
 
+    // One resolved entry in a trait's composition relationship (direct or transitive).
+    struct ComposedTraitRef {
+        std::string module_path;
+        std::string name;
+        int trait_index = -1;
+    };
+
     struct TraitInfo {
         std::string module_path;            // module where 'type Name = trait {...}' is declared
-        std::vector<TraitMethodInfo> methods; // declaration order — the vtable layout
+        std::string name;                   // the trait's own unqualified name — needed for
+                                             // composition diagnostics (cycle chains, collision
+                                             // messages, redundancy warning); nothing else on
+                                             // TraitInfo/ast::TraitType carries it.
+        std::vector<TraitMethodInfo> methods; // FLATTENED: own methods (decl order) followed by
+                                             // each directly-composed trait's own (already-
+                                             // flattened) methods, composition-list order,
+                                             // skipping names already present — this order IS
+                                             // the vtable layout and must never be re-derived.
         bool layout_done = false;
+
+        std::vector<ComposedTraitRef> composed_traits;  // resolved, deduped DIRECT composition
+                                                         // list, source order.
+        std::vector<ComposedTraitRef> component_traits; // deduped TRANSITIVE closure of every
+                                                         // trait this one composes (excludes
+                                                         // self). This vector's order IS the
+                                                         // synthesized sub-vtable ordinal
+                                                         // assignment — codegen and every
+                                                         // coercion-site sema check read this
+                                                         // same vector, never re-derive an order.
+        bool composition_done = false;                  // memoization guard, parallel to layout_done
     };
 
     // One successfully-declared 'impl TRAIT for TYPE' block.
@@ -314,6 +340,23 @@ namespace sema {
     // trait membership itself.
     struct TraitCoercion {
         int trait_index = -1;
+        // The trait actually impl'd for the pointee (== trait_index for a direct exact-match
+        // impl; the composing trait's index when this coercion was resolved indirectly through
+        // its composition — see the pointer-to-component search in check_expr's expected-type
+        // tail). Codegen uses (provider_trait_index, trait_index, pointee type) to find either
+        // the ordinary vtable (provider == trait_index) or the right synthesized sub-vtable.
+        int provider_trait_index = -1;
+    };
+
+    // Records an implicit HANDLE-TO-HANDLE composed-trait narrowing coercion decided by
+    // check_expr's expected-type tail (sibling to TraitCoercion above, which is
+    // pointer-to-handle). 'slot_index' is the pre-computed GEP index into the SOURCE handle's
+    // vtable — methods.size() of the source trait, plus the target's ordinal within the source
+    // trait's own component_traits — codegen reads it directly, never re-derives it.
+    struct TraitHandleCoercion {
+        int from_trait_index = -1;
+        int to_trait_index = -1;
+        int slot_index = -1;
     };
 
     // Records an implicit value-to-'any' coercion decided by check_expr's expected-type
@@ -393,6 +436,7 @@ namespace sema {
         std::unordered_map<const void *, ResolvedType> expr_types;
         std::unordered_map<const void *, VariantCoercion> expr_variant_coercions;
         std::unordered_map<const void *, TraitCoercion> expr_trait_coercions;
+        std::unordered_map<const void *, TraitHandleCoercion> expr_trait_handle_coercions;
         std::unordered_map<const void *, AnyCoercion> expr_any_coercions;
         std::unordered_map<const void *, TraitDispatchInfo> expr_trait_dispatch;
         // A call-site CallExpr node -> the index into Program::generic_fn_instances it
@@ -462,6 +506,14 @@ namespace sema {
         // infinite instantiation chain (no indirection anywhere) must still be caught.
         // Linear-scan (small, rare), not a set, since GenericInstanceKey has no operator<.
         std::vector<GenericInstanceKey> generic_type_resolving;
+        // Ordered ancestor stack of trait_index currently mid-flattening (layout_trait's
+        // composition-resolution step, type_resolver.cpp) — pushed/popped around that step
+        // only. Distinct from trait_resolving above: that set exists purely to short-circuit
+        // a trait referencing ITSELF in a METHOD SIGNATURE (not a true cycle, since a trait
+        // handle is a fixed-size fat pointer); this stack instead detects a genuine trait
+        // COMPOSITION cycle ('trait(A)' -> ... -> 'trait(A)'), which must be a hard error
+        // naming the full chain.
+        std::vector<int> trait_composition_stack;
     };
 
     // Compiler-driver-supplied configuration read by '$option' during sema. Threaded
@@ -700,6 +752,14 @@ namespace sema {
     // Minimal human-readable rendering of a resolved type, used for trait conformance
     // and default-parameter-value diagnostics.
     auto describe_type(const ResolvedType &t, const Program &program) -> std::string;
+    // Renders a method signature ("(self, T1) -> R") for trait-conformance and
+    // trait-composition-collision diagnostics.
+    auto describe_signature(bool is_mut_self, const std::vector<ResolvedType> &params,
+                             const std::vector<ResolvedType> &returns, const Program &program) -> std::string;
+    // True if two trait methods' signatures (self/mut-self, param types, return types —
+    // defaults excluded) differ, i.e. they cannot be merged as the same flattened method
+    // during trait-composition flattening (layout_trait, type_resolver.cpp).
+    auto trait_methods_conflict(const TraitMethodInfo &a, const TraitMethodInfo &b) -> bool;
     // Byte size/alignment of an already-resolved type - exactly what 'size_of(T)'/
     // 'align_of(T)' evaluate to at compile time. codegen.cpp's Generator::size_of()/
     // align_of() and type_resolver.cpp's own Resolver::size_of()/align_of() each compute

@@ -67,6 +67,38 @@ namespace sema {
         }
     }
 
+    auto describe_signature(const bool is_mut_self, const std::vector<ResolvedType> &params,
+                             const std::vector<ResolvedType> &returns, const Program &program) -> std::string {
+        std::string s = is_mut_self ? "(mut self" : "(self";
+        for (const auto &p : params) {
+            s += ", " + describe_type(p, program);
+        }
+        s += ")";
+        if (!returns.empty()) {
+            s += " -> ";
+            if (returns.size() == 1) {
+                s += describe_type(returns[0], program);
+            } else {
+                s += "(";
+                for (size_t i = 0; i < returns.size(); ++i) {
+                    if (i) s += ", ";
+                    s += describe_type(returns[i], program);
+                }
+                s += ")";
+            }
+        }
+        return s;
+    }
+
+    // Compares two trait methods' signatures for the purposes of composition flattening
+    // (layout_trait, type_resolver.cpp): same self/mut-self, same param types in order, same
+    // return types. Default values are deliberately excluded (matching the existing trait-impl
+    // conformance check's own omission, sema.cpp's resolve_trait_impl_signatures_for_program) —
+    // two methods differing only in a default value merge cleanly, no collision.
+    auto trait_methods_conflict(const TraitMethodInfo &a, const TraitMethodInfo &b) -> bool {
+        return a.is_mut_self != b.is_mut_self || a.params != b.params || a.return_types != b.return_types;
+    }
+
     namespace {
         // Resolves 'ef's declared param/return types exactly once (idempotent via
         // 'is_resolved'). Extracted out of resolve_signatures_for_module's inline body so
@@ -243,29 +275,6 @@ namespace sema {
                     info.is_resolved = true;
                 }
             }
-        }
-
-        auto describe_signature(const bool is_mut_self, const std::vector<ResolvedType> &params,
-                                 const std::vector<ResolvedType> &returns, const Program &program) -> std::string {
-            std::string s = is_mut_self ? "(mut self" : "(self";
-            for (const auto &p : params) {
-                s += ", " + describe_type(p, program);
-            }
-            s += ")";
-            if (!returns.empty()) {
-                s += " -> ";
-                if (returns.size() == 1) {
-                    s += describe_type(returns[0], program);
-                } else {
-                    s += "(";
-                    for (size_t i = 0; i < returns.size(); ++i) {
-                        if (i) s += ", ";
-                        s += describe_type(returns[i], program);
-                    }
-                    s += ")";
-                }
-            }
-            return s;
         }
 
         // Resolves every trait-impl method's signature and checks it conforms to the

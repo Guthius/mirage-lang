@@ -1,0 +1,2 @@
+pub type Base = trait { fn base(self) -> i32 }
+pub type Composed = trait(Base)

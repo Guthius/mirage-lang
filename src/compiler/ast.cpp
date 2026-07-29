@@ -2547,6 +2547,29 @@ namespace ast {
             const auto location = parser.current_location();
 
             parser.expect(TokenKind::KwTrait, "'trait'");
+
+            // Optional 'trait(A, B, ...)' composition list. 'allow_generic_args=false' matches
+            // 'impl TRAIT for TYPE''s two named_type operands above — traits are never generic.
+            std::vector<NamedType> composed_traits;
+            if (parser.match(TokenKind::LParen)) {
+                composed_traits.push_back(parse_named_type(parser, /*allow_generic_args=*/false));
+                while (parser.match(TokenKind::Comma)) {
+                    const LoopProgressGuard progress_guard(parser);
+                    composed_traits.push_back(parse_named_type(parser, /*allow_generic_args=*/false));
+                }
+                parser.expect(TokenKind::RParen, "')'");
+            }
+
+            // A composition list with no brace body is legal on its own; a bare 'trait' (no
+            // list, no brace) falls through to expect(LBrace) below and reports its usual error.
+            if (!composed_traits.empty() && !parser.check(TokenKind::LBrace)) {
+                return std::make_unique<TraitType>(TraitType{
+                    .methods = {},
+                    .composed_traits = std::move(composed_traits),
+                    .location = location,
+                });
+            }
+
             parser.expect(TokenKind::LBrace, "'{'");
 
             std::vector<TraitType::Method> methods;
@@ -2569,6 +2592,7 @@ namespace ast {
 
             return std::make_unique<TraitType>(TraitType{
                 .methods = std::move(methods),
+                .composed_traits = std::move(composed_traits),
                 .location = location,
             });
         }

@@ -146,7 +146,11 @@ namespace sema {
                 sema_program.unions.push_back(UnionInfo{.module_path = module_path, .is_tagged = union_decl->is_tagged});
             }
             if (trait_slot >= 0) {
-                sema_program.traits.push_back(TraitInfo{.module_path = module_path});
+                // 'name' is set here (declare time), not by layout_trait, so it's already
+                // available via program.trait_at(idx)->name for an ancestor trait that's still
+                // mid-layout (on ResolveState::trait_composition_stack) when a composition-cycle
+                // error needs to name it — layout_trait never touches this field.
+                sema_program.traits.push_back(TraitInfo{.module_path = module_path, .name = decl.name});
             }
             if (bitset_slot >= 0) {
                 sema_program.bitsets.push_back(BitsetInfo{.module_path = module_path});

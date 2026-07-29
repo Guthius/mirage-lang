@@ -1316,6 +1316,95 @@ bytes, 8-byte aligned, regardless of which trait it names. This is why only
 a pointer (not a bare value) coerces to it, and why handles have no `ext fn`
 ABI representation.
 
+### Trait Composition
+
+```mirage
+type Reader = trait {
+    fn read(self) -> i32
+}
+type Writer = trait {
+    fn write(mut self, b: i32)
+}
+type Stream = trait(Reader, Writer) {
+    fn flush(mut self)
+}
+```
+
+A trait may declare that it **composes** one or more other traits:
+`trait(A, B, ...) { ... }`. The parenthesized list is one or more other
+trait names; the brace body is optional when a composition list is
+present, but if written must be non-empty (the same rule as the bare
+`trait { }` form above) — `Stream` in the example needs its own body only
+because it declares `flush` in addition to composing `Reader`/`Writer`;
+`type Stream = trait(Reader, Writer)` (no body) is equally legal when a
+composing trait declares no methods of its own.
+
+**Flattening.** A composing trait's effective method set is the union of
+its own declared methods (if any) plus every method reachable, transitively,
+through its composed traits. This flattened set is what governs
+everything a trait's method list governs elsewhere in this section —
+`impl` conformance, static/dynamic dispatch, and vtable layout all see the
+flattened set, not just a trait's own literal body.
+
+When two same-named methods meet during flattening — one of a trait's own
+methods and one from a composed trait, or two methods from two different
+composed traits — their full signatures (`self`/`mut self`, parameter
+types, return types; default values are not part of this comparison) are
+compared:
+
+- **Identical signature**: the two methods merge into one flattened entry.
+  This makes the diamond case safe — if `Top` composes both `Left` and
+  `Right`, and both of those compose a common `Base`, `Base`'s methods
+  appear exactly once in `Top`'s flattened set, however many paths reach
+  them.
+- **Differing signature**: a sema error, reported at the composing trait's
+  own declaration, naming both contributing traits and both signatures:
+
+  ```
+  error: trait 'Z' composes both 'X' and 'Y', which each declare 'run' with
+         incompatible signatures ('fn(self) -> i32' vs 'fn(self) -> bool').
+         Rename one of them to disambiguate.
+  ```
+
+  When the collision is between a trait's own method and a composed one,
+  the wording adapts accordingly:
+
+  ```
+  error: trait 'Z' declares 'run' itself and also composes 'X', which
+         declares 'run' with an incompatible signature ('fn(self) -> i32'
+         vs 'fn(self) -> bool'). Rename one of them to disambiguate.
+  ```
+
+**Composition cycles** are a sema error, naming the full chain — including
+the degenerate case of a trait composing itself directly:
+
+```
+error: circular trait composition: 'A' composes 'B', which composes 'A'
+error: circular trait composition: 'A' composes 'A'
+```
+
+**Redundant single composition.** A trait whose composition list has
+exactly one entry and which declares no methods of its own is identical
+to the trait it composes — this is a warning, not an error, suggesting the
+simplification:
+
+```
+warning: trait 'X' composes only 'Y' and declares no methods of its own,
+         making it identical to 'Y'. Either remove 'X' and use 'Y' directly,
+         or declare it as a type alias:
+             pub type X = Y
+```
+
+The warning does not fire once a trait composes a second trait, or once it
+declares at least one method of its own.
+
+**Coherence and conformance** are unaffected by composition: `impl
+COMPOSED_TRAIT for TYPE` must implement exactly the flattened method
+set — every existing rule (exact signature match, default-parameter
+inheritance, no extra methods, the orphan-impl rule, and the
+single-`(TRAIT, TYPE)`-impl-per-program rule) applies to the flattened
+surface exactly as it would to a non-composing trait's own literal body.
+
 ### Implementing a Trait
 
 ```mirage
@@ -1402,6 +1491,44 @@ initializers) — the same contextual mechanism used for `default`,
 `undefined`, and implicit tagged-union wrapping elsewhere in the language.
 The source must be a pointer; coercing a bare (non-pointer) value is an
 error, as is coercing a pointer to a type that doesn't implement the trait.
+
+**Coercing to a composed trait's component.** A pointer also coerces
+directly to any trait that `TYPE`'s impl'd trait composes (direct or
+transitive), with no standalone `impl` of that component required:
+
+```mirage
+mut m: MemStream = { .value = 100, .pos = 0 }   // impl Stream for MemStream only
+const r: Reader = &m                            // OK — Stream composes Reader
+```
+
+An exact, directly-written `impl D for TYPE` always wins over a
+composed-derived route to `D`. If no exact impl exists and more than one
+of `TYPE`'s impl'd traits composes `D`, the coercion is ambiguous — a sema
+error naming both candidates:
+
+```
+error: ambiguous implicit coercion to trait 'D': type 'TYPE' implements it
+       via both 'X' and 'Y'; implement 'D' directly for 'TYPE' to
+       disambiguate
+```
+
+**Narrowing an existing handle.** A trait handle also coerces, through the
+same expected-type positions, to a handle of any trait it composes (direct
+or transitive) — this is a **handle-to-handle** coercion, distinct from the
+pointer case above: the data pointer is carried over unchanged and only the
+vtable pointer is swapped for the composed trait's own, with no runtime
+check:
+
+```mirage
+const s: Stream = &m      // pointer-to-handle: builds the Stream handle
+const r: Reader = s       // handle-to-handle: narrows Stream down to Reader
+r.read()                  // dispatches to the same underlying function
+                           // 's' would have called
+```
+
+This coercion is one-directional — there is no path from a composed
+trait's component back to the composing trait's own handle, matching
+["There is no downcasting"](#handle-values) below.
 
 ```mirage
 mut shapes: [2]Drawable = { &circle, &rect }   // &circle, &rect coerce to Drawable handles

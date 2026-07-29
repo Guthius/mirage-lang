@@ -35,6 +35,7 @@ auto main() -> int {
     expect_terminates_with_errors("union_body_stray_token", "type T = union { ! }\n");
     expect_terminates_with_errors("enum_body_stray_token", "type T = enum { ! }\n");
     expect_terminates_with_errors("trait_body_stray_token", "type T = trait { ! }\n");
+    expect_terminates_with_errors("trait_composition_list_stray_token", "type T = trait(A, ! ) { }\n");
     expect_terminates_with_errors("impl_body_stray_token", "impl T { ! }\n");
     expect_terminates_with_errors("trait_impl_body_stray_token", "impl T for S { ! }\n");
 

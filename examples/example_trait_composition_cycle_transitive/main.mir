@@ -1,0 +1,10 @@
+pub type A = trait(B) {
+    fn a(self)
+}
+pub type B = trait(C) {
+    fn b(self)
+}
+pub type C = trait(A) {
+    fn c(self)
+}
+pub fn main() -> i32 { return 0 }

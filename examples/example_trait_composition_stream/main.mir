@@ -1,0 +1,53 @@
+// Stream/Reader/Writer/Seekable composition example (spec's canonical case). Verifies:
+//   - direct pointer-to-component coercion (no standalone 'impl Reader for MemStream')
+//   - handle-to-handle narrowing from the full Stream handle down to each component
+//   - each narrowed handle dispatches to the correct underlying function (distinct
+//     sentinel values baked into each method) and the data pointer survives narrowing
+//     (mutating through a narrowed Writer/Seekable handle is visible through the
+//     original struct afterward)
+pub type Reader = trait {
+    fn read(self) -> i32
+}
+pub type Writer = trait {
+    fn write(mut self, b: i32)
+}
+pub type Seekable = trait {
+    fn seek(mut self, pos: i32) -> i32
+}
+pub type Stream = trait(Reader, Writer, Seekable)
+
+pub type MemStream = struct {
+    value: i32
+    pos: i32
+}
+
+impl Stream for MemStream {
+    fn read(self) -> i32 { return self.value }
+    fn write(mut self, b: i32) { self.value = b }
+    fn seek(mut self, pos: i32) -> i32 { self.pos = pos; return self.pos }
+}
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub fn main() -> i32 {
+    mut m: MemStream = { .value = 100, .pos = 0 }
+
+    // Direct pointer-to-component coercion.
+    const r: Reader = &m
+    printf("direct read: %d\n", r.read())
+
+    // Full handle, then narrow to each component.
+    const s: Stream = &m
+    const r2: Reader = s
+    printf("narrowed read: %d\n", r2.read())
+
+    mut w: Writer = s
+    w.write(200)
+    printf("after write, through original struct: %d\n", m.value)
+
+    const sk: Seekable = s
+    const new_pos: i32 = sk.seek(42)
+    printf("seek result: %d, through original struct: %d\n", new_pos, m.pos)
+
+    return 0
+}

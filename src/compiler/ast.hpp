@@ -343,7 +343,8 @@ namespace ast {
         SourceLocation location;
     };
 
-    // 'trait { fn method(self) -> T ... }' — a signature-only dispatch surface.
+    // 'trait { fn method(self) -> T ... }' or 'trait(A, B) { ... }' — a
+    // signature-only dispatch surface, optionally composing other traits.
     // Using a trait name in type position denotes a fat-pointer HANDLE, not the
     // trait definition itself; see sema::TraitInfo / TypeKind::Trait.
     struct TraitType {
@@ -366,7 +367,8 @@ namespace ast {
             SourceLocation self_location; // the 'self' token itself
         };
 
-        std::vector<Method> methods;
+        std::vector<Method> methods;             // OWN methods only — never includes composed ones
+        std::vector<NamedType> composed_traits;  // 'trait(A, B)' list, source order; empty if absent
         SourceLocation location;
     };
 
