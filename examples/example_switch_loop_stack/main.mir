@@ -1,0 +1,47 @@
+// example_switch_loop_stack.mir — a 'switch' on a tagged union inside a hot loop.
+//
+// emit_match/emit_switch_stmt allocated their scratch union slot with a bare CreateAlloca at
+// the current insertion point instead of through create_entry_alloca, the hoisting helper every
+// other scratch slot in codegen.cpp uses. Inside a loop body that is a non-entry alloca, which
+// LLVM lowers as a dynamic stack adjustment reclaimed only when the function returns — so the
+// frame grew by one union's worth every iteration.
+//
+// 200_000 iterations was enough to exhaust an 8 MB stack: the compiled program died with
+// SIGSEGV (exit 139). The loop below is deliberately large enough to have crashed and small
+// enough to stay fast.
+//
+// Note on '&' captures: the switch operand is emitted as a VALUE, so the scratch slot holds a
+// copy. A '&payload' capture therefore refers to that copy and is valid only for the duration
+// of its arm — saving one and reading it after the arm ends was never meaningful, and with the
+// slot hoisted it now reliably reads the most recent iteration rather than appearing to work.
+// Diagnosing that escape is a sema-side lifetime check and is recorded as follow-up work.
+//
+// Expected: exit code 3 — 200000 % 7.
+
+type Payload = struct {
+    a: i64
+    b: i64
+    c: i64
+    d: i64
+}
+
+type Msg = union(enum) {
+    Event: Payload
+    Empty
+}
+
+pub fn main() -> i32 {
+    mut m: Msg = .Event{.a = 1, .b = 2, .c = 3, .d = 4}
+    mut total: i64 = 0
+    mut i: usize = 0
+
+    while i < 200000 {
+        switch m {
+            .Event(e): { total = total + e.a },
+            .Empty:    {}
+        }
+        i++
+    }
+
+    return cast(total % 7, i32)
+}

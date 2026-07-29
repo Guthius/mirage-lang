@@ -4375,7 +4375,13 @@ namespace codegen {
                 if (operand_type.kind == sema::TypeKind::Union) {
                     const auto &union_info = sema_program_.unions.at(operand_type.union_index);
                     auto *union_ll_ty = unions_.at(operand_type.union_index);
-                    auto *union_slot = builder_.CreateAlloca(union_ll_ty, nullptr, "match.union");
+                    // Hoisted to the entry block, like every other scratch slot in this file.
+                    // Allocated at the current insertion point, this sits inside any
+                    // enclosing loop body, and LLVM lowers a non-entry alloca as a dynamic
+                    // stack adjustment that is only reclaimed when the function returns --
+                    // so each iteration grew the frame. A 2M-iteration loop switching on a
+                    // tagged union exhausted the stack and died with SIGSEGV.
+                    auto *union_slot = create_entry_alloca(fn, union_ll_ty, "match.union");
                     auto *operand_val = emit_operand();
                     builder_.CreateStore(operand_val, union_slot);
                     auto *tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), union_slot, "match.tag");
@@ -4549,7 +4555,13 @@ namespace codegen {
                 if (operand_type.kind == sema::TypeKind::Union) {
                     const auto &union_info = sema_program_.unions.at(operand_type.union_index);
                     auto *union_ll_ty = unions_.at(operand_type.union_index);
-                    auto *union_slot = builder_.CreateAlloca(union_ll_ty, nullptr, "switch.union");
+                    // Hoisted to the entry block, like every other scratch slot in this file.
+                    // Allocated at the current insertion point, this sits inside any
+                    // enclosing loop body, and LLVM lowers a non-entry alloca as a dynamic
+                    // stack adjustment that is only reclaimed when the function returns --
+                    // so each iteration grew the frame. A 2M-iteration loop switching on a
+                    // tagged union exhausted the stack and died with SIGSEGV.
+                    auto *union_slot = create_entry_alloca(fn, union_ll_ty, "switch.union");
                     auto *operand_val = emit_operand();
                     builder_.CreateStore(operand_val, union_slot);
                     auto *tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), union_slot, "switch.tag");

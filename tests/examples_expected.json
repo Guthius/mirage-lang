@@ -434,6 +434,10 @@
     "action": "run",
     "exit": 73
   },
+  "example_switch_loop_stack": {
+    "action": "run",
+    "exit": 3
+  },
   "example_tagged_union": {
     "action": "run",
     "exit": 0
