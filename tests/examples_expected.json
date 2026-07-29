@@ -1,0 +1,551 @@
+{
+  "builder": {
+    "action": "emit-ir",
+    "exit": 0
+  },
+  "compiler": {
+    "action": "run",
+    "exit": 0
+  },
+  "dictionary": {
+    "action": "emit-ir",
+    "exit": 1,
+    "known_broken": "pre-existing on master: main.mir:7 uses the pre-'[]' paren-generics syntax 'type entry(K: type, V: type)', replaced by 'type entry[K: type, V: type]' when generics landed 2026-07-29"
+  },
+  "example_any_bad_cast": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_any_no_fields": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_any_non_addressable": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_array_init": {
+    "action": "run",
+    "exit": 40
+  },
+  "example_asi_deref": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_asm_expr_cannot_infer": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_asm_expr_mixed_output": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_asm_expr_open_forms": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_asm_expr_sse_register": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_asm_expr_unknown_register": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_asm_expr_width_mismatch": {
+    "action": "run",
+    "exit": 1
+  },
+  "example_asm_memory_operand": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_asm_module_scope": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_asm_movzx": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_asm_movzx_bad_src_width": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_asm_sse_register": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_asm_struct_operand": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_asm_syscall": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_asm_unknown_mnemonic": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_asm_unknown_var": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_asm_width_mismatch": {
+    "action": "run",
+    "exit": 1
+  },
+  "example_asm_zero_operand": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_attr_always_inline_address_taken": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_attr_conflict_init_no_return": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_attr_init_bad_return": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_attr_init_basic": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_attr_init_cycle": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_attr_init_error_return": {
+    "action": "run",
+    "exit": 1
+  },
+  "example_attr_init_on_method": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_attr_init_params": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_attr_init_private": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_attr_naked": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_attr_naked_always_inline_method": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_attr_naked_method": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_attr_naked_method_non_asm_body": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_attr_naked_non_asm_body": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_attr_no_return": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_attr_section": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_attr_section_empty": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_attr_section_method": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_attr_section_method_empty": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_attr_section_trait_method": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_attr_unknown": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_bitset": {
+    "action": "run",
+    "exit": 112
+  },
+  "example_default_params": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_default_params_ext_fn": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_default_params_fnptr_arity": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_default_params_ordering_violation": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_default_params_runtime_once": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_default_params_trait_dispatch": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_default_params_trait_extra": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_default_params_trait_redeclare": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_default_params_try_rejected": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_default_params_type_mismatch": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_default_params_variadic_conflict": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_default_undefined": {
+    "action": "build",
+    "exit": 1,
+    "known_broken": "pre-existing on master: main.mir:24 writes '{ x = 5, y = default }' without the leading dots the current braced-initializer syntax requires ('{.x = 5, .y = default}')"
+  },
+  "example_defer": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_enum": {
+    "action": "build",
+    "exit": 1,
+    "known_broken": "pre-existing on master: import(\"example_enum_def\") cannot resolve \u2014 the target is a sibling of examples/example_enum, not a subdirectory of it"
+  },
+  "example_enum_def": {
+    "action": "emit-ir",
+    "exit": 0
+  },
+  "example_env_invalid_enum": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_env_missing_required": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_error_typestate": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_error_union": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_error_warn": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_fmt": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_fnptr": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_fnptr2": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_fnptr3": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_fnptr4": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_generics_bad_param_type": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_generics_basic": {
+    "action": "run",
+    "exit": 30
+  },
+  "example_generics_const": {
+    "action": "run",
+    "exit": 12
+  },
+  "example_generics_impl_arity_mismatch": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_generics_infer_arg_unify": {
+    "action": "run",
+    "exit": 9
+  },
+  "example_generics_infer_fail": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_generics_missing_args": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_generics_mixed": {
+    "action": "run",
+    "exit": 10
+  },
+  "example_generics_orphan_impl": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_generics_rtti": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_generics_self_instantiation": {
+    "action": "run",
+    "exit": 42
+  },
+  "example_impl": {
+    "action": "run",
+    "exit": 20
+  },
+  "example_link_in_fn_body": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_option_in_mut": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_option_invalid_enum": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_option_missing_required": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_raylib_link": {
+    "action": "link-directives",
+    "exit": 0
+  },
+  "example_reflection": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_return_ok_err": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_scalar_match": {
+    "action": "run",
+    "exit": 111
+  },
+  "example_slice_cast_ptr": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_slice_to_array": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_struct_init": {
+    "action": "run",
+    "exit": 135
+  },
+  "example_struct_positional_init": {
+    "action": "run",
+    "exit": 73
+  },
+  "example_tagged_union": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_tagged_union_scalar_payload": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_trait_composition_bare": {
+    "action": "run",
+    "exit": 9
+  },
+  "example_trait_composition_coherence_still_enforced": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_trait_composition_collision": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_trait_composition_collision_own": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_trait_composition_cycle_2": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_trait_composition_cycle_self": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_trait_composition_cycle_transitive": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_trait_composition_diamond": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_trait_composition_empty_body_rejected": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_trait_composition_multi_no_body": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_trait_composition_multi_with_body": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_trait_composition_orphan_still_enforced": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_trait_composition_redundant_not_fired_own_method": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_trait_composition_redundant_not_fired_two_composed": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_trait_composition_redundant_warn": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_trait_composition_single_no_body": {
+    "action": "run",
+    "exit": 5
+  },
+  "example_trait_composition_stream": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_traits": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_try": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_type_info_wrong_arg": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_type_no_arith": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_type_reflection": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_union": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_varargs": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_when_expr_precedence": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_when_expr_type_mismatch": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_when_fn_body": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_when_nonconst_condition": {
+    "action": "build",
+    "exit": 1
+  },
+  "fmt": {
+    "action": "emit-ir",
+    "exit": 0
+  },
+  "io": {
+    "action": "emit-ir",
+    "exit": 0
+  },
+  "lexer": {
+    "action": "emit-ir",
+    "exit": "timeout",
+    "known_broken": "pre-existing on master: token.mir:16 uses a postfix 'kind match {...}' form that docs/grammar.md:646 does not define (match_expr is prefix-only); the parser spins forever instead of rejecting it",
+    "timeout": 5
+  },
+  "mem": {
+    "action": "emit-ir",
+    "exit": 0
+  },
+  "range_test": {
+    "action": "run",
+    "exit": 0
+  },
+  "start": {
+    "action": "run",
+    "exit": 42
+  },
+  "string": {
+    "action": "emit-ir",
+    "exit": 0
+  },
+  "test_io": {
+    "action": "run",
+    "exit": 0
+  },
+  "test_new": {
+    "action": "run",
+    "exit": 32
+  },
+  "vector": {
+    "action": "emit-ir",
+    "exit": 0
+  }
+}
