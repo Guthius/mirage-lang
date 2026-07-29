@@ -6,6 +6,7 @@ compile_commands.json
 
 # Build Artificates
 build/
+build-*/
 cmake-build-*
 *.out
 

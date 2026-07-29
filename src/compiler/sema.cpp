@@ -396,16 +396,28 @@ namespace sema {
                 const auto *struct_decl = std::get_if<std::unique_ptr<ast::StructType>>(&ts->decl->type);
                 if (!struct_decl) continue;
 
-                const auto *struct_info_ptr = program.struct_at(ts->resolved->struct_index);
-                if (!struct_info_ptr) continue;
-                const auto &struct_info = *struct_info_ptr;
+                const auto struct_index = ts->resolved->struct_index;
                 LocalScope empty;
 
-                for (size_t i = 0; i < (*struct_decl)->fields.size() && i < struct_info.fields.size(); ++i) {
+                for (size_t i = 0; i < (*struct_decl)->fields.size(); ++i) {
                     const auto &field = (*struct_decl)->fields[i];
                     if (!field.init) continue;
 
-                    const auto &field_type = struct_info.fields[i].type;
+                    // Re-fetch through the index and copy the field type by value on every
+                    // iteration, rather than holding a reference into Program::structs across
+                    // the loop.
+                    //
+                    // check_expr takes a mutable Program&, and a field default that is the
+                    // first use of some generic instantiation makes instantiate_generic_type
+                    // push_back onto program.structs -- a plain std::vector, unlike the
+                    // node-stable vector<unique_ptr<...>> generic_fn_instances deliberately
+                    // uses to avoid exactly this. That reallocation invalidates any StructInfo
+                    // reference held across the call, so the following is_assignable() read
+                    // (and every later iteration's) was a use-after-free.
+                    const auto *struct_info = program.struct_at(struct_index);
+                    if (!struct_info || i >= struct_info->fields.size()) break;
+                    const auto field_type = struct_info->fields[i].type;
+
                     const auto init_ty = check_expr(*field.init, empty, module_path, program, diag, field_type, 0);
                     if (!is_assignable(init_ty, field_type)) {
                         diag.report_error(DiagnosticStage::Sema, field.location,
