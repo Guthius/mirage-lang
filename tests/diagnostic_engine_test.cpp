@@ -88,6 +88,24 @@ namespace {
               "normal diagnostic puts the caret under column 5");
     }
 
+    // A CRLF-terminated line must not carry its '\r' into the rendered line or its size,
+    // which would shift the caret clamp by one on every line of such a file.
+    void test_crlf_line_excludes_carriage_return() {
+        SourceManager source_manager;
+        source_manager.set_source("<test>", "let x = 1\r\nlet y = 2\r\n");
+
+        const auto first = source_manager.get_source_line("<test>", 1);
+        check(first == "let x = 1", "CRLF line excludes the carriage return");
+
+        const auto second = source_manager.get_source_line("<test>", 2);
+        check(second == "let y = 2", "second CRLF line excludes the carriage return");
+
+        // LF-only files must be unchanged.
+        SourceManager lf_manager;
+        lf_manager.set_source("<test>", "let x = 1\nlet y = 2\n");
+        check(lf_manager.get_source_line("<test>", 1) == "let x = 1", "LF line unchanged");
+    }
+
     // Tabs in the padding region are preserved so the caret lines up in a tab-using
     // editor; that behavior predates the bound check and must survive it.
     void test_tab_padding_preserved() {
@@ -103,6 +121,7 @@ auto main() -> int {
     test_huge_length_is_clamped();
     test_zero_column();
     test_normal_diagnostic_still_correct();
+    test_crlf_line_excludes_carriage_return();
     test_tab_padding_preserved();
 
     if (failures > 0) {

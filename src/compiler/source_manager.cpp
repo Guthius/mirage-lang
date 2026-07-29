@@ -55,7 +55,15 @@ auto SourceManager::get_source_line(std::string_view filename, size_t line) -> s
                 ++i;
             }
 
-            return std::string_view(source).substr(line_start, i - line_start);
+            // Drop the '\r' of a CRLF terminator. It is not part of the line's text, and
+            // leaving it in inflates .size() by one, which skews the caret clamping in
+            // DiagnosticEngine::print_diagnostic on every line of a CRLF file.
+            auto end = i;
+            if (end > line_start && source[end - 1] == '\r') {
+                --end;
+            }
+
+            return std::string_view(source).substr(line_start, end - line_start);
         }
 
         if (source[i] == '\n') {
