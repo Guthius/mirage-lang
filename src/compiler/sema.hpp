@@ -751,6 +751,17 @@ namespace sema {
     // generic_params (type/fn/impl/trait-impl). Defined in sema_declare.cpp.
     void validate_generic_param_types(const std::vector<ast::GenericParam> &generic_params, DiagnosticEngine &diag);
 
+    // A bare identifier or dotted chain ('T', 'mod.Foo') used as a generic_arg always parses
+    // as an ast::Expr (IdentExpr/MemberExpr), never ast::Type - starts_type_only (ast.cpp) has
+    // exactly one token of lookahead and a plain identifier is ambiguous between "value
+    // expression" and "type name passed through unchanged" (e.g. forwarding an enclosing
+    // generic function's own type param: 'fn wrap[T: type]() -> List[T]'). Reinterprets such
+    // an Expr as the ast::Type it would have parsed to had the parser known better; returns
+    // nullopt for any other expression shape (the caller then reports its own "must be a
+    // type" diagnostic, unchanged). Shared by type_resolver.cpp's resolve_generic_named_type
+    // and sema_check.cpp's resolve_explicit_generic_args. Defined in type_resolver.cpp.
+    auto reinterpret_expr_as_type_name(const ast::Expr &expr) -> std::optional<ast::Type>;
+
     // Returns (or lazily creates, on first request) the concrete monomorphized ResolvedType
     // for 'decl_name[args]' — a generic 'type'/struct/enum/union/bitset declaration
     // instantiated with 'args', in declared parameter order. Linear-scans

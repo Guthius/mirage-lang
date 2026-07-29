@@ -14,6 +14,44 @@ namespace sema {
     // of failing outright.
     void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag);
 
+    // See sema.hpp's doc comment. Mirrors Resolver::as_named_member's dotted-chain walk below
+    // exactly, but starting from an arbitrary Expr (which may be a bare IdentExpr, not just a
+    // MemberExpr) and producing a full ast::Type rather than a bare ast::NamedType.
+    auto reinterpret_expr_as_type_name(const ast::Expr &expr) -> std::optional<ast::Type> {
+        if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
+            return ast::Type{ast::NamedType{.name = ident->name, .location = ident->location}};
+        }
+
+        const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr);
+        if (!member) return std::nullopt;
+
+        std::vector<std::pair<std::string, SourceLocation>> parts;
+        const auto collect = [&](this const auto &self, const ast::Expr &e) -> bool {
+            if (const auto *inner_ident = std::get_if<ast::IdentExpr>(&e)) {
+                parts.emplace_back(inner_ident->name, inner_ident->location);
+                return true;
+            }
+            if (const auto *inner_member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&e)) {
+                if (!self((*inner_member)->object)) return false;
+                parts.emplace_back((*inner_member)->member, (*inner_member)->location);
+                return true;
+            }
+            return false;
+        };
+
+        if (!collect((*member)->object)) return std::nullopt;
+        parts.emplace_back((*member)->member, (*member)->location);
+
+        ast::NamedType result{.name = parts.front().first, .location = parts.front().second};
+        ast::NamedType *tail = &result;
+        for (size_t i = 1; i < parts.size(); ++i) {
+            tail->member = std::make_unique<ast::NamedType>(ast::NamedType{.name = parts[i].first, .location = parts[i].second});
+            tail = tail->member.get();
+        }
+
+        return ast::Type{std::move(result)};
+    }
+
     auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType {
         for (size_t i = 0; i < program.pointer_pointees.size(); ++i) {
             if (program.pointer_pointees[i] == pointee) {
@@ -330,6 +368,18 @@ namespace sema {
 
                     if (is_generic_type_param(param.type)) {
                         const auto *type_arg = std::get_if<ast::Type>(&arg.value);
+                        // A bare 'T' (or dotted 'a.b.T') generic arg always parses as an Expr,
+                        // never a Type (starts_type_only has no way to know it names a type at
+                        // parse time - see reinterpret_expr_as_type_name's doc comment); this is
+                        // the common "forward an enclosing generic's own type param" shape, e.g.
+                        // 'fn wrap[T: type]() -> List[T]'.
+                        std::optional<ast::Type> reinterpreted;
+                        if (!type_arg) {
+                            if (const auto *expr_arg = std::get_if<ast::Expr>(&arg.value)) {
+                                reinterpreted = reinterpret_expr_as_type_name(*expr_arg);
+                                if (reinterpreted) type_arg = &*reinterpreted;
+                            }
+                        }
                         if (!type_arg) {
                             error(diag, arg.location, std::format(
                                 "generic argument {} for '{}' must be a type (parameter '{}: type')",
@@ -384,7 +434,15 @@ namespace sema {
 
                 if (const auto *target_decl = find_type_decl_for(target->module_path, target->name);
                     target_decl && !target_decl->generic_params.empty()) {
-                    return resolve_generic_named_type(named, module_path, target->module_path, target->name, *target_decl);
+                    // generic_args are only ever parsed onto the LEAF segment of a dotted
+                    // chain (see NamedType::generic_args' doc comment) - 'named' here is the
+                    // chain's own root ('list' in 'list.List[i32]'), whose own generic_args is
+                    // always empty, so resolve_generic_named_type must be given the leaf
+                    // ('List[i32]') instead, or an explicit dotted instantiation would always
+                    // look argument-less.
+                    const ast::NamedType *leaf = &named;
+                    while (leaf->member) leaf = leaf->member.get();
+                    return resolve_generic_named_type(*leaf, module_path, target->module_path, target->name, *target_decl);
                 }
 
                 return resolve_final_shallow(target->module_path, target->name, target->crossed_boundary, target->location);

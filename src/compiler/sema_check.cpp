@@ -1345,6 +1345,17 @@ namespace sema {
             const auto &arg = args[i];
             if (is_generic_type_param(param.type)) {
                 const auto *type_arg = std::get_if<ast::Type>(&arg.value);
+                // A bare 'T' generic arg always parses as an Expr, never a Type - see
+                // reinterpret_expr_as_type_name's doc comment (sema.hpp). Covers e.g.
+                // 'fn wrap[T: type]() { make_list[T]() }', forwarding an enclosing generic's
+                // own type param into another generic call.
+                std::optional<ast::Type> reinterpreted;
+                if (!type_arg) {
+                    if (const auto *expr_arg = std::get_if<ast::Expr>(&arg.value)) {
+                        reinterpreted = reinterpret_expr_as_type_name(*expr_arg);
+                        if (reinterpreted) type_arg = &*reinterpreted;
+                    }
+                }
                 if (!type_arg) {
                     diag.report_error(DiagnosticStage::Sema, arg.location, std::format(
                         "generic argument {} for '{}' must be a type (parameter '{}: type')", i + 1, decl_name, param.name));
@@ -1424,6 +1435,51 @@ namespace sema {
                                 .value_arg = static_cast<int64_t>(array_info->count),
                                 .value_arg_scalar_type = resolve_type(decl.generic_params[gi].type, module_path, program, diag),
                             };
+                        }
+                    }
+                }
+            } else if (const auto *wrapped = std::get_if<ast::NamedType>(&rt); wrapped && !wrapped->generic_args.empty()) {
+                // A return type that's itself a generic instantiation forwarding the
+                // enclosing decl's own params ('-> List[T]', 'fn make_list[T: type]()') -
+                // unify each of its generic_args positionally against 'expected's own
+                // GenericInstanceInfo::args (no verification that 'wrapped' and 'expected'
+                // name the exact same decl - a real mismatch still surfaces as the ordinary
+                // "type mismatch" diagnostic once the instantiated return type is checked
+                // against 'expected' downstream, same as any other inference miss would).
+                std::vector<GenericArgValue> expected_args;
+                switch (expected->kind) {
+                case TypeKind::Struct:
+                    if (const auto *info = program.struct_at(expected->struct_index); info && info->generic_instance) expected_args = info->generic_instance->args;
+                    break;
+                case TypeKind::Enum:
+                    if (const auto *info = program.enum_at(expected->enum_index); info && info->generic_instance) expected_args = info->generic_instance->args;
+                    break;
+                case TypeKind::Union:
+                    if (const auto *info = program.union_at(expected->union_index); info && info->generic_instance) expected_args = info->generic_instance->args;
+                    break;
+                case TypeKind::Bitset:
+                    if (const auto *info = program.bitset_at(expected->bitset_index); info && info->generic_instance) expected_args = info->generic_instance->args;
+                    break;
+                default:
+                    break;
+                }
+                if (expected_args.size() == wrapped->generic_args.size()) {
+                    for (size_t ai = 0; ai < wrapped->generic_args.size(); ++ai) {
+                        std::string ref_name;
+                        if (const auto *type_ref = std::get_if<ast::Type>(&wrapped->generic_args[ai]->value)) {
+                            if (const auto *inner_named = std::get_if<ast::NamedType>(type_ref); inner_named && inner_named->member == nullptr && inner_named->generic_args.empty()) {
+                                ref_name = inner_named->name;
+                            }
+                        } else if (const auto *expr_ref = std::get_if<ast::Expr>(&wrapped->generic_args[ai]->value)) {
+                            if (const auto *ident_ref = std::get_if<ast::IdentExpr>(expr_ref)) {
+                                ref_name = ident_ref->name;
+                            }
+                        }
+                        if (ref_name.empty()) continue;
+                        for (size_t gi = 0; gi < decl.generic_params.size(); ++gi) {
+                            if (!bound[gi] && decl.generic_params[gi].name == ref_name) {
+                                bound[gi] = expected_args[ai];
+                            }
                         }
                     }
                 }
@@ -1741,25 +1797,44 @@ namespace sema {
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
                     // Explicit generic-function instantiation call ('make_fixed[16]()',
-                    // 'make_list[i32]()') — the callee is an IndexOrInstantiateExpr whose
-                    // operand names a generic function. Only intercepted when 'operand'
-                    // actually IS a generic function; anything else (ordinary indexing whose
-                    // result happens to be called, e.g. 'fn_table[i]()') falls through to the
-                    // general-expression-callee path below unchanged.
+                    // 'make_list[i32]()', or cross-module 'list.make_list[i32]()') — the
+                    // callee is an IndexOrInstantiateExpr whose operand names a generic
+                    // function, either directly (IdentExpr, same module) or through a
+                    // namespace chain (MemberExpr, 'mod.fn_name'). Only intercepted when
+                    // 'operand' actually IS a generic function; anything else (ordinary
+                    // indexing whose result happens to be called, e.g. 'fn_table[i]()')
+                    // falls through to the general-expression-callee path below unchanged.
                     if (auto *index_callee = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&v->callee)) {
                         const ast::FunctionDecl *generic_decl = nullptr;
+                        std::string decl_module = module_path;
+                        std::string fn_name;
                         if (const auto *op_ident = std::get_if<ast::IdentExpr>(&(*index_callee)->operand);
                             op_ident && !locals.contains(op_ident->name)) {
                             if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
                                 if (const auto sym_it = mod_it->second.symbols.find(op_ident->name); sym_it != mod_it->second.symbols.end()) {
                                     if (const auto *fs = std::get_if<FunctionSymbol>(&sym_it->second); fs && fs->decl && !fs->decl->generic_params.empty()) {
                                         generic_decl = fs->decl;
+                                        fn_name = op_ident->name;
+                                    }
+                                }
+                            }
+                        } else if (const auto *op_member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&(*index_callee)->operand)) {
+                            if (const auto target_module = try_resolve_namespace_chain((*op_member)->object, module_path, locals, program)) {
+                                if (const auto mod_it = program.modules.find(*target_module); mod_it != program.modules.end()) {
+                                    if (const auto sym_it = mod_it->second.symbols.find((*op_member)->member); sym_it != mod_it->second.symbols.end()) {
+                                        if (const auto *fs = std::get_if<FunctionSymbol>(&sym_it->second); fs && fs->decl && !fs->decl->generic_params.empty()) {
+                                            if (!fs->is_pub) {
+                                                return error(diag, v->location, std::format("'{}' is not pub", (*op_member)->member));
+                                            }
+                                            generic_decl = fs->decl;
+                                            fn_name = (*op_member)->member;
+                                            decl_module = *target_module;
+                                        }
                                     }
                                 }
                             }
                         }
                         if (generic_decl) {
-                            const auto &fn_name = std::get<ast::IdentExpr>((*index_callee)->operand).name;
                             std::optional<std::vector<GenericArgValue>> resolved_args;
                             if (!(*index_callee)->args.empty()) {
                                 resolved_args = resolve_explicit_generic_args(generic_decl->generic_params, (*index_callee)->args, module_path, program, diag, v->location, fn_name);
@@ -1767,7 +1842,7 @@ namespace sema {
                                 resolved_args = infer_generic_function_args(*generic_decl, v->args, expected, locals, module_path, program, diag, v->location, loop_depth, defer_loop_base, fn_error_type);
                             }
                             if (!resolved_args) return ResolvedType{.kind = TypeKind::Invalid};
-                            const size_t idx = instantiate_generic_function(program, diag, module_path, fn_name, std::move(*resolved_args), v->location);
+                            const size_t idx = instantiate_generic_function(program, diag, decl_module, fn_name, std::move(*resolved_args), v->location);
                             const auto &instance = *program.generic_fn_instances[idx];
                             check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
                             program.modules.at(module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
@@ -1797,6 +1872,22 @@ namespace sema {
                                     using S = std::decay_t<T1>;
                                     if constexpr (std::is_same_v<S, FunctionSymbol>) {
                                         if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
+                                        // A bare cross-module call to a generic function with NO
+                                        // brackets at all ('list.make_list()', not
+                                        // 'list.make_list[i32]()') - inference only, mirroring the
+                                        // same-module bare-call case below.
+                                        if (sym.decl && !sym.decl->generic_params.empty()) {
+                                            auto resolved_args = infer_generic_function_args(*sym.decl, v->args, expected, locals, module_path, program, diag, v->location, loop_depth, defer_loop_base, fn_error_type);
+                                            if (!resolved_args) return ResolvedType{.kind = TypeKind::Invalid};
+                                            const size_t idx = instantiate_generic_function(program, diag, *target_module, fn_name, std::move(*resolved_args), v->location);
+                                            const auto &instance = *program.generic_fn_instances[idx];
+                                            check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
+                                            program.modules.at(module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
+                                            if (instance.return_types.size() > 1) {
+                                                return error(diag, v->location, "multi-value capture is not yet supported here");
+                                            }
+                                            return instance.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : instance.return_types.front();
+                                        }
                                         auto &resolved_fn = ensure_function_signature_resolved(*target_module, fn_name, program, diag);
                                         check_call_args(v->args, resolved_fn.params, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
                                         if (resolved_fn.return_types.size() > 1) {
