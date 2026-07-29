@@ -1,5 +1,7 @@
 #include "sema.hpp"
 
+#include <filesystem>
+
 #include <algorithm>
 #include <format>
 
@@ -627,6 +629,27 @@ namespace sema {
             const auto category = link_decl.category == ast::LinkCategory::Lib ? LinkCategory::Lib
                                  : link_decl.category == ast::LinkCategory::System ? LinkCategory::System
                                  : LinkCategory::Flag;
+
+            // '#link(lib, ...)' is joined to the declaring module's directory by the driver
+            // (main.cpp), and fs::path::operator/ discards the left operand when the right is
+            // absolute -- the same hazard MODRES-1 fixed for import(). Rejected here, where
+            // there is a location to point at, rather than in the driver which has no
+            // DiagnosticEngine.
+            //
+            // Absolute only, matching the rule for import(): '..' stays allowed, so a project
+            // can link a vendored archive from a sibling directory.
+            //
+            // The other two categories are deliberately unrestricted. 'system' becomes '-lNAME'
+            // and cannot escape. 'flag' is passed to the linker driver verbatim and IS an
+            // escape hatch by design -- that is the feature. It is not a privilege boundary:
+            // the directive comes from source the user is already compiling, so anything it
+            // could do, an '#link(flag, ...)' author could do by invoking the linker directly.
+            if (category == LinkCategory::Lib && std::filesystem::path(*data).is_absolute()) {
+                diag.report_error(DiagnosticStage::Sema, link_decl.location, std::format(
+                    "'#link(lib, ...)' path must be relative to the declaring module's directory; "
+                    "'{}' is absolute", *data));
+                return;
+            }
 
             sema_program.link_directives.push_back(LinkDirective{
                 .category = category,

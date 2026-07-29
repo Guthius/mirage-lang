@@ -1,0 +1,24 @@
+// example_link_absolute_path.mir — REJECTION CASE. '#link(lib, ...)' names a file relative to
+// the declaring module's directory, and the driver joins the two with fs::path::operator/ —
+// which discards the left operand when the right is absolute. An absolute path therefore
+// escaped the module tree entirely, the same hazard MODRES-1 fixed for import().
+//
+// Checked in sema rather than in the driver, which has no DiagnosticEngine and so could only
+// have failed silently or crashed at link time.
+//
+// Absolute paths only. '..' stays allowed, matching the rule for import(), so a project can
+// still link a vendored archive from a sibling directory.
+//
+// '#link(system, ...)' becomes '-lNAME' and cannot escape. '#link(flag, ...)' is passed to the
+// linker verbatim and is an escape hatch by design — not a privilege boundary, since it comes
+// from source the user is already compiling.
+//
+// Expected: compilation fails with
+//   error: '#link(lib, ...)' path must be relative to the declaring module's directory;
+//          '/etc/passwd' is absolute
+
+#link(lib, "/etc/passwd")
+
+pub fn main() -> i32 {
+    return 0
+}
