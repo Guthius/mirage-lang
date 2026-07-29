@@ -516,6 +516,54 @@ namespace sema {
         std::vector<int> trait_composition_stack;
     };
 
+    // RAII helpers for the cycle guards above.
+    //
+    // Every guard used to be a hand-written insert(key) ... erase(key) (or push_back/pop_back)
+    // pair spanning a large recursive body. Any exception thrown in between -- an .at() miss,
+    // a bad std::get, an uncaught std::stoll -- left the key permanently marked "resolving",
+    // so every later attempt to resolve that type reported a spurious "circular dependency".
+    // For the vector stacks the leak is worse: active_generic_env_stack holds a pointer to a
+    // stack-local env, and a missed pop leaves it dangling for the next .back() read.
+    //
+    // These make the unwind path correct by construction. lsp/server.cpp runs sema on a
+    // worker thread with no try/catch anywhere above it, so a poisoned guard would otherwise
+    // persist for the lifetime of the editor session.
+    template <typename Set, typename Key>
+    class ScopedResolveMark {
+      public:
+        ScopedResolveMark(Set &set, Key key) : set_(set), key_(std::move(key)) { set_.insert(key_); }
+        ~ScopedResolveMark() { set_.erase(key_); }
+
+        ScopedResolveMark(const ScopedResolveMark &) = delete;
+        auto operator=(const ScopedResolveMark &) -> ScopedResolveMark & = delete;
+
+      private:
+        Set &set_;
+        Key key_;
+    };
+
+    template <typename Set, typename Key>
+    ScopedResolveMark(Set &, Key) -> ScopedResolveMark<Set, Key>;
+
+    template <typename Stack>
+    class ScopedResolvePush {
+      public:
+        template <typename Value>
+        ScopedResolvePush(Stack &stack, Value &&value) : stack_(stack) {
+            stack_.push_back(std::forward<Value>(value));
+        }
+        ~ScopedResolvePush() { stack_.pop_back(); }
+
+        ScopedResolvePush(const ScopedResolvePush &) = delete;
+        auto operator=(const ScopedResolvePush &) -> ScopedResolvePush & = delete;
+
+      private:
+        Stack &stack_;
+    };
+
+    template <typename Stack, typename Value>
+    ScopedResolvePush(Stack &, Value &&) -> ScopedResolvePush<Stack>;
+
     // Compiler-driver-supplied configuration read by '$option' during sema. Threaded
     // through check_program the same way codegen::Options is threaded through
     // codegen::generate (see codegen.hpp) — a single defaulted struct parameter, copied

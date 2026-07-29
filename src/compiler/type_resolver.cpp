@@ -478,10 +478,9 @@ namespace sema {
                     return error(diag, loc, std::format("type alias cycle detected at '{}'", name));
                 }
 
-                program.resolve_state.alias_resolving.insert(key);
+                const ScopedResolveMark resolving_guard(program.resolve_state.alias_resolving, key);
                 Resolver inner{program, diag, ast_program};
                 auto resolved = inner.resolve_type_impl(ts->decl->type, module_path);
-                program.resolve_state.alias_resolving.erase(key);
 
                 ts->resolved = resolved;
                 return resolved;
@@ -515,10 +514,9 @@ namespace sema {
                         return error(diag, loc, std::format("by-value struct cycle detected at '{}'", name));
                     }
 
-                    program.resolve_state.struct_resolving.insert(key);
+                    const ScopedResolveMark resolving_guard(program.resolve_state.struct_resolving, key);
                     Resolver inner{program, diag, ast_program};
                     inner.layout_struct(module_path, slot, std::get<std::unique_ptr<ast::StructType>>(ts->decl->type));
-                    program.resolve_state.struct_resolving.erase(key);
 
                     return *ts->resolved;
                 }
@@ -545,10 +543,9 @@ namespace sema {
                         return error(diag, loc, std::format("by-value union cycle detected at '{}'", name));
                     }
 
-                    program.resolve_state.union_resolving.insert(key);
+                    const ScopedResolveMark resolving_guard(program.resolve_state.union_resolving, key);
                     Resolver inner{program, diag, ast_program};
                     inner.layout_union(module_path, slot, std::get<std::unique_ptr<ast::UnionType>>(ts->decl->type));
-                    program.resolve_state.union_resolving.erase(key);
 
                     return *ts->resolved;
                 }
@@ -564,10 +561,9 @@ namespace sema {
                         return error(diag, loc, std::format("bitset cycle detected at '{}'", name));
                     }
 
-                    program.resolve_state.bitset_resolving.insert(key);
+                    const ScopedResolveMark resolving_guard(program.resolve_state.bitset_resolving, key);
                     Resolver inner{program, diag, ast_program};
                     inner.layout_bitset(module_path, slot, std::get<std::unique_ptr<ast::BitsetType>>(ts->decl->type));
-                    program.resolve_state.bitset_resolving.erase(key);
 
                     return *ts->resolved;
                 }
@@ -588,10 +584,9 @@ namespace sema {
                         return *ts->resolved;
                     }
 
-                    program.resolve_state.trait_resolving.insert(key);
+                    const ScopedResolveMark resolving_guard(program.resolve_state.trait_resolving, key);
                     Resolver inner{program, diag, ast_program};
                     inner.layout_trait(module_path, slot, std::get<std::unique_ptr<ast::TraitType>>(ts->decl->type));
-                    program.resolve_state.trait_resolving.erase(key);
 
                     return *ts->resolved;
                 }
@@ -1422,7 +1417,7 @@ namespace sema {
                 std::vector<int> seen_direct;
                 std::vector<int> seen_component;
 
-                program.resolve_state.trait_composition_stack.push_back(slot);
+                const ScopedResolvePush composition_guard(program.resolve_state.trait_composition_stack, slot);
 
                 for (const auto &named : decl->composed_traits) {
                     const auto target = walk_namespace_chain(module_path, named, program, diag, ast_program);
@@ -1510,7 +1505,6 @@ namespace sema {
                     }
                 }
 
-                program.resolve_state.trait_composition_stack.pop_back();
 
                 if (direct_composed.size() == 1 && decl->methods.empty()) {
                     diag.warn(DiagnosticStage::Sema, decl->location, std::format(
@@ -1765,10 +1759,9 @@ namespace sema {
         // by-value type expression they see (the same path an anonymous inline type takes)
         // — this instantiation just reuses that machinery as-is, then tags the resulting
         // slot below.
-        program.resolve_state.generic_type_resolving.push_back(key);
+        const ScopedResolvePush generic_guard(program.resolve_state.generic_type_resolving, key);
         Resolver inner{program, diag, nullptr, &env, &decl.generic_params};
         const auto result = inner.resolve_type_impl(decl.type, module_path);
-        program.resolve_state.generic_type_resolving.pop_back();
 
         GenericInstanceInfo instance_info{.decl_module = module_path, .decl_name = decl_name, .args = args};
         switch (result.kind) {

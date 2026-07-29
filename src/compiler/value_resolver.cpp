@@ -380,7 +380,7 @@ namespace sema {
             return error_invalid(diag, loc, std::format("circular dependency detected resolving '{}'", name));
         }
 
-        program.resolve_state.value_resolving.insert(key);
+        const ScopedResolveMark resolving_guard(program.resolve_state.value_resolving, key);
 
         ResolvedType declared_ty{.kind = TypeKind::Void};
 
@@ -409,7 +409,6 @@ namespace sema {
         }
 
         g->is_resolved = true;
-        program.resolve_state.value_resolving.erase(key);
 
         if (g->decl->init) {
             if (!is_constant_expr_impl(*g->decl->init, module_path, program, {})) {
@@ -441,7 +440,7 @@ namespace sema {
             sym.is_resolved = true; // avoid infinite recursion on repeated lookups of this cycle
             return sym;
         }
-        program.resolve_state.fn_signature_resolving.insert(key);
+        const ScopedResolveMark resolving_guard(program.resolve_state.fn_signature_resolving, key);
 
         for (auto &p : sym.decl->params) {
             ResolvedType pt;
@@ -468,7 +467,6 @@ namespace sema {
         check_param_defaults(sym.decl->params, sym.params, sym.required_params, sym.param_default_is_const, module_path, program, diag);
 
         sym.is_resolved = true;
-        program.resolve_state.fn_signature_resolving.erase(key);
         return sym;
     }
 
@@ -503,7 +501,7 @@ namespace sema {
             return *m;
         }
 
-        program.resolve_state.value_resolving.insert(key);
+        const ScopedResolveMark resolving_guard(program.resolve_state.value_resolving, key);
 
         for (auto &p : m->decl->params) {
             m->params.push_back(resolve_type(p.type, module_path, program, diag));
@@ -528,7 +526,6 @@ namespace sema {
         }
         m->is_resolved = true;
 
-        program.resolve_state.value_resolving.erase(key);
         return *m;
     }
 
