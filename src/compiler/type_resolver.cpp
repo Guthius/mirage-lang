@@ -12,7 +12,7 @@ namespace sema {
     // this file so a cross-module named type reached before Program::modules'
     // unordered iteration order gets to that module can declare it on demand instead
     // of failing outright.
-    void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag);
+    void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const SourceLocation &trigger_location = {});
 
     // See sema.hpp's doc comment. Mirrors Resolver::as_named_member's dotted-chain walk below
     // exactly, but starting from an arbitrary Expr (which may be a bare IdentExpr, not just a

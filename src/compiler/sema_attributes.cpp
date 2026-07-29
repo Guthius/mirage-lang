@@ -112,12 +112,20 @@ namespace sema {
         // inline at validate_attributes_for_module's call site below.
         void validate_common_attributes(const std::vector<ast::Attribute> &attrs, const std::vector<ResolvedType> &return_types,
                                          const ast::Stmt &body, const std::string &module_path, Program &program, DiagnosticEngine &diag) {
-            if (const auto *a = find_attribute(attrs, "no_return")) validate_no_return_attribute(*a, return_types, program, diag);
-            if (const auto *a = find_attribute(attrs, "naked")) validate_naked_attribute(*a, body, diag);
-            if (const auto *a = find_attribute(attrs, "always_inline")) validate_always_inline_attribute(*a, diag);
-            if (const auto *a = find_attribute(attrs, "section")) validate_section_attribute(*a, module_path, program, diag);
-            if (find_attribute(attrs, "naked") && find_attribute(attrs, "always_inline")) {
-                diag.report_error(DiagnosticStage::Sema, find_attribute(attrs, "naked")->location,
+            // Bound once and reused: 'naked' and 'always_inline' were each looked up twice
+            // more for the combination check below, which re-scanned the attribute list to
+            // rediscover what had just been found.
+            const auto *no_return = find_attribute(attrs, "no_return");
+            const auto *naked = find_attribute(attrs, "naked");
+            const auto *always_inline = find_attribute(attrs, "always_inline");
+            const auto *section = find_attribute(attrs, "section");
+
+            if (no_return) validate_no_return_attribute(*no_return, return_types, program, diag);
+            if (naked) validate_naked_attribute(*naked, body, diag);
+            if (always_inline) validate_always_inline_attribute(*always_inline, diag);
+            if (section) validate_section_attribute(*section, module_path, program, diag);
+            if (naked && always_inline) {
+                diag.report_error(DiagnosticStage::Sema, naked->location,
                     "'@naked' and '@always_inline' cannot be combined: a naked function has no body to inline");
             }
         }
