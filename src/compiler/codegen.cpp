@@ -65,7 +65,7 @@ namespace codegen {
         };
 
         // A scalar leaf field within a struct, used only for System V x86-64 eightbyte
-        // classification (see classify_struct_eightbytes) — offset is relative to the
+        // classification (see classify_aggregate_eightbytes) — offset is relative to the
         // classified struct's own start, not any enclosing type.
         struct AbiLeaf {
             uint32_t offset = 0;
@@ -80,7 +80,7 @@ namespace codegen {
         // coerced scalar/vector registers ('parts').
         struct AbiClassification {
             bool indirect = false;
-            llvm::StructType *raw_type = nullptr; // the existing packed Mirage struct type
+            llvm::Type *raw_type = nullptr; // the existing Mirage aggregate type (struct or array)
             uint32_t raw_align = 1;
             std::vector<llvm::Type *> parts; // 1-2 entries when !indirect
         };
@@ -691,32 +691,38 @@ namespace codegen {
             // default lowering of a directly-passed aggregate splits it into one leaf register
             // per field, which doesn't match what the real callee reads. See the plan doc for
             // the worked Color/Vector3/Rectangle examples this produces.
-            auto classify_struct_eightbytes(int struct_index) -> AbiClassification {
-                const auto &info = sema_program_.structs.at(struct_index);
-
+            // SysV x86-64 eightbyte classification for any by-value aggregate crossing an
+            // 'ext fn' boundary, not just a struct. A bare '[2]f32' parameter is the same eight
+            // bytes as a 'struct { f32 x, y; }' and clang lowers both to <2 x float>, but only
+            // the struct was being coerced -- the array was handed to LLVM raw, whose default
+            // aggregate lowering does not follow the ABI. collect_abi_leaves already walked
+            // arrays and unions; only this entry point was struct-shaped.
+            auto classify_aggregate_eightbytes(const sema::ResolvedType &type, const std::string &module_path) -> AbiClassification {
                 AbiClassification cls;
-                cls.raw_type = struct_lowering(struct_index).type;
-                cls.raw_align = std::max<uint32_t>(1, info.align);
+                cls.raw_type = llvm_type(module_path, type);
+                const uint32_t size = size_of(module_path, type);
+                cls.raw_align = std::max<uint32_t>(1, align_of(module_path, type));
 
-                if (info.size == 0 || info.size > 16) {
+                if (size == 0 || size > 16) {
                     cls.indirect = true;
                     return cls;
                 }
 
                 std::vector<AbiLeaf> leaves;
                 bool saw_union = false;
-                for (const auto &field : info.fields) {
-                    collect_abi_leaves(field.type, field.offset, leaves, saw_union);
-                }
+                collect_abi_leaves(type, 0, leaves, saw_union);
                 if (saw_union) {
+                    // A union's active member is not knowable statically, so SysV's merge rules
+                    // cannot be applied; MEMORY class is the safe answer.
                     cls.indirect = true;
                     return cls;
                 }
 
-                const uint32_t num_slots = (info.size + 7) / 8;
+                const uint32_t info_size = size;
+                const uint32_t num_slots = (info_size + 7) / 8;
                 for (uint32_t slot = 0; slot < num_slots; ++slot) {
                     const uint32_t slot_start = slot * 8;
-                    const uint32_t slot_end = std::min(slot_start + 8, info.size);
+                    const uint32_t slot_end = std::min(slot_start + 8, info_size);
                     const uint32_t n = slot_end - slot_start;
 
                     bool any_leaf = false;
@@ -775,11 +781,19 @@ namespace codegen {
             // System V x86-64 ABI-coerced representation instead of the raw Mirage struct
             // type (a real C callee never sees the latter directly). Non-struct types are
             // unaffected.
+            // Which by-value types need SysV eightbyte coercion at an 'ext fn' boundary.
+            // Bitset and Enum are deliberately absent: both already lower to their storage
+            // integer, so they are scalars by the time they get here and need no coercion.
+            static auto needs_ext_abi_coercion(const sema::ResolvedType &type) -> bool {
+                return type.kind == sema::TypeKind::Struct || type.kind == sema::TypeKind::Array ||
+                       type.kind == sema::TypeKind::Union;
+            }
+
             auto ext_abi_param_type(const sema::ResolvedType &type, const std::string &module_path) -> llvm::Type * {
-                if (type.kind != sema::TypeKind::Struct) {
+                if (!needs_ext_abi_coercion(type)) {
                     return llvm_type(module_path, type);
                 }
-                const auto cls = classify_struct_eightbytes(type.struct_index);
+                const auto cls = classify_aggregate_eightbytes(type, module_path);
                 if (cls.indirect) {
                     return llvm::PointerType::getUnqual(*context_);
                 }
@@ -801,8 +815,8 @@ namespace codegen {
                 llvm::Type *ret_type = llvm::Type::getVoidTy(*context_);
 
                 if (ret) {
-                    if (ret->kind == sema::TypeKind::Struct) {
-                        const auto cls = classify_struct_eightbytes(ret->struct_index);
+                    if (needs_ext_abi_coercion(*ret)) {
+                        const auto cls = classify_aggregate_eightbytes(*ret, module_path);
                         if (cls.indirect) {
                             param_types.push_back(llvm::PointerType::getUnqual(*context_)); // sret
                         } else if (cls.parts.size() == 1) {
@@ -913,8 +927,8 @@ namespace codegen {
                                     name, *module_);
 
                                 unsigned param_idx = 0;
-                                if (ef->return_type && ef->return_type->kind == sema::TypeKind::Struct) {
-                                    const auto cls = classify_struct_eightbytes(ef->return_type->struct_index);
+                                if (ef->return_type && needs_ext_abi_coercion(*ef->return_type)) {
+                                    const auto cls = classify_aggregate_eightbytes(*ef->return_type, path);
                                     if (cls.indirect) {
                                         llvm_fn->addParamAttr(0, llvm::Attribute::getWithStructRetType(*context_, cls.raw_type));
                                         llvm_fn->addParamAttr(0, llvm::Attribute::getWithAlignment(*context_, llvm::Align(cls.raw_align)));
@@ -922,8 +936,8 @@ namespace codegen {
                                     }
                                 }
                                 for (const auto &param : ef->params) {
-                                    if (param.kind == sema::TypeKind::Struct) {
-                                        const auto cls = classify_struct_eightbytes(param.struct_index);
+                                    if (needs_ext_abi_coercion(param)) {
+                                        const auto cls = classify_aggregate_eightbytes(param, path);
                                         if (cls.indirect) {
                                             llvm_fn->addParamAttr(param_idx, llvm::Attribute::getWithByValType(*context_, cls.raw_type));
                                             llvm_fn->addParamAttr(param_idx, llvm::Attribute::getWithAlignment(*context_, llvm::Align(cls.raw_align)));
@@ -3026,18 +3040,18 @@ namespace codegen {
 
             // Like emit_value_as(), but for 'ext fn' call arguments: struct-typed arguments
             // are coerced to their System V x86-64 ABI representation (see
-            // classify_struct_eightbytes) instead of being passed as a raw aggregate, which is
+            // classify_aggregate_eightbytes) instead of being passed as a raw aggregate, which is
             // what a real C callee (raylib, libc, ...) actually expects. Non-struct arguments
             // are unaffected. When the argument is a struct, its classification is written to
             // '*out_cls' so the caller can attach matching byval/sret attributes to the actual
             // CallInst - LLVM requires those on the call site itself, not just the callee
             // declaration.
             auto emit_ext_call_arg(const ast::Expr &expr, const sema::ResolvedType &param_type, const std::string &param_module, AbiClassification *out_cls = nullptr) -> llvm::Value * {
-                if (param_type.kind != sema::TypeKind::Struct) {
+                if (!needs_ext_abi_coercion(param_type)) {
                     return emit_value_as(expr, param_type, param_module);
                 }
 
-                const auto cls = classify_struct_eightbytes(param_type.struct_index);
+                const auto cls = classify_aggregate_eightbytes(param_type, *current_module_path_);
                 if (out_cls) {
                     *out_cls = cls;
                 }
@@ -3575,8 +3589,8 @@ namespace codegen {
                     return builder_.CreateCall(functions_.at(FunctionKey{target_module, name}), args);
                 }
                 if (const auto *ef = std::get_if<sema::ExtFunctionSymbol>(&sym_it->second)) {
-                    // Struct-by-value args/return crossing into real C code need System V
-                    // x86-64 ABI coercion (see classify_struct_eightbytes) - LLVM's default
+                    // Aggregate-by-value args/return crossing into real C code need System V
+                    // x86-64 ABI coercion (see classify_aggregate_eightbytes) - LLVM's default
                     // lowering of a raw aggregate argument doesn't match what a real C callee
                     // (raylib, libc, ...) reads. byval/sret attributes must be attached to the
                     // CallInst itself, not just the callee's declaration, so track which
@@ -3586,7 +3600,7 @@ namespace codegen {
                         if (i < ef->params.size()) {
                             AbiClassification cls;
                             auto *value = emit_ext_call_arg(call.args[i], ef->params[i], *current_module_path_, &cls);
-                            if (ef->params[i].kind == sema::TypeKind::Struct && cls.indirect) {
+                            if (needs_ext_abi_coercion(ef->params[i]) && cls.indirect) {
                                 byval_args.emplace_back(static_cast<unsigned>(args.size()), cls);
                             }
                             args.push_back(value);
@@ -3603,8 +3617,8 @@ namespace codegen {
                         }
                     };
 
-                    if (ef->return_type && ef->return_type->kind == sema::TypeKind::Struct) {
-                        const auto ret_cls = classify_struct_eightbytes(ef->return_type->struct_index);
+                    if (ef->return_type && needs_ext_abi_coercion(*ef->return_type)) {
+                        const auto ret_cls = classify_aggregate_eightbytes(*ef->return_type, *current_module_path_);
                         if (ret_cls.indirect) {
                             auto *ret_slot = create_entry_alloca(current_function_, ret_cls.raw_type, "ext.ret");
                             std::vector<llvm::Value *> full_args;

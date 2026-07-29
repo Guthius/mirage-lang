@@ -1,0 +1,36 @@
+// Mirage side of the ext-fn ABI test — see tests/ext_abi_test.py and helper.c.
+//
+// Only 'Struct' was SysV-coerced at an 'ext fn' boundary; a by-value array was handed to LLVM
+// raw, whose default aggregate lowering does not follow the ABI. 'sum_arr' below then received
+// {3.0, 0.0} instead of {3.0, 4.0} and returned 30 rather than 34 — silent corruption, no
+// diagnostic.
+
+#link(lib, "helper.o")
+
+ext fn sum_arr(a: [2]f32) -> f32
+
+type Big = struct {
+    a: i64
+    b: i64
+    c: i64
+}
+ext fn sum_big(b: Big) -> i64
+
+type TwoWords = struct {
+    lo: i64
+    hi: i64
+}
+ext fn sum_two_words(t: TwoWords) -> i64
+
+pub fn main() -> i32 {
+    mut arr: [2]f32 = {3.0, 4.0}
+    const s := sum_arr(arr)              // 34
+
+    mut big: Big = {.a = 1, .b = 2, .c = 3}
+    const t := sum_big(big)              // 123
+
+    mut tw: TwoWords = {.lo = 4, .hi = 5}
+    const u := sum_two_words(tw)         // 45
+
+    return cast(s, i32) + cast(t, i32) + cast(u, i32)
+}
