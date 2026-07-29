@@ -1,0 +1,30 @@
+// example_impl_duplicate_method.mir — REJECTION CASE. A bare 'impl TYPE { ... }' method name
+// must be unique for that type within a module.
+//
+// declare_one_decl assigned into module.methods[type][name] unconditionally, so a collision
+// silently overwrote the previous MethodInfo — unlike every other symbol kind (declare_symbol
+// reports "redefinition of 'x'") and unlike trait-impl methods (register_trait_impls_for_program
+// reports "duplicate method"). The earlier body was then never type-checked or emitted, and
+// calls resolved to whichever definition came last in file-merge order: before this was fixed
+// the program below compiled cleanly and returned 222.
+//
+// Expected: compilation fails with
+//   error: duplicate method 'value' for type 'Point'
+
+type Point = struct {
+    x: i32
+    y: i32
+}
+
+impl Point {
+    fn value(self) -> i32 { return 111 }
+}
+
+impl Point {
+    fn value(self) -> i32 { return 222 }
+}
+
+pub fn main() -> i32 {
+    const p: Point = default
+    return p.value()
+}

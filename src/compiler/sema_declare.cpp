@@ -647,7 +647,25 @@ namespace sema {
                                 diag.report_error(DiagnosticStage::Sema, fn.location,
                                     "'@init' is not allowed on impl methods; declare a module-scope function instead");
                             }
-                            module.methods[type_name][fn.name] = MethodInfo{
+                            // Reject a redefinition instead of overwriting it, mirroring
+                            // register_trait_impls_for_program's "duplicate method" check and
+                            // declare_symbol's "redefinition of 'x'" for every other symbol
+                            // kind. This map is keyed by (type, method name) across the whole
+                            // module, so it catches all three collision shapes: twice in one
+                            // impl block, across two 'impl TYPE {}' blocks, and across the
+                            // separate .mir files merged into one module directory.
+                            //
+                            // The first definition wins, matching redefinition handling
+                            // elsewhere. Silently keeping the last meant the earlier body was
+                            // never type-checked or emitted, and calls resolved to whichever
+                            // definition happened to be declared last in file-merge order.
+                            auto &type_methods = module.methods[type_name];
+                            if (type_methods.contains(fn.name)) {
+                                diag.report_error(DiagnosticStage::Sema, fn.location,
+                                    std::format("duplicate method '{}' for type '{}'", fn.name, type_name));
+                                continue;
+                            }
+                            type_methods[fn.name] = MethodInfo{
                                 .decl = &fn,
                                 .impl_module = module_path,
                                 .type_name = type_name,

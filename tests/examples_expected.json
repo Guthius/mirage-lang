@@ -350,6 +350,10 @@
     "action": "run",
     "exit": 20
   },
+  "example_impl_duplicate_method": {
+    "action": "build",
+    "exit": 1
+  },
   "example_link_in_fn_body": {
     "action": "build",
     "exit": 1
