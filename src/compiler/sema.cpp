@@ -415,6 +415,80 @@ namespace sema {
             }
         }
 
+        auto stmt_always_returns(const ast::Stmt &stmt) -> bool;
+
+        // A block guarantees a return if ANY statement in it does - whatever follows is
+        // unreachable, which is a separate (unchecked) concern here.
+        auto block_always_returns(const std::vector<ast::Stmt> &stmts) -> bool {
+            return std::ranges::any_of(stmts, [](const ast::Stmt &s) { return stmt_always_returns(s); });
+        }
+
+        // 'when cond { ... } else (when ... | { ... })' compiles BOTH branches unconditionally
+        // (a hard sema requirement - see spec.md's "Compile-Time Configuration"), so unlike a
+        // loop or switch this is exactly as safe to treat like if/else: guarantees a return
+        // only when an else branch is present and every branch does.
+        auto when_always_returns(const ast::WhenStmt &when) -> bool {
+            if (!when.else_branch) return false;
+            if (!block_always_returns(when.then_block.stmts)) return false;
+            return std::visit(
+                [&]<typename T>(const T &else_v) -> bool {
+                    using V = std::decay_t<T>;
+                    if constexpr (std::is_same_v<V, ast::BlockStmt>) {
+                        return block_always_returns(else_v.stmts);
+                    } else {
+                        return when_always_returns(*else_v);
+                    }
+                },
+                *when.else_branch);
+        }
+
+        // Conservative "does this statement guarantee a return" check, used only for the
+        // early missing-return WARNING below - codegen's own terminator check
+        // (report_codegen_error's "may fall through" sites, driven by LLVM's own CFG state
+        // after emission) remains the sole authoritative/blocking check; this one exists so
+        // the common cases are visible in sema (and therefore the LSP, which never runs
+        // codegen - see analysis.cpp) instead of only surfacing at a full compile.
+        // Deliberately under-approximates: a loop (WhileStmt/ForInStmt), SwitchStmt, or a
+        // MatchExpr used as an ExprStmt is never treated as guaranteed-returning here, even
+        // when it provably is (e.g. 'while true {}' with no break, or an exhaustive match
+        // where every arm returns) - a false positive (an extra warning codegen would
+        // accept) is an acceptable cost of this heuristic; a false negative (silently
+        // missing a real fall-through) is not.
+        auto stmt_always_returns(const ast::Stmt &stmt) -> bool {
+            return std::visit(
+                [&]<typename T>(const T &v) -> bool {
+                    using V = std::decay_t<T>;
+                    if constexpr (std::is_same_v<V, ast::ReturnStmt> || std::is_same_v<V, ast::ReturnErrStmt> ||
+                                  std::is_same_v<V, ast::ReturnOkStmt>) {
+                        return true;
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BlockStmt>>) {
+                        return block_always_returns(v->stmts);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IfStmt>>) {
+                        return v->else_stmt && stmt_always_returns(v->then_stmt) && stmt_always_returns(*v->else_stmt);
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenStmt>>) {
+                        return when_always_returns(*v);
+                    } else {
+                        // WhileStmt, ForInStmt, SwitchStmt, DeferStmt, ExprStmt, VarDeclStmt(Group),
+                        // Break/Continue, LinkDecl/DiagnosticDecl, AsmStmt - none proven to
+                        // guarantee a return by this conservative check.
+                        return false;
+                    }
+                },
+                stmt);
+        }
+
+        // Emits the same-shaped warning as codegen's authoritative "may fall through" error
+        // (see report_codegen_error's three call sites), but as a non-blocking sema WARNING,
+        // early enough to reach the LSP - never emitted for a void-returning body, and never
+        // itself a compile error (a false positive here must not break an otherwise-valid
+        // build; codegen's own check is what actually gates compilation).
+        void warn_if_may_fall_through(const std::string &kind, const std::string &name, const ast::Stmt &body,
+                                      const std::vector<ResolvedType> &return_types, const SourceLocation &location, DiagnosticEngine &diag) {
+            if (return_types.empty() || stmt_always_returns(body)) return;
+            diag.warn(DiagnosticStage::Sema, location,
+                      std::format("{} '{}' may fall through without returning a value", kind, name));
+        }
+
         void check_bodies_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
             for (auto &[name, sym] : module.symbols) {
                 // A bare-import alias shares its 'decl' AST pointer with the origin — the
@@ -448,6 +522,7 @@ namespace sema {
                 }
 
                 check_stmt(fn->decl->body, locals, module_path, program, diag, fn->return_types, 0);
+                warn_if_may_fall_through("function", fn->decl->name, fn->decl->body, fn->return_types, fn->decl->location, diag);
             }
 
             // Check impl method bodies
@@ -474,6 +549,7 @@ namespace sema {
                     }
 
                     check_stmt(info.decl->body, locals, module_path, program, diag, info.return_types, 0);
+                    warn_if_may_fall_through("method", info.decl->name, info.decl->body, info.return_types, info.decl->location, diag);
                 }
             }
         }
@@ -509,6 +585,7 @@ namespace sema {
                         }
 
                         check_stmt(info.decl->body, locals, impl_info.impl_module, program, diag, info.return_types, 0);
+                        warn_if_may_fall_through("method", info.decl->name, info.decl->body, info.return_types, info.decl->location, diag);
                     }
                 }
             }
