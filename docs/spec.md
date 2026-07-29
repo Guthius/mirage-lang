@@ -566,7 +566,7 @@ ternary). Semantics depend on whether `condition` is a compile-time constant:
   branches are type-checked and emitted, and the result is chosen at runtime.
 
 See [Compile-Time Configuration](#compile-time-configuration) for how this
-combines with `#option` and `#link`, and the `when` *statement* (a related
+combines with `$option` and `#link`, and the `when` *statement* (a related
 but distinct construct — see [Statements](#6-statements)).
 
 ### Assignment
@@ -1602,14 +1602,17 @@ import's own namespace name, if one happens to coincide.
 Seven coupled features let a module read compile-time-supplied
 configuration, conditionally compile declarations, statements, and linker
 inputs based on it, and surface configuration problems as sema
-diagnostics: `#option`, `#env`, `#link`, `#error`, `#warn`, the `when`
-statement, and the `when` expression.
+diagnostics: `$option`, `$env`, `#link`, `#error`, `#warn`, the `when`
+statement, and the `when` expression. `$option`/`$env` produce a value and
+use the `$` sigil; `#link`/`#error`/`#warn` are directives with no value
+and use the `#` sigil — together these five form one coupled "Compile-Time
+Configuration" family despite the two different sigils.
 
-### `#option`
+### `$option`
 
 ```mirage
-#option(key)
-#option(key, default)
+$option(key)
+$option(key, default)
 ```
 
 A compile-time expression that reads a value supplied by the compiler
@@ -1623,8 +1626,8 @@ error: required option 'build/target_os' was not provided.
        Pass it with: --opt build/target_os=<value>
 ```
 
-`#option` is legal anywhere an expression is legal — nested inside
-arithmetic (`#option(...) + 1`), passed as a function argument (including
+`$option` is legal anywhere an expression is legal — nested inside
+arithmetic (`$option(...) + 1`), passed as a function argument (including
 `#link`'s `data` argument), as a `mut` variable's initializer, and so on.
 Its value is always resolved once from `--opt`/the default and cached, so it
 behaves as an ordinary compile-time-constant expression wherever it appears.
@@ -1640,16 +1643,16 @@ behaves as an ordinary compile-time-constant expression wherever it appears.
 - Integer types (`i32`, `u32`, `usize`, ...): parsed as a decimal integer. Out-of-range or non-numeric is a sema error.
 - `[]u8`: the raw string, unconverted.
 - Enum types: matched first by variant name (case-sensitive), then by integer value (e.g. `--opt build/target_os=Windows` and `--opt build/target_os=1` can both select the same variant). Neither matching is a sema error naming the valid variant names.
-- Any other target type: a sema error — `#option` does not support it.
+- Any other target type: a sema error — `$option` does not support it.
 
-### `#env`
+### `$env`
 
 ```mirage
-#env(key)
-#env(key, default)
+$env(key)
+$env(key, default)
 ```
 
-Identical to `#option` in every respect — legality, target-type resolution,
+Identical to `$option` in every respect — legality, target-type resolution,
 value coercion, and the required-value error shape — except that `key`
 names an **environment variable** instead of a `--opt` key, and the value
 comes from `std::getenv(key)` (read once at compile time, on the machine
@@ -1661,8 +1664,8 @@ error: required environment variable 'MIRAGE_TARGET_ARCH' was not set.
 ```
 
 ```mirage
-pub const target_os:   OperatingSystem = #env("MIRAGE_TARGET_OS",   .Linux)
-pub const target_arch: Architecture    = #env("MIRAGE_TARGET_ARCH", .X86_64)
+pub const target_os:   OperatingSystem = $env("MIRAGE_TARGET_OS",   .Linux)
+pub const target_arch: Architecture    = $env("MIRAGE_TARGET_ARCH", .X86_64)
 ```
 
 ### `#link`
@@ -1763,11 +1766,11 @@ branch, for instance, never needs an LLVM declaration synthesized for it).
 
 **At module scope**, a `when` block may contain only `#link`, `#error`, and
 `#warn` declarations, `const` declarations initialized directly with
-`#option`/`#env`, `type` declarations, and `ext fn` declarations — anything
+`$option`/`$env`, `type` declarations, and `ext fn` declarations — anything
 else is a sema error:
 
 ```
-error: only '#link', '#error', '#warn', 'const' with '#option'/'#env',
+error: only '#link', '#error', '#warn', 'const' with '$option'/'$env',
        'type', and 'ext fn' declarations are permitted inside a
        module-scope 'when' block.
 ```
@@ -1792,7 +1795,7 @@ collected.
 ### `when` Expression
 
 See [`when` Expression](#when-expression) under Expressions — same
-construct, used here as `#link`'s `data` argument or an `#option`/`#env`
+construct, used here as `#link`'s `data` argument or an `$option`/`$env`
 default/operand.
 
 ### Example
@@ -1802,7 +1805,7 @@ default/operand.
 const target_os   := import("Core/Compiler/Options").target_os     // chained '.field' shortcut
 const target_arch := import("Core/Compiler/Options").target_arch   // (see Import Expression)
 
-const raylib_shared := #option("raylib_shared", false)
+const raylib_shared := $option("raylib_shared", false)
 
 when target_os == .Windows {
     #link(lib, "windows/raylibdll.lib" when raylib_shared else "windows/raylib.lib")
@@ -2310,14 +2313,15 @@ The following identifiers are reserved by the language:
 `align_of` `any` `asm` `bitset` `break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `import_bin` `in` `iota` `len` `macro` `match` `mut` `nil` `pub` `return` `return_err` `return_ok` `size_of` `stackalloc` `struct` `switch` `trait` `true` `try` `type` `type_of` `type_info_of` `undefined` `union` `when` `while`
 
 `ext` is parsed as an identifier, not a keyword; it is used as the prefix
-for extern function declarations. `option`, `env`, `link`, and `warn` are
-likewise parsed as plain identifiers, not keywords — they're only
-meaningful immediately after the `#` sigil (`#option(...)`, `#env(...)`,
-`#link(...)`, `#warn(...)`, see
+for extern function declarations. `option` and `env` are likewise parsed
+as plain identifiers, not keywords — they're only meaningful immediately
+after the `$` sigil (`$option(...)`, `$env(...)`, see
 [Compile-Time Configuration](#12-compile-time-configuration)) and remain
-ordinary, unreserved identifiers everywhere else. `error` (used both as the
-`error(T)` type syntax and after `#` in `#error(...)`) IS a reserved
-keyword, unlike its three siblings above. `no_return`, `naked`,
+ordinary, unreserved identifiers everywhere else. `link` and `warn` are
+likewise plain identifiers, meaningful only immediately after the `#`
+sigil (`#link(...)`, `#warn(...)`, see the same section). `error` (used
+both as the `error(T)` type syntax and after `#` in `#error(...)`) IS a
+reserved keyword, unlike its siblings above. `no_return`, `naked`,
 `always_inline`, `section`, and `init` are likewise parsed as plain
 identifiers, not keywords — meaningful only immediately after the `@`
 sigil (`@no_return`, `@naked`, `@always_inline`, `@section(...)`,
@@ -2946,7 +2950,7 @@ Generic **arguments** at an instantiation site are correspondingly either a
 `type` (for a `T: type` slot) or a compile-time constant expression of the
 matching scalar type (for an `N: SomeScalar` slot), checked the same way an
 ordinary compile-time-constant expression is checked elsewhere (e.g.
-`#option`/`#env`, or an array-size expression):
+`$option`/`$env`, or an array-size expression):
 
 ```
 error: generic argument 2 for 'Fixed' must be a compile-time constant

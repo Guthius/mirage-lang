@@ -4527,14 +4527,14 @@ namespace codegen {
                 builder_.SetInsertPoint(after_bb);
             }
 
-            // Materializes an '#option(...)'/'#env(...)' expression's compile-time-resolved
+            // Materializes an '$option(...)'/'$env(...)' expression's compile-time-resolved
             // value (cached by sema in ProgramModule::expr_option_values — see
             // sema::resolve_option_expr/resolve_env_expr) as an LLVM constant of its
             // resolved type 'ty'.
             auto emit_option_value(const ast::Expr &expr, const sema::ResolvedType &ty) -> llvm::Value * {
                 const auto it = current_module_->expr_option_values.find(sema::get_expr_key(expr));
                 if (it == current_module_->expr_option_values.end()) {
-                    report_codegen_error(diag_, {}, "internal error: '#option'/'#env' value was not resolved by sema");
+                    report_codegen_error(diag_, {}, "internal error: '$option'/'$env' value was not resolved by sema");
                     return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
                 }
                 return std::visit(

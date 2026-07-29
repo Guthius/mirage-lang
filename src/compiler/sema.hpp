@@ -15,11 +15,11 @@
 #include <unordered_set>
 
 namespace sema {
-    // A '--opt key=value' or environment-variable value coerced (per #option's/#env's
+    // A '--opt key=value' or environment-variable value coerced (per $option's/$env's
     // target-type coercion rules) or folded from a default expression: an integer/bool/
-    // enum-underlying value, or a []u8 string. Used for '#option'/'#env' themselves and for
+    // enum-underlying value, or a []u8 string. Used for '$option'/'$env' themselves and for
     // constant-folding 'when' conditions and '#link' data expressions that reference an
-    // '#option'/'#env'-backed const. Defined here (ahead of VariantCoercion/AsmStmtInfo
+    // '$option'/'$env'-backed const. Defined here (ahead of VariantCoercion/AsmStmtInfo
     // etc. further below, which used to be its original home) so the generics structures
     // immediately following — which also need it — can be declared next to the
     // ResolvedType-adjacent structs above rather than split across the file.
@@ -412,7 +412,7 @@ namespace sema {
         // trying (and failing) to look up the inner operand's expr_types entry directly.
         std::unordered_map<const void *, ResolvedType> expr_type_of_operand_type;
         std::unordered_map<const void *, ErrorMatchUnwrap> expr_error_match_unwrap;
-        // '#option(...)'/'#env(...)' expression -> its resolved compile-time value, cached
+        // '$option(...)'/'$env(...)' expression -> its resolved compile-time value, cached
         // by check_expr's OptionExpr/EnvExpr cases so later constant-folding (when
         // conditions, '#link' data) never re-runs coercion/diagnostics for the same node.
         std::unordered_map<const void *, ConstFoldValue> expr_option_values;
@@ -464,7 +464,7 @@ namespace sema {
         std::vector<GenericInstanceKey> generic_type_resolving;
     };
 
-    // Compiler-driver-supplied configuration read by '#option' during sema. Threaded
+    // Compiler-driver-supplied configuration read by '$option' during sema. Threaded
     // through check_program the same way codegen::Options is threaded through
     // codegen::generate (see codegen.hpp) — a single defaulted struct parameter, copied
     // once into Program::options at check_program's entry, then read via the
@@ -519,7 +519,7 @@ namespace sema {
         ResolveState resolve_state;
         bool ok = false;
 
-        // '--opt key=value' values supplied by the driver, read by '#option'.
+        // '--opt key=value' values supplied by the driver, read by '$option'.
         Options options;
         // Linker directives collected from '#link' declarations in live 'when' branches
         // (or unconditional module scope) across every module. Driver-specific consumption
@@ -888,7 +888,7 @@ namespace sema {
     auto evaluate_integer_constant(const ast::Expr &expr, const std::string &module_path, const Program &program) -> std::optional<int64_t>;
 
     // A more general compile-time evaluator than evaluate_integer_constant above: also
-    // folds string literals, cross-module qualified const access ('mod.NAME'), '#option'
+    // folds string literals, cross-module qualified const access ('mod.NAME'), '$option'
     // (via the cached expr_option_values side table), 'when' expressions, and enum-literal
     // (.Variant) equality comparisons (resolved via the sibling operand's expr_types entry,
     // since a bare '.Variant' has no fixed value without that context). Used to fold 'when'
@@ -900,7 +900,7 @@ namespace sema {
     auto find_enum_field_by_name(const EnumInfo &info, std::string_view name) -> const EnumFieldInfo *;
     auto find_enum_field_by_value(const EnumInfo &info, int64_t value) -> const EnumFieldInfo *;
 
-    // Full '#option' resolution: target-type priority (expected > default's type > []u8),
+    // Full '$option' resolution: target-type priority (expected > default's type > []u8),
     // '--opt' string coercion or default-value folding, and the required/invalid-value
     // diagnostics. 'expr_key' is get_expr_key(...) of the ENCLOSING ast::Expr (for caching
     // into ProgramModule::expr_option_values) — see check_expr's OptionExpr case.

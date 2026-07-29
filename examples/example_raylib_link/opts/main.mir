@@ -1,5 +1,5 @@
 // A local stand-in for the (separately-maintained, out-of-repo) stdlib's
-// Core/Compiler/Options module, scoped to this example so the '#option'/'#link'/'when'
+// Core/Compiler/Options module, scoped to this example so the '$option'/'#link'/'when'
 // feature set can be exercised end-to-end without depending on an external stdlib checkout.
 
 pub type OperatingSystem = enum(i32) {
@@ -19,5 +19,5 @@ pub type Architecture = enum(i32) {
     Other = 5
 }
 
-pub const target_os: OperatingSystem = #option("build/target_os", .Linux)
-pub const target_arch: Architecture = #option("build/target_arch", .X86_64)
+pub const target_os: OperatingSystem = $option("build/target_os", .Linux)
+pub const target_arch: Architecture = $option("build/target_arch", .X86_64)

@@ -780,15 +780,15 @@ namespace ast {
             });
         }
 
-        // '#option(key)' / '#option(key, default)'. 'option' is parsed as a plain
-        // identifier after the '#' sigil (not a keyword) — mirrors 'ext fn's precedent of
+        // '$option(key)' / '$option(key, default)'. 'option' is parsed as a plain
+        // identifier after the '$' sigil (not a keyword) — mirrors 'ext fn's precedent of
         // dispatching on a bare identifier lexeme rather than reserving a new keyword.
         auto parse_option_expr(Parser &parser) -> Expr {
             const auto location = parser.current_location();
-            parser.expect(TokenKind::Hash, "'#'");
+            parser.expect(TokenKind::Dollar, "'$'");
 
             if (!parser.check(TokenKind::Identifier) || parser.current_lexeme() != "option") {
-                parser.report_error(location, std::format("expected 'option' or 'env' after '#', got '{}'", parser.current_lexeme()));
+                parser.report_error(location, std::format("expected 'option' or 'env' after '$', got '{}'", parser.current_lexeme()));
 
                 return LiteralIntegerExpr{.value = 0, .location = location};
             }
@@ -811,13 +811,13 @@ namespace ast {
             });
         }
 
-        // '#env(key)' / '#env(key, default)' — reads 'key' as an environment variable
-        // instead of a '--opt key=value' driver flag. Parsed identically to '#option'
-        // above (see its comment); the caller (parse_primary) has already peeked past '#'
+        // '$env(key)' / '$env(key, default)' — reads 'key' as an environment variable
+        // instead of a '--opt key=value' driver flag. Parsed identically to '$option'
+        // above (see its comment); the caller (parse_primary) has already peeked past '$'
         // to confirm the identifier is 'env' before dispatching here.
         auto parse_env_expr(Parser &parser) -> Expr {
             const auto location = parser.current_location();
-            parser.expect(TokenKind::Hash, "'#'");
+            parser.expect(TokenKind::Dollar, "'$'");
             parser.advance(); // consume 'env'
 
             parser.expect(TokenKind::LParen, "'('");
@@ -837,11 +837,12 @@ namespace ast {
             });
         }
 
-        // '#link(category, data)' — a linker directive. 'link' (like 'option' above) is a
-        // plain identifier after '#', not a keyword. Callable from both module-scope
-        // declaration parsing and (permissively) statement parsing — see parse_stmt's
-        // dispatch, which peeks past '#' to distinguish '#link' from '#option' before
-        // deciding whether to consume it here or fall through to an ordinary expr-stmt.
+        // '#link(category, data)' — a linker directive. 'link' (like 'error'/'warn' below)
+        // is a plain identifier after '#', not a keyword — a distinct sigil from the '$'
+        // used by 'option'/'env' above. Callable from both module-scope declaration
+        // parsing and (permissively) statement parsing — see parse_stmt's dispatch, which
+        // peeks past '#' to recognize '#link' before deciding whether to consume it here
+        // or fall through to an ordinary expr-stmt.
         auto parse_link_decl(Parser &parser) -> LinkDecl {
             const auto location = parser.current_location();
             parser.expect(TokenKind::Hash, "'#'");
@@ -1205,7 +1206,7 @@ namespace ast {
                 });
             }
 
-            if (parser.check(TokenKind::Hash)) {
+            if (parser.check(TokenKind::Dollar)) {
                 if (parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "env") {
                     return parse_env_expr(parser);
                 }
@@ -3105,9 +3106,9 @@ namespace ast {
 
         // '#link(...)' parses successfully here (unlike anywhere else a runtime
         // statement is illegal) purely so sema can reject it with a precise
-        // "module scope only" diagnostic. '#option(...)' is NOT special-cased here —
+        // "module scope only" diagnostic. '$option(...)' is NOT special-cased here —
         // it falls through to parse_expr_stmt below, which reaches parse_primary's
-        // own '#' handling for the option-expression form.
+        // own '$' handling for the option-expression form.
         if (parser.check(TokenKind::Hash) && parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "link") {
             return parse_link_decl(parser);
         }
@@ -3369,7 +3370,7 @@ namespace ast {
     // 'when cond { decl... } [else (when ... | { decl... })]' — a module-scope
     // compile-time conditional declaration block. Parsed permissively (any Decl kind, via
     // the ordinary parse_decl dispatcher) — the allow-list restriction to '#link'/'const'
-    // with '#option'/'type'/'ext fn' is a SEMA error (see spec), not a parse error, so
+    // with '$option'/'type'/'ext fn' is a SEMA error (see spec), not a parse error, so
     // parsing here must succeed for any decl kind and let sema reject the disallowed ones.
     auto parse_when_decl(Parser &parser) -> std::unique_ptr<WhenDecl> {
         const auto location = parser.current_location();

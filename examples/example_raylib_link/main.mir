@@ -1,4 +1,4 @@
-// example_raylib_link.mir — the raylib-binding-header shape from the #option/#link/when
+// example_raylib_link.mir — the raylib-binding-header shape from the $option/#link/when
 // task's definition of done. 'opts' is a local stand-in for the stdlib's
 // Core/Compiler/Options module (see opts/main.mir) since the real stdlib lives in a
 // separate repo, not this one.
@@ -11,8 +11,8 @@
 
 const opts := import("opts")
 
-const raylib_shared := #option("raylib_shared", false)
-const raylib_wasm_lib := #option("raylib_wasm_lib", "wasm/libraylib.web.a")
+const raylib_shared := $option("raylib_shared", false)
+const raylib_wasm_lib := $option("raylib_wasm_lib", "wasm/libraylib.web.a")
 
 when opts.target_os == .Windows {
     #link(flag, "/NODEFAULTLIB:msvcrt" when raylib_shared else "/NODEFAULTLIB:libcmt")

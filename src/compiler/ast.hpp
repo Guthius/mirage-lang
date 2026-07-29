@@ -496,7 +496,7 @@ namespace ast {
         SourceLocation location;
     };
 
-    // '#option(key)' / '#option(key, default)' — a compile-time expression that reads a
+    // '$option(key)' / '$option(key, default)' — a compile-time expression that reads a
     // value supplied by the compiler driver via '--opt key=value'. Legal anywhere an
     // expression is legal (arithmetic, call arguments, 'mut' initializers, ...): its value
     // is always resolved once from '--opt'/the default and cached (ProgramModule::
@@ -508,9 +508,9 @@ namespace ast {
         SourceLocation location;
     };
 
-    // '#env(key)' / '#env(key, default)' — like '#option' above, but the value comes from
+    // '$env(key)' / '$env(key, default)' — like '$option' above, but the value comes from
     // an environment variable ('key') instead of a '--opt key=value' driver flag. Shares
-    // '#option''s resolution/caching/codegen machinery end-to-end (see resolve_env_expr,
+    // '$option''s resolution/caching/codegen machinery end-to-end (see resolve_env_expr,
     // ProgramModule::expr_option_values, codegen's emit_option_value) — only the value
     // source differs.
     struct EnvExpr {
@@ -1006,7 +1006,7 @@ namespace ast {
 
     // 'when cond { decl... } [else (when ... | { decl... })]' — a module-scope compile-time
     // conditional declaration block. Parsed permissively (any Decl kind inside), restricted
-    // to '#link'/'const' with '#option'/'type'/'ext fn' by sema. Boxed via unique_ptr (not
+    // to '#link'/'const' with '$option'/'type'/'ext fn' by sema. Boxed via unique_ptr (not
     // stored by value like Decl's other alternatives) because it holds a 'vector<Decl>' —
     // Decl isn't a complete type until this very 'using Decl = ...' declaration finishes, so
     // WhenDecl can only be fully DEFINED afterward; the variant itself only needs the

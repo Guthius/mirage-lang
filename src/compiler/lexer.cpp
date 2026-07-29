@@ -555,6 +555,7 @@ namespace lexer {
                 case ';': return make_token(TokenKind::Semicolon, start);
                 case '@': return make_token(TokenKind::At, start);
                 case '#': return make_token(TokenKind::Hash, start);
+                case '$': return make_token(TokenKind::Dollar, start);
 
                 case '.':
                     if (match('.')) {

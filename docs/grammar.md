@@ -229,7 +229,7 @@ block_decl    ::= '{' { declaration } '}'
 A compile-time conditional declaration block. `expr` must be a compile-time
 constant expression. Parses any declaration kind inside `block_decl`; sema
 restricts the permitted kinds to `#link`, `#error`, `#warn`, `const` with
-`#option`/`#env`, `type`, and `ext fn` (see spec.md's "Compile-Time
+`$option`/`$env`, `type`, and `ext fn` (see spec.md's "Compile-Time
 Configuration" section).
 
 ---
@@ -600,9 +600,9 @@ primary_expr  ::= INT_LITERAL
                | env_expr
                | asm_expr
 
-option_expr   ::= '#option' '(' STRING [ ',' expr ] ')'
+option_expr   ::= '$option' '(' STRING [ ',' expr ] ')'
 
-env_expr      ::= '#env' '(' STRING [ ',' expr ] ')'
+env_expr      ::= '$env' '(' STRING [ ',' expr ] ')'
 
 size_of_expr  ::= 'size_of' '(' size_of_operand ')'
 
@@ -659,17 +659,17 @@ parse error. `{}` (empty) is shared: with a bitset-expected type it denotes
 the zero value (no bits set), exactly as `default` does for a bitset type
 (see spec.md).
 
-`#` is a sigil, not part of an identifier; `option`/`env` (like `link` in
-`link_decl` above) are parsed as plain identifiers immediately following it,
-not reserved keywords. `option_expr`/`env_expr` are legal anywhere
-`primary_expr` is legal — nested inside arithmetic, as a call argument
-(including `#link`'s `data`), as a `mut` initializer, etc. Their value is
-resolved once — from `--opt`/the default for `option_expr`, from the named
-environment variable/the default for `env_expr` — and cached, so each
-composes as an ordinary compile-time-constant expression wherever it's
-written. See spec.md's "Compile-Time Configuration" section for the
-target-type resolution priority and value-coercion rules (identical for
-both).
+`$` is a sigil, not part of an identifier — distinct from the `#` sigil used
+by `link_decl`/`diagnostic_decl` above. `option`/`env` are parsed as plain
+identifiers immediately following it, not reserved keywords.
+`option_expr`/`env_expr` are legal anywhere `primary_expr` is legal —
+nested inside arithmetic, as a call argument (including `#link`'s `data`),
+as a `mut` initializer, etc. Their value is resolved once — from
+`--opt`/the default for `option_expr`, from the named environment
+variable/the default for `env_expr` — and cached, so each composes as an
+ordinary compile-time-constant expression wherever it's written. See
+spec.md's "Compile-Time Configuration" section for the target-type
+resolution priority and value-coercion rules (identical for both).
 
 ---
 
@@ -722,9 +722,10 @@ lexer error. See spec.md's "Comments" section for the general syntax, and
 "Inline Assembly" (§20) for the asm mini-language's separate `;`/`#`
 comment convention used *inside* `asm { ... }` bodies — that convention is
 handled entirely by the asm block's own raw-text lexer and is unrelated to
-the top-level `#` sigil `link_decl`/`diagnostic_decl`/`option_expr`/
-`env_expr` use above: outside an `asm { ... }` body, `#` never introduces a
-comment, it always starts a directive.
+the top-level sigils used above: outside an `asm { ... }` body, neither `#`
+(`link_decl`/`diagnostic_decl`) nor `$` (`option_expr`/`env_expr`) ever
+introduces a comment — `#` always starts a link/diagnostic directive, `$`
+always starts an `option`/`env` expression.
 
 ---
 

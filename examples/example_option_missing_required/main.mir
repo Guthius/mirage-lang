@@ -1,4 +1,4 @@
-// example_option_missing_required.mir — REJECTION CASE. An '#option' with no default
+// example_option_missing_required.mir — REJECTION CASE. An '$option' with no default
 // value must be supplied via '--opt'; if it isn't, sema reports exactly which key is
 // missing and how to supply it.
 //
@@ -6,7 +6,7 @@
 //   error: required option 'required_thing' was not provided.
 //          Pass it with: --opt required_thing=<value>
 
-const x := #option("required_thing")
+const x := $option("required_thing")
 
 pub fn main() {
 }

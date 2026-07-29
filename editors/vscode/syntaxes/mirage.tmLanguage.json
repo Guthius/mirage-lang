@@ -164,7 +164,11 @@
     "directives": {
       "patterns": [
         {
-          "match": "#(option|env|link|error|warn)\\b",
+          "match": "\\$(option|env)\\b",
+          "name": "keyword.other.directive.mirage"
+        },
+        {
+          "match": "#(link|error|warn)\\b",
           "name": "keyword.other.directive.mirage"
         }
       ]

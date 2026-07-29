@@ -131,6 +131,7 @@ enum class TokenKind : uint8_t {
     Semicolon,
     At,
     Hash,
+    Dollar,
 
     // Special
     AsmBlock,

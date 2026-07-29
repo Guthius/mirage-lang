@@ -56,7 +56,7 @@ namespace {
                      << "  --emit-ir            Print LLVM IR to stdout instead of compiling\n"
                      << "  --freestanding       Compile without standard library\n"
                      << "  --noinit             Skip generating/calling the synthesized '@init'-runner '_init'\n"
-                     << "  --opt key=value      Set a compile-time '#option' value (may be repeated)\n"
+                     << "  --opt key=value      Set a compile-time '$option' value (may be repeated)\n"
                      << "  --print-link-directives  Print collected '#link' directives and exit\n"
                      << "  --dump-ast           Print the parsed AST shape and exit\n"
                      << "  --help               Show this help message\n";
@@ -180,10 +180,10 @@ namespace {
         return true;
     }
 
-    // Default 'build/target_os'/'build/target_arch' #option values derived from the host
+    // Default 'build/target_os'/'build/target_arch' $option values derived from the host
     // triple, used only when the user didn't pass an explicit '--opt' override — matching
     // OperatingSystem/Architecture's variant names in the (separately-maintained) stdlib
-    // Core/Compiler/Options module, so both name-based and value-based #option coercion work.
+    // Core/Compiler/Options module, so both name-based and value-based $option coercion work.
     auto default_target_os(const llvm::Triple &triple) -> std::string {
         if (triple.isOSLinux()) return "Linux";
         if (triple.isOSWindows()) return "Windows";
@@ -308,9 +308,9 @@ namespace {
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                     dump_expr(v->object, out); out << "." << v->member;
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
-                    out << "#option(\"" << v->key << "\")";
+                    out << "$option(\"" << v->key << "\")";
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
-                    out << "#env(\"" << v->key << "\")";
+                    out << "$env(\"" << v->key << "\")";
                 } else if constexpr (std::is_same_v<V, ast::ImportExpr>) {
                     out << "import(\"" << v.module_name << "\")";
                 } else {
@@ -388,7 +388,7 @@ auto main(const int argc, char *argv[]) -> int {
         return 1;
     }
 
-    // Host-platform '#option' defaults ('build/target_os'/'build/target_arch'), used only
+    // Host-platform '$option' defaults ('build/target_os'/'build/target_arch'), used only
     // where the user didn't already pass an explicit '--opt' override.
     {
         const llvm::Triple host_triple(llvm::sys::getDefaultTargetTriple());

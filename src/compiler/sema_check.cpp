@@ -1421,7 +1421,7 @@ namespace sema {
 
     // Resolves an explicit generic_args list ('make_list[i32]', 'Fixed[u8, 16]') against
     // 'params' in declared order — arity + per-arg kind checking, matching the exact
-    // diagnostic style used for #option/array-size compile-time-constant checks elsewhere.
+    // diagnostic style used for $option/array-size compile-time-constant checks elsewhere.
     // Shared by generic function and (indirectly, via the caller pre-checking arity)
     // explicit-instantiation call sites; type-position instantiation ('List[i32]' as a
     // NamedType) uses type_resolver.cpp's own, independent copy of this same logic
@@ -1810,8 +1810,8 @@ namespace sema {
                         return error(diag, v->location, "'when' expression branches have different types");
                     }
 
-                    // The condition/branches may freely contain '#option(...)' (or anything
-                    // else) — '#option' is always a compile-time-constant expression (see
+                    // The condition/branches may freely contain '$option(...)' (or anything
+                    // else) — '$option' is always a compile-time-constant expression (see
                     // OptionExpr's doc comment in ast.hpp), so no special-casing is needed
                     // here beyond the ordinary is_constant_expr/evaluate_const_value fold
                     // below. The restriction to compile-time-constant conditions specifically

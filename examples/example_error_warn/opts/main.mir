@@ -8,4 +8,4 @@ pub type Target = enum(i32) {
     BeOS = 2
 }
 
-pub const target: Target = #option("target", .Linux)
+pub const target: Target = $option("target", .Linux)

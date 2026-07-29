@@ -39,7 +39,7 @@ namespace sema {
     }
 
     // Whether 'type' is a legal declared type for a VALUE generic parameter in v1: bool, an
-    // integer kind, or usize. Deliberately narrower than '#option'/'#env's full coercible-type
+    // integer kind, or usize. Deliberately narrower than '$option'/'$env's full coercible-type
     // set (which also allows []u8 and enum) — see spec.md §22, "Declaring Generic Types" for
     // the v1 scope decision (keeps the monomorphization cache key / name-mangling / RTTI
     // value encoding pure-integer comparison).
@@ -306,7 +306,7 @@ namespace sema {
             }, decl);
         }
 
-        // Only '#link', 'const' with a direct '#option(...)'/'#env(...)' initializer,
+        // Only '#link', 'const' with a direct '$option(...)'/'$env(...)' initializer,
         // 'type', and 'ext fn' declarations are permitted inside a module-scope 'when'
         // block (spec). A nested 'when' is always structurally allowed here — its OWN
         // contents are checked recursively against this same allow-list wherever they're
@@ -341,7 +341,7 @@ namespace sema {
             for (const auto &decl : decls) {
                 if (!decl_allowed_in_module_scope_when(decl)) {
                     diag.report_error(DiagnosticStage::Sema, decl_location(decl),
-                        "only '#link', '#error', '#warn', 'const' with '#option'/'#env', 'type', "
+                        "only '#link', '#error', '#warn', 'const' with '$option'/'$env', 'type', "
                         "and 'ext fn' declarations are permitted inside a module-scope 'when' block.");
                     continue;
                 }
@@ -702,7 +702,7 @@ namespace sema {
         // laid out immediately: resolve_type_impl's NamedType case only ever calls
         // resolve_final_SHALLOW (returns the pre-allocated handle without forcing layout),
         // so without this, a cross-module 'when' condition would see a referenced enum's
-        // 'fields' still empty (layout_done=false) when '#option' tries to coerce a
+        // 'fields' still empty (layout_done=false) when '$option' tries to coerce a
         // '--opt' string against it. Harmless to repeat later — layout_done guards make
         // the eventual real step 3 pass a no-op for a module already resolved here.
         for (auto &[name, sym] : module.symbols) {
