@@ -211,8 +211,19 @@ namespace sema {
             switch (op) {
             case ast::BinaryOp::Add:
             case ast::BinaryOp::Sub:
-                if (lhs.kind == TypeKind::Anyptr && rhs.is_integer()) return lhs;
-                if (rhs.kind == TypeKind::Anyptr && lhs.is_integer()) return rhs;
+                // Typed pointers get arithmetic too, not just 'anyptr'. Everything else in the
+                // compiler already assumed this and only binary '+'/'-' disagreed: IncrDecrExpr
+                // permits TypeKind::Pointer, compound '+='/'-=' lowers through
+                // emit_pointer_offset, and codegen's own binary path is gated on
+                // is_pointer_like, which covers Pointer and Anyptr alike and scales the offset
+                // by the pointee size. So 'p++' compiled while 'p = p + 1' did not, for the
+                // same variable.
+                //
+                // Resolved in the permissive direction because the restrictive one would break
+                // working code: examples/mem/mem.mir walks buffers with 'd++.* = s++.*'.
+                // spec.md's "anyptr supports arithmetic" line is updated to match.
+                if (lhs.is_pointer_like() && rhs.is_integer()) return lhs;
+                if (rhs.is_pointer_like() && lhs.is_integer()) return rhs;
                 [[fallthrough]];
 
             case ast::BinaryOp::Mul:

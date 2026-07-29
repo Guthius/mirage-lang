@@ -1,0 +1,38 @@
+// example_pointer_arithmetic.mir — arithmetic on a TYPED pointer, in every form.
+//
+// Only binary '+' / '-' rejected typed pointers; everything else already allowed them.
+// IncrDecrExpr explicitly permits TypeKind::Pointer, compound '+=' / '-=' lowers through
+// emit_pointer_offset, and codegen's own binary path is gated on is_pointer_like, which covers
+// Pointer and Anyptr alike. So 'p++' compiled while 'p = p + 1' did not, for the same variable
+// — sema's binary_op_result special-cased Anyptr only.
+//
+// Resolved in favour of allowing it: the restrictive reading would have broken working code
+// (examples/mem/mem.mir walks buffers with 'd++.* = s++.*'), and codegen was already written
+// for it. spec.md now documents typed-pointer arithmetic explicitly.
+//
+// Every form steps by size_of(T), not bytes, which is what the values below check.
+//
+// Expected: exit code 100 — 30 (p+2) + 40 (q+1) + 10 (back to start) + 20 (p++).
+
+pub fn main() -> i32 {
+    mut a: [4]i32 = {10, 20, 30, 40}
+    mut p: *i32 = &a[0]
+
+    // Binary '+': the form that used to be rejected. Steps by 4 bytes, not 2.
+    const third: *i32 = p + 2
+    mut total: i32 = third.*
+
+    // Binary '+' with the pointer on the right-hand side.
+    const fourth: *i32 = 1 + third
+    total = total + fourth.*
+
+    // Binary '-'.
+    const back: *i32 = fourth - 3
+    total = total + back.*
+
+    // Increment, which always worked, must still agree with the above.
+    p++
+    total = total + p.*
+
+    return total
+}

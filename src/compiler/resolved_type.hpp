@@ -64,6 +64,13 @@ namespace sema {
             }
         }
 
+        // A typed pointer or 'anyptr' — the two kinds that support pointer arithmetic and
+        // nil comparison. codegen.cpp has its own is_pointer_like free function predating
+        // this; both must agree.
+        auto is_pointer_like() const -> bool {
+            return kind == TypeKind::Pointer || kind == TypeKind::Anyptr;
+        }
+
         auto is_signed() const -> bool {
             switch (kind) {
             case TypeKind::I8:

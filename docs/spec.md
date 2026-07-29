@@ -63,7 +63,7 @@ Type System".
 
 ### The `anyptr` Type
 
-`anyptr` supports arithmetic with integer operands (`+`, `-`) for pointer arithmetic. It can be assigned to and from any typed pointer or function pointer, and compared with `nil`.
+`anyptr` supports arithmetic with integer operands (`+`, `-`) for pointer arithmetic, stepping one byte at a time since it has no element type. It can be assigned to and from any typed pointer or function pointer, and compared with `nil`. Typed pointers support the same arithmetic, stepping by the pointee's size — see "Pointer Types" below.
 
 ### The `type` Type
 
@@ -148,6 +148,16 @@ p.* = 99              // dereference: writes x through p
 ```
 
 Auto-deref: accessing members or calling methods on a pointer-to-struct automatically dereferences the pointer, so `p.field` and `p.method()` never need an explicit `.*` — only reading/writing/matching the whole pointee value does.
+
+**Pointer arithmetic.** A typed pointer supports `+` and `-` with an integer operand, `+=` / `-=`, and `++` / `--`. Every form steps by `size_of(T)`, not by bytes — `p + 2` on a `*i32` advances 8 bytes. Use `anyptr` for byte-granular arithmetic.
+
+```mirage
+mut a: [4]i32 = {10, 20, 30, 40}
+mut p: *i32 = &a[0]
+const q: *i32 = p + 2   // third element
+const v: i32 = q.*      // 30
+p++                     // same step, one element forward
+```
 
 ### Array Types
 
