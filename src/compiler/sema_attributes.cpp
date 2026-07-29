@@ -129,6 +129,15 @@ namespace sema {
             if (!decl.params.empty()) {
                 diag.report_error(DiagnosticStage::Sema, attr.location, "'@init' functions may not take parameters");
             }
+            // A generic function has no single concrete body to call implicitly -- it only
+            // exists once monomorphized, and nothing supplies the arguments for an implicit
+            // call. '@init' is already rejected on impl/trait-impl methods at declare time
+            // for the same "there is no one function to run" reason; this closes the gap for
+            // 'fn f[T: type]()'. Without it, validate_init_dependencies_for_program schedules
+            // the uninstantiated declaration straight into Program::init_call_order.
+            if (!decl.generic_params.empty()) {
+                diag.report_error(DiagnosticStage::Sema, attr.location, "'@init' is not allowed on a generic function");
+            }
             // Deliberately no 'pub' requirement: '_init' is emitted into the same LLVM module
             // as every other function in the program (this is a whole-program compile, not
             // separate translation units linked afterward), so it can call a private '@init'

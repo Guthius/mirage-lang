@@ -132,6 +132,10 @@
     "action": "run",
     "exit": 1
   },
+  "example_attr_init_generic": {
+    "action": "build",
+    "exit": 1
+  },
   "example_attr_init_on_method": {
     "action": "build",
     "exit": 1

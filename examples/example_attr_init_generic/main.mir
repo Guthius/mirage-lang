@@ -1,0 +1,20 @@
+// example_attr_init_generic.mir — REJECTION CASE. '@init' marks a function to be run once,
+// implicitly, before main. A generic function has no single concrete body to run: it exists
+// only once monomorphized, and nothing supplies the type arguments for an implicit call.
+//
+// validate_init_structural checked the argument list, the parameter list and the return type
+// but never generic_params, so this was accepted and
+// validate_init_dependencies_for_program went on to schedule the uninstantiated declaration
+// into Program::init_call_order. '@init' is already rejected on impl and trait-impl methods
+// at declare time for the same reason.
+//
+// Expected: compilation fails with
+//   error: '@init' is not allowed on a generic function
+
+@init
+fn setup[T: type]() {
+}
+
+pub fn main() -> i32 {
+    return 0
+}
