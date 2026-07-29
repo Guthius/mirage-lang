@@ -101,6 +101,17 @@ namespace asm_parser {
 
             default:
                 c.error(tok.location, "expected an operand (register, immediate, identifier, or '&identifier')");
+                // Consume the offending token, as every other branch here does -- otherwise
+                // parse_instruction's operand loop breaks on it immediately and fires a
+                // second, redundant "expected ',' or end of instruction" at the same column.
+                //
+                // Comma and Newline are the exception: they are the caller's own structural
+                // tokens. Eating a stray ',' would leave the loop unable to see the separator
+                // and turn one diagnostic into two; eating a Newline would merge this
+                // instruction with the next line.
+                if (!c.check(AsmTokenKind::Comma) && !c.check(AsmTokenKind::Newline)) {
+                    c.advance();
+                }
                 return std::nullopt;
             }
         }
