@@ -1,0 +1,33 @@
+// example_generics_size_of.mir — 'size_of'/'align_of'/'type_of' applied to an explicit generic
+// type instantiation.
+//
+// size_of/align_of/type_of accept a type name as their operand, but their type-name fast paths
+// only recognized IdentExpr ('size_of(MyStruct)') and MemberExpr ('size_of(mod.MyStruct)').
+// 'size_of(List[i32])' parses as an IndexOrInstantiateExpr, matched neither, and fell through
+// to ordinary check_expr — which rejected it with "generic-argument instantiation is not yet
+// supported here", a TODO left over from before generics landed.
+//
+// The instantiation is also recorded into expr_types so codegen can read the operand's type
+// back: codegen holds sema's result as const and cannot instantiate a generic type itself.
+//
+// Expected: exit code 42 — size_of(List[i32]) is 16 and align_of is 8 (a pointer plus a usize),
+// 16 + 8 = 24, plus 16 for the u8 instantiation's own size, plus 2.
+
+pub type List[T: type] = struct {
+    data: *T
+    count: usize
+}
+
+pub fn main() -> i32 {
+    const s := size_of(List[i32])
+    const a := align_of(List[i32])
+    const s8 := size_of(List[u8])
+
+    // type_of on an instantiation must resolve too, and two distinct instantiations must be
+    // distinct types.
+    const t1 := type_of(List[i32])
+    const t2 := type_of(List[u8])
+    const distinct: i32 = t1 == t2 ? 0 : 2
+
+    return cast(s, i32) + cast(a, i32) + cast(s8, i32) + distinct
+}

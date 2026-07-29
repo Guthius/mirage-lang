@@ -1422,6 +1422,51 @@ namespace sema {
     // Resolves an explicit generic_args list ('make_list[i32]', 'Fixed[u8, 16]') against
     // 'params' in declared order — arity + per-arg kind checking, matching the exact
     // diagnostic style used for $option/array-size compile-time-constant checks elsewhere.
+    auto resolve_explicit_generic_args(const std::vector<ast::GenericParam> &params,
+                                        const std::vector<ast::GenericArg> &args, const std::string &module_path,
+                                        Program &program, DiagnosticEngine &diag, const SourceLocation &loc,
+                                        const std::string &decl_name) -> std::optional<std::vector<GenericArgValue>>;
+
+    // Recognizes 'Name[args]' / 'mod.Name[args]' where 'Name' is a generic TYPE declaration,
+    // and returns its monomorphized ResolvedType. Returns nullopt when the operand does not
+    // name a generic type declaration, so callers can fall through to their ordinary handling.
+    //
+    // size_of/align_of/type_of accept a type name in operand position, but their fast paths
+    // only recognized IdentExpr and MemberExpr. 'size_of(List[i32])' parses as an
+    // IndexOrInstantiateExpr, missed both, and fell through to plain check_expr -- which
+    // rejected it with "generic-argument instantiation is not yet supported here", a stale
+    // pre-generics gate.
+    auto try_resolve_generic_type_instantiation(const ast::IndexOrInstantiateExpr &expr, const std::string &module_path,
+                                                 Program &program, DiagnosticEngine &diag) -> std::optional<ResolvedType> {
+        // Find the declaration the operand names, in this module or through a namespace chain.
+        std::string decl_module = module_path;
+        const std::string *decl_name = nullptr;
+
+        if (const auto *ident = std::get_if<ast::IdentExpr>(&expr.operand)) {
+            decl_name = &ident->name;
+        } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr.operand)) {
+            LocalScope no_locals;
+            if (const auto target = try_resolve_namespace_chain((*member)->object, module_path, no_locals, program)) {
+                decl_module = *target;
+                decl_name = &(*member)->member;
+            }
+        }
+        if (!decl_name) return std::nullopt;
+
+        const auto mod_it = program.modules.find(decl_module);
+        if (mod_it == program.modules.end()) return std::nullopt;
+        const auto sym_it = mod_it->second.symbols.find(*decl_name);
+        if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
+        const auto *ts = std::get_if<TypeSymbol>(&sym_it->second);
+        if (!ts || !ts->decl || ts->decl->generic_params.empty()) return std::nullopt;
+
+        auto args = resolve_explicit_generic_args(ts->decl->generic_params, expr.args, module_path, program, diag,
+                                                  expr.location, *decl_name);
+        if (!args) return ResolvedType{.kind = TypeKind::Invalid};
+
+        return instantiate_generic_type(program, diag, decl_module, *decl_name, std::move(*args), expr.location);
+    }
+
     // Shared by generic function and (indirectly, via the caller pre-checking arity)
     // explicit-instantiation call sites; type-position instantiation ('List[i32]' as a
     // NamedType) uses type_resolver.cpp's own, independent copy of this same logic
@@ -2209,6 +2254,16 @@ namespace sema {
                             }
                         }
                     }
+                    if (const auto *inst = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&v->operand)) {
+                        if (const auto instantiated = try_resolve_generic_type_instantiation(**inst, module_path, program, diag)) {
+                            // Record the operand's resolved type so codegen can read it back.
+                            // codegen holds a const Program and cannot instantiate, so its
+                            // 'size_of_operand' falls back to expr_types for anything its own
+                            // ident/member fast paths do not recognize.
+                            program.modules.at(module_path).expr_types[get_expr_key(v->operand)] = *instantiated;
+                            return ResolvedType{.kind = TypeKind::USize};
+                        }
+                    }
                     {
                         const auto operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         if (operand_type.kind == TypeKind::Namespace) {
@@ -2236,6 +2291,16 @@ namespace sema {
                                     return ResolvedType{.kind = TypeKind::USize};
                                 }
                             }
+                        }
+                    }
+                    if (const auto *inst = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&v->operand)) {
+                        if (const auto instantiated = try_resolve_generic_type_instantiation(**inst, module_path, program, diag)) {
+                            // Record the operand's resolved type so codegen can read it back.
+                            // codegen holds a const Program and cannot instantiate, so its
+                            // 'align_of_operand' falls back to expr_types for anything its own
+                            // ident/member fast paths do not recognize.
+                            program.modules.at(module_path).expr_types[get_expr_key(v->operand)] = *instantiated;
+                            return ResolvedType{.kind = TypeKind::USize};
                         }
                     }
                     {
@@ -2271,6 +2336,18 @@ namespace sema {
                                     operand_type = resolve_type_symbol(*target_module, (*mem)->member, program, diag, v->location);
                                     resolved_as_type_name = true;
                                 }
+                            }
+                        }
+                    }
+                    if (!resolved_as_type_name) {
+                        if (const auto *inst = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&v->operand)) {
+                            if (const auto instantiated = try_resolve_generic_type_instantiation(**inst, module_path, program, diag)) {
+                                operand_type = *instantiated;
+                                resolved_as_type_name = true;
+                                // As in size_of/align_of above: codegen's type_of_operand falls
+                                // back to expr_types for operand shapes its own fast paths do
+                                // not recognize, and cannot instantiate one itself.
+                                program.modules.at(module_path).expr_types[get_expr_key(v->operand)] = operand_type;
                             }
                         }
                     }
@@ -2414,16 +2491,19 @@ namespace sema {
                     return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type, /*need_writable=*/false).type;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
-                    // TODO(generics): full IndexOrInstantiateExpr classification (does
-                    // 'operand' name a decl with generic_params?) and instantiation
-                    // (arity/kind checking, inference, monomorphization) lands with the rest
-                    // of the generics sema support — see instantiate_generic_type/
-                    // instantiate_generic_function. Until then, the ordinary-index shape
-                    // (exactly one Expr-tagged arg) behaves exactly as IndexExpr always did;
-                    // any other shape (multi-arg or a type-tagged arg) is generic-argument
-                    // syntax with no instantiation support wired up yet.
+                    // Reaching here means plain VALUE position: 'a[i]'. Generic instantiation is
+                    // classified before this, at each position that can accept one -- a call
+                    // callee ('make[i32]()'), a declared type ('List[i32]' parsed as a
+                    // NamedType), and size_of/align_of/type_of's operand (see
+                    // try_resolve_generic_type_instantiation). So the ordinary-index shape
+                    // (exactly one Expr-tagged arg) is the only one that belongs here.
+                    //
+                    // A remaining multi-arg or type-tagged shape is an instantiation written
+                    // somewhere a value is expected, e.g. 'const x := List[i32]' -- which names
+                    // a type, not a value.
                     if (v->args.size() != 1 || !std::holds_alternative<ast::Expr>(v->args[0].value)) {
-                        return error(diag, v->location, "generic-argument instantiation is not yet supported here");
+                        return error(diag, v->location,
+                            "a generic type instantiation names a type, not a value; it cannot be used here");
                     }
                     const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     const auto index = check_expr(std::get<ast::Expr>(v->args[0].value), locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);

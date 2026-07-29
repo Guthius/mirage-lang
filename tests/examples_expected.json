@@ -350,6 +350,10 @@
     "action": "run",
     "exit": 42
   },
+  "example_generics_size_of": {
+    "action": "run",
+    "exit": 42
+  },
   "example_impl": {
     "action": "run",
     "exit": 20
