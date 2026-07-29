@@ -41,6 +41,13 @@ namespace lsp {
                 // Full RFC 3986 encoding is unnecessary for a Linux-only,
                 // .mir-extension-only tool.
                 switch (c) {
+                case '%':
+                    // Must come first in spirit if not in order: without it a path containing
+                    // a literal '%41' encoded to itself and decoded back to 'A', so the URI
+                    // did not round-trip. '%' is the escape character, so it has to be escaped
+                    // for any of the others to be unambiguous.
+                    out += "%25";
+                    break;
                 case ' ':
                     out += "%20";
                     break;
@@ -59,12 +66,23 @@ namespace lsp {
         }
     }
 
+    // Returns "" for anything that is not a plain 'file://' URI with an empty authority.
+    // Callers treat "" as "not a document this server can handle" (see canonical_path_of).
+    //
+    // A non-empty authority ('file://host/path') is rejected rather than silently treated as
+    // the relative path 'host/path', which is what stripping the scheme alone would do. This
+    // is a Linux-only tool and a remote host is not something it can serve.
     auto uri_to_path(std::string_view uri) -> std::string {
         if (!uri.starts_with(FILE_SCHEME)) {
             return {};
         }
 
-        return percent_decode(uri.substr(FILE_SCHEME.size()));
+        const auto rest = uri.substr(FILE_SCHEME.size());
+        if (!rest.starts_with('/')) {
+            return {};
+        }
+
+        return percent_decode(rest);
     }
 
     auto path_to_uri(std::string_view path) -> std::string {

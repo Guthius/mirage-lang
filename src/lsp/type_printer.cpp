@@ -39,7 +39,21 @@ namespace lsp {
                 if (arg.is_type) {
                     out += type_to_string(arg.type_arg, program, current_module_path);
                 } else if (const auto *iv = std::get_if<int64_t>(&arg.value_arg)) {
-                    out += std::to_string(*iv);
+                    // A bool const-generic argument is stored as int64_t (type_resolver.cpp
+                    // binds it that way; ConstFoldValue has no bool alternative), so rendering
+                    // it as a number showed 'Foo[1]' where the source says 'Foo[true]'.
+                    // value_arg_scalar_type carries the parameter's declared type, which is the
+                    // only thing that distinguishes the two here.
+                    if (arg.value_arg_scalar_type.kind == sema::TypeKind::Bool) {
+                        out += *iv != 0 ? "true" : "false";
+                    } else {
+                        out += std::to_string(*iv);
+                    }
+                } else if (const auto *sv = std::get_if<std::string>(&arg.value_arg)) {
+                    // The other ConstFoldValue alternative. The finding says to add a 'bool'
+                    // branch; there is no bool alternative to add, but std::string fell through
+                    // to "?" for real, which is the same symptom for a different reason.
+                    out += '"' + *sv + '"';
                 } else {
                     out += "?";
                 }
@@ -166,10 +180,16 @@ namespace lsp {
             std::string out = "trait " + name + " {\n";
             for (const auto &method : info->methods) {
                 out += "    fn " + method.name + "(" + (method.is_mut_self ? "mut self" : "self");
+                // Zips the AST params (for names) against the resolved params (for types).
+                // These are built from the same declaration and must be the same length; if
+                // they ever desynchronize, hover would silently print a parameter with no type
+                // rather than anything indicating the mismatch. Say so instead of guessing.
                 if (method.decl) {
-                    for (size_t i = 0; i < method.decl->params.size(); ++i) {
-                        out += ", " + method.decl->params[i].name;
-                        if (i < method.params.size()) {
+                    if (method.decl->params.size() != method.params.size()) {
+                        out += ", <parameter names and types are out of sync>";
+                    } else {
+                        for (size_t i = 0; i < method.decl->params.size(); ++i) {
+                            out += ", " + method.decl->params[i].name;
                             out += ": " + type_to_string(method.params[i], program, current_module_path);
                         }
                     }

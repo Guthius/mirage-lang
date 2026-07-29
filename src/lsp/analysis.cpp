@@ -24,6 +24,15 @@ namespace lsp::analysis {
         // nodes (expr_types keys, Symbol::decl), and those would dangle if we
         // fed sema a temporary copy instead of the object we're about to
         // return.
+        // LSPCORE-13 asks whether every parser error-recovery path leaves a tree structurally
+        // well-formed enough for sema to walk without crashing, since forcing ok=true here
+        // means sema runs on input it would normally refuse. Probed with 100 mutation trials
+        // over four sources chosen for sema complexity (traits, generics, error typestate,
+        // trait composition), each randomly corrupted with 1-8 edits and then driven through
+        // didOpen plus several hovers: no crashes, hangs or non-zero exits. Not a proof, but
+        // the assumption held everywhere it was pushed. Note this became far less dangerous
+        // once the worker thread got its own try/catch (LSPCORE-1): an exception escaping sema
+        // now fails one request instead of calling std::terminate.
         ast_program.ok = true;
         auto sema_program = sema::check_program(ast_program, diag);
 

@@ -38,6 +38,22 @@ namespace lsp {
     // worker reaches the read request, the write has already been applied.
     class TaskQueue {
       public:
+        // The single worker thread can fall behind a client that sends faster than analysis
+        // completes, and nothing outside the diagnostics debounce coalesces anything, so the
+        // queue could grow without bound over a long session. The cap is far above any
+        // realistic backlog -- a client would have to be malfunctioning to reach it.
+        static constexpr size_t MAX_PENDING = 4096;
+
+        // Checked by the caller before building a Task, so a rejected request can be answered
+        // with an error instead of silently dropped. Only cancellable REQUESTS are gated this
+        // way; notifications (didOpen/didChange/didClose) are always accepted, because
+        // refusing a buffer update would desynchronize the server's view of the document from
+        // the editor's, which is worse than a long queue.
+        [[nodiscard]] auto full() -> bool {
+            const std::lock_guard lock(mutex_);
+            return queue_.size() >= MAX_PENDING;
+        }
+
         void push(Task task) {
             {
                 const std::lock_guard lock(mutex_);

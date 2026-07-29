@@ -36,6 +36,7 @@ namespace lsp {
             Running,
         };
 
+        constexpr int INVALID_REQUEST = -32600;
         constexpr int METHOD_NOT_FOUND = -32601;
         constexpr int INTERNAL_ERROR = -32603;
         constexpr int SERVER_NOT_INITIALIZED = -32002;
@@ -69,8 +70,16 @@ namespace lsp {
 
         // Derives the canonical filesystem path this analysis pipeline keys
         // everything by, from a client-supplied "file://..." URI.
+        // Returns "" for a URI this server cannot handle, rather than feeding an empty path
+        // into ast::canonicalize and the std::filesystem calls downstream. Editors do send
+        // non-file schemes -- 'untitled:' for an unsaved buffer is the common one.
         auto canonical_path_of(const std::string &uri) -> std::string {
-            return ast::canonicalize(uri_to_path(uri));
+            auto path = uri_to_path(uri);
+            if (path.empty()) {
+                std::cerr << "mirage-lsp: ignoring unsupported document URI '" << uri << "'\n";
+                return {};
+            }
+            return ast::canonicalize(path);
         }
 
         // JSON-RPC ids are either a number or a string; normalize to a string so they
@@ -301,6 +310,20 @@ namespace lsp {
                 continue;
             }
 
+            // Per the LSP spec, once 'shutdown' has been received the only further message
+            // that may be honoured is 'exit'; anything else must be answered with
+            // InvalidRequest. shutdown_received was tracked but never consulted by dispatch,
+            // so a client that kept sending after shutdown was served as if nothing had
+            // happened -- including requests that queue real analysis onto a worker the server
+            // is about to stop.
+            if (shutdown_received && method != "exit") {
+                std::cerr << "mirage-lsp: '" << method << "' received after shutdown, rejecting\n";
+                if (has_id) {
+                    send_error(channel, message["id"], INVALID_REQUEST, "server is shutting down");
+                }
+                continue;
+            }
+
             // Everything below reads request fields with unchecked chained access --
             // message["params"]["position"]["line"].get<size_t>() and friends. nlohmann's
             // non-const operator[] auto-vivifies a missing key to null, and .get<> on null
@@ -366,6 +389,18 @@ namespace lsp {
                     worker.schedule_diagnostics(path);
                 }});
             } else if (method == "textDocument/didClose") {
+                // Publishes an empty diagnostics list directly rather than going through
+                // do_publish_diagnostics. Kept deliberately: the spec's guidance is that a
+                // server clears diagnostics it computed from an in-memory buffer once that
+                // buffer closes, and re-analysing a just-closed file to re-derive squiggles is
+                // work the editor did not ask for.
+                //
+                // LSPCORE-7's concern is real though: a closed file that still has on-disk
+                // errors AND stays inside an open module's import closure loses its squiggles
+                // until an unrelated edit re-touches that closure. Fixing it properly means
+                // distinguishing "from the open buffer" from "from a file in the closure",
+                // which the current bookkeeping does not track. Recorded as follow-up rather
+                // than traded for a different wrong behavior.
                 const auto uri = message["params"]["textDocument"]["uri"].get<std::string>();
                 auto path = canonical_path_of(uri);
                 queue.push(Task{nullptr, [&worker, &channel, path, uri]() {
@@ -383,7 +418,24 @@ namespace lsp {
                 const auto character = message["params"]["position"]["character"].get<size_t>() + 1;
 
                 auto cancelled = std::make_shared<std::atomic<bool>>(false);
+                // Reusing an id while the previous request with it is still in flight is a
+                // protocol violation, but assigning over the entry silently orphaned the older
+                // request's cancellation flag, so a later $/cancelRequest for that id would
+                // cancel the wrong one. Report rather than misattribute quietly.
+                if (in_flight_.contains(id_key)) {
+                    std::cerr << "mirage-lsp: request id " << id_key
+                              << " reused while still in flight; cancellation may be misattributed\n";
+                }
                 in_flight_[id_key] = cancelled;
+
+                // A full queue means the single worker has fallen far behind. Answer now
+                // rather than leave the client waiting on a request that was never accepted.
+                if (queue.full()) {
+                    std::cerr << "mirage-lsp: task queue full, rejecting '" << method << "'\n";
+                    in_flight_.erase(id_key);
+                    send_error(channel, id, INTERNAL_ERROR, "server busy: task queue full");
+                    continue;
+                }
 
                 const bool is_hover = method == "textDocument/hover";
                 queue.push(Task{cancelled, [&worker, &channel, &completed, cancelled, id, id_key, path, line, character, is_hover] {
@@ -402,7 +454,24 @@ namespace lsp {
                 const auto character = message["params"]["position"]["character"].get<size_t>() + 1;
 
                 auto cancelled = std::make_shared<std::atomic<bool>>(false);
+                // Reusing an id while the previous request with it is still in flight is a
+                // protocol violation, but assigning over the entry silently orphaned the older
+                // request's cancellation flag, so a later $/cancelRequest for that id would
+                // cancel the wrong one. Report rather than misattribute quietly.
+                if (in_flight_.contains(id_key)) {
+                    std::cerr << "mirage-lsp: request id " << id_key
+                              << " reused while still in flight; cancellation may be misattributed\n";
+                }
                 in_flight_[id_key] = cancelled;
+
+                // A full queue means the single worker has fallen far behind. Answer now
+                // rather than leave the client waiting on a request that was never accepted.
+                if (queue.full()) {
+                    std::cerr << "mirage-lsp: task queue full, rejecting '" << method << "'\n";
+                    in_flight_.erase(id_key);
+                    send_error(channel, id, INTERNAL_ERROR, "server busy: task queue full");
+                    continue;
+                }
 
                 queue.push(Task{cancelled, [&worker, &channel, &completed, cancelled, id, id_key, path, line, character] {
                     run_cancellable_request(cancelled, completed, id_key, channel, id, [&]() -> json {
@@ -419,7 +488,24 @@ namespace lsp {
                 const auto end_line = message["params"]["range"]["end"]["line"].get<size_t>() + 1;
 
                 auto cancelled = std::make_shared<std::atomic<bool>>(false);
+                // Reusing an id while the previous request with it is still in flight is a
+                // protocol violation, but assigning over the entry silently orphaned the older
+                // request's cancellation flag, so a later $/cancelRequest for that id would
+                // cancel the wrong one. Report rather than misattribute quietly.
+                if (in_flight_.contains(id_key)) {
+                    std::cerr << "mirage-lsp: request id " << id_key
+                              << " reused while still in flight; cancellation may be misattributed\n";
+                }
                 in_flight_[id_key] = cancelled;
+
+                // A full queue means the single worker has fallen far behind. Answer now
+                // rather than leave the client waiting on a request that was never accepted.
+                if (queue.full()) {
+                    std::cerr << "mirage-lsp: task queue full, rejecting '" << method << "'\n";
+                    in_flight_.erase(id_key);
+                    send_error(channel, id, INTERNAL_ERROR, "server busy: task queue full");
+                    continue;
+                }
 
                 queue.push(Task{cancelled, [&worker, &channel, &completed, cancelled, id, id_key, path, start_line, end_line] {
                     run_cancellable_request(cancelled, completed, id_key, channel, id, [&]() -> json {
