@@ -15,8 +15,10 @@
 #include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/Triple.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <string>
@@ -122,6 +124,38 @@ namespace {
         }
 
         return options;
+    }
+
+    // Creates a uniquely-named file in the system temp directory and returns its path,
+    // or an empty path on failure.
+    //
+    // mkstemp/mkstemps create the file atomically with O_EXCL and mode 0600, which is
+    // what makes this safe in a shared /tmp: the name cannot be guessed and pre-created
+    // as a symlink pointing somewhere else. The descriptor is closed immediately -- the
+    // caller (LLVM's object writer, or clang via -o) reopens the path by name. The file
+    // is left in place as a placeholder so the name stays reserved until then.
+    auto make_temp_file(const std::string_view suffix) -> std::filesystem::path {
+        std::error_code temp_dir_error;
+        const auto temp_dir = std::filesystem::temp_directory_path(temp_dir_error);
+        if (temp_dir_error) {
+            llvm::errs() << "mirage: cannot locate a temporary directory: "
+                         << temp_dir_error.message() << "\n";
+            return {};
+        }
+
+        auto tmpl = (temp_dir / "mirage-XXXXXX").string();
+        tmpl += suffix;
+
+        const int fd = suffix.empty()
+            ? mkstemp(tmpl.data())
+            : mkstemps(tmpl.data(), static_cast<int>(suffix.size()));
+        if (fd < 0) {
+            llvm::errs() << "mirage: cannot create a temporary file in " << temp_dir.string()
+                         << ": " << std::strerror(errno) << "\n";
+            return {};
+        }
+        close(fd);
+        return std::filesystem::path(tmpl);
     }
 
     auto shell_quote(const std::string &value) -> std::string {
@@ -456,7 +490,10 @@ auto main(const int argc, char *argv[]) -> int {
         return 0;
     }
 
-    const auto object_path = std::filesystem::temp_directory_path() / std::format("mirage-{}.o", std::rand());
+    const auto object_path = make_temp_file(".o");
+    if (object_path.empty()) {
+        return 1;
+    }
     const auto object_start = std::chrono::steady_clock::now();
     if (!emit_object_file(*llvm_module, object_path)) {
         return 1;
@@ -464,8 +501,13 @@ auto main(const int argc, char *argv[]) -> int {
     const auto object_elapsed = std::chrono::steady_clock::now() - object_start;
 
     const auto exe_path = options.action == Action::Run
-        ? std::filesystem::temp_directory_path() / std::format("mirage-{}", std::rand())
+        ? make_temp_file("")
         : std::filesystem::path(options.output);
+    if (exe_path.empty()) {
+        std::error_code exe_temp_error;
+        std::filesystem::remove(object_path, exe_temp_error);
+        return 1;
+    }
 
     const auto link_start = std::chrono::steady_clock::now();
     if (!link_executable(object_path, exe_path, options, sema.link_directives)) {
