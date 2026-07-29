@@ -898,3 +898,104 @@ instance often leaves siblings unfixed:
    has) and TYPE-1/TYPE-2 (one evaluator missing a guard the sibling has) exist in the
    first place — consolidating reduces the rate of *future* drift-bugs, not just fixes
    a past one.
+
+---
+
+# Resolution — worked through on branch `fixes` (2026-07-29 → 2026-07-30)
+
+Every finding above has been addressed: fixed, or deliberately decided and
+documented in-code with the reasoning. One commit per finding (or per tight
+group sharing a root cause), each verified before and after.
+
+## Verification added
+
+The repo had two ctest targets and eight hand-run Python scripts, and nothing
+exercised the 136 `examples/` directories. That made "no regressions"
+unverifiable, so it was built first:
+
+| Added | What it covers |
+|---|---|
+| `tests/examples_smoke_test.py` + `examples_expected.json` | all 143 example fixtures, pinned by exit code and first diagnostic |
+| `tests/lexer_robustness_test.cpp` (ctest) | token start locations, unterminated literals, stray bytes, high-bit bytes |
+| `tests/diagnostic_engine_test.cpp` (ctest) | caret rendering against malformed locations |
+| `tests/parser_diagnostics_test.py` | operator underline columns; recovery not cascading |
+| `tests/ext_abi_test.py` + `ext_abi_fixture/` | SysV ABI, linked against C compiled by clang |
+| `tests/cli_test.py` | malformed argument handling, `--help` exit status |
+| `tests/lsp_robustness_test.py` | malformed requests, oversized headers |
+
+ctest went from 2 targets to 4; the Python suites from 8 to 13. Every new test
+was confirmed to fail against the unfixed code before the fix landed.
+
+## Where the review's diagnosis was wrong
+
+Worth recording, since these were found by reproducing rather than reading:
+
+- **CODEGEN-1** predicted by-ref capture *aliasing*. There is no aliasing: LLVM
+  lowers a non-entry alloca as a dynamic stack adjustment reclaimed only at
+  function return, so each iteration *grew* the frame. A 200k-iteration switch
+  exhausted the stack (SIGSEGV). The line identified was right; the consequence
+  was not. A saved `&payload` never pointed at the user's object either way —
+  the operand is emitted as a value, so the slot holds a copy.
+- **LSPCORE-14** says to add a `bool` branch. `ConstFoldValue` has no `bool`
+  alternative; bool const-generic args are stored as `int64_t`. The real fix is
+  consulting `value_arg_scalar_type`. The `std::string` alternative *did* fall
+  through to `"?"`.
+- **CHECK-8** says CHECK-3's fix must land at both gates. It must not:
+  `resolve_lvalue` already reports "not an assignable expression", which is
+  correct.
+- **CODEGEN-4** was listed as needing reachability confirmation. It is reachable
+  (`struct(packed)`, not an attribute) and is a genuine ABI mismatch against
+  clang.
+
+## Bugs found that were not in the review
+
+- **Parser infinite loop.** `expect()` reports without consuming, so ten
+  delimiter-terminated list loops spun forever on a stray token. A plain typo —
+  `{.A: 1}` — hung the compiler at 100% CPU. `examples/lexer` had been
+  unbuildable this way; it now compiles.
+- **`when size_of(...)` compiled the wrong branch.** `is_constant_expr` reports
+  `size_of`/`align_of` as constant but `evaluate_const_value` could not evaluate
+  them, so the condition silently became false.
+- **codegen dereferenced an empty `optional`** to build a match/switch case
+  after TYPE-1/2 made unfoldable patterns possible.
+- **`type_of(module)`** had TYPE-8's gap and additionally interned a meaningless
+  type id into the runtime reflection table.
+- **`references.cpp` was never built.** Not in CMakeLists, never dispatched,
+  never advertised — and it did not compile. Three findings (LSPH-4/5/11)
+  concerned code no compiler had seen. Now in the build and compiling.
+
+## Follow-up work
+
+Deliberately not done, with the reasoning recorded at each site in-code.
+
+**Deferred refactors** (the "N drifted implementations" class, per the campaign's
+scope decision): CHECK-7, CHECK-8, CHECK-9, CODEGEN-6, CODEGEN-7, CODEGEN-8,
+CODEGEN-12, CODEGEN-13, TYPE-5, TYPE-6, TYPE-7, TYPE-11, PARSE-5, PARSE-6,
+PARSE-7, PARSE-8, SEMA-9, SEMA-11, SEMA-12, LSPCORE-12, LSPH-8, LSPH-10.
+PARSE-9 and SEMA-13 were pulled back in and done, being genuinely mechanical.
+
+**Needs a decision or new coverage first:**
+
+- **SEMA-8** — the type-forcing loop looks dead but differs from
+  `ensure_module_declared`'s in bare-import origin redirection, and *nothing in
+  the repo uses a bare import*. A green suite would prove nothing about the only
+  behavior that differs. Needs bare-import test coverage before removal.
+- **Find All References** — now compiles but is still not advertised
+  (`lsp_smoke_test.py:138` pins its absence, beside `renameProvider`).
+  Match-arm variant patterns (`MatchExpr::VariantPattern` is a pattern, not an
+  expression) and bitset literal members (`BitsetExpr` stores strings, not
+  nodes) still do not resolve. Enabling it is a product decision.
+- **Escaping `&payload` captures** — capturing a match/switch payload by
+  reference and using it after the arm ends reads a compiler temporary. It
+  should be diagnosed; that needs sema-side lifetime analysis.
+- **CHECK-6** — narrowing recognizes the error variable only as the whole
+  condition or the leftmost operand of one `&&`/`||`. Widening it is a spec
+  question: `||` proves nothing about either operand in the then-branch.
+- **LSPCORE-7** — `didClose` clears diagnostics unconditionally. Correct for
+  buffer-derived diagnostics, wrong for a closed file still in an open module's
+  closure; distinguishing them needs new bookkeeping.
+- **LSPCORE-11** — no `workspace/didChangeWatchedFiles`, so a dependency edited
+  outside the editor keeps stale analysis.
+- **PARSE-11** — `arr[..5]` does not parse though `for x in ..5` does. A
+  language change (spec + grammar + docs), not a parser fix.
+- **LSPH-9** — no completion inside a generic instantiation's argument list.
