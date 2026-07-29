@@ -131,6 +131,13 @@ namespace lexer {
             // extra lookback (was the token before this Star a Dot?), which is still a purely
             // lexer-level, previous-token-based decision — just over 2 tokens instead of 1.
             bool last_token_is_asi_trigger_ = false;
+            // Line/column of the token currently being lexed, snapshotted by lex_token()
+            // before it consumes anything. make_token() reports these verbatim rather than
+            // back-computing the start from the end position, which is only correct while a
+            // token stays on one line. lex_asm_block() has always snapshotted its own start
+            // for exactly this reason; these two members generalize that to every token.
+            uint32_t token_start_line_ = 1;
+            uint32_t token_start_col_ = 1;
 
             LexerImpl(const std::string_view source, const std::string_view filename, DiagnosticEngine &diagnostics) : source_(source), filename_(filename), diagnostics_(diagnostics) {}
 
@@ -207,17 +214,13 @@ namespace lexer {
                 };
             }
 
-            [[nodiscard]] auto make_location_from_offset(const size_t offset) const -> SourceLocation {
-                return SourceLocation{
-                    .filename = filename_,
-                    .line = line_,
-                    .column = col_ - (pos_ - offset),
-                    .offset = offset,
-                };
-            }
-
             [[nodiscard]] auto make_token(const TokenKind kind, const size_t start) const -> Token {
-                auto location = make_location_from_offset(start);
+                auto location = SourceLocation{
+                    .filename = filename_,
+                    .line = token_start_line_,
+                    .column = token_start_col_,
+                    .offset = start,
+                };
                 location.length = pos_ - start;
                 return Token{
                     .kind = kind,
@@ -338,6 +341,8 @@ namespace lexer {
                 }
 
                 const auto start = pos_;
+                token_start_line_ = line_;
+                token_start_col_ = col_;
                 const auto ch = advance();
 
                 Token token = [&]() -> Token {
@@ -482,17 +487,35 @@ namespace lexer {
                 return make_token(TokenKind::Identifier, start);
             }
 
+            // A string literal may not span a raw newline, as in most C-family languages.
+            // Stopping at the newline keeps the diagnostic on the line with the mistake
+            // instead of swallowing the following lines until some later quote closes it,
+            // and it guarantees a token never spans lines.
             auto lex_string(const size_t start) -> Token {
-                while (!at_end() && peek() != '"') {
+                while (!at_end() && peek() != '"' && peek() != '\n') {
                     if (peek() == '\\') {
                         advance();
+                        // A trailing backslash does not splice the next line into the
+                        // literal; leave the newline for the check below to report.
+                        if (at_end() || peek() == '\n') {
+                            break;
+                        }
                     }
 
                     advance();
                 }
 
-                if (at_end()) {
-                    diagnostics_.report_error(DiagnosticStage::Lexer, make_location(), "unterminated string literal");
+                if (at_end() || peek() == '\n') {
+                    diagnostics_.report_error(
+                        DiagnosticStage::Lexer,
+                        SourceLocation{
+                            .filename = filename_,
+                            .line = token_start_line_,
+                            .column = token_start_col_,
+                            .offset = start,
+                            .length = pos_ - start,
+                        },
+                        "unterminated string literal");
 
                     return make_token(TokenKind::StringLiteral, start);
                 }
@@ -503,14 +526,31 @@ namespace lexer {
             }
 
             auto lex_char(const size_t start) -> Token {
+                // As with lex_string, a raw newline terminates the attempt rather than
+                // being absorbed into the literal, so a character literal never spans
+                // lines and the diagnostic stays on the offending line.
+                const auto literal_start_location = [&] {
+                    return SourceLocation{
+                        .filename = filename_,
+                        .line = token_start_line_,
+                        .column = token_start_col_,
+                        .offset = start,
+                        .length = pos_ - start,
+                    };
+                };
+
                 if (at_end() || peek() == '\'') {
                     diagnostics_.report_error(DiagnosticStage::Lexer, make_location(), "empty character literal");
                     if (!at_end()) advance();
                     return make_token(TokenKind::CharLiteral, start);
                 }
+                if (peek() == '\n') {
+                    diagnostics_.report_error(DiagnosticStage::Lexer, literal_start_location(), "unterminated character literal");
+                    return make_token(TokenKind::CharLiteral, start);
+                }
                 if (peek() == '\\') {
                     advance();
-                    if (at_end()) {
+                    if (at_end() || peek() == '\n') {
                         // fall through to unterminated check below
                     } else if (peek() == 'x') {
                         advance();
@@ -529,7 +569,7 @@ namespace lexer {
                     advance();
                 }
                 if (at_end() || peek() != '\'') {
-                    diagnostics_.report_error(DiagnosticStage::Lexer, make_location(), "unterminated character literal");
+                    diagnostics_.report_error(DiagnosticStage::Lexer, literal_start_location(), "unterminated character literal");
                     return make_token(TokenKind::CharLiteral, start);
                 }
                 advance();

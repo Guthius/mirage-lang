@@ -96,6 +96,26 @@ target_include_directories(lexer_asi_test
 enable_testing()
 add_test(NAME lexer_asi_test COMMAND lexer_asi_test)
 
+add_executable(lexer_robustness_test
+        tests/lexer_robustness_test.cpp
+        src/compiler/lexer.cpp
+        src/compiler/lexer.hpp
+        src/compiler/token.cpp
+        src/compiler/token.hpp
+        src/compiler/diagnostic_engine.cpp
+        src/compiler/diagnostic_engine.hpp
+        src/compiler/source_manager.cpp
+        src/compiler/source_manager.hpp
+        src/compiler/source_location.hpp
+)
+
+target_include_directories(lexer_robustness_test
+        PRIVATE src
+)
+
+add_test(NAME lexer_robustness_test COMMAND lexer_robustness_test)
+set_tests_properties(lexer_robustness_test PROPERTIES TIMEOUT 10)
+
 add_executable(diagnostic_engine_test
         tests/diagnostic_engine_test.cpp
         src/compiler/diagnostic_engine.cpp
