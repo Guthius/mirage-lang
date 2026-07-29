@@ -7,7 +7,7 @@
 namespace sema {
     void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, const ast::Module &decls, DiagnosticEngine &diagnostics);
     void register_trait_impls_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag);
-    void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag);
+    void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const SourceLocation &trigger_location = {});
     void validate_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
     void validate_method_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
     void validate_trait_impl_attributes_for_program(Program &program, DiagnosticEngine &diag);
@@ -154,6 +154,26 @@ namespace sema {
         }
 
         void resolve_signatures_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
+            // NOTE (SEMA-8): the type-forcing loop immediately below looks redundant, and
+            // mostly is -- check_program calls ensure_module_declared for every module before
+            // this runs, and that has its own type-forcing loop whose comment says it makes
+            // "the eventual real step 3 pass a no-op for a module already resolved here"
+            // (layout_done guards make the repeat free).
+            //
+            // It is NOT simply dead, though, and was deliberately kept. The two loops differ
+            // in one respect: this one redirects a bare-import alias to its origin's
+            // (module_path, symbol_name) so the shared global slot is laid out with the origin
+            // as the resolution context for its own field types, whereas
+            // ensure_module_declared resolves every symbol under the importing module's path.
+            // Since ensure_module_declared runs first and sets layout_done, that redirect
+            // cannot currently take effect -- which means either this loop is genuinely dead,
+            // or the redirect is the correct behavior and ensure_module_declared should be
+            // doing it too. Those have opposite fixes.
+            //
+            // Nothing in examples/ or runtime/ uses a bare import, so no test can currently
+            // distinguish the two. Deleting the loop on the strength of a green suite would be
+            // proving nothing. Resolving this needs bare-import coverage first; recorded as
+            // follow-up work rather than guessed at.
             for (auto &[name, sym] : module.symbols) {
                 if (!std::holds_alternative<TypeSymbol>(sym)) continue;
                 const auto &ts = std::get<TypeSymbol>(sym);
