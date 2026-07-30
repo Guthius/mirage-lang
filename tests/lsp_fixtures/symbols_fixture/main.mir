@@ -1,0 +1,81 @@
+// LSP fixture for symbol-shaped features: Find All References, and member completion on a
+// trait handle and a bitset. Each declaration exists so a specific editor behaviour can be
+// pinned in lsp_smoke_test.py, which locates lines by searching for a nearby anchor string
+// rather than by number — so this file may be reordered freely, but the names must stay
+// unique.
+
+pub type Stream_Mode = enum(u8) {
+    Close
+    Flush
+    Read
+}
+
+pub type Stream_Modes = bitset(Stream_Mode, u16)
+
+pub type Shape = trait {
+    fn area(self) -> i32
+    fn perimeter(self) -> i32
+}
+
+pub type Square = struct {
+    side: i32 = 2
+}
+
+impl Shape for Square {
+    fn area(self) -> i32 { return self.side * self.side }
+    fn perimeter(self) -> i32 { return self.side * 4 }
+}
+
+pub type Event = union(enum) {
+    Opened: struct { id: i32 }
+    Closed: struct { id: i32 }
+}
+
+// Referenced from three call sites below, so a references request on it has more than the
+// declaration to find.
+pub fn double(value: i32) -> i32 {
+    return value * 2
+}
+
+// 'counter' is a local with several uses; 'double' is a module symbol.
+pub fn count_things() -> i32 {
+    mut counter: i32 = 1
+    counter = double(counter)
+    counter = counter + double(3)
+    return counter
+}
+
+// The variant names here are match-arm PATTERNS, not expressions — the case that used to
+// find nothing.
+pub fn describe(e: Event) -> i32 {
+    return match e {
+        .Opened(p): p.id,
+        .Closed(p): p.id + 1,
+    }
+}
+
+pub fn describe_again(e: Event) -> i32 {
+    switch e {
+        .Opened(p): { return p.id },
+        .Closed(p): { return 0 },
+    }
+    return 0
+}
+
+// Bitset flags inside a literal: also not expression nodes.
+pub fn make_modes() -> Stream_Modes {
+    mut modes: Stream_Modes = {.Close, .Flush}
+    modes += .Read
+    return modes
+}
+
+pub fn use_shape(shape: Shape) -> i32 {
+    return shape.area()
+}
+
+pub fn main() -> i32 {
+    mut sq: Square = default
+    const shape: Shape = &sq
+    mut modes: Stream_Modes = make_modes()
+    return count_things() + describe(.Opened{.id = 1}) + use_shape(shape) + double(0)
+}

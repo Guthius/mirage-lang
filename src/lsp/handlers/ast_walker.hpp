@@ -16,8 +16,12 @@ namespace lsp::handlers {
         // expression, so on_expr never sees one -- and match arms are where variants are most
         // used, so a visitor relying on on_expr alone finds almost none of their uses.
         // Literal patterns still arrive through on_expr, since those really are expressions.
-        std::function<void(const ast::MatchExpr::VariantPattern &)> on_pattern =
-            [](const ast::MatchExpr::VariantPattern &) {};
+        //
+        // The enclosing match/switch operand comes with it: '.Variant' is contextual, so
+        // resolving the name to a declaration needs the operand's type, and the pattern
+        // carries no back-pointer to it.
+        std::function<void(const ast::MatchExpr::VariantPattern &, const ast::Expr &operand)> on_pattern =
+            [](const ast::MatchExpr::VariantPattern &, const ast::Expr &) {};
     };
 
     // Generic traversal over every Expr/Stmt node reachable from `expr`/`stmt`/a whole

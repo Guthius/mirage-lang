@@ -23,12 +23,32 @@ namespace lsp::handlers {
             };
         }
 
-        // Whether a freshly-resolved reference `res` names the same declaration as `target`.
+        // Which enum an EnumField resolution ultimately belongs to.
+        //
+        // A bitset flag resolves to Kind::EnumField carrying the BITSET as its type
+        // (enum_index == -1, bitset_index set), but 'bitset(Stream_Mode, u16)' derives its
+        // flags FROM Stream_Mode -- '.Close' in a '{.Close}' literal and 'Close' in the enum
+        // declaration are one declaration, and references must report them together.
+        // Comparing bitset_index directly, as this used to, split them apart.
+        //
+        // Normalizing to the member enum keeps the case that guard was protecting: two
+        // bitsets over DIFFERENT enums still have different identities, and two bitsets over
+        // the SAME enum correctly agree, which comparing bitset_index got wrong in the other
+        // direction.
+        auto enum_identity_index(const Resolution &r, const sema::Program &program) -> int {
+            if (r.type.kind == sema::TypeKind::Bitset) {
+                const auto *info = program.bitset_at(r.type.bitset_index);
+                return info ? info->member_enum_type.enum_index : -1;
+            }
+            return r.type.enum_index;
+        }
+
+        // Whether a freshly-resolved reference `a` names the same declaration as `b`.
         // Struct/union/method info is compared by pointer identity - stable for the lifetime
         // of one ProgramResult, since nothing mutates program.structs/unions/methods after
         // analysis finishes. Local/param declarations have no comparable pointer, so identity
         // is their own unique declaration-site SourceLocation instead.
-        auto same_declaration(const Resolution &a, const Resolution &b) -> bool {
+        auto same_declaration(const Resolution &a, const Resolution &b, const sema::Program &program) -> bool {
             if (a.kind != b.kind) return false;
             switch (a.kind) {
             case Resolution::Kind::Symbol:
@@ -48,11 +68,11 @@ namespace lsp::handlers {
                 return a.method == b.method && a.trait_method == b.trait_method;
             case Resolution::Kind::EnumField:
             case Resolution::Kind::Variant:
-                // bitset_index is compared too: a bitset flag resolves to Kind::EnumField with
-                // the BITSET as its type (enum_index/union_index both -1), so without it two
-                // unrelated bitsets' same-named flags would be treated as the same declaration.
-                return a.name == b.name && a.type.kind == b.type.kind && a.type.enum_index == b.type.enum_index &&
-                       a.type.union_index == b.type.union_index && a.type.bitset_index == b.type.bitset_index;
+                // Deliberately NOT comparing type.kind: the same enum field is reachable as
+                // Enum through its own declaration and as Bitset through a flag literal.
+                // enum_identity_index above collapses those two spellings onto one identity.
+                return a.name == b.name && a.type.union_index == b.type.union_index &&
+                       enum_identity_index(a, program) == enum_identity_index(b, program);
             default:
                 return false; // Builtin/None are not meaningful reference targets
             }
@@ -94,7 +114,7 @@ namespace lsp::handlers {
             visitor.on_expr = [&](const ast::Expr &expr) {
                 if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
                     if (const auto res = resolve_bare_name(ident->name, ident->location.line, scope, ctx, module_path)) {
-                        if (same_declaration(*res, target)) out.push_back(location_json(ident->location));
+                        if (same_declaration(*res, target, program)) out.push_back(location_json(ident->location));
                     }
                     return;
                 }
@@ -112,8 +132,25 @@ namespace lsp::handlers {
                     if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(expr));
                         ty_it != ctx.sema_module.exprs.expr_types.end()) {
                         if (auto res = match_enum_or_variant(ty_it->second, dot->name, program);
-                            res.kind != Resolution::Kind::None && same_declaration(res, target)) {
+                            res.kind != Resolution::Kind::None && same_declaration(res, target, program)) {
                             out.push_back(location_json(dot->location));
+                        }
+                    }
+                    return;
+                }
+
+                // '{.Close, .Flush}' -- a bitset literal. Its flags are not expression nodes
+                // (BitsetExpr stores names, not Exprs), so they carry their own locations and
+                // are matched by name against the literal's own bitset type.
+                if (const auto *braced_ptr = std::get_if<std::unique_ptr<ast::BracedInitializerExpr>>(&expr)) {
+                    const auto *bitset = std::get_if<ast::BitsetExpr>(braced_ptr->get());
+                    if (!bitset) return;
+                    const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(expr));
+                    if (ty_it == ctx.sema_module.exprs.expr_types.end()) return;
+                    for (const auto &member : bitset->members) {
+                        if (auto res = match_enum_or_variant(ty_it->second, member.name, program);
+                            res.kind != Resolution::Kind::None && same_declaration(res, target, program)) {
+                            out.push_back(location_json(member.location));
                         }
                     }
                     return;
@@ -126,7 +163,7 @@ namespace lsp::handlers {
                     if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(expr));
                         ty_it != ctx.sema_module.exprs.expr_types.end()) {
                         if (auto res = match_enum_or_variant(ty_it->second, tagged.variant_name, program);
-                            res.kind != Resolution::Kind::None && same_declaration(res, target)) {
+                            res.kind != Resolution::Kind::None && same_declaration(res, target, program)) {
                             out.push_back(location_json(tagged.location));
                         }
                     }
@@ -140,7 +177,7 @@ namespace lsp::handlers {
                 if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(member.object));
                     ty_it != ctx.sema_module.exprs.expr_types.end()) {
                     if (auto res = resolve_member(ty_it->second, member.member, program); res.kind != Resolution::Kind::None) {
-                        if (same_declaration(res, target)) out.push_back(location_json(member.location));
+                        if (same_declaration(res, target, program)) out.push_back(location_json(member.location));
                     }
                     return;
                 }
@@ -154,12 +191,37 @@ namespace lsp::handlers {
                         const auto container = symbol_to_container(*object_res->symbol);
                         if (container.kind != Container::Kind::None) {
                             if (auto [res, next] = step(container, member.member, program); res.kind != Resolution::Kind::None) {
-                                if (same_declaration(res, target)) out.push_back(location_json(member.location));
+                                if (same_declaration(res, target, program)) out.push_back(location_json(member.location));
                             }
                         }
                     }
                 }
             };
+
+            // Match/switch arm patterns ('.Variant:', '.Variant(&v):'). Patterns are not
+            // expressions, so on_expr never sees them -- and arms are where variants are most
+            // used, so without this a references request on a variant found close to nothing.
+            visitor.on_pattern = [&](const ast::MatchExpr::VariantPattern &pattern, const ast::Expr &operand) {
+                const auto key = sema::get_expr_key(operand);
+                const auto ty_it = ctx.sema_module.exprs.expr_types.find(key);
+                if (ty_it == ctx.sema_module.exprs.expr_types.end()) return;
+
+                // 'match err { ... }' dispatches on the INNER representation, not on the
+                // Ok/Failed wrapper the operand's recorded type describes -- so the arms name
+                // variants of the effective type. sema records that rewrite; use it when
+                // present, exactly as codegen does.
+                auto operand_type = ty_it->second;
+                if (const auto unwrap_it = ctx.sema_module.exprs.expr_error_match_unwrap.find(key);
+                    unwrap_it != ctx.sema_module.exprs.expr_error_match_unwrap.end()) {
+                    operand_type = unwrap_it->second.effective_type;
+                }
+
+                if (auto res = match_enum_or_variant(operand_type, pattern.name, program);
+                    res.kind != Resolution::Kind::None && same_declaration(res, target, program)) {
+                    out.push_back(location_json(pattern.name_location));
+                }
+            };
+
             // Was 'walk_stmt(scope.body ? *scope.body : ast::Stmt{ast::ExprStmt{}}, visitor)',
             // which does not compile: the ternary's operands are a const lvalue reference and a
             // temporary, so it materializes a copy of ast::Stmt -- a variant of unique_ptrs,
@@ -224,7 +286,7 @@ namespace lsp::handlers {
                             if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
                                 if (const auto res = resolve_bare_name(ident->name, ident->location.line,
                                                                         Scope{}, ctx, mod_path)) {
-                                    if (same_declaration(*res, target)) out.push_back(location_json(ident->location));
+                                    if (same_declaration(*res, target, result.sema_program)) out.push_back(location_json(ident->location));
                                 }
                             }
                         };
@@ -244,7 +306,7 @@ namespace lsp::handlers {
                     visitor.on_expr = [&](const ast::Expr &expr) {
                         if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
                             if (const auto res = resolve_bare_name(ident->name, ident->location.line, scope, ctx, mod_path)) {
-                                if (same_declaration(*res, target)) out.push_back(location_json(ident->location));
+                                if (same_declaration(*res, target, result.sema_program)) out.push_back(location_json(ident->location));
                             }
                         }
                     };

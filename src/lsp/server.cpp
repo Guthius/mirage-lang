@@ -345,6 +345,9 @@ namespace lsp {
                     {"definitionProvider", true},
                     {"completionProvider", {{"triggerCharacters", {"."}}}},
                     {"inlayHintProvider", true},
+                    // Scoped to the analysed module's import closure, not the workspace: a
+                    // reference from a file that does not import the target is not found.
+                    {"referencesProvider", true},
                 };
                 send_response(channel, message["id"], {{"capabilities", capabilities}});
             } else if (method == "initialized") {
@@ -479,6 +482,40 @@ namespace lsp {
                         const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
                         auto &result = worker.documents.ensure_analysed(path);
                         return handlers::handle_completion(result, module_path, path, line, character);
+                    });
+                }, id_key});
+            } else if (method == "textDocument/references") {
+                const auto id = message["id"];
+                const auto id_key = id_key_of(id);
+                auto path = canonical_path_of(message["params"]["textDocument"]["uri"].get<std::string>());
+                const auto line = message["params"]["position"]["line"].get<size_t>() + 1;
+                const auto character = message["params"]["position"]["character"].get<size_t>() + 1;
+                // 'context' is required by the spec, but tolerate its absence rather than
+                // throwing on a client that omits it; including the declaration is the more
+                // useful default.
+                const auto include_declaration = message["params"].contains("context")
+                    ? message["params"]["context"].value("includeDeclaration", true)
+                    : true;
+
+                auto cancelled = std::make_shared<std::atomic<bool>>(false);
+                if (in_flight_.contains(id_key)) {
+                    std::cerr << "mirage-lsp: request id " << id_key
+                              << " reused while still in flight; cancellation may be misattributed\n";
+                }
+                in_flight_[id_key] = cancelled;
+
+                if (queue.full()) {
+                    std::cerr << "mirage-lsp: task queue full, rejecting '" << method << "'\n";
+                    in_flight_.erase(id_key);
+                    send_error(channel, id, INTERNAL_ERROR, "server busy: task queue full");
+                    continue;
+                }
+
+                queue.push(Task{cancelled, [&worker, &channel, &completed, cancelled, id, id_key, path, line, character, include_declaration] {
+                    run_cancellable_request(cancelled, completed, id_key, channel, id, [&]() -> json {
+                        const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
+                        auto &result = worker.documents.ensure_analysed(path);
+                        return handlers::handle_references(result, module_path, path, line, character, include_declaration);
                     });
                 }, id_key});
             } else if (method == "textDocument/inlayHint") {

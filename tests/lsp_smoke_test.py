@@ -135,7 +135,7 @@ def main() -> int:
     check(caps.get("definitionProvider") is True, "initialize advertises definitionProvider")
     check(caps.get("completionProvider", {}).get("triggerCharacters") == ["."],
           f"initialize advertises completionProvider with '.' trigger, got {caps.get('completionProvider')}")
-    check("referencesProvider" not in caps, "initialize does NOT advertise referencesProvider")
+    check(caps.get("referencesProvider") is True, "initialize advertises referencesProvider")
     check("renameProvider" not in caps, "initialize does NOT advertise renameProvider")
     client.notify("initialized", {})
 
@@ -553,6 +553,111 @@ def main() -> int:
         b_path.write_text(original_b_text)
 
     client.notify("textDocument/didClose", {"textDocument": {"uri": a_uri}})
+    client.read_with_timeout(5)
+
+    # --- Find All References ---
+    #
+    # The two shapes that motivated enabling this at all are match-arm variant patterns and
+    # bitset literal flags. Neither is an expression node, so a walker driven only by
+    # on_expr saw neither — and match arms are where variants are most used, so a references
+    # request on a variant used to report close to nothing.
+    sym_main = FIXTURES / "symbols_fixture" / "main.mir"
+    sym_uri = uri_for(sym_main)
+    sym_text = sym_main.read_text()
+    sym_lines = sym_text.splitlines()
+    client.notify("textDocument/didOpen", {
+        "textDocument": {"uri": sym_uri, "languageId": "mirage", "version": 1, "text": sym_text},
+    })
+    sym_diag = client.read()
+    check(sym_diag["params"]["diagnostics"] == [], "symbols fixture compiles with no diagnostics")
+
+    def sym_pos(anchor: str, substr: str | None = None) -> tuple[int, int]:
+        """Line containing 'anchor'; column of 'substr' (default: 'anchor') within it."""
+        line_idx = next(i for i, line in enumerate(sym_lines) if anchor in line)
+        return line_idx, sym_lines[line_idx].index(substr if substr is not None else anchor)
+
+    def sym_references(anchor: str, substr: str | None = None, include_declaration: bool = True) -> list:
+        l, c = sym_pos(anchor, substr)
+        resp = client.request("textDocument/references", {
+            "textDocument": {"uri": sym_uri},
+            "position": {"line": l, "character": c},
+            "context": {"includeDeclaration": include_declaration},
+        })
+        return resp["result"] or []
+
+    def ref_lines(refs: list) -> list[int]:
+        return sorted(r["range"]["start"]["line"] + 1 for r in refs)
+
+    # A module-scope function: declaration plus three call sites.
+    double_refs = sym_references("pub fn double", "double")
+    check(len(double_refs) >= 4,
+          f"references on a function find its declaration and all call sites, got {ref_lines(double_refs)}")
+    decl_line = sym_pos("pub fn double", "double")[0] + 1
+    check(decl_line in ref_lines(double_refs),
+          "references include the declaration when includeDeclaration is true")
+
+    without_decl = sym_references("pub fn double", "double", include_declaration=False)
+    check(len(without_decl) < len(double_refs),
+          f"includeDeclaration=false returns fewer results ({len(without_decl)} vs {len(double_refs)})")
+
+    # A local: uses stay inside the one function.
+    counter_refs = sym_references("mut counter: i32", "counter")
+    check(len(counter_refs) >= 4,
+          f"references on a local find all of its uses, got {ref_lines(counter_refs)}")
+
+    # A variant used only in match/switch arm patterns and one construction site. This is
+    # the case that found nothing before VariantPattern carried a location.
+    opened_refs = sym_references("    Opened: struct", "Opened")
+    opened_at = ref_lines(opened_refs)
+    match_arm_line = sym_pos("        .Opened(p): p.id", ".Opened")[0] + 1
+    switch_arm_line = sym_pos("        .Opened(p): { return p.id }", ".Opened")[0] + 1
+    check(match_arm_line in opened_at,
+          f"references on a variant find its use in a MATCH arm pattern (line {match_arm_line}, got {opened_at})")
+    check(switch_arm_line in opened_at,
+          f"references on a variant find its use in a SWITCH arm pattern (line {switch_arm_line}, got {opened_at})")
+
+    # A bitset flag written inside a '{.A, .B}' literal: stored as a name, not an Expr.
+    close_refs = sym_references("    Close", "Close")
+    close_at = ref_lines(close_refs)
+    literal_line = sym_pos("{.Close, .Flush}", ".Close")[0] + 1
+    check(literal_line in close_at,
+          f"references on a bitset flag find its use in a '{{.A, .B}}' literal (line {literal_line}, got {close_at})")
+
+    # '.Read' is used via '+=', which IS an expression - so it was already found. Pinned so
+    # the new pattern/literal handling cannot regress the path that already worked.
+    read_refs = sym_references("    Read", "Read")
+    compound_line = sym_pos("modes += .Read", ".Read")[0] + 1
+    check(compound_line in ref_lines(read_refs),
+          f"references on a bitset flag still find compound-assignment uses (line {compound_line})")
+
+    # A trait method called through a handle. Anchored on the CALL, not on the declaration
+    # inside 'type Shape = trait {...}': a position inside a type declaration is not a
+    # resolvable reference target, so anchoring there returns nothing.
+    area_refs = sym_references("return shape.area()", "area")
+    area_at = ref_lines(area_refs)
+    call_line = sym_pos("return shape.area()", "area")[0] + 1
+    check(call_line in area_at,
+          f"references on a trait-handle method call find the call site, got {area_at}")
+
+    # A position that resolves to nothing must answer, not error.
+    blank = client.request("textDocument/references", {
+        "textDocument": {"uri": sym_uri},
+        "position": {"line": 0, "character": 0},
+        "context": {"includeDeclaration": True},
+    })
+    check("error" not in blank and blank["result"] == [],
+          f"references on a comment returns an empty list, got {blank.get('result')}")
+
+    # Omitting 'context' entirely must not throw - some clients do.
+    no_context_line, no_context_col = sym_pos("pub fn double", "double")
+    no_context = client.request("textDocument/references", {
+        "textDocument": {"uri": sym_uri},
+        "position": {"line": no_context_line, "character": no_context_col},
+    })
+    check("error" not in no_context and no_context["result"],
+          "references without a 'context' field is tolerated")
+
+    client.notify("textDocument/didClose", {"textDocument": {"uri": sym_uri}})
     client.read_with_timeout(5)
 
     # --- shutdown / exit ---
