@@ -165,45 +165,31 @@ namespace sema {
         }
 
         void resolve_signatures_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
-            // NOTE (SEMA-8): the type-forcing loop immediately below looks redundant, and
-            // mostly is -- check_program calls ensure_module_declared for every module before
-            // this runs, and that has its own type-forcing loop whose comment says it makes
-            // "the eventual real step 3 pass a no-op for a module already resolved here"
-            // (layout_done guards make the repeat free).
+            // SEMA-8, resolved: there used to be a type-forcing loop here, kept because it
+            // redirected a bare-import alias to its origin's (module_path, symbol_name) --
+            // unlike ensure_module_declared's otherwise-identical loop, which always resolves
+            // under the importing module's path. Whether that redirect was load-bearing or
+            // dead had opposite fixes, and nothing in the corpus could tell them apart.
             //
-            // It is NOT simply dead, though, and was deliberately kept. The two loops differ
-            // in one respect: this one redirects a bare-import alias to its origin's
-            // (module_path, symbol_name) so the shared global slot is laid out with the origin
-            // as the resolution context for its own field types, whereas
-            // ensure_module_declared resolves every symbol under the importing module's path.
-            // Since ensure_module_declared runs first and sets layout_done, that redirect
-            // cannot currently take effect -- which means either this loop is genuinely dead,
-            // or the redirect is the correct behavior and ensure_module_declared should be
-            // doing it too. Those have opposite fixes.
+            // examples/example_bare_import_private_field_type is that discriminating case: a
+            // bare-imported concrete type whose field types are PRIVATE to the defining
+            // module, so laying it out under the importer's path could not resolve them. It
+            // passes with the loop deleted entirely, because the redirect could never fire
+            // and was never needed:
             //
-            // Nothing in examples/ or runtime/ uses a bare import, so no test can currently
-            // distinguish the two. Deleting the loop on the strength of a green suite would be
-            // proving nothing. Resolving this needs bare-import coverage first; recorded as
-            // follow-up work rather than guessed at.
-            for (auto &[name, sym] : module.symbols) {
-                if (!std::holds_alternative<TypeSymbol>(sym)) continue;
-                const auto &ts = std::get<TypeSymbol>(sym);
-                // A generic type declaration has no ResolvedType of its own to force layout
-                // for — see the identical skip in sema_declare.cpp's ensure_module_declared.
-                if (ts.decl && !ts.decl->generic_params.empty()) continue;
-                const auto loc = ts.decl->location;
-                // A bare-import alias's '.resolved' already shares the origin's GLOBAL
-                // struct/enum/union/bitset/trait index (copied verbatim at declare time),
-                // so no copy-back is needed here — forcing layout via the origin's own
-                // (module_path, name) just ensures that shared global-index entry gets laid
-                // out using the origin as the resolution context for its OWN field types,
-                // which becomes automatically visible through the alias too.
-                if (const auto origin = module.bare_import_origins.find(name); origin != module.bare_import_origins.end()) {
-                    resolve_type_symbol(origin->second.module_path, origin->second.symbol_name, program, diag, loc);
-                } else {
-                    resolve_type_symbol(module_path, name, program, diag, loc);
-                }
-            }
+            //   - check_program runs ensure_module_declared for EVERY module before this
+            //     pass, and that already forces layout for every non-generic type symbol.
+            //     Every layout path early-returns on layout_done, so this loop was a pure
+            //     repeat.
+            //   - the alias is laid out under the ORIGIN's path regardless, because
+            //     declare_bare_import calls ensure_module_declared(target) BEFORE reading the
+            //     target's pub symbols (sema_declare.cpp) -- the origin has already laid
+            //     itself out, in its own resolution context, at the moment the alias is
+            //     created. There is nothing left for a redirect to correct.
+            //
+            // Note this is specific to the TYPE loop. The function/ext-fn loop below and
+            // resolve_values_for_module do the same origin lookup but then copy the resolved
+            // symbol back into the alias, which is load-bearing and unaffected by layout_done.
 
             for (auto &[name, sym] : module.symbols) {
                 if (auto *fn = std::get_if<FunctionSymbol>(&sym)) {

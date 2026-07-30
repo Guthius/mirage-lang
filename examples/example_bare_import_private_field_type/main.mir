@@ -1,0 +1,19 @@
+// A bare-imported CONCRETE type whose field types are private to the defining module.
+//
+// This is the case SEMA-8 turned on. Two type-forcing loops laid out module symbols:
+// ensure_module_declared resolved every symbol under the IMPORTING module's path, while
+// resolve_signatures_for_module redirected a bare-import alias to its origin's
+// (module_path, symbol_name) first. An alias shares the origin's global struct index, so
+// whichever path forces layout first decides the resolution context for the fields.
+//
+// If the importer's path won, 'Config.inner' -- whose type 'Inner' is private to lib --
+// could not resolve. That the fixture below works pins which loop is load-bearing.
+//
+// Expected: compiles and runs, exit code 10 (7 + 3).
+
+import("lib")
+
+pub fn main() -> i32 {
+    const c := default_config()
+    return c.inner.limit + c.retries
+}

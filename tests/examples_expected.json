@@ -225,6 +225,10 @@
     "action": "run",
     "exit": 30
   },
+  "example_bare_import_private_field_type": {
+    "action": "run",
+    "exit": 10
+  },
   "example_bitset": {
     "action": "run",
     "exit": 112

@@ -291,6 +291,15 @@ namespace sema {
             // reading its 'pub' symbols, regardless of Program::modules' unordered
             // iteration order. Also detects/reports mutual-dependency cycles via the
             // shared cycle guard (see ensure_module_declared's generalized message below).
+            //
+            // This ordering is load-bearing for more than symbol visibility. An alias shares
+            // the origin's GLOBAL struct/enum/union/bitset index, so whichever module forces
+            // layout first fixes the resolution context for that type's own field types.
+            // Because the target is fully declared HERE — before the alias exists — the
+            // origin always wins, and a pub type whose fields name something private to the
+            // origin resolves correctly through the alias (SEMA-8; see
+            // examples/example_bare_import_private_field_type). Declaring the target lazily
+            // after the aliases were created would silently break that.
             ensure_module_declared(program, target_path, sema_program, diag, decl.location);
 
             const auto target_it = sema_program.modules.find(target_path);

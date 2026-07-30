@@ -1,0 +1,24 @@
+// The DEFINING module of a concrete (non-generic) type reached through a bare import.
+//
+// 'Inner' and 'Unit' are deliberately NOT pub: a bare import aliases only the target's pub
+// symbols, so neither name exists in the importer's scope. 'Config' IS pub and has fields
+// whose types are those private names -- so laying out Config can only succeed if the
+// layout resolves its field types against THIS module rather than against whichever module
+// happened to alias it.
+
+type Unit = enum(u8) { Bytes  Blocks }
+
+type Inner = struct {
+    limit: i32 = 7
+    unit: Unit = .Blocks
+}
+
+pub type Config = struct {
+    inner: Inner
+    retries: i32 = 3
+}
+
+pub fn default_config() -> Config {
+    mut c: Config = default
+    return c
+}
