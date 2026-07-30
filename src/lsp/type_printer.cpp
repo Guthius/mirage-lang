@@ -262,7 +262,7 @@ namespace lsp {
             // user-nameable) — render from their own member-type list instead of falling
             // through to the <anonymous type> case below.
             if (const auto *info = program.union_at(type.union_index); info && info->is_error_union) {
-                std::string out = "error(";
+                std::string out = info->is_optional ? "?error(" : "error(";
                 for (size_t i = 0; i < info->error_member_types.size(); ++i) {
                     if (i > 0) out += " | ";
                     out += type_to_string(info->error_member_types[i], program, current_module_path);
@@ -421,6 +421,8 @@ namespace lsp {
                     return "trait {...}";
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ErrorType>>) {
                     return "error(...)";
+                } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionalErrorType>>) {
+                    return "?" + ast_type_to_string(v->inner, subst);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BitsetType>>) {
                     return "bitset(...)";
                 } else {

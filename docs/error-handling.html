@@ -172,6 +172,82 @@
 <span class="kw">const</span> <span class="var">n</span>, <span class="var">_</span> := <span class="fn">parse_int</span>(<span class="var">text</span>)          <span class="cmt">// ok: explicitly discarded</span>
 <span class="kw">const</span> <span class="var">n</span> := <span class="kw">try</span> <span class="fn">parse_int</span>(<span class="var">text</span>)         <span class="cmt">// ok: propagated</span>
 <span class="kw">const</span> <span class="var">n</span>, <span class="var">err</span> := <span class="fn">parse_int</span>(<span class="var">text</span>)        <span class="cmt">// ok: captured</span></code></pre>
+      <p>
+        Unless the error is marked <em>ignorable</em> — see below.
+      </p>
+
+      <hr>
+
+      <h2 id="ignorable-errors">Ignorable Errors (<code>?</code>)</h2>
+      <p>
+        Some failures are fatal for essentially every caller. Forcing an <code>if err</code> after
+        every allocation buys nothing but noise. Prefixing a function's <strong>last</strong> return
+        type with <code>?</code> marks its error as ignorable: callers may leave it unhandled, and
+        the compiler synthesizes the check they didn't write.
+      </p>
+      <pre><code><span class="kw">pub type</span> <span class="ty">Allocator</span> = <span class="kw">trait</span> {
+    <span class="kw">fn</span> <span class="fn">alloc</span>(<span class="kw">self</span>, <span class="var">size</span>: <span class="ty">usize</span>, <span class="var">zero_memory</span> := <span class="kw">true</span>) -&gt; (<span class="ty">anyptr</span>, ?<span class="ty">Allocator_Error</span>)
+    <span class="kw">fn</span> <span class="fn">realloc</span>(<span class="kw">self</span>, <span class="var">ptr</span>: <span class="ty">anyptr</span>, <span class="var">size</span>: <span class="ty">usize</span>) -&gt; (<span class="ty">anyptr</span>, ?<span class="ty">Allocator_Error</span>)
+    <span class="kw">fn</span> <span class="fn">free</span>(<span class="kw">self</span>, <span class="var">ptr</span>: <span class="ty">anyptr</span>)
+}</code></pre>
+      <p>
+        <code>?T</code>, where <code>T</code> is an <code>enum(i32)</code> or
+        <code>union(enum)</code>, is sugar for <code>?error(T)</code>. The explicit
+        <code>?error(A | B)</code> form and an alias to an existing error type
+        (<code>?SomeIoError</code>) work too. <code>?</code> is legal on free functions,
+        <code>impl</code> methods, trait methods, and function-pointer types — but
+        <strong>only</strong> on the last return type, the one a call site can drop. Anywhere else
+        (an earlier return slot, a parameter, a field, a variable annotation, a type alias) it is a
+        compile error, as is <code>?</code> on a type that isn't an error type.
+      </p>
+      <p>
+        Leaving an ignorable error unbound emits a check on it. On failure the program prints the
+        failing variant's name and the call's source location to stderr and exits with status
+        <code>101</code>:
+      </p>
+      <pre><code>panic: unhandled Allocator_Error.Out_Of_Memory at main.mir:3:23</code></pre>
+      <p>
+        The slot may be dropped in any single-value context, and in a group declaration written one
+        name short of the arity:
+      </p>
+      <pre><code><span class="var">allocator</span>.<span class="fn">alloc</span>(<span class="var">n</span>)                 <span class="cmt">// ok: statement, both values dropped</span>
+<span class="kw">const</span> <span class="var">ptr</span> := <span class="var">allocator</span>.<span class="fn">alloc</span>(<span class="var">n</span>)    <span class="cmt">// ok: error dropped, checked</span>
+<span class="fn">foo</span>(<span class="var">allocator</span>.<span class="fn">alloc</span>(<span class="var">n</span>))            <span class="cmt">// ok: argument position</span>
+<span class="kw">return</span> <span class="var">allocator</span>.<span class="fn">alloc</span>(<span class="var">n</span>)          <span class="cmt">// ok: return position</span>
+<span class="kw">const</span> <span class="var">w</span>, <span class="var">h</span> := <span class="fn">measure</span>()            <span class="cmt">// ok: measure() -&gt; (i32, i32, ?E)</span></code></pre>
+      <p>
+        Naming the slot — <strong>including naming it <code>_</code></strong> — is the deliberate
+        opt-out and synthesizes no check. That is the escape hatch for the caller who really does
+        mean "I don't care":
+      </p>
+      <pre><code><span class="kw">const</span> <span class="var">ptr</span>, <span class="var">_</span> := <span class="var">allocator</span>.<span class="fn">alloc</span>(<span class="var">n</span>)    <span class="cmt">// silently ignored, no check</span>
+<span class="kw">const</span> <span class="var">ptr</span>, <span class="var">err</span> := <span class="var">allocator</span>.<span class="fn">alloc</span>(<span class="var">n</span>)  <span class="cmt">// handled explicitly, as usual</span>
+<span class="kw">const</span> <span class="var">ptr</span> := <span class="kw">try</span> <span class="var">allocator</span>.<span class="fn">alloc</span>(<span class="var">n</span>)   <span class="cmt">// propagated, as usual</span></code></pre>
+      <p>
+        A function whose <em>only</em> return value is <code>?error(...)</code> still yields that
+        error in a value context — there would be nothing else to yield — so the drop applies to it
+        only in statement position:
+      </p>
+      <pre><code><span class="fn">touch</span>(<span class="var">n</span>)                 <span class="cmt">// ok: statement, dropped and checked</span>
+<span class="kw">const</span> <span class="var">e</span> := <span class="fn">touch</span>(<span class="var">n</span>)      <span class="cmt">// captured, exactly like a non-optional error</span></code></pre>
+
+      <div class="callout">
+        <div class="callout-title"><code>?</code> is part of the type</div>
+        <code>error(E)</code> and <code>?error(E)</code> are <em>distinct types</em>: an
+        <code>impl</code> must match its trait's marking, and two function-pointer types differing
+        only in <code>?</code> are different types. Because they hold identical values, though,
+        assignment between them is free in both directions, and everything about handling an error
+        already in hand — <code>try</code>, <code>return_err</code>,
+        <code>match</code>/<code>switch</code>, boolean coercion, the subset rule — ignores the
+        marking entirely. A value inferred from a <code>?</code>-returning function carries it
+        (<code>const e := touch(n)</code> has type <code>?error(E)</code>), and reflection reports it
+        as <code>Type_Info.Error_Type.is_optional</code>.
+      </div>
+      <p>
+        <code>?</code> on <code>main</code> or on an <code>@init</code> function is accepted but has
+        no effect: neither has a caller that could drop anything, and both already terminate the
+        process on failure.
+      </p>
 
       <hr>
 

@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <format>
 #include <fstream>
 #include <map>
@@ -28,6 +29,12 @@
 
 namespace codegen {
     namespace {
+        // Exit status for a panic — a dropped '?error(...)' that turned out to be Failed.
+        // Deliberately distinct from the 1 that 'main -> error(...)' and a failing '@init'
+        // exit with, so "the program reported an error" and "the program hit an error nobody
+        // was looking at" are distinguishable from a shell.
+        constexpr int PANIC_EXIT_CODE = 101;
+
         struct LocalValue {
             llvm::AllocaInst *alloca = nullptr;
             sema::ResolvedType type;
@@ -321,6 +328,13 @@ namespace codegen {
             std::unordered_set<sema::ResolvedType> type_info_emitting_;
             llvm::GlobalVariable *type_info_table_global_ = nullptr;
             size_t type_info_table_size_ = 0;
+
+            // One synthesized noreturn panic routine per error union type that has ever had a
+            // dropped '?error(...)' slot, keyed by union_index — see
+            // panic_helper_for_error_union. Per TYPE, not per call site: the variant-name
+            // dispatch is identical at every site, only the location string differs, and that
+            // is passed in.
+            std::unordered_map<int, llvm::Function *> panic_helpers_;
 
             auto module_for(const std::string &path) const -> const sema::ProgramModule & {
                 return sema_program_.modules.at(path);
@@ -2240,6 +2254,9 @@ namespace codegen {
                             members.push_back(type_info_ptr_for(m));
                         }
                         assignments.push_back({"members", emit_constant_slice(llvm::PointerType::getUnqual(*context_), members, ".type_info_err_members")});
+                        // '?error(...)' — reflectable because optionality is type identity, so
+                        // 'error(E)' and '?error(E)' reach this switch as two distinct unions.
+                        assignments.push_back({"is_optional", builder_.getInt1(info.is_optional)});
                     } else if (info.is_tagged) {
                         variant_name = "Tagged_Union";
                         std::vector<llvm::Constant *> variant_entries;
@@ -2696,14 +2713,237 @@ namespace codegen {
                         llvm::Type::getVoidTy(*context_),
                         {llvm::Type::getInt32Ty(*context_)},
                         false);
-                    auto *exit_fn = module_->getFunction("exit");
-                    if (!exit_fn) {
-                        exit_fn = llvm::Function::Create(exit_ty, llvm::GlobalValue::ExternalLinkage, "exit", *module_);
-                        exit_fn->setDoesNotReturn();
-                    }
+                    // getOrInsertFunction, not getFunction-else-Create: 'ext fn' declarations
+                    // are emitted into this same module under their bare C name (see
+                    // declare_globals_and_functions), so a program declaring its own 'exit'
+                    // already owns the symbol — with a signature we don't control. This form
+                    // always yields a callee matching 'exit_ty' regardless.
+                    const auto exit_fn = module_->getOrInsertFunction("exit", exit_ty);
                     builder_.CreateCall(exit_fn, {exit_code_i32});
                 }
                 builder_.CreateUnreachable();
+            }
+
+            // Writes 'len' bytes at 'ptr' to fd 2. The message half of the panic path, and the
+            // mirror image of emit_process_exit above: a raw syscall in freestanding builds
+            // (which link -nostdlib and so have no libc at all) and libc write() otherwise.
+            void emit_write_stderr(llvm::Value *ptr, llvm::Value *len) {
+                auto *i64_ty = llvm::Type::getInt64Ty(*context_);
+                if (!len->getType()->isIntegerTy(64)) {
+                    len = builder_.CreateZExt(len, i64_ty);
+                }
+
+                if (options_.freestanding) {
+                    // rax=1 (write), rdi=2 (stderr), rsi=buf, rdx=len. rax is both an input
+                    // and the syscall's return register, so it must be declared as an output
+                    // rather than a clobber (an operand can't be both).
+                    auto *syscall_ty = llvm::FunctionType::get(
+                        i64_ty,
+                        {i64_ty, i64_ty, llvm::PointerType::getUnqual(*context_), i64_ty},
+                        false);
+                    auto *syscall = llvm::InlineAsm::get(
+                        syscall_ty,
+                        "syscall",
+                        "={rax},{rax},{rdi},{rsi},{rdx},~{rcx},~{r11},~{memory}",
+                        true);
+                    builder_.CreateCall(syscall, {builder_.getInt64(1), builder_.getInt64(2), ptr, len});
+                } else {
+                    auto *write_ty = llvm::FunctionType::get(
+                        i64_ty,
+                        {llvm::Type::getInt32Ty(*context_), llvm::PointerType::getUnqual(*context_), i64_ty},
+                        false);
+                    const auto write_fn = module_->getOrInsertFunction("write", write_ty);
+                    builder_.CreateCall(write_fn, {builder_.getInt32(2), ptr, len});
+                }
+            }
+
+            // Interns 'text' and returns its {data pointer, byte length} as two constants —
+            // emit_string_literal's slice aggregate taken apart, which is the shape the panic
+            // path's write calls want.
+            auto constant_string_parts(const std::string &text) -> std::pair<llvm::Constant *, llvm::Constant *> {
+                auto *slice = emit_string_literal(text);
+                return {slice->getAggregateElement(0u), slice->getAggregateElement(1u)};
+            }
+
+            // Emits the switch selecting the "Type.Variant" string for one error MEMBER type,
+            // storing its {ptr, len} into the two slots and branching to 'done_bb'. 'member_ptr'
+            // points at the member value itself; both shapes a member can have (enum(i32), or a
+            // tagged union whose u32 tag sits at offset 0) are read as an i32 there.
+            //
+            // The default arm names the type without a variant rather than trapping: this code
+            // only ever runs while the program is already dying, and a corrupted discriminant is
+            // exactly the kind of bug someone reaches for this feature to find.
+            void emit_error_member_name_dispatch(const sema::ResolvedType &member_type, llvm::Value *member_ptr,
+                                                  llvm::Value *name_ptr_slot, llvm::Value *name_len_slot,
+                                                  llvm::BasicBlock *done_bb) {
+                auto *fn = builder_.GetInsertBlock()->getParent();
+                const auto type_name = sema::find_type_module_and_name(member_type, sema_program_).second;
+
+                std::vector<std::pair<int64_t, std::string>> cases;
+                if (member_type.kind == sema::TypeKind::Enum) {
+                    if (const auto *info = sema_program_.enum_at(member_type.enum_index)) {
+                        for (const auto &field : info->fields) {
+                            cases.emplace_back(field.value, field.name);
+                        }
+                    }
+                } else if (member_type.kind == sema::TypeKind::Union) {
+                    if (const auto *info = sema_program_.union_at(member_type.union_index)) {
+                        for (const auto &variant : info->variants) {
+                            cases.emplace_back(variant.tag_value, variant.name);
+                        }
+                    }
+                }
+
+                auto store_name = [&](const std::string &text) {
+                    const auto [ptr, len] = constant_string_parts(text);
+                    builder_.CreateStore(ptr, name_ptr_slot);
+                    builder_.CreateStore(len, name_len_slot);
+                    builder_.CreateBr(done_bb);
+                };
+
+                if (cases.empty()) {
+                    store_name(type_name.empty() ? "<error>" : type_name);
+                    return;
+                }
+
+                auto *tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), member_ptr);
+                auto *unknown_bb = llvm::BasicBlock::Create(*context_, "panic.variant.unknown", fn);
+                auto *sw = builder_.CreateSwitch(tag, unknown_bb, static_cast<unsigned>(cases.size()));
+                for (const auto &[value, name] : cases) {
+                    auto *case_bb = llvm::BasicBlock::Create(*context_, "panic.variant." + name, fn);
+                    sw->addCase(builder_.getInt32(static_cast<uint32_t>(value)), case_bb);
+                    builder_.SetInsertPoint(case_bb);
+                    store_name(std::format("{}.{}", type_name, name));
+                }
+
+                builder_.SetInsertPoint(unknown_bb);
+                store_name(std::format("{}.<unknown>", type_name));
+            }
+
+            // Lazily emits (once per error union type) the noreturn routine every dropped
+            // '?error(...)' at that type panics through:
+            //
+            //     panic: unhandled Allocator_Error.Out_Of_Memory at main.mir:3:23
+            //
+            // Only the middle part varies at runtime, so the routine is a name dispatch feeding
+            // three writes plus the process exit. The error arrives BY POINTER — the caller
+            // spills it — because the union's LLVM representation is a byte array and this code
+            // only ever needs to read discriminants out of it.
+            auto panic_helper_for_error_union(const int union_index) -> llvm::Function * {
+                if (const auto it = panic_helpers_.find(union_index); it != panic_helpers_.end()) {
+                    return it->second;
+                }
+
+                const auto &wrapper = sema_program_.unions.at(union_index);
+                auto *ptr_ty = llvm::PointerType::getUnqual(*context_);
+                auto *i32_ty = llvm::Type::getInt32Ty(*context_);
+                auto *i64_ty = llvm::Type::getInt64Ty(*context_);
+                auto *fn_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), {ptr_ty, ptr_ty, i64_ty}, false);
+                auto *fn = llvm::Function::Create(fn_ty, llvm::GlobalValue::InternalLinkage,
+                                                  std::format("__mirage_panic_unhandled_error.{}", union_index), *module_);
+                fn->setDoesNotReturn();
+                panic_helpers_[union_index] = fn;
+
+                // This runs while positioned inside whichever function body triggered the first
+                // drop at this type, so both the insert point and the emit module have to be
+                // restored afterwards (llvm_type, below, reads current_module_path_).
+                const llvm::IRBuilderBase::InsertPointGuard insert_guard(builder_);
+                const ScopedEmitModule module_scope(*this, wrapper.module_path);
+
+                auto *entry_bb = llvm::BasicBlock::Create(*context_, "entry", fn);
+                builder_.SetInsertPoint(entry_bb);
+
+                auto *err_ptr = fn->getArg(0);
+                auto *site_ptr = fn->getArg(1);
+                auto *site_len = fn->getArg(2);
+
+                auto *name_ptr_slot = builder_.CreateAlloca(ptr_ty, nullptr, "name.ptr");
+                auto *name_len_slot = builder_.CreateAlloca(i64_ty, nullptr, "name.len");
+                auto *write_bb = llvm::BasicBlock::Create(*context_, "panic.write", fn);
+
+                // The Failed payload: the member type itself for a single-member error union,
+                // or the synthesized inner dispatch union for 2+ (same shape translate_error_value
+                // walks, and the one-field {v: T} wrapper struct puts its field at offset 0).
+                auto *payload_ptr = builder_.CreateConstInBoundsGEP1_64(llvm::Type::getInt8Ty(*context_), err_ptr, wrapper.payload_offset);
+
+                if (wrapper.error_member_types.size() == 1) {
+                    emit_error_member_name_dispatch(wrapper.error_member_types.front(), payload_ptr, name_ptr_slot, name_len_slot, write_bb);
+                } else {
+                    const auto &inner = sema_program_.unions.at(wrapper.variants[1].payload_type.union_index);
+                    auto *inner_tag = builder_.CreateLoad(i32_ty, payload_ptr);
+                    auto *unknown_bb = llvm::BasicBlock::Create(*context_, "panic.member.unknown", fn);
+                    auto *sw = builder_.CreateSwitch(inner_tag, unknown_bb, static_cast<unsigned>(inner.variants.size()));
+                    for (const auto &variant : inner.variants) {
+                        auto *case_bb = llvm::BasicBlock::Create(*context_, "panic.member." + variant.name, fn);
+                        sw->addCase(builder_.getInt32(static_cast<uint32_t>(variant.tag_value)), case_bb);
+                        builder_.SetInsertPoint(case_bb);
+                        auto *member_ptr = builder_.CreateConstInBoundsGEP1_64(llvm::Type::getInt8Ty(*context_), payload_ptr, inner.payload_offset);
+                        emit_error_member_name_dispatch(variant.payload_type, member_ptr, name_ptr_slot, name_len_slot, write_bb);
+                    }
+                    builder_.SetInsertPoint(unknown_bb);
+                    const auto [unknown_ptr, unknown_len] = constant_string_parts("<unknown error>");
+                    builder_.CreateStore(unknown_ptr, name_ptr_slot);
+                    builder_.CreateStore(unknown_len, name_len_slot);
+                    builder_.CreateBr(write_bb);
+                }
+
+                builder_.SetInsertPoint(write_bb);
+                const auto [prefix_ptr, prefix_len] = constant_string_parts("panic: unhandled ");
+                emit_write_stderr(prefix_ptr, prefix_len);
+                emit_write_stderr(builder_.CreateLoad(ptr_ty, name_ptr_slot), builder_.CreateLoad(i64_ty, name_len_slot));
+                emit_write_stderr(site_ptr, site_len);
+                emit_process_exit(builder_.getInt32(PANIC_EXIT_CODE)); // ends the block with 'unreachable'
+                return fn;
+            }
+
+            // The check the caller didn't write: on Failed, panic naming the error variant and
+            // the call's source location; otherwise carry on. Shaped exactly like
+            // emit_try_propagation, with the panic call standing in for the propagating return.
+            void emit_unhandled_error_check(llvm::Value *err_val, const sema::ResolvedType &err_type, const SourceLocation &loc) {
+                auto *fn = builder_.GetInsertBlock()->getParent();
+                auto *panic_bb = llvm::BasicBlock::Create(*context_, "err.panic", fn);
+                auto *ok_bb = llvm::BasicBlock::Create(*context_, "err.ok", fn);
+                auto *is_err = builder_.CreateICmpNE(extract_error_tag(err_val), builder_.getInt32(0));
+                builder_.CreateCondBr(is_err, panic_bb, ok_bb);
+
+                builder_.SetInsertPoint(panic_bb);
+                auto *slot = create_entry_alloca(fn, err_val->getType());
+                builder_.CreateStore(err_val, slot);
+                // The basename, not the absolute path SourceLocation carries and the diagnostic
+                // engine prints: this string is baked into the binary for a human to read at the
+                // moment of the crash, and the absolute build-machine path is noise there.
+                const auto site = std::format(" at {}:{}:{}\n",
+                                              std::filesystem::path(std::string(loc.filename)).filename().string(),
+                                              loc.line, loc.column);
+                const auto [site_ptr, site_len] = constant_string_parts(site);
+                builder_.CreateCall(panic_helper_for_error_union(err_type.union_index), {slot, site_ptr, site_len});
+                builder_.CreateUnreachable();
+
+                builder_.SetInsertPoint(ok_bb);
+            }
+
+            // Post-processes a call's raw result when sema recorded that the caller left the
+            // callee's trailing '?error(...)' slot unbound: emits the check, then yields what
+            // actually survives the drop. slot_index 0 means the error was the ONLY return value
+            // (statement position — nothing survives); 1 means a single real value does. Larger
+            // arities only ever come from the group-declaration path, which extracts its own
+            // slots and never routes through here.
+            auto apply_dropped_optional_error(const ast::CallExpr &call, llvm::Value *result) -> llvm::Value * {
+                const auto it = current_exprs_->call_dropped_optional_error.find(&call);
+                if (it == current_exprs_->call_dropped_optional_error.end() || result == nullptr) {
+                    return result;
+                }
+
+                const auto &dropped = it->second;
+                const bool multi = dropped.slot_index > 0;
+                auto *err_val = multi
+                    ? builder_.CreateExtractValue(result, {static_cast<unsigned>(dropped.slot_index)})
+                    : result;
+                emit_unhandled_error_check(err_val, dropped.error_type, call.location);
+
+                if (!multi) return nullptr;
+                if (dropped.slot_index == 1) return builder_.CreateExtractValue(result, {0});
+                return result;
             }
 
             // Synthesized initializer-runner: calls every '@init' function across the program
@@ -3972,6 +4212,24 @@ namespace codegen {
                 return builder_.CreateLoad(wrapper_ll_ty, outer_slot);
             }
 
+            // True when two error union types are DIFFERENT interned unions that nonetheless
+            // have byte-identical representations, so a value of one is already a valid value
+            // of the other and needs no translation. That is exactly the 'error(E)' vs
+            // '?error(E)' pair: interning splits them so optionality can be a type property
+            // (see sema::UnionInfo::is_optional), but an identical member set means an
+            // identical canonical variant order, inner union, payload offset and size.
+            //
+            // Load-bearing, not an optimization: translate_error_value rebuilds its result as
+            // a FAILED value (its only caller was 'try', which runs on the failed path), so
+            // routing an Ok value through it would silently turn success into failure.
+            [[nodiscard]] auto error_unions_interchangeable(const sema::ResolvedType &a, const sema::ResolvedType &b) const -> bool {
+                if (a.kind != sema::TypeKind::Union || b.kind != sema::TypeKind::Union) return false;
+                const auto *a_info = sema_program_.union_at(a.union_index);
+                const auto *b_info = sema_program_.union_at(b.union_index);
+                return a_info != nullptr && b_info != nullptr && a_info->is_error_union && b_info->is_error_union &&
+                       a_info->error_member_types == b_info->error_member_types;
+            }
+
             // Translates a Failed value from callee_error_ty's representation into
             // caller_error_ty's representation. Only called when the two are DIFFERENT
             // synthesized unions (see emit_try_propagation's identical-union fast path) —
@@ -4065,7 +4323,7 @@ namespace codegen {
 
                 builder_.SetInsertPoint(propagate_bb);
                 const auto &caller_error_ty = current_returns_.back();
-                llvm::Value *propagated = (callee_error_ty == caller_error_ty)
+                llvm::Value *propagated = (callee_error_ty == caller_error_ty || error_unions_interchangeable(callee_error_ty, caller_error_ty))
                     ? err_val
                     : translate_error_value(err_val, callee_error_ty, caller_error_ty);
                 emit_error_return(propagated);
@@ -4166,11 +4424,16 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AssignExpr>>) {
                             return emit_assign(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
+                            // Both branches, not just emit_call: a generic call bypasses it
+                            // entirely, and a generic function can return '?error(...)' too.
+                            llvm::Value *result = nullptr;
                             if (const auto inst_it = current_exprs_->expr_generic_fn_instance.find(sema::get_expr_key(expr));
                                 inst_it != current_exprs_->expr_generic_fn_instance.end()) {
-                                return emit_generic_call(*v, inst_it->second);
+                                result = emit_generic_call(*v, inst_it->second);
+                            } else {
+                                result = emit_call(*v);
                             }
-                            return emit_call(*v);
+                            return apply_dropped_optional_error(*v, result);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) {
                             return emit_incr_decr(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
@@ -5574,6 +5837,16 @@ namespace codegen {
                                     locals_[v.names[i]] = LocalValue{.alloca = slot, .type = ty, .type_module = type_module};
                                 }
                             } else {
+                                // One name short of the arity because the caller dropped a
+                                // trailing '?error(...)' (sema recorded it): check it here,
+                                // then bind the surviving names below exactly as usual. This
+                                // path calls emit_call directly, so it never passes through
+                                // emit_expr's apply_dropped_optional_error.
+                                if (const auto dropped = current_exprs_->call_dropped_optional_error.find(call_ptr);
+                                    dropped != current_exprs_->call_dropped_optional_error.end()) {
+                                    auto *err_val = builder_.CreateExtractValue(result, {static_cast<unsigned>(dropped->second.slot_index)});
+                                    emit_unhandled_error_check(err_val, dropped->second.error_type, call_ptr->location);
+                                }
                                 for (size_t i = 0; i < v.names.size(); ++i) {
                                     if (v.names[i].empty() || v.names[i] == "_") continue;
                                     auto ty = all_returns[i];
@@ -6202,7 +6475,9 @@ namespace codegen {
                 if (operand_type.kind == sema::TypeKind::Union) {
                     const auto *union_info = sema_program_.union_at(operand_type.union_index);
                     if (union_info && union_info->is_error_union) {
-                        return (operand_type == target) ? operand_val : translate_error_value(operand_val, operand_type, target);
+                        return (operand_type == target || error_unions_interchangeable(operand_type, target))
+                            ? operand_val
+                            : translate_error_value(operand_val, operand_type, target);
                     }
                 }
 

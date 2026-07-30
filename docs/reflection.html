@@ -194,6 +194,14 @@
         storage type). Being ordinary Mirage source, you can read its full field list directly:
         it's just a <code>union(enum)</code> and a handful of small structs, no compiler magic.
       </p>
+      <p>
+        <code>Error_Type</code> carries its member types plus an <code>is_optional: bool</code>
+        recording whether the type was spelled <code>?error(...)</code> — an error a caller may
+        leave unhandled (see <a href="error-handling.html#ignorable-errors">Ignorable Errors</a>).
+        The marking is visible here because it is part of the type's identity:
+        <code>error(E)</code> and <code>?error(E)</code> are two distinct types with two distinct
+        <code>Type_Info</code> records.
+      </p>
       <div class="callout tip">
         <div class="callout-title">Not auto-imported</div>
         Unlike builtin types, <code>runtime/type_info</code> is a regular stdlib module. Nothing

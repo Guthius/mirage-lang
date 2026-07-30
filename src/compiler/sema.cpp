@@ -48,7 +48,7 @@ namespace sema {
         }
         case TypeKind::Union: {
             if (const auto *info = program.union_at(t.union_index); info && info->is_error_union) {
-                std::string out = "error(";
+                std::string out = info->is_optional ? "?error(" : "error(";
                 for (size_t i = 0; i < info->error_member_types.size(); ++i) {
                     if (i > 0) out += " | ";
                     out += describe_type(info->error_member_types[i], program);

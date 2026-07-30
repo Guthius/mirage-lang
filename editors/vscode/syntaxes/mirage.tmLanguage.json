@@ -13,6 +13,7 @@
     { "include": "#asm-block" },
     { "include": "#directives" },
     { "include": "#attributes" },
+    { "include": "#optional-error" },
     { "include": "#keywords" },
     { "include": "#support-types" },
     { "include": "#ext-modifier" },
@@ -196,6 +197,17 @@
             },
             { "include": "#punctuation" }
           ]
+        }
+      ]
+    },
+    "optional-error": {
+      "comment": "The '?' marking a function's last return type as an ignorable error ('-> (anyptr, ?Allocator_Error)'). Scoped as a modifier rather than an operator so it reads as part of the type, not as the ternary '?' that #operators would otherwise claim it as — hence this must be included BEFORE #operators. Distinguished from the ternary purely by what precedes it: a return slot's '?' always follows '->', ',' or '(', whereas a ternary's always follows an expression.",
+      "patterns": [
+        {
+          "match": "(?<=[>,(])\\s*(\\?)(?=\\s*(?:[A-Za-z_]|\\berror\\b))",
+          "captures": {
+            "1": { "name": "storage.modifier.optional-error.mirage" }
+          }
         }
       ]
     },

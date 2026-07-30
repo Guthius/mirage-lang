@@ -1,0 +1,19 @@
+// example_optional_error_non_error.mir — '?' requires an error type: an 'error(...)'
+// spelling, a bare enum(i32)/union(enum) ('?T' is sugar for '?error(T)'), or an alias to
+// one. Anything else is a sema error.
+
+type Point = struct {
+    x: i32
+    y: i32
+}
+
+fn bad_scalar() -> ?i32 {
+    return 1
+}
+
+fn bad_struct() -> ?Point {
+    return default
+}
+
+pub fn main() {
+}

@@ -47,9 +47,11 @@ param         ::= [ 'mut' ] IDENT ':' type [ '=' expr ]  (* typed, optional defa
 return_types  ::= '->' ret_item                                  (* single return *)
                | '->' '(' ret_item { ',' ret_item } ')'         (* multi-return *)
 
-ret_item      ::= [ IDENT ':' ] type   (* the 'IDENT :' name is optional and purely
-                                          cosmetic — self-documenting, no functional
-                                          effect (no implicit bare-return binding) *)
+ret_item      ::= [ IDENT ':' ] [ '?' ] type   (* the 'IDENT :' name is optional and purely
+                                                  cosmetic — self-documenting, no functional
+                                                  effect (no implicit bare-return binding).
+                                                  '?' marks an ignorable error and is legal
+                                                  ONLY on the last ret_item — see note 19 *)
 ```
 
 `pub`, if present, comes after the attribute: `@naked pub fn f() { ... }`, never `pub @naked fn f() { ... }`.
@@ -268,7 +270,10 @@ error_type    ::= 'error' '(' named_type { '|' named_type } ')'
 
 bitset_type   ::= 'bitset' '(' named_type [ ',' builtin_type ] ')'
 
-fn_type       ::= 'fn' '(' [ fn_type_params ] ')' [ '->' type | '->' '(' type { ',' type } ')' ]
+fn_type       ::= 'fn' '(' [ fn_type_params ] ')' [ '->' fn_ret_item
+                                                  | '->' '(' fn_ret_item { ',' fn_ret_item } ')' ]
+
+fn_ret_item   ::= [ '?' ] type   (* '?' legal only on the last item — see note 19 *)
 
 fn_type_params ::= fn_type_param { ',' fn_type_param } [ ',' '...' ]
                 | '...'
@@ -791,3 +796,5 @@ always starts an `option`/`env` expression.
 17. **`impl_decl`'s own `generic_params` clause, not `named_type`'s `generic_args`, governs the bracket after an impl target.** `named_type`'s `generic_args` is not consulted when parsing `impl_decl`'s `named_type` operand(s) — the `[...]` immediately following `impl SOME_TYPE` (or, in the trait-impl form, following either `named_type`) is always parsed as `impl_decl`'s own trailing `generic_params` clause. Consequently `impl List[T: type] { ... }` (declaring the impl's own parameters, written once against the unspecialized declaration) is the only legal form — `impl List[i32] { ... }` (a per-instantiation specialization impl) is not legal in v1.
 
 18. **Each `generic_arg`'s type-vs-expr parse reuses note 12's lookahead rule verbatim**: a builtin type keyword, or a token that can only begin a type, parses as `type`; anything else parses as `expr`. This is the same rule `size_of_operand` and `generic_arg` both use, applied independently to each comma-separated item inside `generic_args`.
+
+19. **`?` on the last return type marks an ignorable error**, and is the only place the parser accepts a leading `?` in type position. It appears in `ret_item` (free functions, `impl` methods, trait methods) and `fn_ret_item` (function-pointer types); whether it is on the *last* item cannot be known while parsing item *i*, so the parser records each marker's location and reports the non-final ones once the list is complete. Everywhere else `parse_type` rejects `?` outright with a dedicated diagnostic rather than a generic "expected type". What may follow the `?` is deliberately unconstrained by the grammar — `?error(A | B)`, `?SomeEnum` (sugar for `?error(SomeEnum)`), and `?SomeAlias` are all shaped like an ordinary `type` — because only sema can tell whether the named type is an error type at all. See spec.md §16 "Ignorable Errors".

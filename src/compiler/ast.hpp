@@ -62,6 +62,7 @@ namespace ast {
     struct UnionType;
     struct TraitType;
     struct ErrorType;
+    struct OptionalErrorType;
     struct BitsetType;
 
     using Type = std::variant<
@@ -77,6 +78,7 @@ namespace ast {
         std::unique_ptr<FunctionType>,
         std::unique_ptr<TraitType>,
         std::unique_ptr<ErrorType>,
+        std::unique_ptr<OptionalErrorType>,
         std::unique_ptr<BitsetType>>;
 
     struct PointerType {
@@ -340,6 +342,21 @@ namespace ast {
     // interning).
     struct ErrorType {
         std::vector<NamedType> members;
+        SourceLocation location;
+    };
+
+    // '?E' — an error a caller may leave unhandled. Legal ONLY as a function's LAST
+    // return type (enforced in parse_function_return_types / parse_function_type;
+    // parse_type rejects a leading '?' everywhere else), so this node never appears
+    // in a parameter, field, variable, or alias position.
+    //
+    // 'inner' is whatever followed the '?' and is deliberately NOT restricted here:
+    // it may be an 'error(...)' spelling, a bare enum/union(enum) name ('?E' is sugar
+    // for '?error(E)'), or a NamedType alias of an error type. Only sema knows which,
+    // so resolve_optional_error_type does the classification and reports the "not an
+    // error type" diagnostic.
+    struct OptionalErrorType {
+        Type inner;
         SourceLocation location;
     };
 

@@ -166,6 +166,18 @@ namespace sema {
         bool is_error_union = false;
         std::vector<ResolvedType> error_member_types;
 
+        // '?error(...)' — an error a caller may leave unhandled (see intern_error_union).
+        // Optionality is modelled as TYPE IDENTITY, not as a per-return-slot signature flag:
+        // '?error(E)' and 'error(E)' intern to two distinct unions with two distinct
+        // union_indexes. That is what makes a trait/impl '?' mismatch fall out of the
+        // existing return_types comparison, and what lets reflection report it
+        // (Type_Info.Error_Type.is_optional). Set on the OUTER Ok/Failed wrapper only —
+        // the inner member-dispatch union is an implementation detail with no callers.
+        // Deliberately NOT part of error_union_is_subset or the try/return_err rules:
+        // dropping or adding the marker is semantically inert on a value, because it only
+        // ever describes an obligation at the CALL SITE.
+        bool is_optional = false;
+
         // See StructInfo::generic_instance above. Never set alongside is_error_union —
         // error(...) unions are synthesized, not user-declared generic types.
         std::optional<GenericInstanceInfo> generic_instance;
@@ -396,6 +408,16 @@ namespace sema {
         ResolvedType effective_type;
     };
 
+    // Records that a call's trailing '?error(...)' return slot was left unbound by the
+    // caller — see ExprSideTables::call_dropped_optional_error. 'slot_index' is that slot's
+    // index in the callee's return list, so codegen knows the call's true arity (== index +
+    // 1) without re-deriving the callee's signature: 0 means the error WAS the only return
+    // value (statement position), 1 means one real value survives the drop.
+    struct DroppedOptionalError {
+        ResolvedType error_type;
+        size_t slot_index = 0;
+    };
+
     // Sema's resolved view of one 'asm { ... }' instruction, computed by check_asm_stmt
     // (sema_check.cpp) and consumed by codegen's emit_asm_stmt — parallel to
     // ast::AsmInstruction::operands; populated only for ast::AsmVariableOperand entries
@@ -469,6 +491,17 @@ namespace sema {
         // trying (and failing) to look up the inner operand's expr_types entry directly.
         std::unordered_map<const void *, ResolvedType> expr_type_of_operand_type;
         std::unordered_map<const void *, ErrorMatchUnwrap> expr_error_match_unwrap;
+        // A CallExpr whose callee's trailing '?error(...)' slot the caller did NOT bind ->
+        // that slot's type. Codegen turns each entry into the check the caller didn't write:
+        // if the returned error is Failed, panic with its variant name and this call's
+        // source location (see emit_unhandled_error_check). Absent means "nothing to do" —
+        // either the callee's error isn't optional, or the caller bound it (including
+        // binding it to '_', which is the deliberate silent opt-out).
+        //
+        // Keyed by the CallExpr itself, NOT get_expr_key: the group-declaration path only
+        // ever sees the unwrapped node, and this map is written from both paths. Same
+        // convention as expr_generic_fn_instance's writes in check_group_call_returns.
+        std::unordered_map<const ast::CallExpr *, DroppedOptionalError> call_dropped_optional_error;
         // 'when' EXPRESSION -> which branch (true=then_expr, false=else_expr) a
         // compile-time-constant condition folded to; absent if the condition is a runtime
         // value (codegen emits a runtime branch/PHI in that case, like an ordinary ternary).
@@ -634,11 +667,19 @@ namespace sema {
         std::vector<ResolvedType> pointer_pointees; // global; pointee_index is unique across all modules
         std::vector<ArrayInfo> arrays;             // global; array_index is unique across all modules
         std::vector<SliceInfo> slices;             // global; slice_index is unique across all modules
-        // Interning cache for synthesized 'error(...)' union types: sorted member-type
-        // list (canonical identity, order-independent — see intern_error_union) -> the
-        // union_index of the synthesized Ok/Failed wrapper. Two 'error(...)' spellings
-        // naming the same set of member types (in any order) intern to the same union.
-        std::vector<std::pair<std::vector<ResolvedType>, int>> error_unions;
+        // Interning cache for synthesized 'error(...)' union types: (sorted member-type
+        // list, is_optional) — the canonical identity, order-independent in the member
+        // list (see intern_error_union) -> the union_index of the synthesized Ok/Failed
+        // wrapper. Two 'error(...)' spellings naming the same set of member types (in any
+        // order) with the same '?' marking intern to the same union. The '?' IS part of the
+        // key: 'error(E)' and '?error(E)' are distinct types (see UnionInfo::is_optional).
+        struct ErrorUnionKey {
+            std::vector<ResolvedType> members;
+            bool is_optional = false;
+
+            auto operator==(const ErrorUnionKey &) const -> bool = default;
+        };
+        std::vector<std::pair<ErrorUnionKey, int>> error_unions;
         // 'type_of's identity table: every distinct ResolvedType that has ever been the
         // operand of a 'type_of'/'any' coercion gets a stable id here, assigned lazily in
         // encounter order (see intern_type_id). Ids 1-15 are pre-seeded for the builtin

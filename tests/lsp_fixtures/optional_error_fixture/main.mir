@@ -1,0 +1,37 @@
+// LSP fixture for ignorable errors ('?error(...)'). Each declaration exists so a specific
+// editor behaviour can be pinned in lsp_smoke_test.py, which locates lines by searching
+// for the declaration name rather than by number — so this file may be reordered freely,
+// but the names must stay unique.
+
+type Alloc_Error = enum {
+    Out_Of_Memory
+}
+
+// '?' sugar over a bare enum, on the last of two return types.
+fn alloc_sugar(size: usize) -> (anyptr, ?Alloc_Error) {
+    return_ok nil
+}
+
+// A lone '?error(...)' return, explicit spelling.
+fn touch_explicit(size: usize) -> ?error(Alloc_Error) {
+    return_ok
+}
+
+// The non-optional counterpart, so hover output can be compared directly against it.
+fn alloc_plain(size: usize) -> (anyptr, error(Alloc_Error)) {
+    return_ok nil
+}
+
+// '?' inside a trait method. Trait signatures resolve during layout_trait, much earlier
+// than a free function's — which is exactly where a shallow named-type resolution breaks.
+pub type Allocator = trait {
+    fn alloc(self, size: usize) -> (anyptr, ?Alloc_Error)
+}
+
+// '?' in a function-POINTER type.
+type Alloc_Fn = fn(usize) -> (anyptr, ?Alloc_Error)
+
+pub fn main() {
+    // The dropped-error call site: 'dropped' is the anyptr, not a tuple.
+    const dropped := alloc_sugar(16)
+}

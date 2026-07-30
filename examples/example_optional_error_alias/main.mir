@@ -1,0 +1,88 @@
+// example_optional_error_alias.mir — the three spellings of an optional error, and how
+// optional and non-optional error types interconvert.
+//
+//   ?E              — sugar for '?error(E)'
+//   ?error(A | B)   — the explicit form, any number of members
+//   ?Alias          — where 'type Alias = error(A | B)'
+//
+// '?error(A|B)' and 'error(A|B)' are DISTINCT types (which is what lets reflection report
+// is_optional, and what makes a trait/impl '?' mismatch a signature error), but they hold
+// the same values, so assignment between them is free and 'try' works across them.
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+type Read_Error = enum {
+    Eof
+}
+
+type Write_Error = union(enum) {
+    Refused: struct { code: i32 }
+    Busy
+}
+
+type Io_Error = error(Read_Error | Write_Error)
+
+// '?T' sugar over a bare enum.
+fn sugar(fail: bool) -> ?Read_Error {
+    if fail {
+        return_err .Eof
+    }
+    return_ok
+}
+
+// Explicit multi-member spelling.
+fn explicit(fail: bool) -> ?error(Read_Error | Write_Error) {
+    if fail {
+        return_err .Busy
+    }
+    return_ok
+}
+
+// Alias to an existing 'error(...)' type.
+fn aliased(fail: bool) -> ?Io_Error {
+    if fail {
+        return_err .Eof
+    }
+    return_ok
+}
+
+// '?error(Read_Error)' widens into a two-member non-optional union through 'try', exactly
+// like a non-optional callee would.
+fn widen() -> Io_Error {
+    try sugar(false)
+    return_ok
+}
+
+// The reverse direction: a '?Io_Error' value returned from a non-optional 'Io_Error'
+// function. Same member set, so the marker is simply dropped.
+fn narrow() -> Io_Error {
+    const e := aliased(false)
+    return e
+}
+
+pub fn main() {
+    // '?error(A|B)' and '?Alias' name the same interned type, so this assignment needs no
+    // conversion at all.
+    const from_explicit := explicit(false)
+    const from_alias: Io_Error = from_explicit
+
+    if from_alias {
+        printf("unexpected failure\n")
+    }
+
+    const a := widen()
+    const b := narrow()
+    if !a && !b {
+        printf("all conversions ok\n")
+    }
+
+    const failed := explicit(true)
+    if failed {
+        // Matching a '?error(...)' value is exactly matching an 'error(...)' one — every
+        // rule about handling an error already in hand ignores the marker.
+        switch failed {
+            .Write_Error(e): { printf("write error\n") },
+            .Read_Error(e): { printf("read error\n") }
+        }
+    }
+}

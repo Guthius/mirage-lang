@@ -2479,6 +2479,37 @@ namespace ast {
             std::vector<std::string> names; // parallel to types; "" = unnamed
         };
 
+        // Parses one return slot's type, consuming an optional leading '?' ('?E' — an error
+        // a caller may leave unhandled) and wrapping the result in an OptionalErrorType.
+        // Whether a '?' is on the LAST slot can't be decided while parsing slot i, so each
+        // marker's location is recorded here and checked by report_misplaced_optional_errors
+        // once the whole list is known. Shared by parse_function_return_types (free fns,
+        // impl methods, trait methods) and parse_function_type (fn-pointer types) so '?'
+        // behaves identically in every return-type position.
+        auto parse_return_slot_type(Parser &parser, std::vector<std::optional<SourceLocation>> &question_locations) -> Type {
+            if (!parser.check(TokenKind::Question)) {
+                question_locations.emplace_back();
+                return parse_type(parser);
+            }
+
+            const auto location = parser.current_location();
+            parser.advance();
+            question_locations.push_back(location);
+            return std::make_unique<OptionalErrorType>(OptionalErrorType{
+                .inner = parse_type(parser),
+                .location = location,
+            });
+        }
+
+        void report_misplaced_optional_errors(Parser &parser, const std::vector<std::optional<SourceLocation>> &question_locations) {
+            for (size_t i = 0; i + 1 < question_locations.size(); ++i) {
+                if (question_locations[i]) {
+                    parser.report_error(*question_locations[i],
+                                        "'?' may only mark the LAST return type; it marks an error the caller may leave unhandled");
+                }
+            }
+        }
+
         // -> T   or   -> (T1, T2, ...)  — each entry may optionally be prefixed with
         // 'name:' purely for documentation (e.g. LSP hover / self-documenting code);
         // never used for matching or type identity, exactly like parse_function_type's
@@ -2488,6 +2519,7 @@ namespace ast {
         // identifier.
         auto parse_function_return_types(Parser &parser) -> FunctionReturnTypes {
             FunctionReturnTypes result;
+            std::vector<std::optional<SourceLocation>> question_locations;
 
             auto parse_one = [&] {
                 std::string name;
@@ -2496,7 +2528,7 @@ namespace ast {
                     parser.expect(TokenKind::Colon, "':'");
                 }
                 result.names.push_back(std::move(name));
-                result.types.push_back(parse_type(parser));
+                result.types.push_back(parse_return_slot_type(parser, question_locations));
             };
 
             if (parser.match(TokenKind::Arrow)) {
@@ -2517,6 +2549,7 @@ namespace ast {
                 }
             }
 
+            report_misplaced_optional_errors(parser, question_locations);
             return result;
         }
 
@@ -2693,12 +2726,13 @@ namespace ast {
             parser.expect(TokenKind::RParen, "')'");
 
             std::vector<Type> return_types;
+            std::vector<std::optional<SourceLocation>> question_locations;
             if (parser.match(TokenKind::Arrow)) {
                 if (parser.match(TokenKind::LParen)) {
                     // Multi-return: -> (T1, T2, ...)
                     while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
                         const LoopProgressGuard progress_guard(parser);
-                        return_types.push_back(parse_type(parser));
+                        return_types.push_back(parse_return_slot_type(parser, question_locations));
                         skip_semicolons(parser);
                         if (!parser.check(TokenKind::RParen)) {
                             parser.expect(TokenKind::Comma, "','");
@@ -2707,9 +2741,10 @@ namespace ast {
                     parser.expect(TokenKind::RParen, "')'");
                 } else {
                     // Single return: -> T
-                    return_types.push_back(parse_type(parser));
+                    return_types.push_back(parse_return_slot_type(parser, question_locations));
                 }
             }
+            report_misplaced_optional_errors(parser, question_locations);
 
             return std::make_unique<FunctionType>(FunctionType{
                 .param_types = std::move(param_types),
@@ -2988,6 +3023,17 @@ namespace ast {
 
     auto parse_type(Parser &parser) -> Type {
         const auto location = parser.current_location();
+
+        // '?' reaching general type position means it was written somewhere a return slot
+        // isn't (a parameter, field, variable annotation, alias, ...). Only return-slot
+        // parsing consumes it (see parse_return_slot_type), so diagnose it specifically
+        // instead of letting it fall through to the generic "expected type" error below,
+        // then recover by parsing the type it prefixed.
+        if (parser.check(TokenKind::Question)) {
+            parser.report_error(location, "'?' is only allowed on a function's last return type (it marks an error the caller may leave unhandled)");
+            parser.advance();
+            return parse_type(parser);
+        }
 
         if (parser.match(TokenKind::Star)) {
             return std::make_unique<PointerType>(PointerType{

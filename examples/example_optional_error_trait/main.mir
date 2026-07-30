@@ -1,0 +1,69 @@
+// example_optional_error_trait.mir — the motivating case for '?error(...)': an allocator
+// interface whose failure mode is fatal for almost every caller. Marking the error
+// ignorable lets call sites read like infallible code while still aborting on failure,
+// instead of forcing an 'if err' after every allocation.
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub type Allocator_Error = enum {
+    Out_Of_Memory
+    Bad_Alignment
+}
+
+pub type Allocator = trait {
+    fn alloc(self, size: usize, zero_memory := true) -> (anyptr, ?Allocator_Error)
+    fn realloc(self, ptr: anyptr, size: usize) -> (anyptr, ?Allocator_Error)
+    fn free(self, ptr: anyptr)
+}
+
+pub type Bump = struct {
+    buffer: []u8
+    offset: usize
+}
+
+impl Allocator for Bump {
+    fn alloc(self, size: usize, zero_memory: bool) -> (anyptr, ?Allocator_Error) {
+        if self.offset + size > len(self.buffer) {
+            return_err .Out_Of_Memory
+        }
+        const p := &self.buffer[self.offset]
+        self.offset += size
+        return_ok p
+    }
+
+    fn realloc(self, ptr: anyptr, size: usize) -> (anyptr, ?Allocator_Error) {
+        // Dropping a '?error(...)' inside another '?error(...)' function is no different
+        // from dropping it anywhere else — the check is synthesized here too.
+        return_ok self.alloc(size)
+    }
+
+    fn free(self, ptr: anyptr) {
+    }
+}
+
+// Dynamic dispatch through the trait handle drops the error slot just like a direct call.
+fn fill(allocator: Allocator) -> usize {
+    const a := allocator.alloc(16)
+    const b := allocator.alloc(32)
+    const c := allocator.realloc(b, 64)
+    return cast(a, usize)
+}
+
+pub fn main() {
+    mut storage: [256]u8 = default
+    mut bump: Bump = { .buffer = storage, .offset = 0 }
+
+    // Static dispatch.
+    const p := bump.alloc(8)
+    printf("static dispatch ok, offset now %d\n", cast(bump.offset, i32))
+
+    // Dynamic dispatch through the handle.
+    fill(&bump)
+    printf("dynamic dispatch ok, offset now %d\n", cast(bump.offset, i32))
+
+    // A caller that DOES want to look still can — nothing about '?' prevents handling it.
+    const q, err := bump.alloc(4096)
+    if err {
+        printf("handled the failure explicitly\n")
+    }
+}

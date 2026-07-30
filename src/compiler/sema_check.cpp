@@ -155,6 +155,18 @@ namespace sema {
                    program.union_at(ty.union_index)->is_error_union;
         }
 
+        // True iff 'ty' is a '?error(...)' union — an error the CALLER may leave unhandled.
+        // When a call's trailing slot has this type and the caller doesn't bind it, sema
+        // records the omission in ExprSideTables::call_dropped_optional_error and codegen
+        // synthesizes the check the caller didn't write (a panic on failure). Deliberately
+        // narrower than is_error_union_type: everything about handling an error that is
+        // already in hand ('try', 'return_err', match/switch, boolean coercion, the subset
+        // rule) treats optional and non-optional errors identically.
+        auto is_optional_error_union(const ResolvedType &ty, const Program &program) -> bool {
+            const auto *info = ty.kind == TypeKind::Union ? program.union_at(ty.union_index) : nullptr;
+            return info != nullptr && info->is_error_union && info->is_optional;
+        }
+
         // Returns the LocalBinding for 'name' iff it names a currently-in-scope error(...)-typed
         // local (i.e. one with typestate tracking at all).
         auto find_error_local(const std::string &name, LocalScope &locals, const Program &program) -> LocalBinding * {
@@ -526,6 +538,21 @@ namespace sema {
         if (from.kind == TypeKind::Bitset) {
             const auto *info = program.bitset_at(from.bitset_index);
             if (info && info->storage_type == to) return true;
+        }
+        // '?error(E)' and 'error(E)' are distinct types (see UnionInfo::is_optional) but
+        // carry identical values — the '?' only ever describes an obligation at the CALL
+        // SITE, so it is inert once the value is in hand. Assignment in either direction is
+        // therefore allowed whenever the member sets are identical, which is what lets
+        // 'fn g() -> (anyptr, error(E)) { return alloc(n) }' forward a '?error(E)' slot.
+        // Differing member sets stay incompatible — widening still needs 'try'/'return_err'.
+        if (from.kind == TypeKind::Union && to.kind == TypeKind::Union) {
+            const auto *from_info = program.union_at(from.union_index);
+            const auto *to_info = program.union_at(to.union_index);
+            if (from_info && to_info && from_info->is_error_union && to_info->is_error_union &&
+                from_info->is_optional != to_info->is_optional &&
+                from_info->error_member_types == to_info->error_member_types) {
+                return true;
+            }
         }
         return is_assignable(from, to);
     }
@@ -2812,6 +2839,32 @@ namespace sema {
                     return target.type;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
+                    // The single choke point every callee shape below funnels its resolved
+                    // return list through, so the "one value expected here" rule is stated
+                    // once. Two things happen:
+                    //
+                    //  1. A trailing '?error(...)' slot is DROPPED (and recorded, so codegen
+                    //     emits the failure check) whenever the call has 2+ returns. That is
+                    //     what makes 'const p := alloc(n)', 'foo(alloc(n))' and
+                    //     'return alloc(n)' legal for '-> (anyptr, ?E)'.
+                    //  2. Anything still multi-valued keeps the existing diagnostic.
+                    //
+                    // The '>= 2' guard is load-bearing: a fn returning ONLY '?E' must still
+                    // yield that error as this expression's value, so 'const e := f()' keeps
+                    // capturing it. A lone '?E' is dropped only in statement position, where
+                    // the value is discarded outright (see check_stmt's ExprStmt case).
+                    auto single_value_result = [&](std::vector<ResolvedType> returns) -> ResolvedType {
+                        if (returns.size() >= 2 && is_optional_error_union(returns.back(), program)) {
+                            expr_tables_for_write(program, module_path).call_dropped_optional_error[v.get()] =
+                                DroppedOptionalError{.error_type = returns.back(), .slot_index = returns.size() - 1};
+                            returns.pop_back();
+                        }
+                        if (returns.size() > 1) {
+                            return error(diag, v->location, "multi-value capture is not yet supported here");
+                        }
+                        return returns.empty() ? ResolvedType{.kind = TypeKind::Void} : returns.front();
+                    };
+
                     // Explicit generic-function instantiation call ('make_fixed[16]()',
                     // 'make_list[i32]()', or cross-module 'list.make_list[i32]()') — the
                     // callee is an IndexOrInstantiateExpr whose operand names a generic
@@ -2862,10 +2915,7 @@ namespace sema {
                             const auto &instance = *program.generic_fn_instances[idx];
                             check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
                             expr_tables_for_write(program, module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
-                            if (instance.return_types.size() > 1) {
-                                return error(diag, v->location, "multi-value capture is not yet supported here");
-                            }
-                            return instance.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : instance.return_types.front();
+                            return single_value_result(instance.return_types);
                         }
                     }
 
@@ -2899,17 +2949,11 @@ namespace sema {
                                             const auto &instance = *program.generic_fn_instances[idx];
                                             check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
                                             expr_tables_for_write(program, module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
-                                            if (instance.return_types.size() > 1) {
-                                                return error(diag, v->location, "multi-value capture is not yet supported here");
-                                            }
-                                            return instance.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : instance.return_types.front();
+                                            return single_value_result(instance.return_types);
                                         }
                                         auto &resolved_fn = ensure_function_signature_resolved(*target_module, fn_name, program, diag);
                                         check_call_args(v->args, resolved_fn.params, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
-                                        if (resolved_fn.return_types.size() > 1) {
-                                            return error(diag, v->location, "multi-value capture is not yet supported here");
-                                        }
-                                        return resolved_fn.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : resolved_fn.return_types.front();
+                                        return single_value_result(resolved_fn.return_types);
                                     } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
                                         if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
                                         check_call_args(v->args, sym.params, sym.is_variadic, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type);
@@ -2935,10 +2979,7 @@ namespace sema {
                             }
                         }
                         if (auto trait_returns = try_trait_handle_dispatch(receiver_type, (*member_callee)->member, v->args, v.get(), locals, module_path, program, diag, v->location, loop_depth, defer_loop_base, fn_error_type)) {
-                            if (trait_returns->size() > 1) {
-                                return error(diag, v->location, "multi-value capture is not yet supported here");
-                            }
-                            return trait_returns->empty() ? ResolvedType{.kind = TypeKind::Void} : trait_returns->front();
+                            return single_value_result(*trait_returns);
                         }
                         const auto *method = find_method(receiver_type, (*member_callee)->member, program);
                         if (!method) {
@@ -2949,10 +2990,7 @@ namespace sema {
                                         if (field.type.kind == TypeKind::Function) {
                                             const auto &sig = fn_sig(field.type, program);
                                             check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type);
-                                            if (sig.return_types.size() > 1) {
-                                                return error(diag, v->location, "multi-value capture is not yet supported here");
-                                            }
-                                            return sig.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sig.return_types.front();
+                                            return single_value_result(sig.return_types);
                                         }
                                         break;
                                     }
@@ -2974,16 +3012,10 @@ namespace sema {
                             const auto &instance = *program.generic_fn_instances[*idx];
                             check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
                             expr_tables_for_write(program, module_path).expr_generic_fn_instance[get_expr_key(expr)] = *idx;
-                            if (instance.return_types.size() > 1) {
-                                return error(diag, v->location, "multi-value capture is not yet supported here");
-                            }
-                            return instance.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : instance.return_types.front();
+                            return single_value_result(instance.return_types);
                         }
                         check_call_args(v->args, method->param_types, false, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type, method->is_variadic, method_required_params(*method, program));
-                        if (method->return_types.size() > 1) {
-                            return error(diag, v->location, "multi-value capture is not yet supported here");
-                        }
-                        return method->return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : method->return_types.front();
+                        return single_value_result(method->return_types);
                     }
 
                     // General expression callee: evaluate, then call through if it's a function type
@@ -2992,10 +3024,7 @@ namespace sema {
                         if (callee_ty.kind == TypeKind::Function) {
                             const auto &sig = fn_sig(callee_ty, program);
                             check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, "<fn ptr>", loop_depth, defer_loop_base, fn_error_type);
-                            if (sig.return_types.size() > 1) {
-                                return error(diag, v->location, "multi-value capture is not yet supported here");
-                            }
-                            return sig.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sig.return_types.front();
+                            return single_value_result(sig.return_types);
                         }
                         return error(diag, v->location, "unsupported call target");
                     }
@@ -3007,10 +3036,7 @@ namespace sema {
                         if (local_ty.kind == TypeKind::Function) {
                             const auto &sig = fn_sig(local_ty, program);
                             check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
-                            if (sig.return_types.size() > 1) {
-                                return error(diag, v->location, "multi-value capture is not yet supported here");
-                            }
-                            return sig.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : sig.return_types.front();
+                            return single_value_result(sig.return_types);
                         }
                         return error(diag, v->location, std::format("'{}' is not callable", callee_ident->name));
                     }
@@ -3039,17 +3065,11 @@ namespace sema {
                                     const auto &instance = *program.generic_fn_instances[idx];
                                     check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
                                     expr_tables_for_write(program, module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
-                                    if (instance.return_types.size() > 1) {
-                                        return error(diag, v->location, "multi-value capture is not yet supported here");
-                                    }
-                                    return instance.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : instance.return_types.front();
+                                    return single_value_result(instance.return_types);
                                 }
                                 auto &resolved_fn = ensure_function_signature_resolved(module_path, callee_ident->name, program, diag);
                                 check_call_args(v->args, resolved_fn.params, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
-                                if (resolved_fn.return_types.size() > 1) {
-                                    return error(diag, v->location, "multi-value capture is not yet supported here");
-                                }
-                                return resolved_fn.return_types.empty() ? ResolvedType{.kind = TypeKind::Void} : resolved_fn.return_types.front();
+                                return single_value_result(resolved_fn.return_types);
                             } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
                                 check_call_args(v->args, sym.params, sym.is_variadic, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
                                 return sym.return_type.value_or(ResolvedType{.kind = TypeKind::Void});
@@ -4953,8 +4973,22 @@ namespace sema {
                     // Detect ignored errors from fallible calls
                     if (is_error_union_type(expr_ty, program) &&
                         !std::holds_alternative<std::unique_ptr<ast::TryExpr>>(v.expr)) {
-                        diag.report_error(DiagnosticStage::Sema, v.location,
-                            "error from fallible function call must be captured or propagated with 'try'");
+                        // A call to a '?error(...)' function is allowed to ignore it here —
+                        // that IS the feature — but the check still has to happen, so record
+                        // the omission for codegen. This is the only place a lone '?E' return
+                        // (a call with no other return values) can be dropped; in every value
+                        // context single_value_result keeps it, since there the error is the
+                        // expression's value. Gated on the node being a call: a bare 'e'
+                        // statement naming a '?error(...)' LOCAL has no call site to attach a
+                        // check to, so it keeps the diagnostic below.
+                        const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&v.expr);
+                        if (call && is_optional_error_union(expr_ty, program)) {
+                            expr_tables_for_write(program, module_path).call_dropped_optional_error[call->get()] =
+                                DroppedOptionalError{.error_type = expr_ty, .slot_index = 0};
+                        } else {
+                            diag.report_error(DiagnosticStage::Sema, v.location,
+                                "error from fallible function call must be captured or propagated with 'try'");
+                        }
                     }
 
                 } else if constexpr (std::is_same_v<V, ast::VarDeclStmt>) {
@@ -5034,6 +5068,17 @@ namespace sema {
                             diag.report_error(DiagnosticStage::Sema, v.location,
                                 "'try' cannot propagate errors out of a 'defer' body");
                         }
+                    }
+
+                    // One name short of the arity, with a '?error(...)' in the trailing slot:
+                    // the caller is dropping the ignorable error, so record it for codegen
+                    // rather than reporting an arity mismatch. Naming it — including naming
+                    // it '_' — takes this branch's 'else' and stays a silent discard, which
+                    // is the documented opt-out. 'try' already consumed the slot above.
+                    if (!is_try && returns.size() == v.names.size() + 1 && is_optional_error_union(returns.back(), program)) {
+                        expr_tables_for_write(program, module_path).call_dropped_optional_error[call] =
+                            DroppedOptionalError{.error_type = returns.back(), .slot_index = returns.size() - 1};
+                        returns.pop_back();
                     }
 
                     if (returns.size() != v.names.size()) {

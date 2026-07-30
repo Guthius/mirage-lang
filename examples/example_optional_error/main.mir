@@ -1,0 +1,87 @@
+// example_optional_error.mir — '?error(...)' return types: an error the caller may
+// leave unhandled. Dropping the trailing slot is legal in every single-value context;
+// codegen synthesizes the failure check the caller didn't write. Every call here
+// succeeds, so no check fires — see example_optional_error_panic for the failing side.
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+type Alloc_Error = enum {
+    Out_Of_Memory
+}
+
+// '?T' is sugar for '?error(T)'.
+fn alloc(size: usize) -> (anyptr, ?Alloc_Error) {
+    if size > 1024 {
+        return_err .Out_Of_Memory
+    }
+    return_ok nil
+}
+
+// Three return values, the last ignorable.
+fn measure() -> (i32, i32, ?Alloc_Error) {
+    return_ok 3, 4
+}
+
+// A lone '?error(...)' — nothing else to return.
+fn touch(size: usize) -> ?Alloc_Error {
+    if size > 1024 {
+        return_err .Out_Of_Memory
+    }
+    return_ok
+}
+
+fn identity(p: anyptr) -> anyptr {
+    return p
+}
+
+// 'return' position: the trailing error slot is dropped and checked here, in a
+// function that isn't fallible at all.
+fn forward() -> anyptr {
+    return alloc(8)
+}
+
+// A non-optional 'error(...)' return accepts a '?error(...)' value unchanged — the
+// '?' only ever describes an obligation at the CALL site, never the value itself.
+fn relay() -> error(Alloc_Error) {
+    const e := touch(16)
+    return e
+}
+
+pub fn main() {
+    // Statement position, with and without other return values.
+    touch(1)
+    alloc(16)
+
+    // Variable declaration: the error slot is dropped, 'p' is the anyptr.
+    const p := alloc(16)
+    printf("p is nil: %d\n", cast(p == nil, i32))
+
+    // Argument position.
+    printf("identity is nil: %d\n", cast(identity(alloc(32)) == nil, i32))
+
+    // Return position.
+    printf("forward is nil: %d\n", cast(forward() == nil, i32))
+
+    // Group declaration with one name fewer than the arity.
+    const w, h := measure()
+    printf("w=%d h=%d\n", w, h)
+
+    // Naming the slot — including naming it '_' — is the silent opt-out: no check is
+    // synthesized, so this FAILING call is genuinely ignored and the program carries on.
+    // As with any failed fallible call, the other return values are then undefined, which
+    // is precisely what opting out means.
+    const q, _ := alloc(4096)
+    printf("ignored a failure and kept going\n")
+
+    // A lone '?error(...)' in a VALUE context is still captured, not dropped: the error
+    // is the expression's value, so there would be nothing left to yield.
+    const e := touch(4096)
+    if e {
+        printf("touch reported a failure, as expected\n")
+    }
+
+    const e2 := relay()
+    if !e2 {
+        printf("relay succeeded\n")
+    }
+}

@@ -312,6 +312,78 @@ def main() -> int:
     client.notify("textDocument/didClose", {"textDocument": {"uri": reg_uri}})
     client.read()  # publishDiagnostics
 
+    # --- optional_error fixture: ignorable errors ('?error(...)'). The '?' introduces a
+    # new ast::Type alternative, and the LSP's own ast::Type printer ends in a
+    # non-exhaustive `else { return "<?>"; }` — a missed case degrades silently rather
+    # than failing to compile, so it is pinned here. Lines are located by searching for
+    # each declaration's name so the fixture can be reordered freely. ---
+    opt_main = FIXTURES / "optional_error_fixture" / "main.mir"
+    opt_uri = uri_for(opt_main)
+    opt_text = opt_main.read_text()
+    opt_lines = opt_text.splitlines()
+    client.notify("textDocument/didOpen", {
+        "textDocument": {"uri": opt_uri, "languageId": "mirage", "version": 1, "text": opt_text},
+    })
+    diag_msg = client.read()
+    check(diag_msg["params"]["diagnostics"] == [], "optional_error fixture compiles with no diagnostics")
+
+    def opt_pos(anchor: str, substr: str | None = None) -> tuple[int, int]:
+        """Line containing 'anchor'; column of 'substr' (default: 'anchor') within it."""
+        line_idx = next(i for i, line in enumerate(opt_lines) if anchor in line)
+        return line_idx, opt_lines[line_idx].index(substr if substr is not None else anchor)
+
+    def opt_hover(anchor: str, substr: str | None = None) -> str | None:
+        l, c = opt_pos(anchor, substr)
+        resp = client.request("textDocument/hover", {"textDocument": {"uri": opt_uri}, "position": {"line": l, "character": c}})
+        result = resp["result"]
+        return result["contents"]["value"] if result else None
+
+    # The marking must survive into hover text — a signature rendered without it would
+    # claim the caller has to handle an error the compiler lets them drop.
+    value = opt_hover("fn alloc_sugar", "alloc_sugar")
+    check(value is not None and "?error(Alloc_Error)" in value,
+          f"hover on a '?T'-returning fn shows '?error(...)', got {value!r}")
+
+    value = opt_hover("fn touch_explicit", "touch_explicit")
+    check(value is not None and "-> ?error(Alloc_Error)" in value,
+          f"hover on a lone '?error(...)' return shows the marking, got {value!r}")
+
+    # ...and must NOT leak onto the non-optional counterpart, which is the failure mode if
+    # the printer keyed off anything other than the union's own is_optional.
+    value = opt_hover("fn alloc_plain", "alloc_plain")
+    check(value is not None and "error(Alloc_Error)" in value and "?error" not in value,
+          f"hover on the non-optional counterpart shows no '?', got {value!r}")
+
+    value = opt_hover("pub type Allocator", "Allocator")
+    check(value is not None and "?error(Alloc_Error)" in value,
+          f"hover on a trait shows '?' on its method's return type, got {value!r}")
+
+    # Go-to-definition and hover must see THROUGH the '?' to the type it marks. The trait
+    # case is the one that matters: trait signatures resolve during layout_trait, before
+    # the enum it names has been laid out, so a shallow named-type resolution fails here
+    # while still working in the free function above.
+    for anchor, label in (("fn alloc_sugar", "free function"),
+                          ("fn alloc(self", "trait method"),
+                          ("type Alloc_Fn", "fn-pointer type")):
+        l, c = opt_pos(anchor, "?Alloc_Error")
+        pos = {"line": l, "character": c + 1}  # the identifier, just past the '?'
+        resp = client.request("textDocument/hover", {"textDocument": {"uri": opt_uri}, "position": pos})
+        value = resp["result"]["contents"]["value"] if resp["result"] else None
+        check(value is not None and "enum Alloc_Error" in value,
+              f"hover reaches the type inside '?Alloc_Error' in a {label}, got {value!r}")
+        resp = client.request("textDocument/definition", {"textDocument": {"uri": opt_uri}, "position": pos})
+        check(resp["result"] is not None,
+              f"go-to-definition reaches the type inside '?Alloc_Error' in a {label}")
+
+    # A dropped trailing error slot leaves the call yielding one value, so the local's
+    # hover must be that value's type — not a tuple, and not the error union.
+    value = opt_hover("const dropped", "dropped")
+    check(value is not None and "anyptr" in value and "error" not in value,
+          f"hover on a var bound from a dropped-error call shows the surviving value's type, got {value!r}")
+
+    client.notify("textDocument/didClose", {"textDocument": {"uri": opt_uri}})
+    client.read()  # publishDiagnostics
+
     # --- bad_import fixture: a failed import(...) must not cascade into
     # "unknown identifier" for every downstream qualified-name use ---
     bad_import_main = FIXTURES / "bad_import_fixture" / "main.mir"

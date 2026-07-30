@@ -194,3 +194,26 @@ Not bugs, but surprising, and currently only recorded in code comments:
   Upward traversal is how the corpus's own sibling-module imports work
   (`import("../../runtime/type_info")`), so constraining it would break working
   multi-directory projects — but there is no project-root boundary.
+
+---
+
+## 7. Editor tooling that lives outside this repo
+
+Zed's syntax highlighting comes from **[tree-sitter-mirage](https://github.com/Guthius/tree-sitter-mirage)**,
+pinned by commit SHA in `editors/zed/extension.toml`. It is a separate repository and is
+not checked out here, so a syntax change landed in this repo leaves it stale until a PR
+is opened there and the `rev` is bumped (see `editors/zed/README.md` § "Updating the
+grammar"). `editors/zed/languages/mirage/*.scm` are only *queries* against that grammar —
+they cannot introduce a node the grammar does not produce.
+
+VS Code is unaffected: its TextMate grammar (`editors/vscode/syntaxes/mirage.tmLanguage.json`)
+lives here and is updated in the same commit as the language change.
+
+Known stale, in landing order:
+
+- **`//` line comments and `/* */` block comments** (2026-07-27) replaced the old `#`
+  comment syntax.
+- **`?` on the last return type** (2026-07-30) marks an ignorable error —
+  `-> (anyptr, ?Allocator_Error)`. Needs a new optional-marker node on the grammar's
+  return-slot rule, then a query for it here. `highlights.scm` currently scopes a bare
+  `"?"` as `@operator` (the ternary), which is the right fallback until then.

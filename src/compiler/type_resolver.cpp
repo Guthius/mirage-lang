@@ -1304,8 +1304,10 @@ namespace sema {
             // in the usual one-field struct convention) — no inner union at all. 2+
             // members: Failed's payload is a second synthesized tagged union (one variant
             // per member type, named after that member type, in the same canonical order)
-            // whose own payload is, in turn, that member type.
-            auto synthesize_error_union(const std::string &module_path, const std::vector<ResolvedType> &sorted_members, const SourceLocation &location) -> UnionInfo {
+            // whose own payload is, in turn, that member type. 'is_optional' ('?error(...)')
+            // is recorded on the OUTER wrapper only — the inner dispatch union is an
+            // implementation detail nobody can name or call.
+            auto synthesize_error_union(const std::string &module_path, const std::vector<ResolvedType> &sorted_members, bool is_optional, const SourceLocation &location) -> UnionInfo {
                 static constexpr uint32_t TAG_SIZE = 4;
                 static constexpr uint32_t TAG_ALIGN = 4;
 
@@ -1353,6 +1355,7 @@ namespace sema {
                 outer.is_tagged = true;
                 outer.is_error_union = true;
                 outer.error_member_types = sorted_members;
+                outer.is_optional = is_optional;
 
                 TaggedUnionVariant ok_variant;
                 ok_variant.name = "Ok";
@@ -1383,10 +1386,11 @@ namespace sema {
             }
 
             // Interns a (possibly newly-synthesized) error union by the SET of its member
-            // types — 'error(A|B)' and 'error(B|A)' intern to the same union. Duplicate
-            // members are rejected on the original, unsorted list so the diagnostic
-            // reflects the user's actual spelling.
-            auto intern_error_union(const std::string &module_path, const std::vector<ResolvedType> &members, const SourceLocation &location) -> ResolvedType {
+            // types plus its '?' marking — 'error(A|B)' and 'error(B|A)' intern to the same
+            // union, but 'error(A)' and '?error(A)' deliberately do NOT (see
+            // UnionInfo::is_optional). Duplicate members are rejected on the original,
+            // unsorted list so the diagnostic reflects the user's actual spelling.
+            auto intern_error_union(const std::string &module_path, const std::vector<ResolvedType> &members, bool is_optional, const SourceLocation &location) -> ResolvedType {
                 for (size_t i = 0; i < members.size(); ++i) {
                     for (size_t j = i + 1; j < members.size(); ++j) {
                         if (members[i] == members[j]) {
@@ -1411,16 +1415,17 @@ namespace sema {
                 const auto duplicates = std::ranges::unique(sorted_members);
                 sorted_members.erase(duplicates.begin(), duplicates.end());
 
-                for (const auto &[key, index] : program.error_unions) {
-                    if (key == sorted_members) {
+                const Program::ErrorUnionKey key{.members = sorted_members, .is_optional = is_optional};
+                for (const auto &[existing, index] : program.error_unions) {
+                    if (existing == key) {
                         return ResolvedType{.kind = TypeKind::Union, .union_index = index};
                     }
                 }
 
                 const int slot = static_cast<int>(program.unions.size());
                 program.unions.push_back(UnionInfo{});
-                program.unions[slot] = synthesize_error_union(module_path, sorted_members, location);
-                program.error_unions.emplace_back(sorted_members, slot);
+                program.unions[slot] = synthesize_error_union(module_path, sorted_members, is_optional, location);
+                program.error_unions.emplace_back(key, slot);
                 return ResolvedType{.kind = TypeKind::Union, .union_index = slot};
             }
 
@@ -1443,7 +1448,53 @@ namespace sema {
                     members.push_back(resolved);
                 }
 
-                return intern_error_union(module_path, members, decl.location);
+                return intern_error_union(module_path, members, /*is_optional=*/false, decl.location);
+            }
+
+            // '?E' — the same error type as 'error(E)' but marked ignorable, so a caller may
+            // drop it and let codegen synthesize the failure check (see sema's
+            // call_dropped_optional_error). Three spellings resolve here:
+            //
+            //   ?error(A | B)  — inner is an ErrorType; re-intern its member set as optional
+            //   ?Alias         — inner names a 'type Alias = error(A | B)'; same treatment
+            //   ?E             — inner names a bare enum(i32)/union(enum); sugar for '?error(E)'
+            //
+            // Re-interning through the member LIST (rather than flipping a flag on the
+            // resolved union) is what keeps '?error(A|B)' and 'error(A|B)' two distinct
+            // interned unions instead of one mutated one.
+            auto resolve_optional_error_type(const ast::OptionalErrorType &decl, const std::string &module_path) -> ResolvedType {
+                // A NAMED inner has to go through the full resolution path, exactly like
+                // resolve_error_type's members do: is_valid_error_member reads an enum's
+                // underlying_type, which only exists once layout_enum has run, and the shallow
+                // resolution resolve_type_impl uses for a NamedType does not force that. The
+                // difference is invisible for a free function (whose signature is resolved late
+                // enough that the enum is already laid out) but not for a trait method, which
+                // is resolved during layout_trait.
+                ResolvedType inner;
+                if (const auto *named = std::get_if<ast::NamedType>(&decl.inner)) {
+                    const auto target = walk_namespace_chain(module_path, *named, program, diag, ast_program);
+                    if (!target) return ResolvedType{.kind = TypeKind::Invalid};
+                    inner = resolve_final_full(target->module_path, target->name, target->crossed_boundary, target->location);
+                } else {
+                    inner = resolve_type_impl(decl.inner, module_path);
+                }
+                if (inner.kind == TypeKind::Invalid) return inner;
+
+                if (inner.kind == TypeKind::Union) {
+                    if (const auto *info = program.union_at(inner.union_index); info && info->is_error_union) {
+                        if (info->is_optional) return inner;
+                        return intern_error_union(module_path, info->error_member_types, /*is_optional=*/true, decl.location);
+                    }
+                }
+
+                if (!is_valid_error_member(inner)) {
+                    diag.report_error(DiagnosticStage::Sema, decl.location,
+                        std::format("'?' requires an error type; expected 'error(...)', an 'enum(i32)', a 'union(enum)', or a type alias to one, got '{}'",
+                                    describe_type(inner, program)));
+                    return ResolvedType{.kind = TypeKind::Invalid};
+                }
+
+                return intern_error_union(module_path, {inner}, /*is_optional=*/true, decl.location);
             }
 
             // Resolves each trait method's non-self param/return types, in declaration
@@ -1678,6 +1729,8 @@ namespace sema {
                             return error(diag, v->location, "trait types must be declared via 'type Name = trait { ... }'; anonymous trait types are not supported");
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ErrorType>>) {
                             return resolve_error_type(*v, module_path);
+                        } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionalErrorType>>) {
+                            return resolve_optional_error_type(*v, module_path);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BitsetType>>) {
                             const int slot = static_cast<int>(program.bitsets.size());
                             program.bitsets.push_back(BitsetInfo{});
@@ -1685,7 +1738,7 @@ namespace sema {
                             return ResolvedType{.kind = TypeKind::Bitset, .bitset_index = slot};
                         } else {
                             // Exhaustiveness guard, matching walk_expr_for_foreign_refs in
-                            // sema_attributes.cpp. All 13 ast::Type alternatives are handled
+                            // sema_attributes.cpp. All 14 ast::Type alternatives are handled
                             // above; a 14th added later would previously have fallen in here and
                             // silently resolved to Invalid, surfacing as a confusing "unknown
                             // type" much further along. Now it is a compile error at the site

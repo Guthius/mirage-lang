@@ -154,6 +154,19 @@ namespace sema {
             if (!is_void_or_error_return(fn.return_types, program)) {
                 diag.report_error(DiagnosticStage::Sema, attr.location, "'@init' functions must return nothing or 'error(...)'");
             }
+            // '?error(...)' resolves to a perfectly ordinary error union, so it passes the check
+            // above — but an '@init' function has no caller that could drop anything: the
+            // synthesized initializer runner inspects the result itself and terminates the
+            // process on failure regardless. Accept it, but say that it buys nothing, since the
+            // opposite expectation is otherwise invisible.
+            if (!fn.return_types.empty()) {
+                const auto *info = fn.return_types.back().kind == TypeKind::Union
+                    ? program.union_at(fn.return_types.back().union_index) : nullptr;
+                if (info != nullptr && info->is_error_union && info->is_optional) {
+                    diag.warn(DiagnosticStage::Sema, attr.location,
+                        "'?' has no effect on an '@init' function; the initializer runner terminates the process on failure regardless");
+                }
+            }
         }
     }
 

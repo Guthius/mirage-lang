@@ -1,0 +1,25 @@
+// example_optional_error_trait_mismatch.mir — because '?' is modelled as type identity,
+// '?error(E)' and 'error(E)' are two different types, so an impl that drops (or adds) the
+// marker fails the ordinary trait signature check. No special-case code makes this work.
+
+type Alloc_Error = enum {
+    Out_Of_Memory
+}
+
+pub type Allocator = trait {
+    fn alloc(self, size: usize) -> (anyptr, ?Alloc_Error)
+}
+
+type Heap = struct {
+    used: usize
+}
+
+impl Allocator for Heap {
+    // Declared non-optional where the trait says '?' — signature mismatch.
+    fn alloc(self, size: usize) -> (anyptr, error(Alloc_Error)) {
+        return_ok nil
+    }
+}
+
+pub fn main() {
+}

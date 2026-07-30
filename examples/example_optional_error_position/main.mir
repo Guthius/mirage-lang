@@ -1,0 +1,20 @@
+// example_optional_error_position.mir — '?' is a property of a function's return
+// contract, not of a type. It is rejected in every other type position: parameters,
+// variable annotations, struct fields, and type aliases.
+
+type E = enum {
+    Nope
+}
+
+fn in_param(p: ?E) {
+}
+
+type Alias = ?E
+
+type Holder = struct {
+    field: ?E
+}
+
+pub fn main() {
+    mut local: ?E = default
+}

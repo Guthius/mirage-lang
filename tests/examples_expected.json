@@ -478,6 +478,42 @@
     "action": "build",
     "exit": 1
   },
+  "example_optional_error": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_optional_error_alias": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_optional_error_fnptr": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_optional_error_non_error": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_optional_error_not_last": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_optional_error_panic": {
+    "action": "run",
+    "exit": 101
+  },
+  "example_optional_error_position": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_optional_error_trait": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_optional_error_trait_mismatch": {
+    "action": "build",
+    "exit": 1
+  },
   "example_parse_operator_location": {
     "action": "build",
     "exit": 1
@@ -672,7 +708,8 @@
   },
   "lexer": {
     "action": "emit-ir",
-    "exit": 0
+    "exit": 0,
+    "timeout": 5
   },
   "mem": {
     "action": "emit-ir",

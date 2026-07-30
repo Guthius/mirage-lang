@@ -1,0 +1,14 @@
+// example_optional_error_not_last.mir — '?' marks an error the CALLER may leave
+// unhandled, which is only meaningful for the trailing return slot (the one a call site
+// can drop). Anywhere else in the return list it is a parse error.
+
+type E = enum {
+    Nope
+}
+
+fn bad() -> (?E, i32) {
+    return_ok 1
+}
+
+pub fn main() {
+}

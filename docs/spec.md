@@ -1077,6 +1077,9 @@ fn binary_search(base: anyptr, elem_count: usize, elem_size: usize, key: anyptr)
   It does **not** create an implicit binding — `return` still requires explicit values
   (`return 0, false`), exactly as with unnamed return types. Naming is independent per
   entry, so a multi-return list may mix named and unnamed entries.
+- **Ignorable errors**: the LAST return type may be prefixed with `?` to mark a fallible
+  function's error as one callers need not handle — `-> (anyptr, ?Allocator_Error)`. See
+  [Ignorable Errors](#ignorable-errors-). `?` is a parse error on any other return slot.
 
 ### Default Parameter Values
 
@@ -2088,6 +2091,85 @@ const ptr := try alloc(n)     // ok: propagated
 const ptr, err := alloc(n)    // ok: captured
 ```
 
+Unless the error is marked ignorable — see below.
+
+### Ignorable Errors (`?`)
+
+Prefixing a function's **last** return type with `?` marks its error as
+ignorable: callers may leave it unhandled, and the compiler synthesizes
+the check they didn't write.
+
+```mirage
+pub type Allocator = trait {
+    fn alloc(self, size: usize, zero_memory := true) -> (anyptr, ?Allocator_Error)
+    fn realloc(self, ptr: anyptr, size: usize) -> (anyptr, ?Allocator_Error)
+    fn free(self, ptr: anyptr)
+}
+```
+
+`?T` where `T` is an `enum(i32)` or `union(enum)` is sugar for
+`?error(T)`. The explicit form `?error(A | B)` and an alias to an
+existing error type (`?SomeIoError`) work too.
+
+`?` is legal **only** on a function's last return type — the one a call
+site can drop. It is a parse error in any other return slot and in every
+other type position (parameters, fields, variable annotations, aliases),
+and a sema error on a non-error type. It applies to free functions,
+`impl` methods, trait methods, and function-pointer types.
+
+When a call site leaves an ignorable error unbound, the compiler emits a
+check on it. On failure the program panics — writing the failing
+variant's name and the call's source location to stderr — and exits with
+status `101`:
+
+```
+panic: unhandled Allocator_Error.Out_Of_Memory at main.mir:3:23
+```
+
+The slot may be dropped in any single-value context, and in a group
+declaration written one name short of the arity:
+
+```mirage
+allocator.alloc(n)                 // ok: statement, both values dropped
+const ptr := allocator.alloc(n)    // ok: error dropped, checked
+foo(allocator.alloc(n))            // ok: argument position
+return allocator.alloc(n)          // ok: return position
+const w, h := measure()            // ok: measure() -> (i32, i32, ?E)
+```
+
+Naming the slot — **including naming it `_`** — is the deliberate opt-out
+and synthesizes no check:
+
+```mirage
+const ptr, _ := allocator.alloc(n)    // silently ignored, no check
+const ptr, err := allocator.alloc(n)  // handled explicitly, as usual
+const ptr := try allocator.alloc(n)   // propagated, as usual
+```
+
+A function whose *only* return value is `?error(...)` still yields that
+error in a value context — there would be nothing else to yield — so the
+drop applies to it only in statement position:
+
+```mirage
+touch(n)                 // ok: statement, dropped and checked
+const e := touch(n)      // captured, exactly like a non-optional error
+```
+
+`?` is part of the type, not of the signature. `error(E)` and
+`?error(E)` are therefore **distinct types**: an `impl` must match its
+trait's marking, and two function-pointer types differing only in `?` are
+different types. Because they hold identical values, though, assignment
+between them is free in both directions, and everything about handling an
+error already in hand — `try`, `return_err`, `match`/`switch`, boolean
+coercion, the subset rule — ignores the marker entirely. A value inferred
+from a `?`-returning function carries the marking (`const e := touch(n)`
+has type `?error(E)`), and reflection reports it as
+`Type_Info.Error_Type.is_optional`.
+
+`?` on `main` or on an `@init` function is accepted but has no effect:
+neither has a caller that could drop anything, and both already terminate
+the process on failure.
+
 ### Internal Representation
 
 The compiler generates a tagged union for every distinct `error(...)`
@@ -2099,6 +2181,12 @@ payload is itself a second tagged union dispatching on which member type
 occurred. This generated type is never user-nameable and has no
 user-accessible fields — all interaction goes through boolean coercion,
 `return_ok`/`return_err`, `try`, and `match`/`switch`, described below.
+
+Distinct spellings of the same member set share one generated type, but
+the `?` marking is part of that identity: a program using both
+`error(A | B)` and `?error(A | B)` generates two of them. They are
+byte-identical, so a value of one is used as a value of the other with no
+conversion.
 
 ### Boolean Coercion
 

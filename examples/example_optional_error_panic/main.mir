@@ -1,0 +1,29 @@
+// example_optional_error_panic.mir — the failing side of '?error(...)'. Dropping the
+// trailing slot of a call that FAILS panics with the error's variant name and the call
+// site, then exits 101. Expected to die; see tests/error_optional_test.py for the
+// asserted message.
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+type Alloc_Error = enum {
+    Out_Of_Memory
+    Bad_Alignment
+}
+
+fn alloc(size: usize) -> (anyptr, ?Alloc_Error) {
+    if size > 1024 {
+        return_err .Out_Of_Memory
+    }
+    return_ok nil
+}
+
+pub fn main() {
+    const small := alloc(16)
+    printf("small alloc survived\n")
+
+    // Fails. No handler, so the synthesized check panics:
+    //   panic: unhandled Alloc_Error.Out_Of_Memory at main.mir:<line>:<col>
+    const big := alloc(4096)
+
+    printf("unreachable\n")
+}

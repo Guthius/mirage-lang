@@ -145,5 +145,6 @@ pub type Type_Info = union(enum) {
 
     Error_Type: struct {
         members: []anyptr
+        is_optional: bool
     }
 }

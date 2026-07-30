@@ -138,6 +138,24 @@
 <span class="cmt">// Or propagate with try (enclosing fn must return a compatible error(...))</span>
 <span class="kw">const</span> <span class="var">val</span>: <span class="ty">i32</span> = <span class="kw">try</span> <span class="fn">divide</span>(<span class="num">10</span>, <span class="num">2</span>)</code></pre>
 
+      <h3>Ignorable Errors (<code>?</code>)</h3>
+      <p>
+        The <strong>last</strong> return type may be prefixed with <code>?</code> to mark the error
+        as one callers need not handle. Dropping it at a call site is then legal, and the compiler
+        synthesizes a check that panics on failure. <code>?T</code> is sugar for
+        <code>?error(T)</code>.
+      </p>
+      <pre><code><span class="kw">fn</span> <span class="fn">alloc</span>(<span class="var">size</span>: <span class="ty">usize</span>) -&gt; (<span class="ty">anyptr</span>, ?<span class="ty">Allocator_Error</span>) { <span class="cmt">/* ... */</span> }
+
+<span class="kw">const</span> <span class="var">ptr</span> := <span class="fn">alloc</span>(<span class="num">1024</span>)      <span class="cmt">// error dropped; panics if it failed</span>
+<span class="kw">const</span> <span class="var">ptr</span>, <span class="var">_</span> := <span class="fn">alloc</span>(<span class="num">1024</span>)   <span class="cmt">// silent opt-out: no check at all</span>
+<span class="kw">const</span> <span class="var">ptr</span>, <span class="var">err</span> := <span class="fn">alloc</span>(<span class="num">1024</span>) <span class="cmt">// handled explicitly, as usual</span></code></pre>
+      <p>
+        <code>?</code> is legal only on the last return type and only in return position — including
+        in function-pointer types (<code>fn(usize) -&gt; ?E</code>) and trait methods. See
+        <a href="error-handling.html#ignorable-errors">Ignorable Errors</a>.
+      </p>
+
       <p>See <a href="error-handling.html">Error Handling</a> for the full <code>error(...)</code> system: <code>return_ok</code>/<code>return_err</code>, <code>try</code>, and typestate checking.</p>
 
       <h2>Native Variadic Parameters</h2>
