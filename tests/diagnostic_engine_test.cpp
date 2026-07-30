@@ -30,7 +30,13 @@ namespace {
     }
 
     // Reports one diagnostic and returns everything print_diagnostic wrote to stderr.
+    //
+    // Colour is pinned off: redirecting std::cerr's buffer leaves fd 2 alone, so the
+    // printer's isatty check would otherwise report the real terminal and these
+    // expectations would depend on whether the suite was run from a shell or a pipe.
     auto render(const std::string &line, const SourceLocation &location) -> std::string {
+        DiagnosticEngine::set_color_enabled(false);
+
         SourceManager source_manager;
         source_manager.set_source("<test>", line);
         DiagnosticEngine diagnostics(source_manager);
@@ -84,7 +90,8 @@ namespace {
     void test_normal_diagnostic_still_correct() {
         const auto output = render("let x = 1", location_at(1, 5, 1));
         check(output.find("let x = 1") != std::string::npos, "normal diagnostic shows source line");
-        check(output.find("    \033[1;32m^") != std::string::npos,
+        // Two-space line prefix + four columns of padding.
+        check(output.find("\n      ^") != std::string::npos,
               "normal diagnostic puts the caret under column 5");
     }
 
@@ -110,8 +117,40 @@ namespace {
     // editor; that behavior predates the bound check and must survive it.
     void test_tab_padding_preserved() {
         const auto output = render("\t\tx", location_at(1, 3, 1));
-        check(output.find("  \t\t\033[1;32m^") != std::string::npos,
+        check(output.find("  \t\t^") != std::string::npos,
               "tabs before the caret column are preserved");
+    }
+
+    // The level label must be plain text when colour is off. Escapes used to be emitted
+    // unconditionally, which meant nothing consuming the compiler's stderr could match on
+    // "error:" -- the corpus harness pinned first diagnostics for 185 fixtures and every
+    // one of those matches silently failed.
+    void test_uncolored_output_has_no_escapes() {
+        const auto output = render("let x = 1", location_at(1, 5, 1));
+        check(output.find('\033') == std::string::npos, "colour-off output contains no escapes");
+        check(output.find("error: test diagnostic") != std::string::npos,
+              "colour-off output has a plain 'error:' label");
+    }
+
+    // And the colour path still works when it is on.
+    void test_colored_output_wraps_the_label() {
+        SourceManager source_manager;
+        source_manager.set_source("<test>", "let x = 1");
+        DiagnosticEngine diagnostics(source_manager);
+        DiagnosticEngine::set_color_enabled(true);
+
+        std::ostringstream captured;
+        auto *previous = std::cerr.rdbuf(captured.rdbuf());
+        diagnostics.report_error(DiagnosticStage::Lexer, location_at(1, 5, 1), "test diagnostic");
+        std::cerr.rdbuf(previous);
+
+        const auto output = captured.str();
+        DiagnosticEngine::set_color_enabled(false);
+
+        check(output.find("\033[1;31merror\033[0m: ") != std::string::npos,
+              "colour-on output wraps the error label");
+        check(output.find("\033[1;32m^") != std::string::npos,
+              "colour-on output wraps the caret");
     }
 }
 
@@ -123,6 +162,8 @@ auto main() -> int {
     test_normal_diagnostic_still_correct();
     test_crlf_line_excludes_carriage_return();
     test_tab_padding_preserved();
+    test_uncolored_output_has_no_escapes();
+    test_colored_output_wraps_the_label();
 
     if (failures > 0) {
         std::fprintf(stderr, "%d diagnostic engine test(s) failed\n", failures);

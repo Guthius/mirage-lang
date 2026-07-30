@@ -9,19 +9,23 @@
   },
   "dictionary": {
     "action": "emit-ir",
+    "diag": "examples/dictionary/main.mir:7:15: error: expected '=', got '('",
     "exit": 1,
     "known_broken": "pre-existing on master: main.mir:7 uses the pre-'[]' paren-generics syntax 'type entry(K: type, V: type)', replaced by 'type entry[K: type, V: type]' when generics landed 2026-07-29"
   },
   "example_any_bad_cast": {
     "action": "build",
+    "diag": "examples/example_any_bad_cast/main.mir:8:20: error: 'any' may only be cast to a pointer type or 'anyptr'.",
     "exit": 1
   },
   "example_any_no_fields": {
     "action": "build",
+    "diag": "examples/example_any_no_fields/main.mir:7:17: error: 'any' has no field 'id'",
     "exit": 1
   },
   "example_any_non_addressable": {
     "action": "build",
+    "diag": "examples/example_any_non_addressable/main.mir:5:20: error: cannot coerce non-addressable value to 'any'; bind it to a variable first.",
     "exit": 1
   },
   "example_array_init": {
@@ -34,6 +38,7 @@
   },
   "example_asm_expr_cannot_infer": {
     "action": "build",
+    "diag": "examples/example_asm_expr_cannot_infer/main.mir:10:5: error: cannot infer result type for 'asm -> eax'; add an explicit type annotation: 'asm -> eax: i32 { ... }' or annotate the variable receiving the result.",
     "exit": 1
   },
   "example_asm_expr_mixed_output": {
@@ -46,10 +51,12 @@
   },
   "example_asm_expr_sse_register": {
     "action": "build",
+    "diag": "examples/example_asm_expr_sse_register/main.mir:10:25: error: register 'xmm0' is not supported in inline asm (v1)",
     "exit": 1
   },
   "example_asm_expr_unknown_register": {
     "action": "build",
+    "diag": "examples/example_asm_expr_unknown_register/main.mir:10:25: error: expected a register name after 'asm ->'",
     "exit": 1
   },
   "example_asm_expr_width_mismatch": {
@@ -58,14 +65,17 @@
   },
   "example_asm_high_byte_register": {
     "action": "build",
+    "diag": "examples/example_asm_high_byte_register/main.mir:17:13: error: register 'ah' is not supported in inline asm (v1)",
     "exit": 1
   },
   "example_asm_memory_operand": {
     "action": "build",
+    "diag": "examples/example_asm_memory_operand/main.mir:14:22: error: unexpected character '+' in asm block",
     "exit": 1
   },
   "example_asm_module_scope": {
     "action": "build",
+    "diag": "examples/example_asm_module_scope/main.mir:9:6: error: asm blocks are only legal inside function bodies",
     "exit": 1
   },
   "example_asm_movzx": {
@@ -74,14 +84,17 @@
   },
   "example_asm_movzx_bad_src_width": {
     "action": "build",
+    "diag": "examples/example_asm_movzx_bad_src_width/main.mir:16:9: error: 'movzx' source must be 8 or 16 bits (got 32 bits) \u2014 there is no 'movzx' encoding for a 32-bit or 64-bit source; use 'mov' instead, which already zero-extends automatically when writing a 32-bit register",
     "exit": 1
   },
   "example_asm_sse_register": {
     "action": "build",
+    "diag": "examples/example_asm_sse_register/main.mir:14:18: error: register 'xmm0' is not supported in inline asm (v1)",
     "exit": 1
   },
   "example_asm_struct_operand": {
     "action": "build",
+    "diag": "examples/example_asm_struct_operand/main.mir:16:18: error: asm operand 'p' has type 'Point', but only scalar and pointer types are supported in asm operands",
     "exit": 1
   },
   "example_asm_syscall": {
@@ -94,6 +107,7 @@
   },
   "example_asm_unknown_var": {
     "action": "build",
+    "diag": "examples/example_asm_unknown_var/main.mir:10:18: error: unknown identifier 'unknown_name' in asm block.",
     "exit": 1
   },
   "example_asm_width_mismatch": {
@@ -110,14 +124,17 @@
   },
   "example_attr_conflict_init_no_return": {
     "action": "build",
+    "diag": "examples/example_attr_conflict_init_no_return/main.mir:9:3: error: '@init' and '@no_return' cannot be combined: an initializer must return control so the next one can run",
     "exit": 1
   },
   "example_attr_grouped_with_args": {
     "action": "build",
+    "diag": "examples/example_attr_grouped_with_args/main.mir:15:17: error: a grouped attribute ('@(...)') cannot take arguments; use the single '@name(args)' form instead",
     "exit": 1
   },
   "example_attr_init_bad_return": {
     "action": "build",
+    "diag": "examples/example_attr_init_bad_return/main.mir:7:1: error: '@init' functions must return nothing or 'error(...)'",
     "exit": 1
   },
   "example_attr_init_basic": {
@@ -126,6 +143,7 @@
   },
   "example_attr_init_cycle": {
     "action": "build",
+    "diag": "examples/example_attr_init_cycle/main.mir:17:6: error: circular '@init' dependency: module 'examples/example_attr_init_cycle' requires module 'examples/example_attr_init_cycle/b' to initialize first, but 'examples/example_attr_init_cycle/b' also (transitively) requires 'examples/example_attr_init_cycle' to initialize first",
     "exit": 1
   },
   "example_attr_init_error_return": {
@@ -134,14 +152,17 @@
   },
   "example_attr_init_generic": {
     "action": "build",
+    "diag": "examples/example_attr_init_generic/main.mir:14:1: error: '@init' is not allowed on a generic function",
     "exit": 1
   },
   "example_attr_init_on_method": {
     "action": "build",
+    "diag": "examples/example_attr_init_on_method/main.mir:12:5: error: '@init' is not allowed on impl methods; declare a module-scope function instead",
     "exit": 1
   },
   "example_attr_init_params": {
     "action": "build",
+    "diag": "examples/example_attr_init_params/main.mir:6:1: error: '@init' functions may not take parameters",
     "exit": 1
   },
   "example_attr_init_private": {
@@ -154,14 +175,17 @@
   },
   "example_attr_naked_always_inline_method": {
     "action": "build",
+    "diag": "examples/example_attr_naked_always_inline_method/main.mir:13:7: error: '@naked' and '@always_inline' cannot be combined: a naked function has no body to inline",
     "exit": 1
   },
   "example_attr_naked_method": {
     "action": "build",
+    "diag": ":1:1: error: LLVM module verification failed",
     "exit": 1
   },
   "example_attr_naked_method_non_asm_body": {
     "action": "build",
+    "diag": ":1:1: error: LLVM module verification failed",
     "exit": 1
   },
   "example_attr_naked_non_asm_body": {
@@ -178,6 +202,7 @@
   },
   "example_attr_section_empty": {
     "action": "build",
+    "diag": "examples/example_attr_section_empty/main.mir:7:1: error: '@section' argument must not be an empty string",
     "exit": 1
   },
   "example_attr_section_method": {
@@ -186,6 +211,7 @@
   },
   "example_attr_section_method_empty": {
     "action": "build",
+    "diag": "examples/example_attr_section_method_empty/main.mir:13:5: error: '@section' argument must not be an empty string",
     "exit": 1
   },
   "example_attr_section_trait_method": {
@@ -194,6 +220,7 @@
   },
   "example_attr_unknown": {
     "action": "build",
+    "diag": "examples/example_attr_unknown/main.mir:9:1: error: unknown attribute '@frobulate'. Known attributes: no_return, naked, always_inline, section, init.",
     "exit": 1
   },
   "example_bare_import_default_param": {
@@ -206,6 +233,7 @@
   },
   "example_const_fold_overflow": {
     "action": "build",
+    "diag": "examples/example_const_fold_overflow/main.mir:23:9: error: match arm pattern could not be folded to an integer constant (an overflowing division, a shift of 64 or more, or an expression this position cannot evaluate)",
     "exit": 1
   },
   "example_const_union_variant": {
@@ -218,14 +246,17 @@
   },
   "example_default_params_ext_fn": {
     "action": "build",
+    "diag": "examples/example_default_params_ext_fn/main.mir:8:12: error: 'ext fn' declarations may not have default parameter values. Default arguments have no C ABI representation.",
     "exit": 1
   },
   "example_default_params_fnptr_arity": {
     "action": "build",
+    "diag": "examples/example_default_params_fnptr_arity/main.mir:16:14: error: 'fp' expects 2 argument(s), got 1",
     "exit": 1
   },
   "example_default_params_ordering_violation": {
     "action": "build",
+    "diag": "examples/example_default_params_ordering_violation/main.mir:9:18: error: parameter 'b' has no default value but follows parameter 'a' which does. All parameters after the first defaulted parameter must also have defaults.",
     "exit": 1
   },
   "example_default_params_runtime_once": {
@@ -238,26 +269,32 @@
   },
   "example_default_params_trait_extra": {
     "action": "build",
+    "diag": "examples/example_default_params_trait_extra/main.mir:20:20: error: parameter 'loud' in 'Bot.greet' declares a default value but the corresponding trait method 'Greeter.greet' does not. Defaults on trait implementations must match the trait declaration.",
     "exit": 1
   },
   "example_default_params_trait_redeclare": {
     "action": "build",
+    "diag": "examples/example_default_params_trait_redeclare/main.mir:19:20: error: parameter 'loud' in 'Bot.greet' redeclares a default value already declared by the trait 'Greeter'. Remove the default from the implementation \u2014 it is inherited from the trait.",
     "exit": 1
   },
   "example_default_params_try_rejected": {
     "action": "build",
+    "diag": "examples/example_default_params_try_rejected/main.mir:19:19: error: enclosing function must return 'error(...)' to use 'try'",
     "exit": 1
   },
   "example_default_params_type_mismatch": {
     "action": "build",
+    "diag": "examples/example_default_params_type_mismatch/main.mir:8:6: error: default value for parameter 'x' has type 'i32' but parameter is declared as 'bool'",
     "exit": 1
   },
   "example_default_params_variadic_conflict": {
     "action": "build",
+    "diag": "examples/example_default_params_variadic_conflict/main.mir:10:6: error: a parameter list cannot mix a native variadic parameter with default parameter values",
     "exit": 1
   },
   "example_default_undefined": {
     "action": "build",
+    "diag": "examples/example_default_undefined/main.mir:24:22: error: unknown identifier 'x'",
     "exit": 1,
     "known_broken": "pre-existing on master: main.mir:24 writes '{ x = 5, y = default }' without the leading dots the current braced-initializer syntax requires ('{.x = 5, .y = default}')"
   },
@@ -267,6 +304,7 @@
   },
   "example_enum": {
     "action": "build",
+    "diag": "examples/example_enum/main.mir:1:13: error: cannot resolve import path 'example_enum_def' from 'examples/example_enum'",
     "exit": 1,
     "known_broken": "pre-existing on master: import(\"example_enum_def\") cannot resolve \u2014 the target is a sibling of examples/example_enum, not a subdirectory of it"
   },
@@ -276,10 +314,12 @@
   },
   "example_env_invalid_enum": {
     "action": "build",
+    "diag": "examples/example_env_invalid_enum/main.mir:17:15: error: required environment variable 'MIRAGE_OS_CHOICE' was not set.",
     "exit": 1
   },
   "example_env_missing_required": {
     "action": "build",
+    "diag": "examples/example_env_missing_required/main.mir:9:12: error: required environment variable 'MIRAGE_REQUIRED_THING' was not set.",
     "exit": 1
   },
   "example_error_typestate": {
@@ -320,6 +360,7 @@
   },
   "example_fnptr_bad_context": {
     "action": "build",
+    "diag": "examples/example_fnptr_bad_context/main.mir:27:19: error: arithmetic is not allowed on function pointer types",
     "exit": 1
   },
   "example_fnptr_inferred": {
@@ -328,6 +369,7 @@
   },
   "example_generics_bad_param_type": {
     "action": "build",
+    "diag": "examples/example_generics_bad_param_type/main.mir:26:14: error: generic parameter 'E' is bound by 'Color', which is not a trait; a bound must name a trait",
     "exit": 1
   },
   "example_generics_bare_import": {
@@ -340,18 +382,22 @@
   },
   "example_generics_bound_arith_rejected": {
     "action": "build",
+    "diag": "examples/example_generics_bound_arith_rejected/main.mir:18:14: error: cannot apply arithmetic to a generic parameter bound by 'Hashable'; the bound grants only its own methods plus assignment, '==' and '!='",
     "exit": 1
   },
   "example_generics_bound_method_missing": {
     "action": "build",
+    "diag": "examples/example_generics_bound_method_missing/main.mir:17:18: error: no method 'size' on a generic parameter bound by 'Hashable'; the bound declares 'hash'",
     "exit": 1
   },
   "example_generics_bound_not_a_trait": {
     "action": "build",
+    "diag": "examples/example_generics_bound_not_a_trait/main.mir:14:13: error: generic parameter 'T' is bound by 'Point', which is not a trait; a bound must name a trait",
     "exit": 1
   },
   "example_generics_bound_not_impl": {
     "action": "build",
+    "diag": "examples/example_generics_bound_not_impl/main.mir:22:26: error: 'Plain' does not implement trait 'Hashable', required by generic parameter 'T'",
     "exit": 1
   },
   "example_generics_bound_ok": {
@@ -380,6 +426,7 @@
   },
   "example_generics_eager_impl_method": {
     "action": "build",
+    "diag": "examples/example_generics_eager_impl_method/main.mir:20:23: error: unknown function 'missing_helper'",
     "exit": 1
   },
   "example_generics_eager_unbound_ok": {
@@ -388,18 +435,22 @@
   },
   "example_generics_eager_unknown_call": {
     "action": "build",
+    "diag": "examples/example_generics_eager_unknown_call/main.mir:14:23: error: unknown function 'nonexistent_helper'",
     "exit": 1
   },
   "example_generics_fn_value_missing_args": {
     "action": "build",
+    "diag": "examples/example_generics_fn_value_missing_args/main.mir:23:19: error: 'fnv1a' is a generic function; supply its generic arguments to name a specific instantiation (e.g. 'fnv1a[i32]')",
     "exit": 1
   },
   "example_generics_fn_value_variadic": {
     "action": "build",
+    "diag": "examples/example_generics_fn_value_variadic/main.mir:16:23: error: cannot take the address of variadic function 'log_all'; function pointers to variadic functions are not supported",
     "exit": 1
   },
   "example_generics_impl_arity_mismatch": {
     "action": "build",
+    "diag": "examples/example_generics_impl_arity_mismatch/main.mir:13:1: error: 'impl Box' has 2 generic parameter(s), but 'Box' is declared with 1 \u2014 impl generic parameter lists must match the target type's own arity exactly",
     "exit": 1
   },
   "example_generics_infer_arg_unify": {
@@ -408,10 +459,12 @@
   },
   "example_generics_infer_fail": {
     "action": "build",
+    "diag": "examples/example_generics_infer_fail/main.mir:17:26: error: could not infer generic parameter 'N' for 'make_fixed' \u2014 provide it explicitly ('make_fixed[...]()') or use it in a context with a known expected type",
     "exit": 1
   },
   "example_generics_missing_args": {
     "action": "build",
+    "diag": "examples/example_generics_missing_args/main.mir:14:12: error: 'Box' used without generic arguments \u2014 expected 1 ('Box[...]')",
     "exit": 1
   },
   "example_generics_mixed": {
@@ -420,6 +473,7 @@
   },
   "example_generics_orphan_impl": {
     "action": "build",
+    "diag": "examples/example_generics_orphan_impl/main.mir:20:1: error: 'impl Drawable for Box' has 2 generic parameter(s), but 'Box' is declared with 1 \u2014 impl generic parameter lists must match the target type's own arity exactly",
     "exit": 1
   },
   "example_generics_rtti": {
@@ -448,14 +502,17 @@
   },
   "example_impl_duplicate_method": {
     "action": "build",
+    "diag": "examples/example_impl_duplicate_method/main.mir:24:5: error: duplicate method 'value' for type 'Point'",
     "exit": 1
   },
   "example_import_absolute": {
     "action": "build",
+    "diag": "examples/example_import_absolute/main.mir:11:14: error: cannot resolve import path '/etc' from 'examples/example_import_absolute'",
     "exit": 1
   },
   "example_integer_literal_range": {
     "action": "build",
+    "diag": "examples/example_integer_literal_range/main.mir:24:9: error: integer literal 300 is out of range for 'u8' (0..255); use 'cast(...)' if truncation is intended",
     "exit": 1
   },
   "example_integer_literal_range_ok": {
@@ -464,10 +521,12 @@
   },
   "example_link_absolute_path": {
     "action": "build",
+    "diag": "examples/example_link_absolute_path/main.mir:20:1: error: '#link(lib, ...)' path must be relative to the declaring module's directory; '/etc/passwd' is absolute",
     "exit": 1
   },
   "example_link_in_fn_body": {
     "action": "build",
+    "diag": "examples/example_link_in_fn_body/main.mir:10:5: error: '#link' is a linker directive and may only appear at module scope or inside a module-scope 'when' block.",
     "exit": 1
   },
   "example_option_in_mut": {
@@ -476,10 +535,12 @@
   },
   "example_option_invalid_enum": {
     "action": "build",
+    "diag": "examples/example_option_invalid_enum/main.mir:16:15: error: required option 'os_choice' was not provided.",
     "exit": 1
   },
   "example_option_missing_required": {
     "action": "build",
+    "diag": "examples/example_option_missing_required/main.mir:9:12: error: required option 'required_thing' was not provided.",
     "exit": 1
   },
   "example_optional_error": {
@@ -496,10 +557,12 @@
   },
   "example_optional_error_non_error": {
     "action": "build",
+    "diag": "examples/example_optional_error_non_error/main.mir:14:20: error: '?' requires an error type; expected 'error(...)', an 'enum(i32)', a 'union(enum)', or a type alias to one, got 'Point'",
     "exit": 1
   },
   "example_optional_error_not_last": {
     "action": "build",
+    "diag": "examples/example_optional_error_not_last/main.mir:9:14: error: '?' may only mark the LAST return type; it marks an error the caller may leave unhandled",
     "exit": 1
   },
   "example_optional_error_panic": {
@@ -508,6 +571,7 @@
   },
   "example_optional_error_position": {
     "action": "build",
+    "diag": "examples/example_optional_error_position/main.mir:9:16: error: '?' is only allowed on a function's last return type (it marks an error the caller may leave unhandled)",
     "exit": 1
   },
   "example_optional_error_trait": {
@@ -516,10 +580,12 @@
   },
   "example_optional_error_trait_mismatch": {
     "action": "build",
+    "diag": "examples/example_optional_error_trait_mismatch/main.mir:19:5: error: method 'alloc' does not match trait 'Allocator': expected (self, usize) -> (anyptr, ?error(Alloc_Error)), found (self, usize) -> (anyptr, error(Alloc_Error))",
     "exit": 1
   },
   "example_parse_operator_location": {
     "action": "build",
+    "diag": "examples/example_parse_operator_location/main.mir:21:19: error: operand type mismatch in binary expression",
     "exit": 1
   },
   "example_pointer_arithmetic": {
@@ -544,6 +610,7 @@
   },
   "example_size_of_namespace": {
     "action": "build",
+    "diag": "examples/example_size_of_namespace/main.mir:17:24: error: 'size_of' requires a type or a value; this names an imported module",
     "exit": 1
   },
   "example_slice_cast_ptr": {
@@ -588,26 +655,32 @@
   },
   "example_trait_composition_coherence_still_enforced": {
     "action": "build",
+    "diag": "examples/example_trait_composition_coherence_still_enforced/main.mir:5:1: error: duplicate impl of trait 'Composed' for type 'Impl'",
     "exit": 1
   },
   "example_trait_composition_collision": {
     "action": "build",
+    "diag": "examples/example_trait_composition_collision/main.mir:3:14: error: trait 'Z' composes both 'X' and 'Y', which each declare 'run' with incompatible signatures ('fn(self) -> i32' vs 'fn(self) -> bool'). Rename one of them to disambiguate.",
     "exit": 1
   },
   "example_trait_composition_collision_own": {
     "action": "build",
+    "diag": "examples/example_trait_composition_collision_own/main.mir:2:14: error: trait 'Z' declares 'run' itself and also composes 'X', which declares 'run' with an incompatible signature ('fn(self) -> bool' vs 'fn(self) -> i32'). Rename one of them to disambiguate.",
     "exit": 1
   },
   "example_trait_composition_cycle_2": {
     "action": "build",
+    "diag": "examples/example_trait_composition_cycle_2/main.mir:1:20: error: circular trait composition: 'B' composes 'A', which composes 'B'",
     "exit": 1
   },
   "example_trait_composition_cycle_self": {
     "action": "build",
+    "diag": "examples/example_trait_composition_cycle_self/main.mir:1:20: error: circular trait composition: 'A' composes 'A'",
     "exit": 1
   },
   "example_trait_composition_cycle_transitive": {
     "action": "build",
+    "diag": "examples/example_trait_composition_cycle_transitive/main.mir:1:20: error: circular trait composition: 'B' composes 'C', which composes 'A', which composes 'B'",
     "exit": 1
   },
   "example_trait_composition_diamond": {
@@ -616,6 +689,7 @@
   },
   "example_trait_composition_empty_body_rejected": {
     "action": "build",
+    "diag": "examples/example_trait_composition_empty_body_rejected/main.mir:4:14: error: trait must declare at least one method",
     "exit": 1
   },
   "example_trait_composition_multi_no_body": {
@@ -628,6 +702,7 @@
   },
   "example_trait_composition_orphan_still_enforced": {
     "action": "build",
+    "diag": "examples/example_trait_composition_orphan_still_enforced/main.mir:4:1: error: orphan impl: 'impl Composed for Impl' must be declared in the module that defines 'Composed' or the module that defines 'Impl'",
     "exit": 1
   },
   "example_trait_composition_redundant_not_fired_own_method": {
@@ -660,10 +735,12 @@
   },
   "example_type_info_wrong_arg": {
     "action": "build",
+    "diag": "examples/example_type_info_wrong_arg/main.mir:5:16: error: type_info_of() requires an argument of type 'type' or 'any'; got 'i32'. Use 'type_of(expr)' to get the type ID first.",
     "exit": 1
   },
   "example_type_no_arith": {
     "action": "build",
+    "diag": "examples/example_type_no_arith/main.mir:5:31: error: 'type' values only support '==' and '!='",
     "exit": 1
   },
   "example_type_reflection": {
@@ -676,6 +753,7 @@
   },
   "example_var_group_missing_name": {
     "action": "build",
+    "diag": "examples/example_var_group_missing_name/main.mir:19:13: error: expected a name or '_' in a declaration group; use '_' to discard a value",
     "exit": 1
   },
   "example_varargs": {
@@ -688,6 +766,7 @@
   },
   "example_when_expr_type_mismatch": {
     "action": "build",
+    "diag": "examples/example_when_expr_type_mismatch/main.mir:8:18: error: 'when' expression branches have different types",
     "exit": 1
   },
   "example_when_fn_body": {
@@ -696,6 +775,7 @@
   },
   "example_when_nonconst_condition": {
     "action": "build",
+    "diag": "examples/example_when_nonconst_condition/main.mir:11:5: error: 'when' condition must be a compile-time constant expression. Use 'if' for runtime conditions.",
     "exit": 1
   },
   "example_when_size_of": {

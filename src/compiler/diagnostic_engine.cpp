@@ -3,8 +3,34 @@
 #include "source_manager.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <format>
 #include <iostream>
+#include <unistd.h>
+
+namespace {
+    // Diagnostics are colourised only when stderr is a terminal. Emitting escapes
+    // unconditionally puts raw "\033[1;31m" bytes into every redirected build log and into
+    // anything that captures the compiler's output -- which is also why
+    // tests/examples_smoke_test.py's first_diagnostic(), matching the literal substring
+    // "error:", never matched a single one of its 185 fixtures.
+    bool color_override_set = false;
+    bool color_override = false;
+
+    constexpr auto RESET = "\033[0m";
+}
+
+void DiagnosticEngine::set_color_enabled(const bool enabled) {
+    color_override_set = true;
+    color_override = enabled;
+}
+
+auto DiagnosticEngine::color_enabled() -> bool {
+    if (color_override_set) {
+        return color_override;
+    }
+    return isatty(fileno(stderr)) != 0;
+}
 
 void DiagnosticEngine::report(const DiagnosticLevel level, const DiagnosticStage stage, const SourceLocation &location, std::string message) {
     // Deliberately checked before the level is examined, so once the error cap is reached
@@ -63,9 +89,11 @@ void DiagnosticEngine::print_diagnostic(const Diagnostic &diagnostic) const {
         << diagnostic.location.line << ":"
         << diagnostic.location.column << ": ";
 
+    const auto color = color_enabled();
+
     switch (diagnostic.level) {
-    case DiagnosticLevel::Error:   out << "\033[1;31merror\033[0m: "; break;
-    case DiagnosticLevel::Warning: out << "\033[1;33mwarning\033[0m: "; break;
+    case DiagnosticLevel::Error:   out << (color ? "\033[1;31m" : "") << "error" << (color ? RESET : "") << ": "; break;
+    case DiagnosticLevel::Warning: out << (color ? "\033[1;33m" : "") << "warning" << (color ? RESET : "") << ": "; break;
     }
 
     out << diagnostic.message << "\n";
@@ -90,10 +118,11 @@ void DiagnosticEngine::print_diagnostic(const Diagnostic &diagnostic) const {
             : 1;
         const auto caret_count = std::max<size_t>(std::min<size_t>(diagnostic.location.length, max_length), 1);
 
-        out << "\033[1;32m";
+        if (color) out << "\033[1;32m";
         for (size_t i = 0; i < caret_count; ++i) {
             out << '^';
         }
-        out << "\033[0m\n";
+        if (color) out << RESET;
+        out << "\n";
     }
 }

@@ -37,6 +37,14 @@ class DiagnosticEngine {
     void report_error(DiagnosticStage stage, const SourceLocation &location, std::string message);
     void warn(DiagnosticStage stage, const SourceLocation &location, std::string message);
 
+    // Whether diagnostics are colourised. Defaults to isatty(stderr), so redirected output
+    // and captured build logs get plain text. Process-wide rather than per-engine because
+    // it describes the destination stream, which every engine shares; overridable so tests
+    // can pin it (they redirect std::cerr's buffer, which leaves fd 2 -- and so isatty --
+    // reporting the real terminal).
+    static void set_color_enabled(bool enabled);
+    [[nodiscard]] static auto color_enabled() -> bool;
+
     [[nodiscard]] auto has_errors() const -> bool { return error_count_ > 0; }
     [[nodiscard]] auto error_count() const -> size_t { return error_count_; }
     [[nodiscard]] auto has_reached_max_errors() const -> bool { return error_count_ >= MAX_ERRORS; }
