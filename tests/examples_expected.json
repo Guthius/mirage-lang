@@ -316,6 +316,15 @@
     "diag": "examples/example_env_missing_required/main.mir:9:12: error: required environment variable 'MIRAGE_REQUIRED_THING' was not set.",
     "exit": 1
   },
+  "example_error_narrow_and_chain": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_error_narrow_unknown": {
+    "action": "build",
+    "diag": "examples/example_error_narrow_unknown/main.mir:46:12: error: cannot match on an error value of unknown state; the preceding branches left it in different states, so nothing is known about it here; re-check it",
+    "exit": 1
+  },
   "example_error_typestate": {
     "action": "run",
     "exit": 0

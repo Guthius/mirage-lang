@@ -1,0 +1,51 @@
+// The shapes that deliberately do NOT narrow, and the diagnostic each one produces.
+//
+// "cannot match on an error value of unknown state" has three quite different causes, and
+// used to give the same generic advice for all of them -- "check it first" -- which is the
+// thing the user has usually already done. Each now names its actual cause.
+//
+// Expected: rejected at build time, with one diagnostic per case below.
+
+type Code = enum(i32) { Bad = 1  Worse = 2 }
+
+fn may_fail(n: i32) -> error(Code) {
+    if n < 0 { return_err .Bad }
+    return_ok
+}
+
+fn observe(p: *error(Code)) -> i32 { return 0 }
+
+// '||' proves nothing about either operand in the then-branch: the branch is taken when
+// EITHER holds, so neither is known.
+pub fn via_or() -> i32 {
+    mut e := may_fail(-1)
+    if e || (1 < 2) {
+        return match e { .Bad: 1, .Worse: 2 }
+    }
+    return 0
+}
+
+// Taking the address invalidates the typestate: the callee may have written through it.
+pub fn via_address_of() -> i32 {
+    mut e := may_fail(-1)
+    if e {
+        observe(&e)
+        return match e { .Bad: 1, .Worse: 2 }
+    }
+    return 0
+}
+
+// A loop may run zero times, so the code after it only knows what the pre-loop state and
+// the post-body state agree on. Here they do not: the condition narrows 'e' to Failed for
+// the body, while the zero-iteration path still has it Unknown.
+pub fn via_branch_disagreement() -> i32 {
+    mut e := may_fail(-1)
+    while e {
+        break
+    }
+    return match e { .Bad: 1, .Worse: 2 }
+}
+
+pub fn main() -> i32 {
+    return via_or() + via_address_of() + via_branch_disagreement()
+}

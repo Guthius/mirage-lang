@@ -278,6 +278,23 @@
     <span class="cmt">// err is known Ok here</span>
 }</code></pre>
       <p>
+        <strong>Which conditions narrow.</strong> The error local has to appear as a bare
+        identifier. Beyond the whole condition being <code>err</code> or <code>!err</code>, an
+        <code>&amp;&amp;</code> chain narrows <em>every</em> operand that is a bare
+        <code>err</code>/<code>!err</code>, at any depth — all of them must hold for the
+        then-branch to be taken:
+      </p>
+      <pre><code><span class="kw">if</span> <span class="var">ready</span> &amp;&amp; <span class="var">err</span> { <span class="cmt">// err is known Failed here</span> }
+<span class="kw">if</span> <span class="var">e1</span> &amp;&amp; <span class="var">e2</span> { <span class="cmt">// both are known Failed here</span> }</code></pre>
+      <p>
+        The else-branch of an <code>&amp;&amp;</code> learns nothing — any single operand being
+        false is enough to reach it. <code>||</code> narrows nothing in either branch: the branch
+        is taken when <em>either</em> side holds, so neither is known. Anything else — the local
+        behind a member access, a deref, a call, a comparison, or nested inside a
+        <code>||</code> — narrows nothing, and the rejection at a later <code>match</code> says
+        so rather than only reporting "unknown state".
+      </p>
+      <p>
         <strong>Early-return narrowing:</strong> after <code>if !err { ... }</code> where the body
         unconditionally exits (<code>return</code>/<code>return_ok</code>/<code>return_err</code>/
         <code>break</code>/<code>continue</code> on every path) and there's no <code>else</code>,

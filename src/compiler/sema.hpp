@@ -869,10 +869,27 @@ namespace sema {
     // 'locals' straight through by reference) so branch-local narrowing can't leak sideways.
     enum class ErrorState : uint8_t { NotApplicable, Unknown, Failed, Ok };
 
+    // Why an error local's state is Unknown. Purely for diagnostics: three quite different
+    // situations funnel into the same "cannot match on an error value of unknown state"
+    // message, and without this the advice it gives ("check it first") is the thing the user
+    // has often already done -- with a condition whose SHAPE is what defeated the narrowing.
+    enum class ErrorUnknownReason : uint8_t {
+        // Never checked, or the reason was not recorded.
+        Unchecked,
+        // Branched on, but by a condition the narrowing rules draw no conclusion from:
+        // a '||', or the error variable behind a member access, deref, call or comparison.
+        UncheckedConditionShape,
+        // '&err' was taken; the callee may have overwritten it.
+        AddressTaken,
+        // Two branches disagreed about the state and the join could not keep either.
+        BranchesDisagreed,
+    };
+
     struct LocalBinding {
         ResolvedType type;
         bool is_mut = false;
         ErrorState err_state = ErrorState::NotApplicable;
+        ErrorUnknownReason err_unknown_reason = ErrorUnknownReason::Unchecked;
     };
 
     using LocalScope = std::unordered_map<std::string, LocalBinding>;

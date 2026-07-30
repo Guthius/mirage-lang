@@ -2222,6 +2222,30 @@ if err {
 }
 ```
 
+**Which conditions narrow.** A condition narrows an error local when the local
+appears in it as a bare identifier, in one of these positions:
+
+| Condition | then-branch | else-branch |
+|---|---|---|
+| `err` | `Failed` | `Ok` |
+| `!err` | `Ok` | `Failed` |
+| any operand of an `&&` chain (`x && err`, `err1 && err2`, `a && b && !err`) | that operand's state | `Unknown` |
+| an operand of a `\|\|` | `Unknown` | `Unknown` |
+
+An `&&` chain narrows *every* operand that is a bare `err` or `!err`, at any depth
+in the chain — all of them must hold for the then-branch to be taken. The
+else-branch learns nothing, since any one operand being false is enough to reach
+it. A chain that both asserts and denies the same variable (`err && !err`) leaves
+it `Unknown` rather than letting operand order decide.
+
+`||` narrows nothing, in either branch: the branch is taken when *either* side
+holds, so neither is known. This is not an omission — it degrades a previously
+known state to `Unknown`, which is the conservative reading.
+
+Anything else — the local behind a member access, a deref, a call, a comparison,
+or nested inside a `||` — narrows nothing. The rejection at a later `match err`
+says so explicitly rather than only reporting "unknown state".
+
 **Early-return narrowing:** after `if !err { <body> }` where the condition
 is exactly `!err`, there is no `else`, and every path through `<body>`
 definitely exits (`return`/`return_ok`/`return_err`/`break`/`continue`),

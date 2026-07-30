@@ -35,7 +35,19 @@ namespace sema {
         bool is_exact_not_err = false;
     };
 
-    auto compute_condition_narrowing(const ast::Expr &condition, LocalScope &locals, const Program &program) -> std::optional<ConditionNarrowing>;
+    // Possibly several: 'err1 && err2' narrows both, which a single-value return cannot
+    // express. Empty means the condition's shape proves nothing about any error local.
+    auto compute_condition_narrowing(const ast::Expr &condition, LocalScope &locals, const Program &program) -> std::vector<ConditionNarrowing>;
+
+    // Whether the condition mentions an error local at all in a position the narrowing rules
+    // cannot use. Drives the extra hint on "unknown state" -- see its use below.
+    auto condition_mentions_unnarrowable_error(const ast::Expr &condition, LocalScope &locals, const Program &program) -> std::optional<std::string>;
+
+    // Applies a condition's narrowings to one branch's scope, and records why any error local
+    // the condition merely MENTIONS was left Unknown. Used by all four branching forms
+    // (if/while/ternary/when) so they agree on both.
+    auto apply_condition_narrowing(LocalScope &scope, const std::vector<ConditionNarrowing> &narrowings,
+                                   bool then_branch, const ast::Expr &condition, const Program &program) -> void;
 
     namespace {
         struct LvalueInfo {
@@ -2606,6 +2618,7 @@ namespace sema {
                             if (const auto *ident = std::get_if<ast::IdentExpr>(&v->operand)) {
                                 if (const auto it = locals.find(ident->name); it != locals.end() && it->second.err_state != ErrorState::NotApplicable) {
                                     it->second.err_state = ErrorState::Unknown;
+                                    it->second.err_unknown_reason = ErrorUnknownReason::AddressTaken;
                                 }
                             }
                             return intern_pointer(program, lv.type);
@@ -2683,13 +2696,11 @@ namespace sema {
                     // cannot leak into the sibling branch or outward. No merge afterwards: an
                     // expression's branches do not join back into the enclosing scope's state
                     // the way statement branches do.
-                    const auto narrowing = compute_condition_narrowing(v->condition, locals, program);
+                    const auto narrowings = compute_condition_narrowing(v->condition, locals, program);
                     auto then_locals = locals;
                     auto else_locals = locals;
-                    if (narrowing) {
-                        if (auto *b = find_error_local(narrowing->var_name, then_locals, program)) b->err_state = narrowing->then_state;
-                        if (auto *b = find_error_local(narrowing->var_name, else_locals, program)) b->err_state = narrowing->else_state;
-                    }
+                    apply_condition_narrowing(then_locals, narrowings, true, v->condition, program);
+                    apply_condition_narrowing(else_locals, narrowings, false, v->condition, program);
 
                     // Check the non-literal branch first when exactly one branch is a coercible
                     // literal, so the literal unifies against the other branch's real type --
@@ -2725,13 +2736,11 @@ namespace sema {
                     check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
                     // Same literal-coercion ordering and same per-branch typestate narrowing as
                     // TernaryExpr above.
-                    const auto narrowing = compute_condition_narrowing(v->condition, locals, program);
+                    const auto narrowings = compute_condition_narrowing(v->condition, locals, program);
                     auto then_locals = locals;
                     auto else_locals = locals;
-                    if (narrowing) {
-                        if (auto *b = find_error_local(narrowing->var_name, then_locals, program)) b->err_state = narrowing->then_state;
-                        if (auto *b = find_error_local(narrowing->var_name, else_locals, program)) b->err_state = narrowing->else_state;
-                    }
+                    apply_condition_narrowing(then_locals, narrowings, true, v->condition, program);
+                    apply_condition_narrowing(else_locals, narrowings, false, v->condition, program);
 
                     ResolvedType then_ty, else_ty;
                     if (is_coercible_literal(v->then_expr) && !is_coercible_literal(v->else_expr)) {
@@ -3537,9 +3546,38 @@ namespace sema {
                         const auto *ident = std::get_if<ast::IdentExpr>(&v->operand);
                         const auto *binding = ident ? find_error_local(ident->name, locals, program) : nullptr;
                         if (!binding || binding->err_state != ErrorState::Failed) {
-                            return error(diag, v->location,
-                                "cannot match on an error value of unknown state; check it first: "
-                                "'if err { match err { ... } }', or use an early return: 'if !err { return_ok ... } '");
+                            // Three quite different situations reach this point. The generic
+                            // "check it first" advice is right only for the first -- for the
+                            // other two it describes a check the user has already written,
+                            // which is why this used to be such a confusing diagnostic. Name
+                            // the actual cause instead where it is known.
+                            constexpr auto generic_advice =
+                                "check it first: 'if err {{ match err {{ ... }} }}', "
+                                "or use an early return: 'if !err {{ return_ok ... }}'";
+                            const auto reason = binding ? binding->err_unknown_reason : ErrorUnknownReason::Unchecked;
+
+                            std::string detail;
+                            switch (reason) {
+                            case ErrorUnknownReason::Unchecked:
+                                detail = std::format(generic_advice);
+                                break;
+                            case ErrorUnknownReason::UncheckedConditionShape:
+                                detail = std::format(
+                                    "the enclosing condition mentions it but does not narrow it -- only "
+                                    "'err', '!err', or an operand of a '&&' chain do that, and '||' "
+                                    "proves nothing about either side; {}", std::format(generic_advice));
+                                break;
+                            case ErrorUnknownReason::AddressTaken:
+                                detail = "its address was taken, so its state is no longer known here; "
+                                         "re-check it after the call";
+                                break;
+                            case ErrorUnknownReason::BranchesDisagreed:
+                                detail = "the preceding branches left it in different states, so nothing "
+                                         "is known about it here; re-check it";
+                                break;
+                            }
+                            return error(diag, v->location, std::format(
+                                "cannot match on an error value of unknown state; {}", detail));
                         }
                         const auto &wrapper = *program.union_at(operand_type.union_index);
                         const auto &failed_variant = wrapper.variants[1];
@@ -4405,55 +4443,138 @@ namespace sema {
     // 'is_exact_not_err' gates the early-return-narrowing rule below — per spec it applies
     // ONLY to a condition that is exactly '!err', not any compound form.
 
-    auto compute_condition_narrowing(const ast::Expr &condition, LocalScope &locals, const Program &program) -> std::optional<ConditionNarrowing> {
-        if (const auto *ident = std::get_if<ast::IdentExpr>(&condition)) {
+    // Matches 'err' or '!err' where 'err' is a bare identifier naming an error-typed local.
+    // Returns the name and whether it was negated.
+    auto match_error_operand(const ast::Expr &expr, LocalScope &locals, const Program &program)
+        -> std::optional<std::pair<std::string, bool>> {
+        if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
             if (find_error_local(ident->name, locals, program)) {
-                return ConditionNarrowing{ident->name, ErrorState::Failed, ErrorState::Ok, true, false};
+                return std::make_pair(ident->name, false);
             }
             return std::nullopt;
         }
-        if (const auto *un = std::get_if<std::unique_ptr<ast::UnaryExpr>>(&condition)) {
+        if (const auto *un = std::get_if<std::unique_ptr<ast::UnaryExpr>>(&expr)) {
             if ((*un)->op != ast::UnaryOp::LogicalNot) return std::nullopt;
             if (const auto *ident = std::get_if<ast::IdentExpr>(&(*un)->operand)) {
                 if (find_error_local(ident->name, locals, program)) {
-                    return ConditionNarrowing{ident->name, ErrorState::Ok, ErrorState::Failed, false, true};
+                    return std::make_pair(ident->name, true);
                 }
             }
-            return std::nullopt;
         }
+        return std::nullopt;
+    }
+
+    // Appends every operand of a '&&' chain, flattened. Stops at anything that is not a
+    // '&&', so a nested '||' arrives as a single opaque operand and is never descended into.
+    void flatten_and_chain(const ast::Expr &expr, std::vector<const ast::Expr *> &out) {
+        if (const auto *bin = std::get_if<std::unique_ptr<ast::BinaryExpr>>(&expr)) {
+            if ((*bin)->op == ast::BinaryOp::LogicalAnd) {
+                flatten_and_chain((*bin)->lhs, out);
+                flatten_and_chain((*bin)->rhs, out);
+                return;
+            }
+        }
+        out.push_back(&expr);
+    }
+
+    auto compute_condition_narrowing(const ast::Expr &condition, LocalScope &locals, const Program &program) -> std::vector<ConditionNarrowing> {
+        // The two SIMPLE shapes. Only these set is_exact_err/is_exact_not_err, which gate the
+        // early-return-narrowing rule and the redundant-check warning -- per spec neither
+        // applies to a compound condition.
+        if (const auto simple = match_error_operand(condition, locals, program)) {
+            const auto &[name, negated] = *simple;
+            if (negated) {
+                return {ConditionNarrowing{name, ErrorState::Ok, ErrorState::Failed, false, true}};
+            }
+            return {ConditionNarrowing{name, ErrorState::Failed, ErrorState::Ok, true, false}};
+        }
+
         if (const auto *bin = std::get_if<std::unique_ptr<ast::BinaryExpr>>(&condition)) {
             const auto &b = **bin;
-            if (b.op != ast::BinaryOp::LogicalAnd && b.op != ast::BinaryOp::LogicalOr) return std::nullopt;
-            const bool is_and = b.op == ast::BinaryOp::LogicalAnd;
 
-            if (const auto *ident = std::get_if<ast::IdentExpr>(&b.lhs)) {
-                if (find_error_local(ident->name, locals, program)) {
-                    // 'err && x' -> Failed in then; 'err || x' -> Unknown in then (spec).
-                    return ConditionNarrowing{ident->name, is_and ? ErrorState::Failed : ErrorState::Unknown, ErrorState::Unknown, false, false};
-                }
-            }
-            if (const auto *un = std::get_if<std::unique_ptr<ast::UnaryExpr>>(&b.lhs)) {
-                if ((*un)->op == ast::UnaryOp::LogicalNot) {
-                    if (const auto *ident = std::get_if<ast::IdentExpr>(&(*un)->operand)) {
-                        if (find_error_local(ident->name, locals, program)) {
-                            // '!err && x' -> Ok in then (no early-return narrowing); '!err || x' -> Unknown.
-                            return ConditionNarrowing{ident->name, is_and ? ErrorState::Ok : ErrorState::Unknown, ErrorState::Unknown, false, false};
-                        }
+            // '&&': every operand must hold for the then-branch, so EACH one that is a bare
+            // 'err'/'!err' narrows that variable there. The else-branch learns nothing -- any
+            // single operand being false is enough to take it.
+            if (b.op == ast::BinaryOp::LogicalAnd) {
+                std::vector<const ast::Expr *> operands;
+                flatten_and_chain(condition, operands);
+
+                std::vector<ConditionNarrowing> result;
+                for (const auto *operand : operands) {
+                    const auto matched = match_error_operand(*operand, locals, program);
+                    if (!matched) continue;
+                    const auto &[name, negated] = *matched;
+                    const auto state = negated ? ErrorState::Ok : ErrorState::Failed;
+
+                    // A variable named twice in one chain: consistent repeats ('err && err')
+                    // keep their state, contradictions ('err && !err' -- unreachable, but
+                    // legal to write) degrade to Unknown rather than letting operand order
+                    // decide.
+                    const auto existing = std::ranges::find_if(result, [&](const auto &n) { return n.var_name == name; });
+                    if (existing != result.end()) {
+                        if (existing->then_state != state) existing->then_state = ErrorState::Unknown;
+                        continue;
                     }
+                    result.push_back(ConditionNarrowing{name, state, ErrorState::Unknown, false, false});
+                }
+                return result;
+            }
+
+            // '||': deliberately NOT widened, and deliberately not descended into. An operand
+            // of a '||' being true tells you nothing about any other operand, so the
+            // then-branch proves nothing -- including about the leftmost one. The
+            // Unknown/Unknown entry below is not a no-op: it DEGRADES whatever was previously
+            // known about the variable, which is the conservative and correct thing to do
+            // once its state has been branched on inconclusively.
+            if (b.op == ast::BinaryOp::LogicalOr) {
+                if (const auto matched = match_error_operand(b.lhs, locals, program)) {
+                    return {ConditionNarrowing{matched->first, ErrorState::Unknown, ErrorState::Unknown, false, false}};
                 }
             }
         }
-        // No narrowing for any other condition shape. Deliberate v1 scope, not an oversight:
-        // the error variable is recognized only as the whole condition ('err', '!err') or as
-        // the LEFTMOST operand of a single '&&'/'||'. So 'x && err', 'err1 && err2' and any
-        // deeper nesting narrow nothing, and the subsequent 'match err' reports "unknown
-        // state" with no hint that the condition's shape is why.
-        //
-        // Widening this means deciding what a compound condition proves about each operand --
-        // '||' in particular proves nothing about either in the then-branch -- which is a spec
-        // question, not a code change. Consistent with the other narrow-v1-subset admissions
-        // in this file (generic inference); recorded as follow-up work.
+
+        // Anything else proves nothing: the error variable behind a member access, a deref, a
+        // call, a comparison, or nested under a '||'. condition_mentions_unnarrowable_error
+        // below turns that into an actionable hint rather than a bare "unknown state".
+        return {};
+    }
+
+    // Finds an error local mentioned anywhere in a condition, for the case where narrowing
+    // produced nothing. Used only to explain WHY -- so it deliberately looks everywhere,
+    // including the places the narrowing rules refuse to draw conclusions from.
+    auto condition_mentions_unnarrowable_error(const ast::Expr &condition, LocalScope &locals, const Program &program) -> std::optional<std::string> {
+        if (const auto matched = match_error_operand(condition, locals, program)) {
+            return matched->first;
+        }
+        if (const auto *un = std::get_if<std::unique_ptr<ast::UnaryExpr>>(&condition)) {
+            return condition_mentions_unnarrowable_error((*un)->operand, locals, program);
+        }
+        if (const auto *bin = std::get_if<std::unique_ptr<ast::BinaryExpr>>(&condition)) {
+            if (const auto lhs = condition_mentions_unnarrowable_error((*bin)->lhs, locals, program)) return lhs;
+            return condition_mentions_unnarrowable_error((*bin)->rhs, locals, program);
+        }
         return std::nullopt;
+    }
+
+    auto apply_condition_narrowing(LocalScope &scope, const std::vector<ConditionNarrowing> &narrowings,
+                                   const bool then_branch, const ast::Expr &condition, const Program &program) -> void {
+        for (const auto &narrowing : narrowings) {
+            if (auto *b = find_error_local(narrowing.var_name, scope, program)) {
+                b->err_state = then_branch ? narrowing.then_state : narrowing.else_state;
+                if (b->err_state == ErrorState::Unknown) {
+                    b->err_unknown_reason = ErrorUnknownReason::UncheckedConditionShape;
+                }
+            }
+        }
+
+        // The condition named an error local somewhere the rules draw no conclusion from
+        // (behind a '||', a member access, a deref, a call, a comparison). It stays Unknown
+        // either way -- this only records that the condition's shape is the reason.
+        if (const auto mentioned = condition_mentions_unnarrowable_error(condition, scope, program)) {
+            if (auto *b = find_error_local(*mentioned, scope, program); b && b->err_state == ErrorState::Unknown) {
+                b->err_unknown_reason = ErrorUnknownReason::UncheckedConditionShape;
+            }
+        }
     }
 
     // Merges two branch-end scopes into 'target' (the scope visible in code following the
@@ -4468,7 +4589,13 @@ namespace sema {
             const auto b_it = b.find(name);
             const auto a_state = a_it != a.end() ? a_it->second.err_state : ErrorState::Unknown;
             const auto b_state = b_it != b.end() ? b_it->second.err_state : ErrorState::Unknown;
-            binding.err_state = (a_state == b_state) ? a_state : ErrorState::Unknown;
+            if (a_state == b_state) {
+                binding.err_state = a_state;
+                if (a_it != a.end()) binding.err_unknown_reason = a_it->second.err_unknown_reason;
+            } else {
+                binding.err_state = ErrorState::Unknown;
+                binding.err_unknown_reason = ErrorUnknownReason::BranchesDisagreed;
+            }
         }
     }
 
@@ -4851,16 +4978,16 @@ namespace sema {
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IfStmt>>) {
                     check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
 
-                    const auto narrowing = compute_condition_narrowing(v->condition, locals, program);
+                    const auto narrowings = compute_condition_narrowing(v->condition, locals, program);
 
-                    if (narrowing) {
-                        if (const auto *binding = find_error_local(narrowing->var_name, locals, program)) {
-                            if (narrowing->is_exact_err && binding->err_state == ErrorState::Failed) {
+                    for (const auto &narrowing : narrowings) {
+                        if (const auto *binding = find_error_local(narrowing.var_name, locals, program)) {
+                            if (narrowing.is_exact_err && binding->err_state == ErrorState::Failed) {
                                 diag.warn(DiagnosticStage::Sema, v->location, std::format(
-                                    "redundant error check: '{}' is already known to be Failed here", narrowing->var_name));
-                            } else if (narrowing->is_exact_not_err && binding->err_state == ErrorState::Ok) {
+                                    "redundant error check: '{}' is already known to be Failed here", narrowing.var_name));
+                            } else if (narrowing.is_exact_not_err && binding->err_state == ErrorState::Ok) {
                                 diag.warn(DiagnosticStage::Sema, v->location, std::format(
-                                    "redundant error check: '{}' is already known to be Ok here", narrowing->var_name));
+                                    "redundant error check: '{}' is already known to be Ok here", narrowing.var_name));
                             }
                         }
                     }
@@ -4870,23 +4997,22 @@ namespace sema {
                     // (a bare non-block then-stmt is grammar-legal and would otherwise leak
                     // mutations into the other branch / the enclosing scope).
                     auto then_locals = locals;
-                    if (narrowing) {
-                        if (auto *b = find_error_local(narrowing->var_name, then_locals, program)) b->err_state = narrowing->then_state;
-                    }
+                    apply_condition_narrowing(then_locals, narrowings, true, v->condition, program);
                     check_stmt(v->then_stmt, then_locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
 
                     auto else_locals = locals;
-                    if (narrowing) {
-                        if (auto *b = find_error_local(narrowing->var_name, else_locals, program)) b->err_state = narrowing->else_state;
-                    }
+                    apply_condition_narrowing(else_locals, narrowings, false, v->condition, program);
                     if (v->else_stmt) check_stmt(*v->else_stmt, else_locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
 
                     // Early-return narrowing: 'if !err { <body that always exits> }' with no
                     // else strengthens the post-if state to Failed (the only path that
                     // reaches here is the condition being false, i.e. err was Failed) — this
                     // overrides what the general join below would otherwise conclude.
-                    if (narrowing && narrowing->is_exact_not_err && !v->else_stmt && stmt_always_exits(v->then_stmt)) {
-                        if (auto *b = find_error_local(narrowing->var_name, locals, program)) {
+                    // is_exact_not_err is only ever set by the simple '!err' shape, so this
+                    // list has exactly one entry whenever the rule applies.
+                    const auto exact_not_err = std::ranges::find_if(narrowings, [](const auto &n) { return n.is_exact_not_err; });
+                    if (exact_not_err != narrowings.end() && !v->else_stmt && stmt_always_exits(v->then_stmt)) {
+                        if (auto *b = find_error_local(exact_not_err->var_name, locals, program)) {
                             b->err_state = ErrorState::Failed;
                         }
                     } else {
@@ -4896,11 +5022,9 @@ namespace sema {
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhileStmt>>) {
                     check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
 
-                    const auto narrowing = compute_condition_narrowing(v->condition, locals, program);
+                    const auto narrowings = compute_condition_narrowing(v->condition, locals, program);
                     auto body_locals = locals;
-                    if (narrowing) {
-                        if (auto *b = find_error_local(narrowing->var_name, body_locals, program)) b->err_state = narrowing->then_state;
-                    }
+                    apply_condition_narrowing(body_locals, narrowings, true, v->condition, program);
                     check_stmt(v->body, body_locals, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
 
                     // The loop may run zero times, so code after it only knows what pre-loop

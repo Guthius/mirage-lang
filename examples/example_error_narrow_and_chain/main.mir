@@ -1,0 +1,70 @@
+// Error-typestate narrowing through a '&&' chain.
+//
+// Narrowing used to recognize the error variable only as the whole condition ('err',
+// '!err') or as the LEFTMOST operand of a single '&&'/'||'. So 'flag && err' and
+// 'err1 && err2' narrowed nothing, and the 'match err' that followed was rejected as
+// "unknown state" -- which read as a bug in the check rather than a limit of it.
+//
+// Every operand of a '&&' chain must hold for the then-branch to be taken, so each one
+// that is a bare 'err' or '!err' narrows that variable there. '||' is deliberately NOT
+// widened: see example_error_narrow_unknown.
+//
+// Returns 0, or the number of the first check that failed.
+
+type Code = enum(i32) { Bad = 1  Worse = 2 }
+
+fn may_fail(n: i32) -> error(Code) {
+    if n < 0 { return_err .Bad }
+    return_ok
+}
+
+pub fn main() -> i32 {
+    const flag := true
+
+    // The error variable is not leftmost.
+    mut e := may_fail(-1)
+    if flag && e {
+        if match e { .Bad: 1, .Worse: 2 } != 1 { return 1 }
+    } else {
+        return 2
+    }
+
+    // Two error variables in one chain: both narrow.
+    mut a := may_fail(-1)
+    mut b := may_fail(-1)
+    if a && b {
+        if match a { .Bad: 1, .Worse: 2 } != 1 { return 3 }
+        if match b { .Bad: 1, .Worse: 2 } != 1 { return 4 }
+    } else {
+        return 5
+    }
+
+    // Deeper in a longer chain, past a non-error operand.
+    mut c := may_fail(-1)
+    if flag && (1 < 2) && c {
+        if match c { .Bad: 1, .Worse: 2 } != 1 { return 6 }
+    } else {
+        return 7
+    }
+
+    // '!err' in a chain narrows to Ok, so the then-branch must NOT be taken for a
+    // failed error and must be taken for a successful one.
+    mut d := may_fail(1)
+    if flag && !d {
+        // reached: d is Ok
+    } else {
+        return 8
+    }
+
+    // A while loop's condition narrows its body the same way.
+    mut n: i32 = 0
+    mut g := may_fail(-1)
+    while flag && g {
+        if match g { .Bad: 1, .Worse: 2 } != 1 { return 9 }
+        n++
+        if n > 2 { break }
+    }
+    if n == 0 { return 10 }
+
+    return 0
+}
