@@ -591,6 +591,10 @@
     "diag": "examples/example_parse_operator_location/main.mir:21:19: error: operand type mismatch in binary expression",
     "exit": 1
   },
+  "example_payload_capture_escape": {
+    "action": "run",
+    "exit": 0
+  },
   "example_pointer_arithmetic": {
     "action": "run",
     "exit": 100

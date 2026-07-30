@@ -49,6 +49,23 @@ namespace sema {
     auto apply_condition_narrowing(LocalScope &scope, const std::vector<ConditionNarrowing> &narrowings,
                                    bool then_branch, const ast::Expr &condition, const Program &program) -> void;
 
+    // Warns when a by-ref payload capture ('.Variant(&v):') is let out of its own arm.
+    //
+    // Codegen emits the match/switch operand as a VALUE into one scratch slot per function
+    // ("match.union"/"switch.union" in codegen.cpp), so '&v' points into a compiler temporary,
+    // not at the user's object -- and the next match through that slot overwrites it. Any use
+    // after the arm ends therefore reads something the program never stored there.
+    //
+    // Diagnosing this properly needs escape analysis, and sema has no lifetime machinery at
+    // all (LocalBinding is {type, is_mut, err_state}). This is the cheap conservative
+    // approximation: a syntactic check for the pointer reaching a return, an assignment, a
+    // call argument, or an aggregate initializer. It is a WARNING because it over-reports --
+    // passing the pointer to something that only reads it during the arm, like a compare, is
+    // perfectly safe and still flagged. It also under-reports: assigning the pointer to an
+    // arm-local first and letting THAT escape is not tracked.
+    auto check_payload_capture_escape(const ast::Stmt &body, const std::string &name, DiagnosticEngine &diag) -> void;
+    auto check_payload_capture_escape_expr(const ast::Expr &value, const std::string &name, DiagnosticEngine &diag) -> void;
+
     namespace {
         struct LvalueInfo {
             ResolvedType type;
@@ -3765,6 +3782,7 @@ namespace sema {
                                                     .type = intern_pointer(program, payload_ty),
                                                     .is_mut = false,
                                                 };
+                                                check_payload_capture_escape_expr(arm.value, *vp.capture_name, diag);
                                             } else {
                                                 arm_locals[*vp.capture_name] = LocalBinding{.type = payload_ty, .is_mut = false};
                                             }
@@ -4554,6 +4572,152 @@ namespace sema {
             return condition_mentions_unnarrowable_error((*bin)->rhs, locals, program);
         }
         return std::nullopt;
+    }
+
+    // Whether evaluating 'expr' yields the capture pointer ITSELF, as opposed to reading
+    // through it. 'v' does; 'v.*', 'v.field' and 'v[i]' do not -- those copy out of the
+    // scratch slot while the arm is still live, which is exactly the safe usage.
+    auto yields_capture_pointer(const ast::Expr &expr, const std::string &name) -> bool {
+        if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
+            return ident->name == name;
+        }
+        // 'cast(v, anyptr)' launders the pointer but still yields it.
+        if (const auto *cast = std::get_if<std::unique_ptr<ast::CastExpr>>(&expr)) {
+            return yields_capture_pointer((*cast)->value, name);
+        }
+        // Either branch escaping is enough.
+        if (const auto *ternary = std::get_if<std::unique_ptr<ast::TernaryExpr>>(&expr)) {
+            return yields_capture_pointer((*ternary)->then_expr, name)
+                || yields_capture_pointer((*ternary)->else_expr, name);
+        }
+        return false;
+    }
+
+    void report_capture_escape(const std::string &name, const SourceLocation &loc, const char *what, DiagnosticEngine &diag) {
+        diag.warn(DiagnosticStage::Sema, loc, std::format(
+            "by-ref payload capture '{}' escapes its arm via {}; the match operand is emitted as a "
+            "value into one scratch slot per function, so '{}' points at a compiler temporary rather "
+            "than the original object, and the next match through that slot overwrites it. Capture "
+            "by value, or copy what you need out of '{}' before the arm ends",
+            name, what, name, name));
+    }
+
+    auto check_payload_capture_escape_expr(const ast::Expr &value, const std::string &name, DiagnosticEngine &diag) -> void {
+        std::visit([&]<typename T>(const T &node) {
+            using U = std::decay_t<T>;
+            if constexpr (std::is_same_v<U, std::unique_ptr<ast::CallExpr>>) {
+                for (const auto &arg : node->args) {
+                    if (yields_capture_pointer(arg, name)) {
+                        report_capture_escape(name, node->location, "a call argument", diag);
+                    }
+                    check_payload_capture_escape_expr(arg, name, diag);
+                }
+                check_payload_capture_escape_expr(node->callee, name, diag);
+            } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::AssignExpr>>) {
+                if (yields_capture_pointer(node->value, name)) {
+                    report_capture_escape(name, node->location, "an assignment", diag);
+                }
+                check_payload_capture_escape_expr(node->target, name, diag);
+                check_payload_capture_escape_expr(node->value, name, diag);
+            } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::BracedInitializerExpr>>) {
+                std::visit([&]<typename V>(const V &alt) {
+                    using W = std::decay_t<V>;
+                    if constexpr (std::is_same_v<W, ast::StructExpr>) {
+                        for (const auto &field : alt.fields) {
+                            if (yields_capture_pointer(field.expr, name)) {
+                                report_capture_escape(name, field.location, "a struct field", diag);
+                            }
+                            check_payload_capture_escape_expr(field.expr, name, diag);
+                        }
+                    } else if constexpr (std::is_same_v<W, ast::ArrayExpr>) {
+                        for (const auto &element : alt.values) {
+                            if (yields_capture_pointer(element, name)) {
+                                report_capture_escape(name, alt.location, "an array element", diag);
+                            }
+                            check_payload_capture_escape_expr(element, name, diag);
+                        }
+                    }
+                }, *node);
+            } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::UnaryExpr>>) {
+                check_payload_capture_escape_expr(node->operand, name, diag);
+            } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::BinaryExpr>>) {
+                check_payload_capture_escape_expr(node->lhs, name, diag);
+                check_payload_capture_escape_expr(node->rhs, name, diag);
+            } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TernaryExpr>>) {
+                check_payload_capture_escape_expr(node->condition, name, diag);
+                check_payload_capture_escape_expr(node->then_expr, name, diag);
+                check_payload_capture_escape_expr(node->else_expr, name, diag);
+            } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::MemberExpr>>) {
+                check_payload_capture_escape_expr(node->object, name, diag);
+            } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::CastExpr>>) {
+                check_payload_capture_escape_expr(node->value, name, diag);
+            } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::MatchExpr>>) {
+                // A nested match shadowing the same capture name rebinds it; the outer
+                // capture is no longer what the name refers to inside those arms.
+                check_payload_capture_escape_expr(node->operand, name, diag);
+                for (const auto &arm : node->arms) {
+                    const auto *vp = std::get_if<ast::MatchExpr::VariantPattern>(&arm.pattern);
+                    if (vp && vp->capture_name && *vp->capture_name == name) continue;
+                    check_payload_capture_escape_expr(arm.value, name, diag);
+                }
+            }
+            // Everything else either has no sub-expressions or cannot carry the pointer out.
+        }, value);
+    }
+
+    auto check_payload_capture_escape(const ast::Stmt &body, const std::string &name, DiagnosticEngine &diag) -> void {
+        std::visit([&]<typename T>(const T &node) {
+            using U = std::decay_t<T>;
+            if constexpr (std::is_same_v<U, std::unique_ptr<ast::BlockStmt>>) {
+                for (const auto &s : node->stmts) check_payload_capture_escape(s, name, diag);
+            } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IfStmt>>) {
+                check_payload_capture_escape_expr(node->condition, name, diag);
+                check_payload_capture_escape(node->then_stmt, name, diag);
+                if (node->else_stmt) check_payload_capture_escape(*node->else_stmt, name, diag);
+            } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::WhileStmt>>) {
+                check_payload_capture_escape_expr(node->condition, name, diag);
+                check_payload_capture_escape(node->body, name, diag);
+            } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::ForInStmt>>) {
+                check_payload_capture_escape_expr(node->iterable, name, diag);
+                check_payload_capture_escape(node->body, name, diag);
+            } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SwitchStmt>>) {
+                check_payload_capture_escape_expr(node->operand, name, diag);
+                for (const auto &arm : node->arms) {
+                    const auto *vp = std::get_if<ast::MatchExpr::VariantPattern>(&arm.pattern);
+                    if (vp && vp->capture_name && *vp->capture_name == name) continue;
+                    check_payload_capture_escape(arm.body, name, diag);
+                }
+            } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::DeferStmt>>) {
+                // A defer runs at scope exit, by which point the slot may already have been
+                // reused -- so the pointer reaching one is an escape in its own right.
+                check_payload_capture_escape(node->body, name, diag);
+            } else if constexpr (std::is_same_v<U, ast::ExprStmt>) {
+                check_payload_capture_escape_expr(node.expr, name, diag);
+            } else if constexpr (std::is_same_v<U, ast::VarDeclStmt>) {
+                if (node.init) check_payload_capture_escape_expr(*node.init, name, diag);
+            } else if constexpr (std::is_same_v<U, ast::VarDeclGroupStmt>) {
+                check_payload_capture_escape_expr(node.init, name, diag);
+            } else if constexpr (std::is_same_v<U, ast::ReturnStmt>) {
+                for (const auto &e : node.return_values) {
+                    if (yields_capture_pointer(e, name)) {
+                        report_capture_escape(name, node.location, "a return", diag);
+                    }
+                    check_payload_capture_escape_expr(e, name, diag);
+                }
+            } else if constexpr (std::is_same_v<U, ast::ReturnOkStmt>) {
+                for (const auto &e : node.return_values) {
+                    if (yields_capture_pointer(e, name)) {
+                        report_capture_escape(name, node.location, "a return", diag);
+                    }
+                    check_payload_capture_escape_expr(e, name, diag);
+                }
+            } else if constexpr (std::is_same_v<U, ast::ReturnErrStmt>) {
+                if (yields_capture_pointer(node.error_value, name)) {
+                    report_capture_escape(name, node.location, "a return", diag);
+                }
+                check_payload_capture_escape_expr(node.error_value, name, diag);
+            }
+        }, body);
     }
 
     auto apply_condition_narrowing(LocalScope &scope, const std::vector<ConditionNarrowing> &narrowings,
@@ -5390,6 +5554,7 @@ namespace sema {
                                                     .type = intern_pointer(program, payload_ty),
                                                     .is_mut = false,
                                                 };
+                                                check_payload_capture_escape(arm.body, *vp.capture_name, diag);
                                             } else {
                                                 arm_locals[*vp.capture_name] = LocalBinding{.type = payload_ty, .is_mut = false};
                                             }

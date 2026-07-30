@@ -1251,6 +1251,19 @@ Both `match` (expression) and `switch` (statement) use the same arm pattern synt
 .variant_name(&capture)    // binds payload struct by reference (*PayloadType)
 ```
 
+A by-reference capture is valid **only for the duration of its own arm**, and requires the
+operand to be an lvalue. The operand is evaluated into one compiler-managed slot per
+function, so the pointer refers to that slot and not to the original object — and the next
+`match`/`switch` in the same function reuses it. Reading through the pointer inside the arm
+(`v.*`, `v.field`) is the intended use; letting the pointer itself outlive the arm — by
+returning it, assigning it outward, passing it to a call, or storing it in an aggregate —
+reads a value the program never put there.
+
+The compiler warns about the escaping forms it can see syntactically. The check is
+deliberately conservative in both directions: it flags a call that only reads the pointer
+during the arm, and it does not follow the pointer through an intermediate local. Capture by
+value when the payload needs to outlive the arm.
+
 **Literal pattern** (for integer and bool operands):
 ```mirage
 42

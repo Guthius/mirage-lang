@@ -1,0 +1,99 @@
+// A by-ref payload capture ('.Variant(&v):') that is let out of its own arm.
+//
+// Codegen emits the match/switch operand as a VALUE into one scratch slot per function, so
+// '&v' points at a compiler temporary rather than at the original object -- and the next
+// match through that slot overwrites it. Anything that reads the pointer after the arm has
+// ended therefore sees whatever was matched most recently.
+//
+// This compiles (the escape is a warning, not an error, because the check is a conservative
+// syntactic approximation), so the fixture's exit code pins nothing interesting. What it
+// pins is the set of escape routes that are detected -- see tests/payload_capture_test.py.
+
+type Arg = union(enum) {
+    small: u8
+    large: u64
+}
+
+fn observe(p: *u64) -> u64 { return p.* }
+
+mut global_ptr: *u64 = nil
+
+type Holder = struct {
+    ptr: *u64 = nil
+}
+
+// via an assignment to a binding declared outside the arm
+pub fn escape_via_assignment(a: Arg) -> u64 {
+    mut out: *u64 = nil
+    switch a {
+        .large(&v): {
+            out = v
+        },
+        .small(v): {},
+    }
+    if !out { return 0 }
+    return out.*
+}
+
+// via a call argument
+pub fn escape_via_call(a: Arg) -> u64 {
+    mut total: u64 = 0
+    switch a {
+        .large(&v): {
+            total = observe(v)
+        },
+        .small(v): {},
+    }
+    return total
+}
+
+// via a store into a global
+pub fn escape_via_global(a: Arg) {
+    switch a {
+        .large(&v): {
+            global_ptr = v
+        },
+        .small(v): {},
+    }
+}
+
+// via an aggregate initializer
+pub fn escape_via_struct(a: Arg) -> Holder {
+    mut h: Holder = default
+    switch a {
+        .large(&v): {
+            h = { .ptr = v }
+        },
+        .small(v): {},
+    }
+    return h
+}
+
+// via a return, out of the match-expression form
+pub fn escape_via_return(a: Arg) -> *u64 {
+    switch a {
+        .large(&v): {
+            return v
+        },
+        .small(v): {},
+    }
+    return nil
+}
+
+// SAFE: reading through the pointer while the arm is still live. Must not warn.
+pub fn safe_read_through(a: Arg) -> u64 {
+    mut got: u64 = 0
+    switch a {
+        .large(&v): {
+            got = v.*
+        },
+        .small(v): {},
+    }
+    return got
+}
+
+pub fn main() -> i32 {
+    const a: Arg = .large{.v = 7}
+    if safe_read_through(a) != 7 { return 1 }
+    return 0
+}

@@ -323,6 +323,18 @@
         <tr><td>Default</td><td><code>_</code></td><td>Any remaining value (must be last)</td></tr>
       </table>
 
+      <div class="callout warning">
+        <div class="callout-title">A by-ref capture is only valid inside its own arm</div>
+        The operand is evaluated into one compiler-managed slot per function, so
+        <code>&amp;capture</code> points at that slot rather than at the original object — and
+        the next <code>match</code>/<code>switch</code> in the same function reuses it. Reading
+        through the pointer inside the arm (<code>v.*</code>, <code>v.field</code>) is the
+        intended use. Letting the pointer itself outlive the arm — returning it, assigning it
+        outward, passing it to a call, storing it in a struct — reads a value the program never
+        put there. The compiler warns about the forms it can see syntactically; capture by value
+        when the payload needs to outlive the arm.
+      </div>
+
       <div class="page-nav">
         <a href="functions.html" class="prev"><span class="label">Previous</span>Functions</a>
         <a href="structs-and-types.html" class="next"><span class="label">Next</span>Structs &amp; Types</a>
