@@ -820,6 +820,30 @@ def main() -> int:
     check("Close" not in flag_labels,
           f"contextual '.flag' completion is not implemented (offers no bitset flags), got {flag_labels}")
 
+    # --- completion inside a generic instantiation's argument list (LSPH-9) ---
+    #
+    # 'Bucket[i32]' and 'arr[idx]' are the same production to the parser, told apart in sema
+    # once the identifier's declaration is known -- and completion has no parse at all, since
+    # it tokenizes a buffer that is usually mid-edit. So the bracket's owner is found by
+    # walking back over balanced brackets, and classified by what that identifier names.
+    generic_items = sym_completion("mut b: Bucket[i32] = default", "i32")
+    generic_labels = [it["label"] for it in generic_items]
+    check("Square" in generic_labels and "Bucket" in generic_labels,
+          f"completion inside 'Bucket[...]' offers declared type names, got {generic_labels}")
+    check("i32" in generic_labels and "bool" in generic_labels,
+          f"completion inside 'Bucket[...]' offers builtin type names, got {generic_labels}")
+    check("double" not in generic_labels and "counter" not in generic_labels,
+          f"completion inside 'Bucket[...]' offers no functions or locals, got {generic_labels}")
+
+    # An ordinary index must be unaffected: 'arr' is not a generic type, so this is the
+    # value-completion path exactly as before.
+    index_items = sym_completion("return b.value + arr[idx]", "idx")
+    index_labels = [it["label"] for it in index_items]
+    check("idx" in index_labels,
+          f"completion inside 'arr[...]' still offers locals, got {index_labels}")
+    check("if" in index_labels,
+          f"completion inside 'arr[...]' still offers keywords, got {index_labels}")
+
     client.notify("textDocument/didClose", {"textDocument": {"uri": sym_uri}})
     client.read_with_timeout(5)
 

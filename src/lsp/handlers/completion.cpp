@@ -48,6 +48,34 @@ namespace lsp::handlers {
             }
         }
 
+        // Builtin type spellings offerable as a generic argument. Deliberately a fixed list
+        // rather than a filter over keyword_spellings(): most keywords ('if', 'return',
+        // 'match') are meaningless in a type position, and offering them there is noise.
+        constexpr std::string_view BUILTIN_TYPE_NAMES[] = {
+            "bool", "byte", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+            "usize", "isize", "f32", "f64", "anyptr", "type",
+        };
+
+        // Type names only: what belongs in a generic argument list. The counterpart to
+        // add_module_symbols, which offers every symbol kind and would suggest functions and
+        // globals in a position where neither can appear.
+        void add_type_names(const sema::SymbolTable &symbols, const std::string &prefix, std::vector<json> &out) {
+            for (const auto &name : BUILTIN_TYPE_NAMES) {
+                if (starts_with(std::string(name), prefix)) {
+                    out.emplace_back(item(std::string(name), ItemKind::Keyword, "builtin type"));
+                }
+            }
+            for (const auto &[name, symbol] : symbols) {
+                if (!starts_with(name, prefix)) continue;
+                if (std::holds_alternative<sema::TypeSymbol>(symbol)) {
+                    out.emplace_back(item(name, ItemKind::Struct, "type"));
+                } else if (std::holds_alternative<sema::ImportSymbol>(symbol)) {
+                    // A module can qualify a type ('mod.Thing'), so it is still worth offering.
+                    out.emplace_back(item(name, ItemKind::Module, "module"));
+                }
+            }
+        }
+
         void add_locals_and_params(const EnclosingFunction &enclosing, const LocalLookupContext &ctx,
                                     const size_t before_line, const sema::Program &program,
                                     const std::string &module_path, const std::string &prefix,
@@ -92,6 +120,37 @@ namespace lsp::handlers {
                     },
                     symbol);
             }
+        }
+
+        // Whether the cursor sits inside an unclosed '[' whose opener follows an identifier,
+        // and if so the index of the token naming what is being indexed or instantiated.
+        //
+        // The parser itself refuses to decide this ('arr[i]' and 'List[i32]' are the same
+        // production, IndexOrInstantiateExpr, classified in sema once the identifier's
+        // declaration is known). Here there is no parse at all -- completion tokenizes a
+        // buffer that is usually mid-edit and often unparseable -- so the bracket structure
+        // is walked directly, backwards, counting depth.
+        auto enclosing_bracket_owner(const std::vector<Token> &tokens, const size_t anchor) -> std::optional<size_t> {
+            int depth = 0;
+            for (size_t i = anchor; i-- > 0;) {
+                const auto kind = tokens[i].kind;
+                if (kind == TokenKind::RBracket) {
+                    ++depth;
+                } else if (kind == TokenKind::LBracket) {
+                    if (depth == 0) {
+                        // Unclosed '[' at this level: its owner is whatever precedes it.
+                        if (i == 0 || tokens[i - 1].kind != TokenKind::Identifier) return std::nullopt;
+                        return i - 1;
+                    }
+                    --depth;
+                } else if (kind == TokenKind::LBrace || kind == TokenKind::RBrace ||
+                           kind == TokenKind::Semicolon) {
+                    // A statement or block boundary: the cursor is not inside a bracket that
+                    // opened before it. Stops the scan running away over the whole file.
+                    return std::nullopt;
+                }
+            }
+            return std::nullopt;
         }
 
         // Enumerates struct fields/union members/tagged-union variants/enum fields/methods
@@ -311,6 +370,30 @@ namespace lsp::handlers {
                 add_type_members(container.type, result.sema_program, module_path, prefix, items);
             }
         } else {
+            // Inside 'Something[...]' (LSPH-9). Whether that is a generic instantiation or an
+            // ordinary index cannot be decided from tokens alone -- it is the same production
+            // to the parser, resolved in sema once the identifier's declaration is known, and
+            // here there is no parse to consult. So it is decided by what the identifier
+            // actually names: a generic type declaration means type arguments, anything else
+            // (or nothing recognizable, in a buffer mid-edit) means an index.
+            //
+            // Degrading toward the value completions rather than toward nothing matters: a
+            // wrong guess that offers an empty list is worse than the old behaviour, while a
+            // wrong guess that offers values is exactly the old behaviour.
+            if (chain_anchor) {
+                if (const auto owner = enclosing_bracket_owner(tokens, *chain_anchor)) {
+                    const auto &owner_name = tokens[*owner].lexeme;
+                    const auto sym_it = sema_mod_it->second.symbols.find(owner_name);
+                    const auto *type_sym = sym_it != sema_mod_it->second.symbols.end()
+                        ? std::get_if<sema::TypeSymbol>(&sym_it->second)
+                        : nullptr;
+                    if (type_sym && type_sym->decl && !type_sym->decl->generic_params.empty()) {
+                        add_type_names(sema_mod_it->second.symbols, prefix, items);
+                        return items;
+                    }
+                }
+            }
+
             add_keywords(prefix, items);
             add_locals_and_params(enclosing, ctx, line, result.sema_program, module_path, prefix, items);
             add_module_symbols(sema_mod_it->second.symbols, result.sema_program, module_path, prefix, items);

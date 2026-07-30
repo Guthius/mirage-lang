@@ -73,9 +73,25 @@ pub fn use_shape(shape: Shape) -> i32 {
     return shape.area()
 }
 
+// A generic type, so completion inside 'Bucket[<cursor>]' has something to resolve the
+// bracket's owner against — and an ordinary array, so the index case can be told apart.
+pub type Bucket[T: type] = struct {
+    value: T
+}
+
+pub fn use_bucket() -> i32 {
+    mut b: Bucket[i32] = default
+    b.value = 5
+
+    mut arr: [3]i32 = { 1, 2, 3 }
+    mut idx: usize = 1
+
+    return b.value + arr[idx]
+}
+
 pub fn main() -> i32 {
     mut sq: Square = default
     const shape: Shape = &sq
     mut modes: Stream_Modes = make_modes()
-    return count_things() + describe(.Opened{.id = 1}) + use_shape(shape) + double(0)
+    return count_things() + describe(.Opened{.id = 1}) + use_shape(shape) + double(0) + use_bucket()
 }
