@@ -265,6 +265,18 @@
         shared-vs-static or per-platform library names are usually selected:
       </p>
       <pre><code><span class="kw">#link</span>(<span class="var">lib</span>, <span class="str">"raylibdll.lib"</span> <span class="kw">when</span> <span class="var">raylib_shared</span> <span class="kw">else</span> <span class="str">"raylib.lib"</span>)</code></pre>
+
+      <div class="callout warning">
+        <div class="callout-title"><code>flag</code> is an unvalidated escape hatch</div>
+        The three categories are checked differently: <code>lib</code> rejects absolute paths, and
+        <code>system</code> becomes <code>-lNAME</code> so it cannot express anything else.
+        <code>flag</code> is the only one passed to the linker verbatim, with no validation at all —
+        <code>#link(flag, "-Wl,--whatever")</code> arrives exactly as written. That is the point of
+        it, and it is not a privilege boundary: the directive comes from source you are already
+        compiling, which could do anything a linker flag could. Worth knowing when reading
+        unfamiliar code, though — it is the one directive whose effect nothing in the compiler
+        bounds.
+      </div>
       <p>
         <code>#link</code> is legal only at module scope, or inside a module-scope <code>when</code>
         block — anywhere else (a function body, an <code>if</code>, etc.) it's a compile error. The

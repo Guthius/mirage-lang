@@ -313,6 +313,19 @@
         when you need to execute statements per arm. Only <code>match</code> checks exhaustiveness.
       </div>
 
+      <div class="callout">
+        <div class="callout-title">Why only <code>match</code> is exhaustive</div>
+        The asymmetry is deliberate. <code>match</code> is an expression and must produce a value on
+        <em>every</em> path, so an uncovered variant has nothing it could evaluate to.
+        <code>switch</code> is a statement, and a value matching no arm simply does nothing — a
+        well-defined outcome, and often the intended one; requiring exhaustiveness would force a
+        <code>_: {}</code> arm onto every switch that legitimately handles a subset.
+        <br><br>
+        The practical consequence: adding a variant to an enum or tagged union breaks every
+        <code>match</code> on it until the new case is handled, and changes no <code>switch</code> at
+        all. Use <code>match</code> when you want the compiler to find every site as a type grows.
+      </div>
+
       <h2>Arm Pattern Reference</h2>
       <table>
         <tr><th>Pattern</th><th>Syntax</th><th>Matches</th></tr>

@@ -1296,6 +1296,18 @@ Matches any value. Must be the last arm. At most one `_` allowed per match/switc
 
 `switch` is a statement: arm bodies are statements, no result type, no exhaustiveness check. `match` is an expression: arm bodies are expressions, all arms must produce the same type, exhaustiveness is checked.
 
+**The asymmetry is deliberate, not an omission.** `match` is an expression and must
+produce a value on *every* path, so an uncovered variant has no answer to give — there
+is nothing it could evaluate to. `switch` is a statement, and a value matching no arm
+simply does nothing, which is a well-defined outcome and often the intended one. Adding
+an exhaustiveness requirement to `switch` would mean forcing a `_: {}` arm onto every
+switch that legitimately handles a subset.
+
+The practical consequence is worth knowing: adding a variant to an enum or tagged union
+makes every `match` on it fail to compile until the new case is handled, and changes no
+`switch` at all. If you want the compiler to find every site when a type grows, use
+`match`.
+
 ---
 
 ## 9. Impl Blocks and Methods
@@ -1663,6 +1675,17 @@ The path is resolved in two steps:
 
 This lets a project keep local, closely-related modules as subdirectories of the importing module, while sharing a common library root via `MIRAGE_PATH` for anything meant to be reused across unrelated parts of a project.
 
+**The containment rule applies only to step 2.** The `MIRAGE_PATH` fallback is confined to
+`MIRAGE_PATH`; the importer-relative branch has no containment check at all, and the only
+path form rejected outright is an absolute one. `import("../../elsewhere")` resolves
+happily to anywhere on the filesystem the importing file can reach.
+
+That is deliberate rather than an oversight: upward traversal is how sibling modules
+import each other, which the corpus itself depends on — `examples/example_reflection`
+imports `"../../runtime/type_info"`. Constraining it would break working multi-directory
+projects. But there is no project-root boundary, so an import path is bounded only by the
+filesystem.
+
 The `mirage build`/`mirage run` CLI also accepts a `--std=<path>` flag, which overrides `MIRAGE_PATH` for that invocation.
 
 ### Accessing Module Symbols
@@ -1883,6 +1906,15 @@ The compiler collects every `#link` directive reachable from a *live*
 `when` branch (see below), across every compiled module, into a single
 list the driver can act on (the exact linking mechanism is driver-specific
 and out of the compiler's scope — collection only).
+
+**`flag` is an unvalidated escape hatch, by design.** The three categories are checked
+differently: `lib` rejects absolute paths, and `system` becomes `-lNAME` and so cannot
+express anything else. `flag` is the only one passed to the linker verbatim, with no
+validation whatsoever — `#link(flag, "-Wl,--whatever")` reaches the linker exactly as
+written. That is the point of it, and it is not a privilege boundary: the directive comes
+from source the user is already compiling, which could do anything a linker flag could.
+Worth knowing when reviewing unfamiliar code, though — it is the one directive whose
+effect is not bounded by anything the compiler checks.
 
 ### `#error` / `#warn`
 

@@ -85,6 +85,18 @@
         that imports them, and put anything meant to be shared across unrelated projects under the
         directory pointed to by <code>MIRAGE_PATH</code>.
       </p>
+
+      <div class="callout">
+        <div class="callout-title">The containment rule applies only to step 2</div>
+        The <code>MIRAGE_PATH</code> fallback is confined to <code>MIRAGE_PATH</code>. The
+        importer-relative branch has no containment check at all, and the only path form rejected
+        outright is an absolute one — <code>import("../../elsewhere")</code> resolves happily to
+        anywhere on the filesystem the importing file can reach.
+        <br><br>
+        That is deliberate: upward traversal is how sibling modules import each other, as the
+        example just below relies on. Constraining it would break working multi-directory projects.
+        But there is no project-root boundary, so an import path is bounded only by the filesystem.
+      </div>
       <pre><code><span class="cmt">// project/
 //   main/
 //     main.mir        -- import("../lib/vector") reaches project/lib/vector
