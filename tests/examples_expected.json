@@ -293,10 +293,8 @@
     "exit": 1
   },
   "example_default_undefined": {
-    "action": "build",
-    "diag": "examples/example_default_undefined/main.mir:24:22: error: unknown identifier 'x'",
-    "exit": 1,
-    "known_broken": "pre-existing on master: main.mir:24 writes '{ x = 5, y = default }' without the leading dots the current braced-initializer syntax requires ('{.x = 5, .y = default}')"
+    "action": "run",
+    "exit": 203
   },
   "example_defer": {
     "action": "run",
