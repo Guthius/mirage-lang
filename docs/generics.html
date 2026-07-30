@@ -111,6 +111,16 @@
         pattern, and so on. <code>ext fn</code> and <code>macro</code> declarations may not
         carry generic parameters — the grammar gives them no syntax position to write one.
       </p>
+      <pre><code><span class="kw">fn</span> <span class="fn">make_fixed</span>[<span class="ty">N</span>: <span class="ty">usize</span>](<span class="var">fill</span>: [<span class="ty">N</span>]<span class="ty">u8</span> = <span class="kw">default</span>) -&gt; [<span class="ty">N</span>]<span class="ty">u8</span> { <span class="cmt">/* 'N' in the default is legal */</span> }
+
+<span class="kw">fn</span> <span class="fn">width</span>[<span class="ty">K</span>: <span class="kw">type</span>](<span class="var">n</span> := <span class="fn">size_of</span>(<span class="ty">K</span>)) -&gt; <span class="ty">usize</span> { <span class="kw">return</span> <span class="var">n</span> }</code></pre>
+      <p>
+        <strong>Default parameter values may reference the enclosing declaration's own generic
+        parameters</strong>, type or value. This is the one exception to the rule that a default
+        expression cannot reference another parameter of the same function — a default is
+        re-resolved per instantiation, so <code>size_of(K)</code> above is <code>8</code> in
+        <code>width[i64]()</code> and <code>4</code> in <code>width[i32]()</code>.
+      </p>
 
       <h2>Generic Impl Blocks</h2>
       <pre><code><span class="kw">impl</span> <span class="ty">List</span>[<span class="ty">T</span>: <span class="kw">type</span>] {
@@ -184,6 +194,28 @@
         parameters</strong> infer <em>only</em> from expected-type context — there's generally
         no argument shape to unify a value parameter against. If any parameter remains unbound
         after both passes, it's a compile error naming the specific unresolved parameter.
+      </p>
+
+      <h2 id="generic-functions-as-values">Generic Functions as Values</h2>
+      <pre><code><span class="kw">type</span> <span class="ty">Hash_Function</span>[<span class="ty">T</span>: <span class="kw">type</span>] = <span class="kw">fn</span>(<span class="ty">T</span>) -&gt; <span class="ty">u64</span>
+
+<span class="kw">fn</span> <span class="fn">fnv1a</span>[<span class="ty">T</span>: <span class="kw">type</span>](<span class="var">value</span>: <span class="ty">T</span>) -&gt; <span class="ty">u64</span> { <span class="cmt">/* ... */</span> }
+
+<span class="kw">const</span> <span class="var">h</span>: <span class="ty">Hash_Function</span>[<span class="ty">i32</span>] = <span class="fn">fnv1a</span>[<span class="ty">i32</span>]   <span class="cmt">// fn(i32) -&gt; u64</span>
+<span class="kw">const</span> <span class="var">g</span> := <span class="fn">fnv1a</span>[<span class="ty">i64</span>]                      <span class="cmt">// decays; g is 'fn(i64) -&gt; u64'</span></code></pre>
+      <p>
+        A generic function instantiation can be used as a <strong>value</strong>, not just as a
+        call callee: <code>f[Args]</code> in value position names that one monomorphized
+        instantiation and has its function-pointer type. Generic arguments must be written
+        <strong>explicitly</strong> — the inference above draws on a call's arguments and expected
+        type, and in value position there are none, so a bare generic function name is an error
+        (<span class="cmt">"supply its generic arguments to name a specific instantiation"</span>).
+      </p>
+      <p>
+        The ordinary function-pointer rules apply unchanged to the instantiation: a variadic
+        generic function's address still can't be taken, and <code>@always_inline</code> still
+        warns. This is also the only way to name an instantiation as a value, since
+        instantiations are otherwise observable only through their mangled symbol names.
       </p>
 
       <h2>Implicit Self-Instantiation</h2>

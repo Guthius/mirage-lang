@@ -83,6 +83,10 @@ namespace sema {
         // Set only when this slot is a monomorphized instantiation of a generic 'type
         // Name[...] = struct {...}' declaration — see instantiate_generic_type.
         std::optional<GenericInstanceInfo> generic_instance;
+        // Guards check_generic_struct_field_defaults_for_program's worklist. Only meaningful
+        // when generic_instance is set: a non-generic struct's field defaults are checked by
+        // check_struct_field_defaults_for_module instead, which walks declarations, not slots.
+        bool field_defaults_checked = false;
     };
 
     struct ArrayInfo {
@@ -832,6 +836,19 @@ namespace sema {
     auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType;
     auto intern_slice(Program &program, const ResolvedType &element) -> ResolvedType;
     auto intern_function_type(Program &program, FunctionTypeInfo sig) -> ResolvedType;
+    // The function-pointer type a named function DECAYS to when it appears in value position
+    // ('const g := f', a ':='-inferred default parameter value, a call argument with no
+    // declared parameter type to expect). Each interns a 'fn(params) -> returns' from an
+    // already-resolved signature; none of them may be called on a variadic function (the
+    // caller must reject that first — see spec.md's function-pointer rules) nor on a generic
+    // TEMPLATE, whose 'params' are deliberately empty (see is_generic_function).
+    // Whole-program pass checking every monomorphized generic struct's field default
+    // initializers — see its definition in sema_check.cpp for why the declaration-walking
+    // check_struct_field_defaults_for_module cannot cover them.
+    void check_generic_struct_field_defaults_for_program(Program &program, DiagnosticEngine &diag);
+    auto function_pointer_type_of(const FunctionSymbol &sym, Program &program) -> ResolvedType;
+    auto ext_function_pointer_type_of(const ExtFunctionSymbol &sym, Program &program) -> ResolvedType;
+    auto generic_instance_function_pointer_type(const GenericFunctionInstance &instance, Program &program) -> ResolvedType;
     // Assigns (or looks up) 'type''s stable identity for a given ResolvedType — the
     // compile-time value 'type_of' resolves to. Lazy, encounter-order assignment starting
     // at Program::next_type_id (16); ids 1-15 are pre-seeded by seed_builtin_type_ids for
@@ -949,10 +966,18 @@ namespace sema {
     // call site) — this is what naturally makes 'try' inside a default expression
     // a sema error via the ordinary TryExpr check, with no special casing needed
     // here or anywhere else in this feature.
+    //
+    // 'outer_scope' is the scope explicitly-typed defaults are checked in. Ordinary
+    // declarations pass nothing (module scope — a default may not reference another
+    // parameter of the same function). A GENERIC declaration's instantiation passes a scope
+    // carrying its VALUE generic-params as locals, since spec.md §22 makes the enclosing
+    // declaration's own generic parameters the single exception to that rule; its TYPE
+    // generic-params come from the ambient ScopedGenericScope instead.
     template <typename ParamT>
     void check_param_defaults(const std::vector<ParamT> &decl_params, const std::vector<ResolvedType> &resolved_params,
                                size_t &required_params, std::vector<bool> &param_default_is_const,
-                               const std::string &module_path, Program &program, DiagnosticEngine &diag) {
+                               const std::string &module_path, Program &program, DiagnosticEngine &diag,
+                               const LocalScope *outer_scope = nullptr) {
         required_params = decl_params.size();
         param_default_is_const.assign(decl_params.size(), false);
         if (decl_params.empty()) return;
@@ -981,8 +1006,8 @@ namespace sema {
                     seen_default = true;
                 }
                 if (p.type) {
-                    LocalScope empty;
-                    const auto default_ty = check_expr(*p.default_value, empty, module_path, program, diag, resolved_params[i], 0);
+                    LocalScope scope = outer_scope ? *outer_scope : LocalScope{};
+                    const auto default_ty = check_expr(*p.default_value, scope, module_path, program, diag, resolved_params[i], 0);
                     if (!assignable_in_module(default_ty, resolved_params[i], module_path, program)) {
                         diag.report_error(DiagnosticStage::Sema, p.location, std::format(
                             "default value for parameter '{}' has type '{}' but parameter is declared as '{}'",

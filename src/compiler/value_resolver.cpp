@@ -433,6 +433,20 @@ namespace sema {
             return sym;
         }
 
+        // A generic function template has no single resolvable signature: 'T' in '(value: T)'
+        // only means anything once a concrete instantiation binds it (see
+        // instantiate_generic_function, which resolves the params through
+        // resolve_type_with_generic_env instead). Resolving here would run the plain,
+        // env-less resolve_type below and report a bogus "unknown type 'T'" against the
+        // TEMPLATE's own parameter list — and then latch it, because 'is_resolved = true' at
+        // the bottom would cache the resulting Invalid param types forever. Callers that can
+        // reach a generic symbol must check is_generic_function() and route to an
+        // instantiation instead; bail out leaving is_resolved false so a later, correct
+        // resolution is still possible.
+        if (is_generic_function(sym)) {
+            return sym;
+        }
+
         const auto key = std::make_pair(module_path, name);
         if (program.resolve_state.fn_signature_resolving.contains(key)) {
             diag.report_error(DiagnosticStage::Sema, sym.decl->location,

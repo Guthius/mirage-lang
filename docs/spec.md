@@ -326,6 +326,28 @@ Function pointer types represent callable values. They are opaque pointers inter
 
 Multi-return function pointer types use `-> (T1, T2)` syntax.
 
+A function's name used in **value position** — anywhere a value is expected, rather than as a call
+callee — is that function's address, with its own function-pointer type. No expected type is
+required, so a name may be bound with `:=` or used as an inferred-type default parameter value:
+
+```mirage
+fn double(v: i32) -> i32 { return v * 2 }
+
+const fp: fn(i32) -> i32 = double   // explicit type
+const g := double                    // same value; type inferred as 'fn(i32) -> i32'
+fn apply(v: i32, op := double) -> i32 { return op(v) }
+```
+
+An `ext fn` name decays the same way. The address of a variadic function — native `...T` or C
+`...` — cannot be taken (see [Native Variadic Parameters](#native-variadic-parameters)), and a macro has no
+address. For a generic function, the instantiation must be named explicitly: see
+[Generic Functions as Values](#generic-functions-as-values).
+
+Because a decayed name is a well-typed value, a forgotten `()` is reported at the point of use
+rather than at the name itself, and is not diagnosed at all where a function pointer is already
+valid — notably in a condition, where a function pointer is a `nil` test, so `if double {}` means
+`if double != nil`.
+
 ---
 
 ## 3. Literals
@@ -3128,6 +3150,38 @@ error: could not infer generic parameter 'N' for 'make_fixed' — provide it
        explicitly ('make_fixed[16]()') or use it in a context with a known
        expected type
 ```
+
+### Generic Functions as Values
+
+A generic function instantiation may be used as a **value**, not just as a
+call callee. `f[Args]` in value position names that one monomorphized
+instantiation and has its function-pointer type:
+
+```mirage
+type Hash_Function[T: type] = fn(T) -> u64
+
+fn fnv1a[T: type](value: T) -> u64 { ... }
+
+const h: Hash_Function[i32] = fnv1a[i32]   // fn(i32) -> u64
+const g := fnv1a[i64]                      // decays; g is 'fn(i64) -> u64'
+```
+
+Generic arguments must be written **explicitly** here. The inference described
+above draws on a call's arguments and expected type; in value position there
+are no arguments, so a bare generic function name is an error:
+
+```
+error: 'fnv1a' is a generic function; supply its generic arguments to name a
+       specific instantiation (e.g. 'fnv1a[i32]')
+```
+
+The ordinary function-pointer rules apply unchanged to the instantiation. In
+particular a variadic generic function's address still cannot be taken, and
+`@always_inline` still warns.
+
+Instantiations remain internal symbols observable only through their mangled
+names — see [Monomorphization and Type Identity](#monomorphization-and-type-identity)
+— so a function pointer is the only way to name one as a value.
 
 ### Implicit Self-Instantiation
 

@@ -252,6 +252,24 @@
 <span class="kw">mut</span> <span class="var">fp</span>: <span class="ty">fn</span>(<span class="ty">i32</span>) -&gt; <span class="ty">i32</span> = <span class="var">square</span>
 <span class="kw">const</span> <span class="var">r</span>: <span class="ty">i32</span> = <span class="var">fp</span>(<span class="num">9</span>)   <span class="cmt">// 81</span></code></pre>
 
+      <h3>Inferring the Pointer Type</h3>
+      <pre><code><span class="kw">const</span> <span class="var">g</span> := <span class="var">square</span>                         <span class="cmt">// g: fn(i32) -&gt; i32, no annotation needed</span>
+
+<span class="kw">fn</span> <span class="fn">apply</span>(<span class="var">v</span>: <span class="ty">i32</span>, <span class="var">op</span> := <span class="var">square</span>) -&gt; <span class="ty">i32</span> { <span class="kw">return</span> <span class="var">op</span>(<span class="var">v</span>) }</code></pre>
+      <p>
+        A function's name in value position is its address, with its own function-pointer type —
+        no expected type required. That's what makes <code>:=</code> and an inferred-type default
+        parameter value work, neither of which can supply one. An <code>ext fn</code> name behaves
+        the same; a generic function needs its instantiation named explicitly
+        (<code>fnv1a[i32]</code>, see <a href="generics.html#generic-functions-as-values">Generics</a>).
+      </p>
+      <p>
+        One consequence: since a decayed name is a well-typed value, a forgotten <code>()</code>
+        is reported where the value is used rather than at the name, and isn't reported at all
+        where a function pointer is already valid — in a condition it's a <code>nil</code> test,
+        so <code>if square {}</code> means <code>if square != nil</code>.
+      </p>
+
       <h3>Higher-Order Functions</h3>
       <pre><code><span class="kw">fn</span> <span class="fn">apply</span>(<span class="var">op</span>: <span class="ty">fn</span>(<span class="ty">i32</span>, <span class="ty">i32</span>) -&gt; <span class="ty">i32</span>, <span class="var">x</span>: <span class="ty">i32</span>, <span class="var">y</span>: <span class="ty">i32</span>) -&gt; <span class="ty">i32</span> {
     <span class="kw">return</span> <span class="var">op</span>(<span class="var">x</span>, <span class="var">y</span>)

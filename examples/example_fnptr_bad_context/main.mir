@@ -1,0 +1,28 @@
+// example_fnptr_bad_context.mir — REJECTION case documenting the diagnostic CHANGE that came with
+// function-name decay (see example_fnptr_inferred).
+//
+// A bare function name in value position used to be rejected outright with
+// "'f' is a function; did you mean to call it?", which doubled as a forgotten-'()' hint. Now that
+// the name decays to its function-pointer type so ':=' and inferred default parameter values can
+// work, that hint is gone: a forgotten '()' surfaces as an ordinary type error at the point of
+// use instead. This fixture pins the replacement wording, so the change stays deliberate and
+// visible rather than becoming an accident.
+//
+// Here 'double + 1' is arithmetic on a function pointer, which is rejected on its own terms.
+//
+// CAVEAT worth knowing: not every forgotten '()' is still caught. A function pointer is
+// boolean-coercible as a nil test (a pre-existing rule — 'const g: fn(i32) -> i32 = double;
+// if g {}' has always compiled), so a forgotten '()' in a CONDITION — 'if double {}' — now
+// silently means "if double != nil", which is always true, where it used to be an error. That is
+// the price of decay; nothing here can detect it, because the decayed expression is well-typed.
+//
+// Expected: compile error — "arithmetic is not allowed on function pointer types", NOT
+// "did you mean to call it?".
+
+fn double(v: i32) -> i32 {
+    return v * 2
+}
+
+pub fn main() -> i32 {
+    return double + 1
+}

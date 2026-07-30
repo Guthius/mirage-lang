@@ -1,0 +1,36 @@
+// example_generics_default_size_of.mir — a ':='-inferred default parameter value whose
+// expression is a compile-time query over the enclosing declaration's own TYPE parameter
+// ('n := size_of(K)'). The parameter's type is therefore derived from checking the default
+// expression, which in turn can only be resolved once 'K' is bound.
+//
+// This is the narrowest possible case of spec.md §22's "Default parameter values may reference
+// the enclosing declaration's own generic parameters": no function pointers, no structs, just a
+// bare type parameter inside a default expression. It used to report "unknown identifier 'K'"
+// against the default, because a default expression was checked in plain module scope with the
+// enclosing declaration's parameters nowhere in sight.
+//
+// Also exercises the same for align_of, and confirms that passing the argument explicitly still
+// overrides the default.
+//
+// Expected: compiles and runs, exit code 21 (see main).
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+fn width[K: type](n := size_of(K)) -> usize {
+    return n
+}
+
+fn alignment[K: type](a := align_of(K)) -> usize {
+    return a
+}
+
+pub fn main() -> i32 {
+    const w8 := width[i64]()        // size_of(i64)  == 8
+    const w4 := width[i32]()        // size_of(i32)  == 4
+    const w_explicit := width[i64](1)  // default overridden -> 1
+    const a8 := alignment[i64]()    // align_of(i64) == 8
+
+    printf("w8=%zu w4=%zu w_explicit=%zu a8=%zu\n", w8, w4, w_explicit, a8)
+
+    return cast(w8 + w4 + w_explicit + a8, i32)   // 8 + 4 + 1 + 8 == 21
+}

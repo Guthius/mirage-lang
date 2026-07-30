@@ -26,6 +26,15 @@ namespace sema {
         std::vector<bool> param_default_is_const; // parallel to params; meaningful only at i >= required_params
     };
 
+    // True for a generic function TEMPLATE ('fn f[T: type](v: T)'). Such a symbol's
+    // 'params'/'return_types' are deliberately never filled in: a template has no single
+    // signature, only one per concrete instantiation (see GenericFunctionInstance). Anything
+    // that reads those vectors — or calls ensure_function_signature_resolved — must check
+    // this first and route to instantiate_generic_function instead.
+    inline auto is_generic_function(const FunctionSymbol &sym) -> bool {
+        return sym.decl != nullptr && !sym.decl->generic_params.empty();
+    }
+
     struct ExtFunctionSymbol {
         const ast::ExtFunctionDecl *decl = nullptr;
         std::vector<ResolvedType> params;

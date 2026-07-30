@@ -1,0 +1,43 @@
+// example_generics_default_type_param.mir — spec.md §22's own example of a default parameter
+// value referencing the enclosing declaration's generic parameter:
+//
+//     fn make_fixed[N: usize](fill: [N]u8 = default) -> [N]u8 { ... }   // 'N' in the default is legal
+//
+// The rule ("Default parameter values may reference the enclosing declaration's own generic
+// parameters", type or value) was documented but never exercised by a fixture, and did not
+// actually work: a default expression is checked in the plain module scope, so the enclosing
+// declaration's parameters were invisible to it.
+//
+// Covers a VALUE parameter used in a default's declared type ('[N]u8 = default'), and a value
+// parameter referenced by the default EXPRESSION itself ('times := N').
+//
+// Expected: compiles and runs, exit code 12 (see main).
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+// 'N' appears in the defaulted parameter's own declared type.
+fn make_fixed[N: usize](fill: [N]u8 = default) -> [N]u8 {
+    return fill
+}
+
+// 'N' appears in the default EXPRESSION, inferred-type form — the parameter's type comes from
+// whatever 'N' resolves to (usize).
+fn scaled[N: usize](base: usize, times := N) -> usize {
+    return base * times
+}
+
+pub fn main() -> i32 {
+    // 'fill' omitted: materialized as '[4]u8 = default', i.e. all zeroes.
+    const zeroes := make_fixed[4]()
+    // 'fill' passed explicitly, so the default is not used.
+    const ones: [4]u8 = {1, 1, 1, 1}
+    const copied := make_fixed[4](ones)
+
+    const from_default := scaled[3](2)   // times defaults to N == 3 -> 6
+    const from_arg := scaled[3](2, 3)    // times passed explicitly -> 6
+
+    printf("zeroes[0]=%d copied[0]=%d from_default=%zu from_arg=%zu\n",
+           cast(zeroes[0], i32), cast(copied[0], i32), from_default, from_arg)
+
+    return cast(from_default + from_arg, i32)   // 6 + 6 == 12
+}

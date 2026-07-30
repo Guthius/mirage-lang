@@ -679,6 +679,12 @@ namespace sema {
 
         check_trait_impl_bodies_for_program(out, diag);
 
+        // After the bodies, because that is where most generic instantiations are created —
+        // a generic struct's field defaults can only be checked once its type parameters are
+        // bound, so unlike check_struct_field_defaults_for_module above this walks
+        // monomorphized slots rather than declarations.
+        check_generic_struct_field_defaults_for_program(out, diag);
+
         // Runs last: the cross-module '@init' reference walk doesn't need type-checked
         // bodies, but keeping it after every other pass makes "last" unambiguous.
         validate_init_dependencies_for_program(program, out, diag);

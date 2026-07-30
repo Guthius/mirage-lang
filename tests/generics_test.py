@@ -55,6 +55,48 @@ CASES = [
         ["box: is_generic=1 args=1", "plain: is_generic=0 args=0"],
         [],
     ),
+    # Generic functions as values + generic params in scope inside default parameter values
+    # (spec.md §22). Each of these exercised a distinct failure before: a generic instantiation
+    # in value position, a bare function name decaying with no expected type, and the enclosing
+    # declaration's own generic parameters being visible to a default expression.
+    (
+        "example_generics_default_fn_value",
+        "run",
+        7,
+        ["h=4 h_wide=8 h_inferred=4 eq_yes=1 eq_no=0"],
+        [],
+    ),
+    (
+        "example_generics_default_type_param",
+        "run",
+        12,
+        ["zeroes[0]=0 copied[0]=1 from_default=6 from_arg=6"],
+        [],
+    ),
+    (
+        "example_generics_default_size_of",
+        "run",
+        21,
+        ["w8=8 w4=4 w_explicit=1 a8=8"],
+        [],
+    ),
+    # A monomorphized generic struct's field defaults on codegen's runtime braced-initializer
+    # path — these used to lower to a zero-width 'i0' and fail LLVM verification.
+    (
+        "example_generics_struct_field_default",
+        "run",
+        12,
+        ["plain: cap=0 count=0 sealed=0 slot0=7", "sized: cap=4 count=0"],
+        [],
+    ),
+    # Non-generic half of function-name decay.
+    (
+        "example_fnptr_inferred",
+        "run",
+        25,
+        ["via_local=10 defaulted=6 overridden=-3 twice=12"],
+        [],
+    ),
     # Rejection cases — each new restriction/coherence error from spec.md §22.
     (
         "example_generics_orphan_impl",
@@ -90,6 +132,32 @@ CASES = [
         1,
         [],
         ["could not infer generic parameter"],
+    ),
+    # A generic function named as a value needs explicit generic arguments — there is nothing to
+    # infer from in value position. Also pins the absence of the phantom "unknown type 'T'"
+    # cascade this mistake used to emit against the callee's own (correct) declaration.
+    (
+        "example_generics_fn_value_missing_args",
+        "build",
+        1,
+        [],
+        ["is a generic function; supply its generic arguments"],
+    ),
+    (
+        "example_generics_fn_value_variadic",
+        "build",
+        1,
+        [],
+        ["cannot take the address of variadic function"],
+    ),
+    # Pins the diagnostic that REPLACED "did you mean to call it?" once function names started
+    # decaying to function pointers.
+    (
+        "example_fnptr_bad_context",
+        "build",
+        1,
+        [],
+        ["arithmetic is not allowed on function pointer types"],
     ),
 ]
 

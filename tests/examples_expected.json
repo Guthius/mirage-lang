@@ -314,6 +314,14 @@
     "action": "run",
     "exit": 0
   },
+  "example_fnptr_bad_context": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_fnptr_inferred": {
+    "action": "run",
+    "exit": 25
+  },
   "example_generics_bad_param_type": {
     "action": "build",
     "exit": 1
@@ -325,6 +333,26 @@
   "example_generics_const": {
     "action": "run",
     "exit": 12
+  },
+  "example_generics_default_fn_value": {
+    "action": "run",
+    "exit": 7
+  },
+  "example_generics_default_size_of": {
+    "action": "run",
+    "exit": 21
+  },
+  "example_generics_default_type_param": {
+    "action": "run",
+    "exit": 12
+  },
+  "example_generics_fn_value_missing_args": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_generics_fn_value_variadic": {
+    "action": "build",
+    "exit": 1
   },
   "example_generics_impl_arity_mismatch": {
     "action": "build",
@@ -361,6 +389,10 @@
   "example_generics_size_of": {
     "action": "run",
     "exit": 42
+  },
+  "example_generics_struct_field_default": {
+    "action": "run",
+    "exit": 12
   },
   "example_impl": {
     "action": "run",

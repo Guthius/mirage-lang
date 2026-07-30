@@ -1,0 +1,25 @@
+// example_generics_fn_value_missing_args.mir — REJECTION case: a generic function named as a
+// value with no generic arguments at all.
+//
+// A generic function TEMPLATE has no signature, so there is nothing to decay to a function
+// pointer — unlike a non-generic name, which now decays (see example_fnptr_inferred). Generic
+// arguments must be written explicitly in value position: unlike a call, there are no arguments
+// to unify against, so 'hash := fnv1a' can never be inferred; it has to be 'fnv1a[K]'.
+//
+// This fixture also pins the absence of a cascade that used to accompany this mistake: naming a
+// generic function in value position ran the template through the non-generic signature resolver,
+// which resolved '(value: T)' with no bindings in scope and reported a phantom
+// "unknown type 'T'" against the CALLEE's own declaration — a diagnostic pointing at correct
+// code, several lines away from the actual error, and one that then latched (the template's
+// param types were cached as invalid). Only the error below should appear.
+//
+// Expected: compile error — "is a generic function; supply its generic arguments".
+
+pub fn fnv1a[T: type](value: T) -> u64 {
+    return cast(size_of(T), u64)
+}
+
+pub fn main() -> i32 {
+    const hash := fnv1a
+    return cast(hash(1), i32)
+}

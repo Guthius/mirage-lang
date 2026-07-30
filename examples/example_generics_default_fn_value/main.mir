@@ -1,0 +1,89 @@
+// example_generics_default_fn_value.mir — a ':='-inferred default parameter value that names a
+// generic function INSTANTIATION ('hash := fnv1a[K]'), inside a generic function whose own type
+// parameter supplies the generic argument. Exercises three things at once, each of which used to
+// fail on its own:
+//
+//   1. a generic function instantiation used as a VALUE, not as a call callee ('fnv1a[K]');
+//   2. a bare function reference decaying to its function-pointer type with no expected type to
+//      match against (the ':=' form declares no type of its own);
+//   3. the enclosing declaration's own TYPE parameter being in scope inside a default parameter
+//      value expression — spec.md §22, "Default parameter values may reference the enclosing
+//      declaration's own generic parameters".
+//
+// Both the defaulted and the explicitly-passed spellings are called, so the default really is
+// materialized at the call site rather than silently dropped. 'Table' also has a defaulted
+// 'count' field that every initializer here omits, which covers the monomorphized-struct field
+// default path.
+//
+// NOTE: 'make_table' is deliberately instantiated at exactly ONE (K, V) pair. Instantiating the
+// same generic function at two different pairs miscompiles on a pre-existing, unrelated bug
+// (ProgramModule::expr_types is keyed by AST node alone, so a second monomorphization overwrites
+// the first's recorded expression types — the shared 'return {...}' then resolves to the wrong
+// struct slot and LLVM verification fails). Instantiating the generic *fnv1a* twice is fine, and
+// is done below, since its body holds no type-dependent expression.
+//
+// Expected: compiles and runs, exit code 7 (see main).
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub type Hash_Function[T: type] = fn(T) -> u64
+pub type Eq_Fn[T: type] = fn(T, T) -> bool
+
+pub fn fnv1a[T: type](value: T) -> u64 {
+    // Deliberately trivial — this fixture is about how 'fnv1a[K]' is *named*, not about hashing.
+    return cast(size_of(T), u64)
+}
+
+fn always_eq[T: type](a: T, b: T) -> bool {
+    return a == b
+}
+
+fn never_eq[T: type](a: T, b: T) -> bool {
+    return false
+}
+
+pub type Table[K: type, V: type] = struct {
+    hash: Hash_Function[K]
+    eq:     Eq_Fn[K]
+    count: usize = 0
+}
+
+pub fn make_table[K: type, V: type](hash := fnv1a[K], eq := always_eq[K]) -> Table[K, V] {
+    return {
+        .hash = hash,
+        .eq = eq,
+    }
+}
+
+pub fn main() -> i32 {
+    // Both defaults omitted: 'hash' is fnv1a[i32], 'eq' is always_eq[i32].
+    const defaulted: Table[i32, i32] = make_table[i32, i32]()
+    const h := defaulted.hash(1)            // size_of(i32) == 4
+    const eq_yes := defaulted.eq(3, 3)      // always_eq -> true
+
+    // Both parameters passed explicitly, overriding the defaults. Same (K, V) pair, so this is
+    // the same monomorphized instance as above.
+    const overridden: Table[i32, i32] = make_table[i32, i32](fnv1a[i32], never_eq[i32])
+    const eq_no := overridden.eq(3, 3)      // never_eq -> false
+
+    // A second instantiation of the generic function itself, named as a value and called through
+    // a function-pointer local — 'fnv1a[i64]' must be a distinct instance from 'fnv1a[i32]'.
+    const wide: Hash_Function[i64] = fnv1a[i64]
+    const h_wide := wide(1)                 // size_of(i64) == 8
+
+    // Decay with no expected type at all: ':=' names the instantiation and infers 'fn(i32) -> u64'.
+    const inferred := fnv1a[i32]
+    const h_inferred := inferred(1)         // 4 again
+
+    printf("h=%llu h_wide=%llu h_inferred=%llu eq_yes=%d eq_no=%d\n",
+           h, h_wide, h_inferred, cast(eq_yes, i32), cast(eq_no, i32))
+
+    mut result: i32 = 0
+    if eq_yes { result += 1 }
+    if !eq_no { result += 2 }
+    if h_wide == 8 { result += 1 }
+    if h_inferred == 4 { result += 1 }
+    result += cast(defaulted.count, i32)    // omitted defaulted field -> 0
+    result += 2
+    return result                           // 1 + 2 + 1 + 1 + 0 + 2 == 7
+}

@@ -75,6 +75,54 @@ namespace sema {
         return ResolvedType{.kind = TypeKind::Function, .fn_index = static_cast<int>(program.fn_signatures.size()) - 1};
     }
 
+    // Shared tail of the three *_function_pointer_type_of helpers below: interns
+    // 'fn(params) -> returns', carrying the declaration's parameter names through as the
+    // cosmetic-only FunctionTypeInfo::param_names (they don't participate in interning
+    // equality, so a name mismatch never splits a signature into two entries).
+    namespace {
+        auto intern_decayed_fn_type(Program &program, std::vector<ResolvedType> params,
+                                     std::vector<std::string> names, std::vector<ResolvedType> returns,
+                                     const bool is_variadic) -> ResolvedType {
+            names.resize(params.size());
+            return intern_function_type(program, FunctionTypeInfo{
+                .param_types = std::move(params),
+                .param_names = std::move(names),
+                .return_types = std::move(returns),
+                .is_variadic = is_variadic,
+            });
+        }
+
+        template <typename ParamT>
+        auto param_names_of(const std::vector<ParamT> &params) -> std::vector<std::string> {
+            std::vector<std::string> names;
+            names.reserve(params.size());
+            for (const auto &p : params) names.push_back(p.name);
+            return names;
+        }
+    }
+
+    auto function_pointer_type_of(const FunctionSymbol &sym, Program &program) -> ResolvedType {
+        return intern_decayed_fn_type(program, sym.params,
+                                       sym.decl ? param_names_of(sym.decl->params) : std::vector<std::string>{},
+                                       sym.return_types, /*is_variadic=*/false);
+    }
+
+    auto ext_function_pointer_type_of(const ExtFunctionSymbol &sym, Program &program) -> ResolvedType {
+        std::vector<ResolvedType> returns;
+        if (sym.return_type) returns.push_back(*sym.return_type);
+        return intern_decayed_fn_type(program, sym.params,
+                                       sym.decl ? param_names_of(sym.decl->params) : std::vector<std::string>{},
+                                       std::move(returns), sym.is_variadic);
+    }
+
+    auto generic_instance_function_pointer_type(const GenericFunctionInstance &instance, Program &program) -> ResolvedType {
+        auto names = instance.decl      ? param_names_of(instance.decl->params)
+                     : instance.impl_decl ? param_names_of(instance.impl_decl->params)
+                                          : std::vector<std::string>{};
+        return intern_decayed_fn_type(program, instance.param_types, std::move(names),
+                                       instance.return_types, /*is_variadic=*/false);
+    }
+
     auto intern_slice(Program &program, const ResolvedType &element) -> ResolvedType {
         for (size_t i = 0; i < program.slices.size(); ++i) {
             if (program.slices[i].element_type == element) {

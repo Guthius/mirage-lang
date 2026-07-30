@@ -1,0 +1,55 @@
+// example_generics_struct_field_default.mir — a monomorphized GENERIC struct whose braced
+// initializer omits a field that has a default, on the runtime (non-constant) path.
+//
+// check_struct_field_defaults_for_module walks module.symbols and requires TypeSymbol::resolved,
+// which a generic template never has — resolving 'slots: *K = nil' means nothing until K is
+// bound. So a generic struct's field defaults were never type-checked at all, and no expr_types
+// entry was recorded for them. Codegen's runtime braced-initializer path emits an omitted field's
+// default through emit_expr, whose expr_type() falls back to Invalid when the entry is missing:
+// 'count: usize = 0' lowered to a zero-width 'i0 0' and LLVM module verification failed. A type
+// error inside such a default also went silently unreported.
+//
+// The runtime path is what matters here — it is only taken when at least one PROVIDED field is
+// non-constant, which is why 'slots' is initialized from a parameter rather than a literal. A
+// fully-constant initializer folds through a different path that was never affected.
+//
+// Expected: compiles and runs, exit code 12 (see main).
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub type Buffer[K: type] = struct {
+    slots:      *K = nil
+    capacity: usize = 0
+    count:    usize = 0
+    sealed:    bool = false
+}
+
+// 'slots' provided from a runtime value; the other three fields fall back to their defaults.
+pub fn make_buffer[K: type](storage: *K) -> Buffer[K] {
+    return { .slots = storage }
+}
+
+// Same struct, but overriding one of the defaulted fields too.
+pub fn make_sized_buffer[K: type](storage: *K, capacity: usize) -> Buffer[K] {
+    return { .slots = storage, .capacity = capacity }
+}
+
+pub fn main() -> i32 {
+    mut backing: [4]i32 = {7, 0, 0, 0}
+
+    const plain := make_buffer[i32](&backing[0])
+    const sized := make_sized_buffer[i32](&backing[0], 4)
+
+    printf("plain: cap=%zu count=%zu sealed=%d slot0=%d\n",
+           plain.capacity, plain.count, cast(plain.sealed, i32), plain.slots.*)
+    printf("sized: cap=%zu count=%zu\n", sized.capacity, sized.count)
+
+    mut result: i32 = 0
+    if plain.capacity == 0 { result += 1 }
+    if plain.count == 0 { result += 1 }
+    if !plain.sealed { result += 1 }
+    if sized.capacity == 4 { result += 1 }
+    if sized.count == 0 { result += 1 }
+    result += plain.slots.*                 // 7 — proves the provided field survived
+    return result                           // 1 + 1 + 1 + 1 + 1 + 7 == 12
+}

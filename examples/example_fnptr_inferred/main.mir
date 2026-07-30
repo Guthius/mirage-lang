@@ -1,0 +1,49 @@
+// example_fnptr_inferred.mir — a bare function name in value position DECAYS to its own
+// function-pointer type when there is no expected type to match against.
+//
+// Previously a function name was only usable as a value where a 'fn(...) -> ...' type was already
+// expected ('const fp: fn(i32) -> i32 = f', see example_fnptr*); anything else reported
+// "'f' is a function; did you mean to call it?" — including 'const g := f' and, more importantly,
+// a ':='-inferred default parameter value, which declares no type of its own and so can never
+// supply an expectation.
+//
+// Nothing about generics is involved here; this is the non-generic half of that change.
+//
+// Expected: compiles and runs, exit code 25 (see main).
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+fn double(v: i32) -> i32 {
+    return v * 2
+}
+
+fn negate(v: i32) -> i32 {
+    return -v
+}
+
+// ':='-inferred default parameter value naming a function: the parameter's type IS the decayed
+// 'fn(i32) -> i32'.
+fn apply(v: i32, op := double) -> i32 {
+    return op(v)
+}
+
+// A cross-module-shaped case is covered by example_fnptr3; here the point is only that no
+// expected type is needed.
+fn apply_twice(v: i32, op := double) -> i32 {
+    return op(op(v))
+}
+
+pub fn main() -> i32 {
+    // Inferred local: 'g' is 'fn(i32) -> i32', no annotation written.
+    const g := double
+    const via_local := g(5)              // 10
+
+    const defaulted := apply(3)          // double(3) -> 6
+    const overridden := apply(3, negate) // negate(3) -> -3
+    const twice := apply_twice(3)        // double(double(3)) -> 12
+
+    printf("via_local=%d defaulted=%d overridden=%d twice=%d\n",
+           via_local, defaulted, overridden, twice)
+
+    return via_local + defaulted + overridden + twice   // 10 + 6 + (-3) + 12 == 25
+}

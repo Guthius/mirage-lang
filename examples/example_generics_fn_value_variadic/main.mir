@@ -1,0 +1,18 @@
+// example_generics_fn_value_variadic.mir — REJECTION case: taking the address of a variadic
+// generic function's instantiation.
+//
+// spec.md's function-pointer rule ("the address of a variadic function cannot be taken as a
+// function pointer") is not weakened by generic instantiations being nameable as values: the
+// instantiation is still a variadic function, so 'log_all[i32]' in value position is rejected
+// exactly as a non-generic variadic name is.
+//
+// Expected: compile error — "cannot take the address of variadic function".
+
+fn log_all[T: type](first: T, rest: ...T) -> usize {
+    return len(rest)
+}
+
+pub fn main() -> i32 {
+    const f := log_all[i32]
+    return cast(f(1, 2, 3), i32)
+}

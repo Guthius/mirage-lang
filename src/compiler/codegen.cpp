@@ -1141,17 +1141,37 @@ namespace codegen {
             // module. 'declaring_module' must be a stable reference (e.g. a module_path
             // field on a Program-owned info struct), not a temporary.
             auto emit_default_arg(const ast::Expr &default_expr, bool is_const, const std::string &declaring_module, const sema::ResolvedType &param_type) -> llvm::Value * {
-                if (is_const) {
-                    return emit_constant_expr(default_expr);
-                }
+                // The module swap applies to the constant-folding path too: emit_constant_expr
+                // reaches lookups keyed on current_module_ (sizeof_operand's type-symbol and
+                // expr_types lookups, for instance), and those must resolve against the module
+                // the expression was written and sema-checked in, not the caller's.
                 const auto *saved_path = current_module_path_;
                 const auto *saved_module = current_module_;
                 current_module_path_ = &declaring_module;
                 current_module_ = &module_for(declaring_module);
-                auto *val = emit_value_as(default_expr, param_type, declaring_module);
+                auto *val = is_const ? emit_constant_expr(default_expr)
+                                     : emit_value_as(default_expr, param_type, declaring_module);
                 current_module_path_ = saved_path;
                 current_module_ = saved_module;
                 return val;
+            }
+
+            // As emit_default_arg, for a GENERIC instance's omitted trailing argument. A default
+            // expression may reference the enclosing declaration's own generic parameters
+            // (spec.md §22) — 'fn f[K: type](n := size_of(K))' — but it is materialized here at
+            // the CALL site, where active_generic_env_stack holds the caller's bindings, or none
+            // at all. Push the callee instance's substitution env for just this expression so the
+            // generic-param fallbacks in sizeof_operand/align_of_operand and friends resolve
+            // against the right instantiation. Scoped per-argument rather than around the whole
+            // call so the caller's own explicit arguments still emit in the caller's scope.
+            auto emit_generic_default_arg(const sema::GenericFunctionInstance &instance, const ast::Expr &default_expr,
+                                           bool is_const, const sema::ResolvedType &param_type) -> llvm::Value * {
+                const auto &generic_params = instance.decl ? instance.decl->generic_params
+                                                             : *instance.generic_params_for_method;
+                const auto env = sema::build_generic_binding_env(generic_params, instance.args);
+                const sema::ScopedResolvePush guard(
+                    const_cast<sema::Program &>(sema_program_).active_generic_env_stack, &env);
+                return emit_default_arg(default_expr, is_const, instance.module_path, param_type);
             }
 
             // As emit_default_arg, but for a call resolved via MethodInfo (static/inherent
@@ -3308,12 +3328,19 @@ namespace codegen {
                 return LValue{.ptr = ptr, .type = field_it->type, .type_module = struct_module, .storage_type = llvm_type_for(field_it->type, struct_module)};
             }
 
-            // 'index.args' is guaranteed exactly one Expr-tagged element here — sema's
-            // IndexOrInstantiateExpr classification (see check_expr) only ever emits an
-            // 'expr_types' entry (and thus reaches codegen) for the ordinary-index shape;
-            // a real generic-instantiation use is resolved to a concrete type/symbol
-            // entirely within sema and never reaches this lvalue path.
+            // 'index.args' is expected to be exactly one Expr-tagged element here: of the shapes
+            // sema's IndexOrInstantiateExpr classification lets reach codegen (see check_expr),
+            // only the ordinary-index one is an LVALUE. A generic TYPE instantiation is resolved
+            // to a concrete type entirely within sema; a generic FUNCTION instantiation names a
+            // monomorphized instance's address, which emit_expr handles directly and which has
+            // no storage to take the address of — so reaching here with one is a bug, not
+            // something to GEP into.
             auto emit_index_lvalue(const ast::IndexOrInstantiateExpr &index) -> LValue {
+                if (index.args.size() != 1 || !std::holds_alternative<ast::Expr>(index.args[0].value)) {
+                    report_codegen_error(diag_, index.location,
+                        "internal error: generic instantiation reached the index lvalue path");
+                    return LValue{};
+                }
                 const auto &index_expr = std::get<ast::Expr>(index.args[0].value);
                 const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(index.operand));
                 const auto type_module = expr_type_module_hint(index.operand);
@@ -3445,13 +3472,13 @@ namespace codegen {
                     for (size_t i = 0; i < instance.param_types.size(); ++i) {
                         args.push_back(i < call.args.size()
                             ? emit_value_as(call.args[i], instance.param_types[i], instance.module_path)
-                            : emit_default_arg(*instance.impl_decl->params[i].default_value, instance.param_default_is_const[i], instance.module_path, instance.param_types[i]));
+                            : emit_generic_default_arg(instance, *instance.impl_decl->params[i].default_value, instance.param_default_is_const[i], instance.param_types[i]));
                     }
                 } else {
                     for (size_t i = 0; i < instance.param_types.size(); ++i) {
                         args.push_back(i < call.args.size()
                             ? emit_value_as(call.args[i], instance.param_types[i], instance.module_path)
-                            : emit_default_arg(*instance.decl->params[i].default_value, instance.param_default_is_const[i], instance.module_path, instance.param_types[i]));
+                            : emit_generic_default_arg(instance, *instance.decl->params[i].default_value, instance.param_default_is_const[i], instance.param_types[i]));
                     }
                 }
                 return builder_.CreateCall(llvm_fn, args);
@@ -4135,6 +4162,19 @@ namespace codegen {
                             }
                             return emit_cast(emit_expr(v->value), from, ty);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
+                            // A generic function instantiation naming a monomorphized instance as
+                            // a function-pointer value ('fnv1a[i32]') — sema recorded which
+                            // instance in expr_generic_fn_instance (see
+                            // try_resolve_generic_fn_instantiation_value), and
+                            // declare_generic_functions() already created the llvm::Function, so
+                            // this is just the address of that. Mirrors the IdentExpr fn-ptr path.
+                            if (ty.kind == sema::TypeKind::Function) {
+                                const auto &table = current_module_->expr_generic_fn_instance;
+                                if (const auto it = table.find(sema::get_expr_key(expr)); it != table.end()) {
+                                    const auto &instance = *sema_program_.generic_fn_instances[it->second];
+                                    return functions_.at(FunctionKey{instance.module_path, instance.mangled_name});
+                                }
+                            }
                             const auto lv = emit_lvalue(expr);
                             return builder_.CreateLoad(lv.storage_type, lv.ptr);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
@@ -5009,6 +5049,22 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, ast::IdentExpr>) {
                             if (const auto macro = macro_args_.find(v.name); macro != macro_args_.end()) {
                                 return emit_const_macro_arg(macro->second);
+                            }
+                            // A bare reference to the active generic instance's own VALUE
+                            // parameter, e.g. the default in 'fn f[N: usize](times := N)'. sema's
+                            // is_constant_expr counts such a name as constant (it consults the
+                            // same env — see its doc comment), so this path must be able to fold
+                            // it too, or the two disagree and an otherwise valid program dies
+                            // with "unsupported global constant initializer" below. Mirrors
+                            // sizeof_operand's identical generic-param fallback.
+                            if (!sema_program_.active_generic_env_stack.empty()) {
+                                for (const auto &binding : *sema_program_.active_generic_env_stack.back()) {
+                                    if (binding.is_type || binding.param_name != v.name) continue;
+                                    if (const auto *n = std::get_if<int64_t>(&binding.const_value)) {
+                                        return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty),
+                                                                       static_cast<uint64_t>(*n), ty.is_signed());
+                                    }
+                                }
                             }
                             const auto sym = current_module_->symbols.find(v.name);
                             if (sym != current_module_->symbols.end()) {

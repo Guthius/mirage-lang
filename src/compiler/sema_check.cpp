@@ -716,6 +716,21 @@ namespace sema {
                             error(diag, call.location, std::format("'{}' is not pub", name));
                             return {};
                         }
+                        // A bare CROSS-MODULE call to a generic function with no brackets
+                        // ('try hash.fnv1a(v)') — inference only, mirroring check_expr's own
+                        // cross-module case. Without this the template would reach
+                        // ensure_function_signature_resolved, which refuses to resolve a
+                        // generic signature (see is_generic_function), leaving 'params' empty
+                        // and producing a bogus arity error.
+                        if (is_generic_function(sym)) {
+                            auto resolved_args = infer_generic_function_args(*sym.decl, call.args, std::nullopt, locals, module_path, program, diag, call.location, loop_depth, defer_loop_base, fn_error_type);
+                            if (!resolved_args) return {};
+                            const size_t idx = instantiate_generic_function(program, diag, target_module, name, std::move(*resolved_args), call.location);
+                            const auto &instance = *program.generic_fn_instances[idx];
+                            check_call_args(call.args, instance.param_types, false, locals, module_path, program, diag, call.location, name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
+                            program.modules.at(module_path).expr_generic_fn_instance[&call] = idx;
+                            return instance.return_types;
+                        }
                         auto &resolved_fn = ensure_function_signature_resolved(target_module, name, program, diag);
                         check_call_args(call.args, resolved_fn.params, false, locals, module_path, program, diag, call.location, name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
                         return resolved_fn.return_types;
@@ -1256,6 +1271,37 @@ namespace sema {
         }
     }
 
+    // RAII pairing of shadow_generic_type_params + active_generic_env_stack, the two halves of
+    // "make this instantiation's generic parameters visible to ordinary resolution". Both are
+    // needed together and both must be undone on every exit path (see ScopedResolvePush's doc
+    // comment on why a missed pop is worse than a leak — it dangles). Used for signature
+    // resolution and body checking alike; the env must outlive the guard.
+    // The module is re-looked-up by path on scope exit rather than held as a reference:
+    // checking a default expression or a body can declare a module on demand, and inserting
+    // into Program::modules (an unordered_map) may rehash and invalidate any outstanding
+    // ProgramModule&.
+    class ScopedGenericScope {
+      public:
+        ScopedGenericScope(Program &program, std::string module_path, const std::vector<ast::GenericParam> &decl_params,
+                            const std::vector<GenericArgValue> &args, const GenericBindingEnv &env)
+            : program_(program), module_path_(std::move(module_path)),
+              shadowed_(shadow_generic_type_params(decl_params, args, program.modules.at(module_path_))) {
+            program_.active_generic_env_stack.push_back(&env);
+        }
+        ~ScopedGenericScope() {
+            program_.active_generic_env_stack.pop_back();
+            restore_shadowed_symbols(program_.modules.at(module_path_), shadowed_);
+        }
+
+        ScopedGenericScope(const ScopedGenericScope &) = delete;
+        auto operator=(const ScopedGenericScope &) -> ScopedGenericScope & = delete;
+
+      private:
+        Program &program_;
+        std::string module_path_;
+        std::vector<std::pair<std::string, std::optional<Symbol>>> shadowed_;
+    };
+
     // One immutable LocalScope binding per VALUE generic-param — mirrors
     // Resolver::generic_env_locals (type_resolver.cpp), duplicated here since check_expr's
     // LocalScope isn't reachable from that file's Resolver.
@@ -1278,25 +1324,21 @@ namespace sema {
         instance.body_checked = true;
         if (!instance.decl && !instance.impl_decl) return;
 
-        auto &module = program.modules.at(instance.module_path);
         const auto &generic_params = instance.decl ? instance.decl->generic_params
                                                      : *instance.generic_params_for_method;
 
-        auto shadowed = shadow_generic_type_params(generic_params, instance.args, module);
-
-        // Pushed for the duration of body-checking so any nested resolve_type/
+        // Held for the duration of body-checking so any nested resolve_type/
         // resolve_declared_type call reached from inside check_stmt/check_expr (a local var
         // decl's type annotation, size_of's operand, a cast target, ...) can find this
-        // instance's value/type bindings too — see Program::active_generic_env_stack's doc
-        // comment. Complements shadow_generic_type_params above (TYPE params only) and
-        // add_generic_value_param_locals below (ordinary check_expr IdentExpr lookup only);
-        // this stack is what makes bare-type-position resolution (not just value-expression
-        // lookup) inside the body work.
+        // instance's type and value bindings — see Program::active_generic_env_stack's doc
+        // comment and ScopedGenericScope's. Complements add_generic_value_param_locals below
+        // (ordinary check_expr IdentExpr lookup only); the scope is what makes bare-type-
+        // position resolution (not just value-expression lookup) inside the body work.
         const auto env = build_generic_binding_env(generic_params, instance.args);
-        program.active_generic_env_stack.push_back(&env);
+        const ScopedGenericScope generic_scope(program, instance.module_path, generic_params, instance.args, env);
 
         LocalScope locals;
-        for (auto &[gname, gsym] : module.symbols) {
+        for (auto &[gname, gsym] : program.modules.at(instance.module_path).symbols) {
             if (auto *g = std::get_if<GlobalSymbol>(&gsym)) {
                 locals[gname] = LocalBinding{.type = g->type, .is_mut = g->is_mut};
             }
@@ -1316,9 +1358,77 @@ namespace sema {
             }
             check_stmt(instance.impl_decl->body, locals, instance.module_path, program, diag, instance.return_types, 0);
         }
+    }
 
-        program.active_generic_env_stack.pop_back();
-        restore_shadowed_symbols(module, shadowed);
+    // Type-checks the field default initializers of every monomorphized generic struct.
+    //
+    // check_struct_field_defaults_for_module (sema.cpp) can't do this: it walks module.symbols
+    // and requires TypeSymbol::resolved, which a generic TEMPLATE never has — resolving
+    // 'slots: *Slot[K, V] = nil' means nothing until K and V are bound. So a generic struct's
+    // defaults went entirely unchecked, which left no expr_types entry for them. Codegen's
+    // runtime braced-initializer path emits an omitted field's default via emit_expr, whose
+    // expr_type() falls back to Invalid when the entry is missing — lowering 'count: usize = 0'
+    // to a zero-width 'i0 0' and failing LLVM module verification. Type errors in those
+    // defaults also went unreported.
+    //
+    // Runs as a whole-program pass after body checking, since that is when most instantiations
+    // come into existence. Checking one instance's defaults can itself instantiate another
+    // generic type, so this loops to a fixed point, with 'field_defaults_checked' both
+    // preventing rework and guaranteeing termination.
+    //
+    // Note that all instantiations of one generic struct share the same init AST nodes, so they
+    // share expr_types entries and the last instantiation checked wins. That is pre-existing
+    // behaviour for generic function bodies too (they are checked per instance against the same
+    // shared map); it only becomes observable for a default whose TYPE varies per instantiation
+    // ('x: K = 0'), not for the common 'count: usize = 0' / 'p: *K = nil' shapes.
+    void check_generic_struct_field_defaults_for_program(Program &program, DiagnosticEngine &diag) {
+        bool progressed = true;
+        while (progressed) {
+            progressed = false;
+            // Index-based, re-fetching every time: check_expr below can instantiate another
+            // generic type, and Program::structs is a plain vector whose reallocation would
+            // invalidate any StructInfo reference held across the call (the same hazard
+            // check_struct_field_defaults_for_module documents).
+            for (size_t si = 0; si < program.structs.size(); ++si) {
+                if (!program.structs[si].generic_instance) continue;
+                if (program.structs[si].field_defaults_checked) continue;
+                program.structs[si].field_defaults_checked = true;
+                progressed = true;
+
+                // Copied by value — the slot may move under us for the reason above.
+                const auto instance_info = *program.structs[si].generic_instance;
+
+                const auto mod_it = program.modules.find(instance_info.decl_module);
+                if (mod_it == program.modules.end()) continue;
+                const auto sym_it = mod_it->second.symbols.find(instance_info.decl_name);
+                if (sym_it == mod_it->second.symbols.end()) continue;
+                const auto *ts = std::get_if<TypeSymbol>(&sym_it->second);
+                if (!ts || !ts->decl) continue;
+                const auto *struct_decl = std::get_if<std::unique_ptr<ast::StructType>>(&ts->decl->type);
+                if (!struct_decl) continue;
+
+                const auto env = build_generic_binding_env(ts->decl->generic_params, instance_info.args);
+                const ScopedGenericScope generic_scope(program, instance_info.decl_module,
+                                                        ts->decl->generic_params, instance_info.args, env);
+                LocalScope scope;
+                add_generic_value_param_locals(ts->decl->generic_params, instance_info.args, scope);
+
+                for (size_t i = 0; i < (*struct_decl)->fields.size(); ++i) {
+                    const auto &field = (*struct_decl)->fields[i];
+                    if (!field.init) continue;
+
+                    const auto *struct_info = program.struct_at(static_cast<int>(si));
+                    if (!struct_info || i >= struct_info->fields.size()) break;
+                    const auto field_type = struct_info->fields[i].type;
+
+                    const auto init_ty = check_expr(*field.init, scope, instance_info.decl_module, program, diag, field_type, 0);
+                    if (!is_assignable(init_ty, field_type)) {
+                        diag.report_error(DiagnosticStage::Sema, field.location,
+                            std::format("default value type mismatch for field '{}'", field.name));
+                    }
+                }
+            }
+        }
     }
 
     auto instantiate_generic_function(Program &program, DiagnosticEngine &diag, const std::string &module_path,
@@ -1368,19 +1478,27 @@ namespace sema {
         instance->args = args;
         instance->mangled_name = decl_name + mangle_generic_args(args, program);
 
+        // spec.md §22: "Default parameter values may reference the enclosing declaration's own
+        // generic parameters" — type parameters as well as value ones. That needs the same
+        // generic scope body-checking gets, because a default expression is an ordinary
+        // expression: it reaches check_expr, whose internals call the plain resolve_type and
+        // is_constant_expr, neither of which takes an explicit env. Held across the whole
+        // signature region so 'hash := fnv1a[K]', 'n := size_of(K)' and
+        // 'fill: [N]u8 = default' all resolve 'K'/'N'.
+        const ScopedGenericScope generic_scope(program, module_path, decl.generic_params, args, env);
+        LocalScope default_scope;
+        add_generic_value_param_locals(decl.generic_params, args, default_scope);
+
         for (auto &p : decl.params) {
             ResolvedType pt;
             if (p.type) {
                 pt = resolve_type_with_generic_env(*p.type, module_path, program, diag, env, &decl.generic_params);
             } else {
-                // ':=' inferred-type param — infer from the default expr. Value generic-param
-                // locals are bound so the default expr may itself reference them; type
-                // generic-params are not shadowed here (best-effort — matches the scope of
-                // v1's inference support, which doesn't extend to ':='-inferred generic
-                // params referencing type params in their default expression).
-                LocalScope empty;
-                add_generic_value_param_locals(decl.generic_params, args, empty);
-                pt = check_expr(*p.default_value, empty, module_path, program, diag, std::nullopt, 0);
+                // ':=' inferred-type param — its type IS whatever its default expression checks
+                // to, so this is the one place a param type comes from check_expr rather than
+                // resolve_type. 'default_scope' carries the value generic-params as locals; the
+                // type ones are visible via generic_scope above.
+                pt = check_expr(*p.default_value, default_scope, module_path, program, diag, std::nullopt, 0);
             }
             if (p.is_variadic) {
                 instance->is_variadic = true;
@@ -1395,7 +1513,7 @@ namespace sema {
         }
 
         check_param_defaults(decl.params, instance->param_types, instance->required_params,
-                              instance->param_default_is_const, module_path, program, diag);
+                              instance->param_default_is_const, module_path, program, diag, &default_scope);
 
         program.generic_fn_instances.push_back(std::move(instance));
         const size_t idx = program.generic_fn_instances.size() - 1;
@@ -1462,14 +1580,18 @@ namespace sema {
         instance->generic_params_for_method = &impl_generic_params;
         instance->mangled_name = type_name + mangle_generic_args(args, program) + "::" + method_name;
 
+        // Same generic scope as instantiate_generic_function above — see its comment for why a
+        // default expression needs it.
+        const ScopedGenericScope generic_scope(program, type_module, impl_generic_params, args, env);
+        LocalScope default_scope;
+        add_generic_value_param_locals(impl_generic_params, args, default_scope);
+
         for (auto &p : template_method->decl->params) {
             ResolvedType pt;
             if (p.type) {
                 pt = resolve_type_with_generic_env(*p.type, type_module, program, diag, env, &impl_generic_params);
             } else {
-                LocalScope empty;
-                add_generic_value_param_locals(impl_generic_params, args, empty);
-                pt = check_expr(*p.default_value, empty, type_module, program, diag, std::nullopt, 0);
+                pt = check_expr(*p.default_value, default_scope, type_module, program, diag, std::nullopt, 0);
             }
             if (p.is_variadic) {
                 instance->is_variadic = true;
@@ -1484,7 +1606,7 @@ namespace sema {
         }
 
         check_param_defaults(template_method->decl->params, instance->param_types, instance->required_params,
-                              instance->param_default_is_const, type_module, program, diag);
+                              instance->param_default_is_const, type_module, program, diag, &default_scope);
 
         program.generic_fn_instances.push_back(std::move(instance));
         const size_t idx = program.generic_fn_instances.size() - 1;
@@ -1542,6 +1664,74 @@ namespace sema {
         if (!args) return ResolvedType{.kind = TypeKind::Invalid};
 
         return instantiate_generic_type(program, diag, decl_module, *decl_name, std::move(*args), expr.location);
+    }
+
+    // The generic-FUNCTION sibling of try_resolve_generic_type_instantiation above: classifies
+    // 'fnv1a[i32]' / 'fnv1a[K]' appearing in VALUE position (not as a call callee) as naming a
+    // concrete monomorphized instantiation, and yields that instantiation's function-pointer
+    // type. Returns nullopt when the operand doesn't name a generic function declaration, so
+    // callers fall through to ordinary indexing.
+    //
+    // Generic arguments must be written explicitly here. infer_generic_function_args only
+    // unifies against call arguments and a single return type, so there is nothing to infer
+    // from in value position — 'fnv1a' alone is rejected by check_expr's IdentExpr arm with a
+    // "supply its generic arguments" hint instead.
+    //
+    // 'expr_key' must be get_expr_key() of the ENCLOSING ast::Expr, matching what codegen
+    // looks up in ProgramModule::expr_generic_fn_instance / expr_types.
+    auto try_resolve_generic_fn_instantiation_value(const ast::IndexOrInstantiateExpr &expr, const void *expr_key,
+                                                     LocalScope &locals, const std::string &module_path,
+                                                     Program &program, DiagnosticEngine &diag) -> std::optional<ResolvedType> {
+        std::string decl_module = module_path;
+        const std::string *decl_name = nullptr;
+        bool cross_module = false;
+
+        if (const auto *ident = std::get_if<ast::IdentExpr>(&expr.operand)) {
+            // A local of the same name shadows the declaration, in which case this really is
+            // an index into that local — same precedence the call-callee path applies.
+            if (locals.contains(ident->name)) return std::nullopt;
+            decl_name = &ident->name;
+        } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr.operand)) {
+            if (const auto target = try_resolve_namespace_chain((*member)->object, module_path, locals, program)) {
+                decl_module = *target;
+                decl_name = &(*member)->member;
+                cross_module = true;
+            }
+        }
+        if (!decl_name) return std::nullopt;
+
+        const auto mod_it = program.modules.find(decl_module);
+        if (mod_it == program.modules.end()) return std::nullopt;
+        const auto sym_it = mod_it->second.symbols.find(*decl_name);
+        if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
+        const auto *fs = std::get_if<FunctionSymbol>(&sym_it->second);
+        if (!fs || !is_generic_function(*fs)) return std::nullopt;
+
+        if (cross_module && !fs->is_pub) {
+            return error(diag, expr.location, std::format("'{}' is not pub", *decl_name));
+        }
+
+        auto args = resolve_explicit_generic_args(fs->decl->generic_params, expr.args, module_path, program, diag,
+                                                  expr.location, *decl_name);
+        if (!args) return ResolvedType{.kind = TypeKind::Invalid};
+
+        const size_t idx = instantiate_generic_function(program, diag, decl_module, *decl_name, std::move(*args), expr.location);
+        const auto &instance = *program.generic_fn_instances[idx];
+        if (instance.is_variadic) {
+            return error(diag, expr.location, std::format(
+                "cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", *decl_name));
+        }
+        if (instance.decl && find_attribute(instance.decl->attributes, "always_inline")) {
+            diag.warn(DiagnosticStage::Sema, expr.location, std::format(
+                "taking the address of '@always_inline' function '{}'. Calls through a "
+                "function pointer cannot be inlined. The function will still exist as a "
+                "symbol but the '@always_inline' attribute has no effect on indirect calls.",
+                *decl_name));
+        }
+        // Recorded under the ENCLOSING expr's key so codegen can map this node straight to
+        // 'instance.mangled_name''s llvm::Function — the same side table generic CALLS use.
+        program.modules.at(module_path).expr_generic_fn_instance[expr_key] = idx;
+        return generic_instance_function_pointer_type(instance, program);
     }
 
     // Shared by generic function and (indirectly, via the caller pre-checking arity)
@@ -1788,29 +1978,50 @@ namespace sema {
                             } else if constexpr (std::is_same_v<S, ImportSymbol>) {
                                 return ResolvedType{.kind = TypeKind::Namespace};
                             } else if constexpr (std::is_same_v<S, FunctionSymbol>) {
+                                // A generic TEMPLATE has no signature to take the address of —
+                                // only a concrete instantiation does. Reject here rather than
+                                // letting it reach ensure_function_signature_resolved, which
+                                // would leave 'params' empty and produce a confusing
+                                // signature-mismatch error against the empty list.
+                                if (is_generic_function(sym)) {
+                                    return error(diag, v.location, std::format(
+                                        "'{}' is a generic function; supply its generic arguments to name a "
+                                        "specific instantiation (e.g. '{}[i32]')", v.name, v.name));
+                                }
                                 auto &resolved_fn = ensure_function_signature_resolved(module_path, v.name, program, diag);
                                 if (resolved_fn.is_variadic) {
                                     return error(diag, v.location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v.name));
                                 }
-                                // Allow taking address when expected type is a matching function type
+                                if (resolved_fn.decl && find_attribute(resolved_fn.decl->attributes, "always_inline")) {
+                                    diag.warn(DiagnosticStage::Sema, v.location, std::format(
+                                        "taking the address of '@always_inline' function '{}'. Calls through a "
+                                        "function pointer cannot be inlined. The function will still exist as a "
+                                        "symbol but the '@always_inline' attribute has no effect on indirect calls.",
+                                        v.name));
+                                }
+                                // With a function-typed expectation, honour it exactly (so a
+                                // signature mismatch names the expectation rather than yielding a
+                                // second, vaguer error downstream).
                                 if (expected && expected->kind == TypeKind::Function) {
                                     const auto &exp_sig = fn_sig(*expected, program);
                                     if (function_params_compatible(resolved_fn.params, exp_sig.param_types) &&
                                         resolved_fn.return_types == exp_sig.return_types &&
                                         !exp_sig.is_variadic) {
-                                        if (resolved_fn.decl && find_attribute(resolved_fn.decl->attributes, "always_inline")) {
-                                            diag.warn(DiagnosticStage::Sema, v.location, std::format(
-                                                "taking the address of '@always_inline' function '{}'. Calls through a "
-                                                "function pointer cannot be inlined. The function will still exist as a "
-                                                "symbol but the '@always_inline' attribute has no effect on indirect calls.",
-                                                v.name));
-                                        }
                                         return *expected;
                                     }
                                     return error(diag, v.location, std::format("'{}' has a different signature from the expected function type", v.name));
                                 }
-                                return error(diag, v.location, std::format("'{}' is a function; did you mean to call it?", v.name));
+                                // No expectation (or a non-function one): a bare function name in
+                                // value position decays to its own function-pointer type, so
+                                // 'const g := f' and a ':='-inferred default parameter value work
+                                // without the type having to be written out. A non-function
+                                // expectation still fails, just via the ordinary assignability
+                                // check at the use site instead of a special case here.
+                                return function_pointer_type_of(resolved_fn, program);
                             } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
+                                if (sym.is_variadic && !(expected && expected->kind == TypeKind::Function)) {
+                                    return error(diag, v.location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v.name));
+                                }
                                 // Allow taking address when expected type is a matching function type
                                 if (expected && expected->kind == TypeKind::Function) {
                                     const auto &exp_sig = fn_sig(*expected, program);
@@ -1823,7 +2034,8 @@ namespace sema {
                                     }
                                     return error(diag, v.location, std::format("'{}' has a different signature from the expected function type", v.name));
                                 }
-                                return error(diag, v.location, std::format("'{}' is an external function; did you mean to call it?", v.name));
+                                // Same decay as an ordinary function above.
+                                return ext_function_pointer_type_of(sym, program);
                             } else if constexpr (std::is_same_v<S, MacroSymbol>) {
                                 if (expected && expected->kind == TypeKind::Function) {
                                     return error(diag, v.location, std::format("cannot take the address of macro '{}'", v.name));
@@ -2595,38 +2807,62 @@ namespace sema {
                     return to;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
-                    // Cross-module function pointer taking: mod.fn_name when expected type is a function type
-                    if (expected && expected->kind == TypeKind::Function) {
-                        if (const auto target_mod = try_resolve_namespace_chain(v->object, module_path, locals, program)) {
-                            const auto mod_it = program.modules.find(*target_mod);
-                            if (mod_it != program.modules.end()) {
-                                const auto sym_it = mod_it->second.symbols.find(v->member);
-                                if (sym_it != mod_it->second.symbols.end()) {
-                                    const auto &exp_sig = fn_sig(*expected, program);
-                                    if (std::holds_alternative<FunctionSymbol>(sym_it->second)) {
-                                        auto &fn = ensure_function_signature_resolved(*target_mod, v->member, program, diag);
-                                        if (!fn.is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
-                                        if (fn.is_variadic) {
+                    // Cross-module function pointer taking: 'mod.fn_name' in value position.
+                    // Mirrors the same-module IdentExpr arms above, including the decay when
+                    // there is no function-typed expectation — try_resolve_namespace_chain
+                    // already guarantees the object is a module here, so a FunctionSymbol/
+                    // ExtFunctionSymbol member can only mean "name this function as a value";
+                    // anything else falls through to ordinary member resolution below.
+                    if (const auto target_mod = try_resolve_namespace_chain(v->object, module_path, locals, program)) {
+                        const auto mod_it = program.modules.find(*target_mod);
+                        if (mod_it != program.modules.end()) {
+                            const auto sym_it = mod_it->second.symbols.find(v->member);
+                            if (sym_it != mod_it->second.symbols.end()) {
+                                const auto *exp_sig = expected && expected->kind == TypeKind::Function
+                                    ? &fn_sig(*expected, program) : nullptr;
+                                if (const auto *generic_fs = std::get_if<FunctionSymbol>(&sym_it->second);
+                                    generic_fs && is_generic_function(*generic_fs)) {
+                                    return error(diag, v->location, std::format(
+                                        "'{}' is a generic function; supply its generic arguments to name a "
+                                        "specific instantiation (e.g. '{}[i32]')", v->member, v->member));
+                                }
+                                if (std::holds_alternative<FunctionSymbol>(sym_it->second)) {
+                                    auto &fn = ensure_function_signature_resolved(*target_mod, v->member, program, diag);
+                                    if (!fn.is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
+                                    if (fn.is_variadic) {
+                                        return error(diag, v->location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v->member));
+                                    }
+                                    if (fn.decl && find_attribute(fn.decl->attributes, "always_inline")) {
+                                        diag.warn(DiagnosticStage::Sema, v->location, std::format(
+                                            "taking the address of '@always_inline' function '{}'. Calls through a "
+                                            "function pointer cannot be inlined. The function will still exist as a "
+                                            "symbol but the '@always_inline' attribute has no effect on indirect calls.",
+                                            v->member));
+                                    }
+                                    if (!exp_sig) return function_pointer_type_of(fn, program);
+                                    if (function_params_compatible(fn.params, exp_sig->param_types) &&
+                                        fn.return_types == exp_sig->return_types &&
+                                        !exp_sig->is_variadic) {
+                                        return *expected;
+                                    }
+                                    return error(diag, v->location, std::format("'{}' has a different signature from the expected function type", v->member));
+                                }
+                                if (const auto *ef = std::get_if<ExtFunctionSymbol>(&sym_it->second)) {
+                                    if (!ef->is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
+                                    if (!exp_sig) {
+                                        if (ef->is_variadic) {
                                             return error(diag, v->location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v->member));
                                         }
-                                        if (function_params_compatible(fn.params, exp_sig.param_types) &&
-                                            fn.return_types == exp_sig.return_types &&
-                                            !exp_sig.is_variadic) {
-                                            return *expected;
-                                        }
-                                        return error(diag, v->location, std::format("'{}' has a different signature from the expected function type", v->member));
+                                        return ext_function_pointer_type_of(*ef, program);
                                     }
-                                    if (const auto *ef = std::get_if<ExtFunctionSymbol>(&sym_it->second)) {
-                                        if (!ef->is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
-                                        std::vector<ResolvedType> ext_returns;
-                                        if (ef->return_type) ext_returns.push_back(*ef->return_type);
-                                        if (function_params_compatible(ef->params, exp_sig.param_types) &&
-                                            ext_returns == exp_sig.return_types &&
-                                            ef->is_variadic == exp_sig.is_variadic) {
-                                            return *expected;
-                                        }
-                                        return error(diag, v->location, std::format("'{}' has a different signature from the expected function type", v->member));
+                                    std::vector<ResolvedType> ext_returns;
+                                    if (ef->return_type) ext_returns.push_back(*ef->return_type);
+                                    if (function_params_compatible(ef->params, exp_sig->param_types) &&
+                                        ext_returns == exp_sig->return_types &&
+                                        ef->is_variadic == exp_sig->is_variadic) {
+                                        return *expected;
                                     }
+                                    return error(diag, v->location, std::format("'{}' has a different signature from the expected function type", v->member));
                                 }
                             }
                         }
@@ -2634,16 +2870,25 @@ namespace sema {
                     return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type, /*need_writable=*/false).type;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
-                    // Reaching here means plain VALUE position: 'a[i]'. Generic instantiation is
-                    // classified before this, at each position that can accept one -- a call
-                    // callee ('make[i32]()'), a declared type ('List[i32]' parsed as a
-                    // NamedType), and size_of/align_of/type_of's operand (see
-                    // try_resolve_generic_type_instantiation). So the ordinary-index shape
-                    // (exactly one Expr-tagged arg) is the only one that belongs here.
+                    // Value position: either an ordinary index ('a[i]') or a generic FUNCTION
+                    // instantiation naming a monomorphized instance as a function-pointer value
+                    // ('fnv1a[i32]', 'fnv1a[K]'). Generic TYPE instantiation is classified
+                    // before this, at each position that can accept one -- a call callee
+                    // ('make[i32]()'), a declared type ('List[i32]' parsed as a NamedType), and
+                    // size_of/align_of/type_of's operand (see
+                    // try_resolve_generic_type_instantiation).
                     //
-                    // A remaining multi-arg or type-tagged shape is an instantiation written
+                    // The function check runs FIRST, and before the arg-shape guard below,
+                    // because both bracket shapes can name an instantiation: a builtin arg
+                    // ('[i32]') is Type-tagged, while a bare generic-param arg ('[K]') parses as
+                    // an Expr and would otherwise be misread as an index subscript.
+                    if (auto fn_value = try_resolve_generic_fn_instantiation_value(*v, get_expr_key(expr), locals, module_path, program, diag)) {
+                        return *fn_value;
+                    }
+                    // A remaining multi-arg or type-tagged shape is a TYPE instantiation written
                     // somewhere a value is expected, e.g. 'const x := List[i32]' -- which names
-                    // a type, not a value.
+                    // a type, not a value. The ordinary-index shape (exactly one Expr-tagged
+                    // arg) is the only one that belongs below.
                     if (v->args.size() != 1 || !std::holds_alternative<ast::Expr>(v->args[0].value)) {
                         return error(diag, v->location,
                             "a generic type instantiation names a type, not a value; it cannot be used here");
