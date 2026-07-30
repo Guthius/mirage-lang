@@ -909,8 +909,8 @@ namespace sema {
                     const auto *einfo = program.enum_at(binfo->member_enum_type.enum_index);
                     if (!einfo) return std::nullopt;
                     int64_t folded = 0;
-                    for (const auto &name : bitset_expr->members) {
-                        const auto *field = find_enum_field_by_name(*einfo, name);
+                    for (const auto &member : bitset_expr->members) {
+                        const auto *field = find_enum_field_by_name(*einfo, member.name);
                         if (!field) return std::nullopt;
                         folded |= int64_t{1} << (field->value + 1);
                     }

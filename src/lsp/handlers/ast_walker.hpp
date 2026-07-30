@@ -12,6 +12,12 @@ namespace lsp::handlers {
     struct AstVisitor {
         std::function<void(const ast::Expr &)> on_expr = [](const ast::Expr &) {};
         std::function<void(const ast::Stmt &)> on_stmt = [](const ast::Stmt &) {};
+        // Match/switch arm variant patterns ('.Variant', '.Variant(&v)'). A pattern is NOT an
+        // expression, so on_expr never sees one -- and match arms are where variants are most
+        // used, so a visitor relying on on_expr alone finds almost none of their uses.
+        // Literal patterns still arrive through on_expr, since those really are expressions.
+        std::function<void(const ast::MatchExpr::VariantPattern &)> on_pattern =
+            [](const ast::MatchExpr::VariantPattern &) {};
     };
 
     // Generic traversal over every Expr/Stmt node reachable from `expr`/`stmt`/a whole

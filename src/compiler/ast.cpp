@@ -752,11 +752,17 @@ namespace ast {
                     });
                 }
 
-                std::vector<std::string> members;
+                std::vector<BitsetExpr::Member> members;
                 while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
                     const LoopProgressGuard progress_guard(parser);
                     parser.expect(TokenKind::Dot, "'.'");
-                    members.push_back(parser.expect_identifier());
+                    // Taken before expect_identifier consumes it, so the location points at
+                    // the flag name rather than at whatever follows it.
+                    const auto member_location = parser.current_location();
+                    members.push_back(BitsetExpr::Member{
+                        .name = parser.expect_identifier(),
+                        .location = member_location,
+                    });
 
                     skip_semicolons(parser);
                     if (parser.check(TokenKind::RBrace)) {
@@ -1417,6 +1423,7 @@ namespace ast {
                         if (parser.check(TokenKind::Dot)) {
                             // VariantPattern: .name or .name(capture) or .name(&capture)
                             parser.advance();
+                            const auto name_location = parser.current_location();
                             auto vname = parser.expect_identifier();
                             std::optional<std::string> capture_name;
                             bool capture_by_ref = false;
@@ -1431,6 +1438,7 @@ namespace ast {
                                 .name = std::move(vname),
                                 .capture_name = std::move(capture_name),
                                 .capture_by_ref = capture_by_ref,
+                                .name_location = name_location,
                             };
                         }
                         if (parser.check(TokenKind::Identifier) && parser.current_lexeme() == "_") {
@@ -3156,6 +3164,7 @@ namespace ast {
             auto arm_pattern = [&]() -> MatchExpr::ArmPattern {
                 if (parser.check(TokenKind::Dot)) {
                     parser.advance();
+                    const auto name_location = parser.current_location();
                     auto vname = parser.expect_identifier();
                     std::optional<std::string> capture_name;
                     bool capture_by_ref = false;
@@ -3170,6 +3179,7 @@ namespace ast {
                         .name = std::move(vname),
                         .capture_name = std::move(capture_name),
                         .capture_by_ref = capture_by_ref,
+                        .name_location = name_location,
                     };
                 }
                 if (parser.check(TokenKind::Identifier) && parser.current_lexeme() == "_") {

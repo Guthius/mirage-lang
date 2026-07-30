@@ -4,11 +4,18 @@
 
 namespace lsp::handlers {
     namespace {
+        void walk_arm_pattern(const ast::MatchExpr::ArmPattern &pattern, const AstVisitor &visitor) {
+            if (const auto *lit = std::get_if<ast::MatchExpr::LiteralPattern>(&pattern)) {
+                if (lit->expr) walk_expr(*lit->expr, visitor);
+            } else if (const auto *variant = std::get_if<ast::MatchExpr::VariantPattern>(&pattern)) {
+                visitor.on_pattern(*variant);
+            }
+            // DefaultPattern ('_') names nothing.
+        }
+
         void walk_match_arms(const std::vector<ast::MatchExpr::Arm> &arms, const AstVisitor &visitor) {
             for (const auto &arm : arms) {
-                if (const auto *lit = std::get_if<ast::MatchExpr::LiteralPattern>(&arm.pattern)) {
-                    if (lit->expr) walk_expr(*lit->expr, visitor);
-                }
+                walk_arm_pattern(arm.pattern, visitor);
                 walk_expr(arm.value, visitor);
             }
         }
@@ -118,9 +125,7 @@ namespace lsp::handlers {
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SwitchStmt>>) {
                     walk_expr(node->operand, visitor);
                     for (const auto &arm : node->arms) {
-                        if (const auto *lit = std::get_if<ast::MatchExpr::LiteralPattern>(&arm.pattern)) {
-                            if (lit->expr) walk_expr(*lit->expr, visitor);
-                        }
+                        walk_arm_pattern(arm.pattern, visitor);
                         walk_stmt(arm.body, visitor);
                     }
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::DeferStmt>>) {

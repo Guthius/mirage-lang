@@ -4113,15 +4113,18 @@ namespace sema {
                                 if (!enum_info) {
                                     return error(diag, bv.location, "internal error: invalid bitset member enum index");
                                 }
+                                // Both diagnostics point at the offending flag rather than at
+                                // the whole '{.A, .B}' literal, which is why Member carries a
+                                // location.
                                 std::unordered_set<std::string> seen;
-                                for (const auto &name : bv.members) {
-                                    if (!seen.insert(name).second) {
-                                        error(diag, bv.location, std::format("duplicate member '{}' in bitset initializer", name));
+                                for (const auto &member : bv.members) {
+                                    if (!seen.insert(member.name).second) {
+                                        error(diag, member.location, std::format("duplicate member '{}' in bitset initializer", member.name));
                                         continue;
                                     }
-                                    const auto it = std::ranges::find(enum_info->fields, name, &sema::EnumFieldInfo::name);
+                                    const auto it = std::ranges::find(enum_info->fields, member.name, &sema::EnumFieldInfo::name);
                                     if (it == enum_info->fields.end()) {
-                                        error(diag, bv.location, std::format("no bitset member named '{}'", name));
+                                        error(diag, member.location, std::format("no bitset member named '{}'", member.name));
                                     }
                                 }
                                 return *expected;

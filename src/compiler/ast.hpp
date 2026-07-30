@@ -192,7 +192,17 @@ namespace ast {
     // ('{.field = expr, ...}') at parse time by whether '=' follows the first
     // '.IDENT'; see parse_braced_initializer.
     struct BitsetExpr {
-        std::vector<std::string> members;
+        // Each flag carries its own location. The flags are not expression nodes -- there is
+        // no IdentExpr to attach a position to -- so without this the only location available
+        // for a member is the whole literal's, which is too coarse both for diagnostics
+        // (an unknown or duplicate flag underlines '{.A, .B}' entire) and for the LSP, whose
+        // reference search has nothing to match a cursor position against.
+        struct Member {
+            std::string name;
+            SourceLocation location;
+        };
+
+        std::vector<Member> members;
         SourceLocation location;
     };
 
@@ -604,6 +614,10 @@ namespace ast {
             std::string name;
             std::optional<std::string> capture_name; // nullopt if no capture
             bool capture_by_ref = false;             // true for (&v) capture
+            // Position of 'name' itself, not of the arm. A pattern is not an expression, so
+            // there is no node here for a cursor to land on -- the LSP needs this to resolve
+            // a variant written in a match arm, which is where variants are most used.
+            SourceLocation name_location;
         };
         struct LiteralPattern {
             std::unique_ptr<Expr> expr; // compile-time constant; type-checked against operand type

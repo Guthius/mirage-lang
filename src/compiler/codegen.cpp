@@ -1416,8 +1416,8 @@ namespace codegen {
             auto emit_bitset_expr_value(const ast::BitsetExpr &be, const sema::ResolvedType &ty) -> llvm::Value * {
                 const auto &bitset_info = sema_program_.bitsets.at(ty.bitset_index);
                 uint64_t folded = 0;
-                for (const auto &name : be.members) {
-                    folded |= bitset_member_mask(bitset_info, name, be.location).value_or(0);
+                for (const auto &member : be.members) {
+                    folded |= bitset_member_mask(bitset_info, member.name, member.location).value_or(0);
                 }
                 return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty), folded, false);
             }
