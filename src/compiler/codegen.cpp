@@ -3971,10 +3971,20 @@ namespace codegen {
                         args.push_back(emit_variadic_tail_slice(call.args, fixed_count, slice_ty, target_module));
                         return builder_.CreateCall(functions_.at(FunctionKey{target_module, name}), args);
                     }
+                    // Same bare-import hazard the macro path above documents, and for the same
+                    // reason: a default-value expression physically lives in — and was
+                    // type-checked into the tables of — the function's TRUE ORIGIN module, but
+                    // 'target_module' for an unqualified bare-import call is the CALLING module.
+                    // Handing emit_default_arg the caller's module makes its expr_types lookups
+                    // miss outright (an 'unordered_map::at' abort, not a diagnostic).
+                    const auto fn_origin = target.bare_import_origins.find(name);
+                    const auto &default_arg_module = fn_origin != target.bare_import_origins.end()
+                        ? fn_origin->second.module_path
+                        : target_module;
                     for (size_t i = 0; i < fn->params.size(); ++i) {
                         args.push_back(i < call.args.size()
                             ? emit_value_as(call.args[i], fn->params[i], *current_module_path_)
-                            : emit_default_arg(*fn->decl->params[i].default_value, fn->param_default_is_const[i], target_module, fn->params[i]));
+                            : emit_default_arg(*fn->decl->params[i].default_value, fn->param_default_is_const[i], default_arg_module, fn->params[i]));
                     }
                     return builder_.CreateCall(functions_.at(FunctionKey{target_module, name}), args);
                 }

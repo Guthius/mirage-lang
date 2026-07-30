@@ -196,6 +196,10 @@
     "action": "build",
     "exit": 1
   },
+  "example_bare_import_default_param": {
+    "action": "run",
+    "exit": 30
+  },
   "example_bitset": {
     "action": "run",
     "exit": 112

@@ -1,0 +1,36 @@
+// example_bare_import_default_param — a NON-GENERIC function reached through a bare
+// 'import("lib")' alias, called with its defaulted trailing parameter omitted.
+//
+// The crash this pins: a default-value expression physically lives in the callee's module
+// and is type-checked into THAT module's expr side tables, but for an unqualified
+// bare-import call codegen's 'target_module' is the CALLING module (the name was found
+// there, via the alias). emit_default_arg was handed the caller's module as the expression's
+// declaring module, so every lookup inside it missed — an 'unordered_map::at' abort, i.e. a
+// hard compiler crash on valid code, with no diagnostic. emit_call's macro path had already
+// documented and handled exactly this hazard; the ordinary function path had not.
+//
+// example_generics_bare_import covers the same intersection for a GENERIC callee, which goes
+// through a different default-argument path and was never affected.
+//
+// Expected: compiles and runs, exit code 30.
+
+import("lib")
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub fn main() -> i32 {
+    // Default omitted: 'scale' must be materialized from lib's own 'default_factor()', a
+    // call expression that only lib's side tables know the type of.
+    const a := scaled(5)
+
+    // Default supplied explicitly: the argument is the CALLER's expression, so this path
+    // never touches the callee's module and worked all along.
+    const b := scaled(5, 4)
+
+    // A constant-folded default takes emit_default_arg's other branch (emit_constant_expr),
+    // which reaches module-keyed lookups of its own.
+    const c := offset(5)
+
+    printf("a=%d b=%d c=%d\n", a, b, c)
+    return a + b + c // 15 + 20 - 5 == 30
+}

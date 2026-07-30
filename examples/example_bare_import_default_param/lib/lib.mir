@@ -1,0 +1,25 @@
+// The bare-imported module. Everything here is reached from main.mir WITHOUT a namespace
+// qualifier, which is what makes codegen's notion of "which module is this expression
+// written in" diverge from "which module was the name found in".
+
+const BASE_OFFSET: i32 = -10
+
+// Private to this module: if the default expression were evaluated in the importer's scope
+// it could not see this at all.
+fn secret_factor() -> i32 {
+    return 3
+}
+
+pub fn default_factor() -> i32 {
+    return secret_factor()
+}
+
+// Runtime default: emit_default_arg's non-constant branch.
+pub fn scaled(value: i32, scale := default_factor()) -> i32 {
+    return value * scale
+}
+
+// Compile-time-constant default: emit_default_arg's emit_constant_expr branch.
+pub fn offset(value: i32, delta := BASE_OFFSET) -> i32 {
+    return value + delta
+}
