@@ -1002,7 +1002,15 @@ namespace codegen {
                         const auto &origin_sym = sema_program_.modules.at(origin_path).symbols.at(origin_name);
                         if (std::holds_alternative<sema::GlobalSymbol>(origin_sym)) {
                             globals_[global_key(path, alias_name)] = globals_.at(global_key(origin_path, origin_name));
-                        } else if (std::holds_alternative<sema::FunctionSymbol>(origin_sym)) {
+                        } else if (const auto *ofn = std::get_if<sema::FunctionSymbol>(&origin_sym)) {
+                            // A GENERIC origin has no llvm::Function to alias: pass 1 skipped it
+                            // (see the generic_params check there), and each instantiation is
+                            // declared separately by declare_generic_functions() under the
+                            // ORIGIN module's key — which is the same key a call through this
+                            // alias resolves to, because instantiate_generic_function() redirects
+                            // bare-import aliases to their origin before interning the instance.
+                            // So there is nothing to register here, and the .at() below would throw.
+                            if (ofn->decl && !ofn->decl->generic_params.empty()) continue;
                             functions_[FunctionKey{path, alias_name}] = functions_.at(FunctionKey{origin_path, origin_name});
                         }
                         // TypeSymbol: no codegen table to alias — struct/enum/union/bitset/

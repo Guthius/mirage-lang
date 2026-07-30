@@ -326,6 +326,10 @@
     "action": "build",
     "exit": 1
   },
+  "example_generics_bare_import": {
+    "action": "run",
+    "exit": 7
+  },
   "example_generics_basic": {
     "action": "run",
     "exit": 30

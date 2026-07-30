@@ -1,0 +1,61 @@
+// example_generics_bare_import — a GENERIC function reached through a bare 'import("lib")'
+// alias. Bare imports and generics each worked; their intersection did not, in two ways:
+//
+//   1. sema instantiated the generic under the module the NAME was found in — the importer —
+//      so the instance body was checked with the importer's symbol table as its scope. The
+//      defining module's private helpers ('scramble' in lib) were invisible from there, and a
+//      same-named symbol in the importer would have silently captured instead.
+//   2. codegen's bare-import alias pass then did an unconditional lookup of the origin's
+//      llvm::Function, which for a generic origin is never created (each instantiation gets its
+//      own function instead) — an unordered_map::at crash, i.e. a hard compiler abort on
+//      perfectly valid code.
+//
+// All three ways of naming a bare-imported generic are exercised below: an inferred call, an
+// explicit instantiation used as a value, and a ':='-inferred default parameter value inside
+// another generic function.
+//
+// Expected: compiles and runs, exit code 7 (see main).
+
+import("lib")
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub type Weigh_Fn[T: type] = fn(T) -> u64
+
+pub type Box[T: type] = struct {
+    weigh: Weigh_Fn[T]
+}
+
+// 'weigh_of[T]' here is the bare-imported alias, instantiated with this generic's own type
+// parameter — the same shape as core/hash_map's 'hash := fnv1a[K]'.
+pub fn make_box[T: type](weigh := weigh_of[T]) -> Box[T] {
+    return {
+        .weigh = weigh,
+    }
+}
+
+pub fn main() -> i32 {
+    const zero: i32 = 0
+
+    // 1. Bare call, generic argument inferred from the argument type.
+    const a := weigh_of(zero)               // scramble(size_of(i32)) == 4*3+1 == 13
+
+    // 2. Explicit instantiation named as a value, at a DIFFERENT type argument, so the two
+    //    instances must stay distinct.
+    const wide: Weigh_Fn[i64] = weigh_of[i64]
+    const b := wide(0)                      // scramble(size_of(i64)) == 8*3+1 == 25
+
+    // 3. Reached through another generic's defaulted parameter. 'make_box' is instantiated at
+    //    exactly one T — see example_generics_default_fn_value for why more than one would trip
+    //    a pre-existing, unrelated monomorphization bug.
+    const boxed: Box[i32] = make_box[i32]()
+    const c := boxed.weigh(zero)            // 13 again
+
+    printf("a=%llu b=%llu c=%llu\n", a, b, c)
+
+    mut result: i32 = 0
+    if a == 13 { result += 1 }
+    if b == 25 { result += 2 }
+    if c == 13 { result += 4 }
+    return result                           // 1 + 2 + 4 == 7
+}

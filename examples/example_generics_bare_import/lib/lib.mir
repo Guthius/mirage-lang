@@ -1,0 +1,14 @@
+// The DEFINING module of the generic function the root module bare-imports.
+//
+// 'scramble' is deliberately NOT pub: a bare import only aliases the target's pub symbols, so
+// this name does not exist in the importer's scope. That is the whole point — it means the
+// instantiated body of 'weigh_of' below can only type-check if the instance is resolved against
+// THIS module rather than against whichever module happened to name it.
+
+fn scramble(x: u64) -> u64 {
+    return x * 3 + 1
+}
+
+pub fn weigh_of[T: type](value: T) -> u64 {
+    return scramble(cast(size_of(T), u64))
+}

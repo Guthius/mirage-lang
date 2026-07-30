@@ -1434,6 +1434,24 @@ namespace sema {
     auto instantiate_generic_function(Program &program, DiagnosticEngine &diag, const std::string &module_path,
                                        const std::string &decl_name, std::vector<GenericArgValue> args,
                                        const SourceLocation &use_loc) -> size_t {
+        // A bare-imported generic function is an ALIAS sharing the origin's FunctionDecl, so
+        // instantiate it under the ORIGIN's module rather than the importer's. Every caller
+        // below passes the module the NAME was found in, which for an alias is the importer —
+        // and instantiating there would check the instance body with the importer's symbol
+        // table as its resolution scope (the defining module's private helpers invisible,
+        // same-named symbols in the importer silently capturing) and key the instance's
+        // llvm::Function off a module that never declared it. Redirecting here covers every
+        // instantiation path at once, and mirrors the origin-redirect every other symbol kind
+        // already does in sema.cpp's resolve_signatures_for_module/resolve_values_for_module.
+        // It also dedupes: two importers of the same generic now share one instantiation.
+        if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
+            const auto &origins = mod_it->second.bare_import_origins;
+            if (const auto o = origins.find(decl_name); o != origins.end()) {
+                return instantiate_generic_function(program, diag, o->second.module_path, o->second.symbol_name,
+                                                     std::move(args), use_loc);
+            }
+        }
+
         const GenericInstanceKey key{.module_path = module_path, .decl_name = decl_name, .args = args};
 
         for (const auto &[k, idx] : program.generic_fn_instance_lookup) {
