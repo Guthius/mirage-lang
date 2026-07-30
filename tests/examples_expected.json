@@ -303,10 +303,8 @@
     "exit": 0
   },
   "example_enum": {
-    "action": "build",
-    "diag": "examples/example_enum/main.mir:1:13: error: cannot resolve import path 'example_enum_def' from 'examples/example_enum'",
-    "exit": 1,
-    "known_broken": "pre-existing on master: import(\"example_enum_def\") cannot resolve \u2014 the target is a sibling of examples/example_enum, not a subdirectory of it"
+    "action": "run",
+    "exit": 10
   },
   "example_enum_def": {
     "action": "emit-ir",

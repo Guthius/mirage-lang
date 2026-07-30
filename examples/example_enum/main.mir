@@ -1,4 +1,4 @@
-const my := import("example_enum_def")
+const my := import("../example_enum_def")
 
 fn get_value(e: my.enum_type) -> i32 {
     return match e {
