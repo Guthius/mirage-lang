@@ -1,0 +1,19 @@
+// example_generics_eager_unknown_call/main.mir
+//
+// The whole point of eager generic checking: 'swap_all' is NEVER instantiated anywhere in
+// this program, yet its body calls a function that does not exist. Before eager checking a
+// generic body was only type-checked once some concrete instantiation was requested, so this
+// compiled cleanly and the mistake surfaced only at the first use — or never.
+//
+// Expected: rejected at the DECLARATION with "unknown function 'nonexistent_helper'".
+
+pub fn swap_all[T: type](a: *T, b: *T) {
+    const tmp: T = a.*
+    a.* = b.*
+    b.* = tmp
+    nonexistent_helper(a)
+}
+
+pub fn main() -> i32 {
+    return 0
+}

@@ -1,0 +1,22 @@
+// example_generics_bound_method_missing/main.mir
+//
+// A trait bound is the COMPLETE statement of what 'T' offers, so calling anything outside it
+// is wrong at the declaration — not at some later use site, and not never. 'hash_it' is not
+// instantiated anywhere in this program; the error is still reported.
+//
+// Contrast example_generics_eager_unbound_ok, where the same shape on an UNCONSTRAINED
+// parameter is accepted: without a bound there is nothing to contradict.
+//
+// Expected: rejected with "no method 'size' on a generic parameter bound by 'Hashable'".
+
+pub type Hashable = trait {
+    fn hash(self) -> i32
+}
+
+pub fn hash_it[T: Hashable](v: *T) -> i32 {
+    return v.size()
+}
+
+pub fn main() -> i32 {
+    return 0
+}

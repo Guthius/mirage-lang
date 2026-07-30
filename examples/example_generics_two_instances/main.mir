@@ -1,0 +1,48 @@
+// example_generics_two_instances/main.mir
+//
+// Regression test: ONE generic function instantiated at TWO distinct argument sets, where
+// the body contains a type-dependent expression.
+//
+// Every monomorphization of a generic shares the same body AST nodes, so per-expression
+// sema records (ResolvedType, coercions, nested generic-instance indices) cannot be keyed
+// by AST node alone — the second instantiation would overwrite the first's and codegen
+// would emit the second's types into the first's body. Records are therefore owned
+// per-instance (sema::ExprSideTables).
+//
+// 'mk' is the trigger: its 'return { .a = p, .n = 1 }' braced initializer resolves to a
+// DIFFERENT struct slot for Tb[i32, i32] than for Tb[i64, i64].
+//
+// Expected: compiles and runs, exit code 30 (1 + 2 + 3 + 24).
+
+pub type Tb[K: type, V: type] = struct {
+    a: *K
+    n: usize
+}
+
+pub fn mk[K: type, V: type](p: *K) -> Tb[K, V] {
+    return { .a = p, .n = 1 }
+}
+
+// A second generic whose body calls another generic — the call node is shared across
+// instantiations but resolves to a different instance index in each.
+pub fn boxed[T: type](v: *T) -> usize {
+    const b: Tb[T, T] = mk[T, T](v)
+    return b.n
+}
+
+pub fn main() -> i32 {
+    mut x: i32 = 1
+    mut y: i64 = 2
+
+    const a: Tb[i32, i32] = mk[i32, i32](&x)
+    const b: Tb[i64, i64] = mk[i64, i64](&y)
+
+    // a.n and b.n are both 1; a.a.* is 1 and b.a.* is 2.
+    const sum: usize = a.n + b.n + cast(a.a.*, usize) + cast(b.a.*, usize)
+
+    // boxed instantiated at two distinct types as well.
+    const c: usize = boxed[i32](&x) + boxed[i64](&y)
+
+    // sum = 1 + 1 + 1 + 2 = 5, c = 2  ->  5 + 2 = 7 ... scaled to a distinctive code below.
+    return cast(sum + c, i32) + 23
+}

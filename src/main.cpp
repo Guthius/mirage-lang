@@ -38,6 +38,7 @@ namespace {
         bool noinit = false;
         bool print_link_directives = false;
         bool dump_ast = false;
+        bool eager_generic_check = true;
         std::string module_path;
         std::string output = "a.out";
         std::string std_path;
@@ -64,6 +65,7 @@ namespace {
                      << "  --opt key=value      Set a compile-time '$option' value (may be repeated)\n"
                      << "  --print-link-directives  Print collected '#link' directives and exit\n"
                      << "  --dump-ast           Print the parsed AST shape and exit\n"
+                     << "  --no-eager-generic-check  Only type-check a generic's body once it is instantiated\n"
                      << "  --help               Show this help message\n";
     }
 
@@ -89,6 +91,8 @@ namespace {
                 options.print_link_directives = true;
             } else if (arg == "--dump-ast") {
                 options.dump_ast = true;
+            } else if (arg == "--no-eager-generic-check") {
+                options.eager_generic_check = false;
             } else if (arg == "--opt") {
                 if (i + 1 >= argc) {
                     llvm::errs() << "mirage: '--opt' requires an argument of the form 'key=value'\n";
@@ -516,7 +520,10 @@ auto main(const int argc, char *argv[]) -> int {
     }
 
     const auto sema_start = std::chrono::steady_clock::now();
-    const auto sema = sema::check_program(ast, diag, sema::Options{.opt_values = options.opt_values});
+    const auto sema = sema::check_program(ast, diag, sema::Options{
+        .opt_values = options.opt_values,
+        .eager_generic_check = options.eager_generic_check,
+    });
     if (!sema.ok) {
         return 1;
     }

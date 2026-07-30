@@ -265,6 +265,10 @@ namespace sema {
         ResolvedType variadic_element_type{};
         size_t required_params = 0;
         std::vector<bool> param_default_is_const; // parallel to param_types
+        // This instantiation's OWN per-node records live in Program::generic_fn_instance_exprs,
+        // keyed by this instance's index — not inline here, only because ExprSideTables names
+        // coercion structs declared further down this header. Reach them via
+        // Program::exprs_for_fn_instance().
     };
 
     // A single trait method's resolved signature (no body — trait methods are
@@ -422,6 +426,66 @@ namespace sema {
         std::string source_path;
     };
 
+    // Everything sema records ABOUT AN EXPRESSION/STATEMENT NODE, keyed by that node's
+    // address (get_expr_key, or the raw node pointer for the three decl-shaped maps).
+    //
+    // Split out of ProgramModule because a module is the wrong owner for these: a generic
+    // function's body AST is SHARED by every monomorphization of it, so keying on the node
+    // alone means instantiation #2 overwrites instantiation #1's entries and codegen then
+    // emits #2's types into #1's body. Each GenericFunctionInstance therefore owns a set of
+    // these, and each generic type instantiation gets one via
+    // Program::generic_type_instance_exprs; ProgramModule keeps one for ordinary
+    // (non-generic) code. Program::active_expr_tables selects between them — see
+    // expr_tables() below, whose read/write asymmetry is load-bearing.
+    //
+    // A map belongs here only if its value can legitimately DIFFER between two
+    // instantiations of the same AST node. Maps written at declare time (inline_import_paths,
+    // when_decl_selected) or whose value is instantiation-independent (expr_option_values —
+    // a '$option'/'$env' build-time constant) deliberately stay on ProgramModule.
+    struct ExprSideTables {
+        std::unordered_map<const void *, ResolvedType> expr_types;
+        std::unordered_map<const void *, VariantCoercion> expr_variant_coercions;
+        std::unordered_map<const void *, TraitCoercion> expr_trait_coercions;
+        std::unordered_map<const void *, TraitHandleCoercion> expr_trait_handle_coercions;
+        std::unordered_map<const void *, AnyCoercion> expr_any_coercions;
+        std::unordered_map<const void *, TraitDispatchInfo> expr_trait_dispatch;
+        // A call-site CallExpr node -> the index into Program::generic_fn_instances it
+        // resolved to (explicit or inferred instantiation of a generic function, or a
+        // generic method call) — populated by check_expr's CallExpr handling, consumed by
+        // codegen to find the pre-resolved, pre-mangled callee instead of re-deriving it.
+        // The clearest case for this struct existing: a generic function calling another
+        // generic function resolves to a DIFFERENT instance index per enclosing instance,
+        // on the very same call node.
+        std::unordered_map<const void *, size_t> expr_generic_fn_instance;
+        // 'type_info_of(type_of(T))' EXPRESSION -> T's compile-time-constant type id, present
+        // only for this exact syntactic shape (see check_expr's TypeInfoOfExpr case) — the fast
+        // path that resolves directly to a specific '__type_info_<id>' global at codegen time,
+        // rather than the generic runtime binary-search table lookup.
+        std::unordered_map<const void *, uint64_t> expr_type_info_const_id;
+        // 'type_of(...)' EXPRESSION -> its operand's resolved type. Needed because a type-name
+        // operand (e.g. 'type_of(Point)') never goes through check_expr itself (see check_expr's
+        // TypeOfExpr case, mirroring SizeOfExpr) and so has no expr_types entry of its own -
+        // TypeInfoOfExpr's 'type_info_of(type_of(T))' fast-path detection reads this instead of
+        // trying (and failing) to look up the inner operand's expr_types entry directly.
+        std::unordered_map<const void *, ResolvedType> expr_type_of_operand_type;
+        std::unordered_map<const void *, ErrorMatchUnwrap> expr_error_match_unwrap;
+        // 'when' EXPRESSION -> which branch (true=then_expr, false=else_expr) a
+        // compile-time-constant condition folded to; absent if the condition is a runtime
+        // value (codegen emits a runtime branch/PHI in that case, like an ordinary ternary).
+        // Instance-varying: 'when N > 4' picks a different branch per 'N'.
+        std::unordered_map<const void *, bool> expr_when_selected;
+        // 'when' STATEMENT -> which branch is live (always present; a when statement's
+        // condition is always required to be a compile-time constant).
+        std::unordered_map<const ast::WhenStmt *, bool> when_stmt_selected;
+        // 'asm { ... }' node -> sema's resolved operand types + computed clobber set. Populated
+        // by check_asm_stmt (sema_check.cpp), consumed by codegen's emit_asm_stmt.
+        std::unordered_map<const ast::AsmStmt *, AsmStmtInfo> asm_stmt_info;
+        // 'asm -> reg [: type] { ... }' EXPRESSION node -> the same AsmStmtInfo shape as above,
+        // in a separate map (an AsmExpr never shares a key with any AsmStmt). Populated by
+        // check_asm_expr, consumed by codegen's emit_asm_expr.
+        std::unordered_map<const ast::AsmExpr *, AsmStmtInfo> asm_expr_info;
+    };
+
     struct ProgramModule {
         SymbolTable symbols;
         // type_name -> method_name -> MethodInfo
@@ -437,40 +501,14 @@ namespace sema {
         // origin's path/name — rather than accidentally re-resolving/re-checking/
         // re-emitting the SAME decl under this module's (wrong) context.
         std::unordered_map<std::string, BareImportOrigin> bare_import_origins;
-        std::unordered_map<const void *, ResolvedType> expr_types;
-        std::unordered_map<const void *, VariantCoercion> expr_variant_coercions;
-        std::unordered_map<const void *, TraitCoercion> expr_trait_coercions;
-        std::unordered_map<const void *, TraitHandleCoercion> expr_trait_handle_coercions;
-        std::unordered_map<const void *, AnyCoercion> expr_any_coercions;
-        std::unordered_map<const void *, TraitDispatchInfo> expr_trait_dispatch;
-        // A call-site CallExpr node -> the index into Program::generic_fn_instances it
-        // resolved to (explicit or inferred instantiation of a generic function, or a
-        // generic method call) — populated by check_expr's CallExpr handling, consumed by
-        // codegen to find the pre-resolved, pre-mangled callee instead of re-deriving it.
-        std::unordered_map<const void *, size_t> expr_generic_fn_instance;
-        // 'type_info_of(type_of(T))' EXPRESSION -> T's compile-time-constant type id, present
-        // only for this exact syntactic shape (see check_expr's TypeInfoOfExpr case) — the fast
-        // path that resolves directly to a specific '__type_info_<id>' global at codegen time,
-        // rather than the generic runtime binary-search table lookup.
-        std::unordered_map<const void *, uint64_t> expr_type_info_const_id;
-        // 'type_of(...)' EXPRESSION -> its operand's resolved type. Needed because a type-name
-        // operand (e.g. 'type_of(Point)') never goes through check_expr itself (see check_expr's
-        // TypeOfExpr case, mirroring SizeOfExpr) and so has no expr_types entry of its own -
-        // TypeInfoOfExpr's 'type_info_of(type_of(T))' fast-path detection reads this instead of
-        // trying (and failing) to look up the inner operand's expr_types entry directly.
-        std::unordered_map<const void *, ResolvedType> expr_type_of_operand_type;
-        std::unordered_map<const void *, ErrorMatchUnwrap> expr_error_match_unwrap;
+        // Per-node records for this module's ORDINARY (non-generic) code. A generic
+        // instantiation's nodes land in its own instance-owned set instead — never here.
+        ExprSideTables exprs;
         // '$option(...)'/'$env(...)' expression -> its resolved compile-time value, cached
         // by check_expr's OptionExpr/EnvExpr cases so later constant-folding (when
         // conditions, '#link' data) never re-runs coercion/diagnostics for the same node.
+        // Stays module-level: a build-time config value does not vary by instantiation.
         std::unordered_map<const void *, ConstFoldValue> expr_option_values;
-        // 'when' EXPRESSION -> which branch (true=then_expr, false=else_expr) a
-        // compile-time-constant condition folded to; absent if the condition is a runtime
-        // value (codegen emits a runtime branch/PHI in that case, like an ordinary ternary).
-        std::unordered_map<const void *, bool> expr_when_selected;
-        // 'when' STATEMENT -> which branch is live (always present; a when statement's
-        // condition is always required to be a compile-time constant).
-        std::unordered_map<const ast::WhenStmt *, bool> when_stmt_selected;
         // module-scope 'when' DECLARATION -> which branch is live.
         std::unordered_map<const ast::WhenDecl *, bool> when_decl_selected;
         // ImportExpr node (found nested under a '.field' MemberExpr chain by
@@ -479,13 +517,6 @@ namespace sema {
         // try_resolve_namespace_chain only has access to sema::Program, not the
         // ast::Program::module_imports map the resolution needs.
         std::unordered_map<const ast::ImportExpr *, std::string> inline_import_paths;
-        // 'asm { ... }' node -> sema's resolved operand types + computed clobber set. Populated
-        // by check_asm_stmt (sema_check.cpp), consumed by codegen's emit_asm_stmt.
-        std::unordered_map<const ast::AsmStmt *, AsmStmtInfo> asm_stmt_info;
-        // 'asm -> reg [: type] { ... }' EXPRESSION node -> the same AsmStmtInfo shape as above,
-        // in a separate map (an AsmExpr never shares a key with any AsmStmt). Populated by
-        // check_asm_expr, consumed by codegen's emit_asm_expr.
-        std::unordered_map<const ast::AsmExpr *, AsmStmtInfo> asm_expr_info;
         bool ok = false;
     };
 
@@ -576,6 +607,11 @@ namespace sema {
     // check_expr/check_stmt call site.
     struct Options {
         std::unordered_map<std::string, std::string> opt_values;
+        // Type-check every generic declaration's body once at its point of definition, with
+        // its parameters bound to Opaque (see check_generic_templates_for_program). On by
+        // default; '--no-eager-generic-check' turns it off so a false positive in that pass
+        // can never hard-block a build.
+        bool eager_generic_check = true;
     };
 
     enum class LinkCategory : uint8_t { Lib, System, Flag };
@@ -701,6 +737,51 @@ namespace sema {
         // instance's body can recursively trigger another instantiation before returning.
         std::vector<const GenericBindingEnv *> active_generic_env_stack;
 
+        // Per-instantiation expression records (see ExprSideTables). Heap-allocated and
+        // lazily created so a pointer handed out here survives any later insertion, and so
+        // instances that never check a body cost nothing.
+        //   - fn:   keyed by index into 'generic_fn_instances'
+        //   - type: keyed by the GLOBAL struct/enum/union/bitset slot index. Keyed by slot
+        //           rather than stored on *Info because 'structs' is a plain vector that
+        //           reallocates mid-check (check_generic_struct_field_defaults_for_program
+        //           already re-fetches by index for exactly this reason).
+        std::unordered_map<size_t, std::unique_ptr<ExprSideTables>> generic_fn_instance_exprs;
+        std::unordered_map<int, std::unique_ptr<ExprSideTables>> generic_type_instance_exprs;
+
+        auto exprs_for_fn_instance(size_t idx) -> ExprSideTables & {
+            auto &slot = generic_fn_instance_exprs[idx];
+            if (!slot) slot = std::make_unique<ExprSideTables>();
+            return *slot;
+        }
+        auto exprs_for_type_instance(int slot_index) -> ExprSideTables & {
+            auto &slot = generic_type_instance_exprs[slot_index];
+            if (!slot) slot = std::make_unique<ExprSideTables>();
+            return *slot;
+        }
+        // Read-only lookups for codegen, which holds a 'const Program &' and must not create.
+        // Null means "nothing was ever checked for this instantiation".
+        auto find_fn_instance_exprs(size_t idx) const -> const ExprSideTables * {
+            const auto it = generic_fn_instance_exprs.find(idx);
+            return it == generic_fn_instance_exprs.end() ? nullptr : it->second.get();
+        }
+        auto find_type_instance_exprs(int slot_index) const -> const ExprSideTables * {
+            const auto it = generic_type_instance_exprs.find(slot_index);
+            return it == generic_type_instance_exprs.end() ? nullptr : it->second.get();
+        }
+
+        // Selects which ExprSideTables the node currently being checked/emitted belongs to.
+        // Pushed by ScopedGenericScope (sema) and ScopedEmitExprs (codegen); empty means
+        // "ordinary module-level code".
+        std::vector<ExprSideTables *> active_expr_tables;
+
+        // Non-zero while the eager pass is checking a generic DECLARATION's body with its
+        // parameters bound to Opaque. Suppresses side effects that would otherwise leak
+        // template-only artifacts into the real program — specifically, marking a concrete
+        // instantiation as needing emission. 'fn f[T]() { g[i32]() }' must not cause 'g[i32]'
+        // to be emitted just because 'f' was checked; only a real call to 'f' does that.
+        // A counter, not a flag, because checking one template can reach another.
+        int template_check_depth = 0;
+
         // Bounds-checked table lookups, returning nullptr for an out-of-range
         // index instead of the undefined behavior of raw operator[]. Under
         // normal compilation every *_index on a ResolvedType is guaranteed
@@ -759,6 +840,43 @@ namespace sema {
         return std::visit([](const auto &v) -> const void * { return &v; }, expr);
     }
 
+    // Which ExprSideTables a node's record belongs in. WRITES go to the innermost active
+    // scope: while a generic instantiation is being checked or emitted, every node it walks
+    // is that instantiation's, so the module's tables must not be touched at all (writing
+    // there is the monomorphization-collision bug this split exists to fix).
+    inline auto expr_tables_for_write(Program &program, const std::string &module_path) -> ExprSideTables & {
+        if (!program.active_expr_tables.empty()) return *program.active_expr_tables.back();
+        // operator[], not at(): two pre-existing write sites (the 'when' expression and
+        // statement selectors) already used the module-creating form, and a throw here would
+        // be a hard crash where a default-constructed module is harmless.
+        return program.modules[module_path].exprs;
+    }
+
+    // READS are asymmetric with writes: they check the active scope first, then FALL BACK to
+    // the module. The fallback is required — checking an instance body legitimately reads
+    // nodes that were recorded module-level long before any instance existed. The clearest
+    // case is evaluate_const_value recursing into a global const's initializer, whose entries
+    // resolve_values_for_module wrote into the module's tables; a top-of-stack-only read
+    // would miss them and the fold would fail with a spurious "not a compile-time constant".
+    //
+    // The fallback cannot mask a stale-instance read, because writes never reach the module's
+    // tables while a scope is active — the two sets are disjoint by construction. Keep that
+    // invariant if you add a write site.
+    // Returns a pointer to the record, or nullptr if neither scope has one.
+    template <typename Map, typename Key>
+    auto find_expr_record(const Program &program, const std::string &module_path,
+                           Map ExprSideTables::*member, const Key &key) -> const typename Map::mapped_type * {
+        if (!program.active_expr_tables.empty()) {
+            const auto &active = (*program.active_expr_tables.back()).*member;
+            if (const auto it = active.find(key); it != active.end()) return &it->second;
+        }
+        const auto mod_it = program.modules.find(module_path);
+        if (mod_it == program.modules.end()) return nullptr;
+        const auto &fallback = mod_it->second.exprs.*member;
+        if (const auto it = fallback.find(key); it != fallback.end()) return &it->second;
+        return nullptr;
+    }
+
     // Expr alternatives are a mix of by-value nodes ('.location'), boxed 'unique_ptr<T>' nodes
     // ('->location'), and the boxed BracedInitializerExpr (a unique_ptr to a nested variant with
     // no location of its own); this uniformly extracts the location regardless of which.
@@ -798,6 +916,43 @@ namespace sema {
                                 const SourceLocation &decl_loc) -> std::optional<ResolvedType>;
     auto resolve_import_bin_type(const std::string &module_path, const std::string &path, const SourceLocation &loc,
                                   Program &program, DiagnosticEngine &diag) -> ResolvedType;
+    // The trait a generic parameter is bound by ('[T: Hashable]'), or -1 for an unconstrained
+    // '[T: type]'. Defined in type_resolver.cpp.
+    // Does '(type_module, type_name)' implement the trait at 'trait_index'? Returns the index
+    // of the trait that PROVIDES it — the trait itself for a direct 'impl TRAIT for TYPE', or
+    // a composing trait that reaches it transitively — or -1 for no. Note the type is named by
+    // its UNSPECIALIZED (module, name): find_type_module_and_name maps 'List[i32]' back to
+    // 'List', matching the coherence rule that one impl governs every instantiation.
+    //
+    // 'ambiguous_via', when non-null, collects the names of every composing trait that reaches
+    // the wanted one; more than one entry means the caller should report an ambiguity. Shared
+    // by the implicit value-to-trait-handle coercion and by generic bound checking, which must
+    // agree on what "implements" means. Defined in type_resolver.cpp.
+    auto find_trait_provider(const Program &program, const std::string &type_module, const std::string &type_name,
+                              int trait_index, std::vector<std::string> *ambiguous_via = nullptr) -> int;
+
+    // 'report' asks it to also diagnose a named bound that does not resolve to a trait; only
+    // the eager pass sets it, since that pass visits each declaration exactly once.
+    auto generic_param_bound_trait_index(const ast::GenericParam &param, const std::string &module_path,
+                                          Program &program, DiagnosticEngine &diag, bool report = false) -> int;
+
+    // Whether 'ty' is, or structurally contains, an unbound generic parameter (TypeKind::Opaque
+    // — see resolved_type.hpp). Recursive because the parameter is usually wrapped: '*T', '[]T',
+    // or a struct with a 'T' field. Defined in type_resolver.cpp.
+    auto contains_opaque(const ResolvedType &ty, const Program &program) -> bool;
+
+    // Whether an instantiation's argument list still mentions an unbound generic parameter —
+    // i.e. this is a generic being instantiated from inside another generic's DECLARATION
+    // ('fn f[T]() { g[T]() }'), not from real code.
+    //
+    // Such an instantiation is a fiction: there is no concrete 'g[T]' to monomorphize, and
+    // registering one would put a type with no layout in front of codegen. Callers therefore
+    // resolve its SIGNATURE (so the call's arity and arguments are still checked) but keep it
+    // out of every registry, and never check its body — the callee's own eager pass does that
+    // once, at its declaration. instantiate_generic_type has nothing worth building at all and
+    // simply yields Opaque. Defined in type_resolver.cpp.
+    auto args_contain_opaque(const std::vector<GenericArgValue> &args, const Program &program) -> bool;
+
     auto is_assignable(const ResolvedType &from, const ResolvedType &to) -> bool;
     // Like is_assignable, but also allows the additional expected-type-position-only
     // coercions available at an ordinary call/assignment site (array<->slice/pointer,

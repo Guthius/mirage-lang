@@ -210,6 +210,13 @@ namespace sema {
             case TypeKind::Namespace:
                 return 0;
 
+            // An unbound generic parameter has no layout until it is substituted. 0 is the
+            // intended answer, not a fallthrough: layout_struct/layout_union already tolerate
+            // a zero-size, zero-align member (they seed max_align at 1 and guard on
+            // 'f_align > 0'), and no instantiation carrying one is ever emitted.
+            case TypeKind::Opaque:
+                return 0;
+
             default:
                 return 0;
             }
@@ -995,9 +1002,15 @@ namespace sema {
                 return names;
             }
 
-            auto array_len_expr_value(const ast::Expr &expr, const std::string &module_path) -> uint64_t {
+            // nullopt means "the length is an unbound generic value parameter" — not an error,
+            // just not knowable yet. The caller degrades the whole array type to Opaque.
+            auto array_len_expr_value(const ast::Expr &expr, const std::string &module_path) -> std::optional<uint64_t> {
                 auto locals = generic_env_locals();
                 const auto len_type = check_expr(expr, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::USize}, 0);
+                // Checked before is_integer(), which Opaque fails: '[N]u8' while eagerly
+                // checking 'fn buf[N: usize]()' has no count to fold, and reporting
+                // "could not be evaluated" here would flag correct code.
+                if (len_type.kind == TypeKind::Opaque) return std::nullopt;
                 if (!len_type.is_integer()) {
                     diag.report_error(DiagnosticStage::Sema, expr_location(expr), "array length must be an integer constant expression");
                     return 0;
@@ -1622,7 +1635,17 @@ namespace sema {
                             }
                             auto element = resolve_type_impl(v->base_type, module_path);
                             const auto count = array_len_expr_value(*v->size, module_path);
-                            return intern_array(program, element, count, size_of(module_path, element) * count, align_of(module_path, element));
+                            // Degrade to plain Opaque when the length or the element is an
+                            // unbound generic parameter, rather than interning an array with a
+                            // placeholder count. intern_array dedups on (element, count) only,
+                            // so an opaque '[N]u8' recorded as count 0 would silently alias a
+                            // real '[0]u8' — a miscompile waiting to happen. Opaque is already
+                            // permissive for indexing, 'len', and assignment, which is exactly
+                            // what a not-yet-known array needs.
+                            if (!count || element.kind == TypeKind::Opaque) {
+                                return ResolvedType{.kind = TypeKind::Opaque};
+                            }
+                            return intern_array(program, element, *count, size_of(module_path, element) * *count, align_of(module_path, element));
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceType>>) {
                             auto element = resolve_type_impl(v->base_type, module_path);
@@ -1698,8 +1721,101 @@ namespace sema {
         };
     }
 
+    auto find_trait_provider(const Program &program, const std::string &type_module, const std::string &type_name,
+                              const int trait_index, std::vector<std::string> *ambiguous_via) -> int {
+        const auto it = program.trait_impls_by_type.find({type_module, type_name});
+        if (it == program.trait_impls_by_type.end()) return -1;
+
+        // Tier 1: an exact, directly-written 'impl D for TYPE' always wins over any
+        // composed-derived route to D — this is what keeps every pre-existing direct-impl
+        // program byte-for-byte unaffected by the Tier 2 search below.
+        for (const auto &impl_info : it->second) {
+            if (impl_info.trait_index == trait_index) return trait_index;
+        }
+
+        // Tier 2: no exact impl — any impl on this type whose trait COMPOSES the wanted one
+        // (directly or transitively) provides it. Two such routes is an ambiguity the caller
+        // reports; collecting the names is optional since not every caller needs the message.
+        int provider = -1;
+        for (const auto &impl_info : it->second) {
+            const auto *candidate = program.trait_at(impl_info.trait_index);
+            if (!candidate) continue;
+            const bool reaches = std::ranges::any_of(candidate->component_traits,
+                [&](const auto &c) { return c.trait_index == trait_index; });
+            if (!reaches) continue;
+            if (provider < 0) provider = impl_info.trait_index;
+            if (ambiguous_via) ambiguous_via->push_back(impl_info.trait_name);
+        }
+        return provider;
+    }
+
+    auto generic_param_bound_trait_index(const ast::GenericParam &param, const std::string &module_path,
+                                          Program &program, DiagnosticEngine &diag, const bool report) -> int {
+        // '[T: type]' is a BuiltinType and carries no bound; only the '[T: SomeTrait]' spelling
+        // (a NamedType, possibly dotted) does. Anything else was already rejected by
+        // validate_generic_param_types on shape.
+        const auto *named = std::get_if<ast::NamedType>(&param.type);
+        if (!named) return -1;
+        const auto resolved = resolve_type(param.type, module_path, program, diag);
+        if (resolved.kind == TypeKind::Trait) return resolved.trait_index;
+        // 'report' is set by exactly one caller — the eager pass, which visits each generic
+        // DECLARATION once. Every other caller runs per-instantiation and would repeat the
+        // message once per use site.
+        if (report && resolved.kind != TypeKind::Invalid) { // Invalid was already diagnosed
+            diag.report_error(DiagnosticStage::Sema, param.location, std::format(
+                "generic parameter '{}' is bound by '{}', which is not a trait; a bound must name a trait",
+                param.name, describe_type(resolved, program)));
+        }
+        return -1;
+    }
+
+    auto contains_opaque(const ResolvedType &ty, const Program &program) -> bool {
+        switch (ty.kind) {
+        case TypeKind::Opaque:
+            return true;
+        case TypeKind::Pointer: {
+            const auto *pointee = program.pointee_at(ty.pointee_index);
+            return pointee && contains_opaque(*pointee, program);
+        }
+        case TypeKind::Array: {
+            const auto *info = program.array_at(ty.array_index);
+            return info && contains_opaque(info->element_type, program);
+        }
+        case TypeKind::Slice: {
+            const auto *info = program.slice_at(ty.slice_index);
+            return info && contains_opaque(info->element_type, program);
+        }
+        case TypeKind::Struct: {
+            const auto *info = program.struct_at(ty.struct_index);
+            if (!info) return false;
+            return std::ranges::any_of(info->fields,
+                [&](const auto &f) { return contains_opaque(f.type, program); });
+        }
+        default:
+            return false;
+        }
+    }
+
+    auto args_contain_opaque(const std::vector<GenericArgValue> &args, const Program &program) -> bool {
+        return std::ranges::any_of(args, [&](const GenericArgValue &a) {
+            // A VALUE parameter carries its opaqueness on the scalar type rather than the
+            // folded value: binding 'N' to an Opaque-typed local makes every use of 'N' Opaque,
+            // without needing an extra ConstFoldValue alternative threaded through every
+            // const-folding site in the compiler.
+            return a.is_type ? contains_opaque(a.type_arg, program)
+                              : a.value_arg_scalar_type.kind == TypeKind::Opaque;
+        });
+    }
+
     auto is_assignable(const ResolvedType &from, const ResolvedType &to) -> bool {
         if (from == to) return true;
+        // An unbound generic parameter is assignment-compatible with everything, in both
+        // directions. Whether a real 'T' actually is depends on the instantiation, which by
+        // definition isn't known here — so the eager pass stays silent and the real check
+        // happens per-instantiation. One short-circuit covers every caller of this and of
+        // assignable_in_module. Assignment/copy is part of the universal core a trait-bounded
+        // parameter keeps too, so this deliberately does not consult 'trait_index'.
+        if (from.kind == TypeKind::Opaque || to.kind == TypeKind::Opaque) return true;
         if (from.kind == TypeKind::Anyptr && to.kind == TypeKind::Pointer) return true;
         if (from.kind == TypeKind::Pointer && to.kind == TypeKind::Anyptr) return true;
         // nil (Anyptr) is assignable to/from function pointer types
@@ -1791,6 +1907,18 @@ namespace sema {
     auto instantiate_generic_type(Program &program, DiagnosticEngine &diag, const std::string &module_path,
                                    const std::string &decl_name, std::vector<GenericArgValue> args,
                                    const SourceLocation &use_loc) -> ResolvedType {
+        // 'List[T]' written inside a generic declaration names no concrete type. Unlike the
+        // function case — which still resolves a signature so the call can be arity-checked —
+        // there is nothing here worth building, and building it would be actively harmful:
+        // this function's normal path ALLOCATES a struct/enum/union/bitset slot, and codegen's
+        // declare_structs walks every slot unconditionally and asks for each field's LLVM
+        // type. A slot with an unbound parameter in it would reach that walk. Yield Opaque,
+        // which is permissive for field access, indexing and assignment — exactly what a
+        // not-yet-known aggregate needs while its declaration is being checked.
+        if (args_contain_opaque(args, program)) {
+            return ResolvedType{.kind = TypeKind::Opaque};
+        }
+
         const GenericInstanceKey key{.module_path = module_path, .decl_name = decl_name, .args = args};
 
         for (const auto &[k, ty] : program.generic_type_instance_lookup) {

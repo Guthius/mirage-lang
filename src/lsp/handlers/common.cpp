@@ -417,8 +417,8 @@ namespace lsp::handlers {
             return {.type = *declared};
         }
         if (node.init) {
-            if (const auto it = ctx.sema_module.expr_types.find(sema::get_expr_key(*node.init));
-                it != ctx.sema_module.expr_types.end()) {
+            if (const auto it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(*node.init));
+                it != ctx.sema_module.exprs.expr_types.end()) {
                 return {.type = it->second};
             }
             if (const auto display = describe_generic_call_return_type(*node.init, ctx)) {
@@ -1281,7 +1281,7 @@ namespace lsp::handlers {
         }
 
         if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
-            if (const auto ty_it = mod_it->second.expr_types.find(sema::get_expr_key(operand)); ty_it != mod_it->second.expr_types.end()) {
+            if (const auto ty_it = mod_it->second.exprs.expr_types.find(sema::get_expr_key(operand)); ty_it != mod_it->second.exprs.expr_types.end()) {
                 return ty_it->second;
             }
         }
@@ -1316,8 +1316,8 @@ namespace lsp::handlers {
             }
         } else if (const auto *len_expr = std::get_if<std::unique_ptr<ast::LenExpr>>(found)) {
             if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
-                if (const auto ty_it = mod_it->second.expr_types.find(sema::get_expr_key((*len_expr)->operand));
-                    ty_it != mod_it->second.expr_types.end()) {
+                if (const auto ty_it = mod_it->second.exprs.expr_types.find(sema::get_expr_key((*len_expr)->operand));
+                    ty_it != mod_it->second.exprs.expr_types.end()) {
                     res.builtin_operand_type = ty_it->second;
                     // Only a fixed-size array's length is a compile-time constant; a slice's is
                     // a runtime field (see sema_check.cpp's LenExpr case).
@@ -1481,15 +1481,15 @@ namespace lsp::handlers {
         if (enclosing.body && idx >= 1 && tokens[idx - 1].kind == TokenKind::Dot) {
             if (const auto *found = find_expr_by_location(*enclosing.body, tokens[idx - 1].location)) {
                 if (const auto *member_expr = std::get_if<std::unique_ptr<ast::MemberExpr>>(found)) {
-                    if (const auto ty_it = ctx.sema_module.expr_types.find(sema::get_expr_key((*member_expr)->object));
-                        ty_it != ctx.sema_module.expr_types.end()) {
+                    if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key((*member_expr)->object));
+                        ty_it != ctx.sema_module.exprs.expr_types.end()) {
                         if (auto res = resolve_member(ty_it->second, tokens[idx].lexeme, result.sema_program);
                             res.kind != Resolution::Kind::None) {
                             return res;
                         }
                     }
-                } else if (const auto ty_it = ctx.sema_module.expr_types.find(sema::get_expr_key(*found));
-                           ty_it != ctx.sema_module.expr_types.end()) {
+                } else if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(*found));
+                           ty_it != ctx.sema_module.exprs.expr_types.end()) {
                     if (auto res = match_enum_or_variant(ty_it->second, tokens[idx].lexeme, result.sema_program);
                         res.kind != Resolution::Kind::None) {
                         return res;
@@ -1507,8 +1507,8 @@ namespace lsp::handlers {
             if (enclosing.body) {
                 if (const auto brace_loc = enclosing_struct_literal_brace(tokens, idx)) {
                     if (const auto *literal_expr = find_expr_by_location(*enclosing.body, *brace_loc)) {
-                        if (const auto ty_it = ctx.sema_module.expr_types.find(sema::get_expr_key(*literal_expr));
-                            ty_it != ctx.sema_module.expr_types.end()) {
+                        if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(*literal_expr));
+                            ty_it != ctx.sema_module.exprs.expr_types.end()) {
                             if (auto field_res = match_struct_or_union_field(ty_it->second, tokens[idx].lexeme, result.sema_program);
                                 field_res.kind != Resolution::Kind::None) {
                                 return field_res;

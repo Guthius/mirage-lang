@@ -69,17 +69,21 @@ namespace sema {
         }
 
         auto is_constant_expr_impl(const ast::Expr &expr, const std::string &module_path, const Program &program, const std::unordered_set<std::string> &treated_as_const) -> bool {
-            if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
-                if (mod_it->second.expr_variant_coercions.contains(get_expr_key(expr))) {
+            // Read through find_expr_record, not the module directly: this runs DURING generic
+            // body checking (via is_constant_expr from 'when' conditions, array lengths and
+            // default params), where the records live in the instantiation's tables.
+            {
+                const auto key = get_expr_key(expr);
+                if (find_expr_record(program, module_path, &ExprSideTables::expr_variant_coercions, key)) {
                     return false; // implicit tagged-union coercion has runtime stores
                 }
-                if (mod_it->second.expr_trait_coercions.contains(get_expr_key(expr))) {
+                if (find_expr_record(program, module_path, &ExprSideTables::expr_trait_coercions, key)) {
                     return false; // implicit pointer-to-trait-handle coercion has runtime stores
                 }
-                if (mod_it->second.expr_trait_handle_coercions.contains(get_expr_key(expr))) {
+                if (find_expr_record(program, module_path, &ExprSideTables::expr_trait_handle_coercions, key)) {
                     return false; // implicit handle-to-handle trait narrowing has a runtime load + store
                 }
-                if (mod_it->second.expr_any_coercions.contains(get_expr_key(expr))) {
+                if (find_expr_record(program, module_path, &ExprSideTables::expr_any_coercions, key)) {
                     return false; // implicit any-coercion materializes a runtime {id, data} value
                 }
             }
@@ -147,10 +151,9 @@ namespace sema {
                     // 'any' — that case lowers to a runtime read of the any value's type id
                     // (see codegen.cpp's TypeOfExpr case).
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
-                        if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
-                            if (const auto ty_it = mod_it->second.expr_types.find(get_expr_key(v->operand)); ty_it != mod_it->second.expr_types.end()) {
-                                return ty_it->second.kind != TypeKind::Any;
-                            }
+                        if (const auto *ty = find_expr_record(program, module_path, &ExprSideTables::expr_types,
+                                                               get_expr_key(v->operand))) {
+                            return ty->kind != TypeKind::Any;
                         }
                         return true;
                     }
@@ -196,17 +199,13 @@ namespace sema {
                                 } else if constexpr (std::is_same_v<BVT, ast::BitsetExpr>) {
                                     return true; // member names are plain strings, always compile-time constant
                                 } else { // ast::StructExpr
-                                    const auto mod_it = program.modules.find(module_path);
-                                    if (mod_it == program.modules.end()) {
+                                    const auto *recorded_ty = find_expr_record(program, module_path,
+                                        &ExprSideTables::expr_types, get_expr_key(expr));
+                                    if (!recorded_ty) {
                                         return false;
                                     }
 
-                                    const auto ty_it = mod_it->second.expr_types.find(get_expr_key(expr));
-                                    if (ty_it == mod_it->second.expr_types.end()) {
-                                        return false;
-                                    }
-
-                                    const auto &ty = ty_it->second;
+                                    const auto &ty = *recorded_ty;
                                     if (ty.kind == TypeKind::Union) {
                                         return false; // union member construction has runtime stores
                                     }
@@ -224,12 +223,13 @@ namespace sema {
                                         // Reject values that require a runtime lvalue-based coercion
                                         // (array<->slice, array/slice->pointer) that only emit_value_as
                                         // can perform; the constant codegen path can't do this.
-                                        const auto field_ty_it = mod_it->second.expr_types.find(get_expr_key(sf.expr));
+                                        const auto *field_ty = find_expr_record(program, module_path,
+                                            &ExprSideTables::expr_types, get_expr_key(sf.expr));
                                         if (const auto *info = ty.kind == TypeKind::Struct ? program.struct_at(ty.struct_index) : nullptr;
-                                            info && field_ty_it != mod_it->second.expr_types.end()) {
+                                            info && field_ty) {
                                             const auto field_it = std::ranges::find(info->fields, sf.name, &StructField::name);
                                             if (field_it != info->fields.end()) {
-                                                const auto &from = field_ty_it->second;
+                                                const auto &from = *field_ty;
                                                 const auto &target = field_it->type;
                                                 const bool needs_runtime_coercion =
                                                     (from.kind == TypeKind::Array && target.kind == TypeKind::Slice) ||
@@ -875,15 +875,13 @@ namespace sema {
                     // sibling-type fallback for the one shape that can still route around
                     // that: a dot-ident used as the LHS of a comparison the outer context
                     // didn't already give an enum-typed 'expected').
-                    const auto mod_it = program.modules.find(module_path);
-                    if (mod_it == program.modules.end()) return std::nullopt;
-                    const auto ty_it = mod_it->second.expr_types.find(get_expr_key(expr));
-                    if (ty_it == mod_it->second.expr_types.end()) return std::nullopt;
-                    if (ty_it->second.kind == TypeKind::Bitset) {
+                    const auto *recorded = find_expr_record(program, module_path, &ExprSideTables::expr_types, get_expr_key(expr));
+                    if (!recorded) return std::nullopt;
+                    if (recorded->kind == TypeKind::Bitset) {
                         // A '.Member' resolved against a bitset-expected type folds to its
                         // one-bit MASK (1 << (value+1)), not the raw enum ordinal — see
                         // BitsetInfo's bit-index formula.
-                        const auto *binfo = program.bitset_at(ty_it->second.bitset_index);
+                        const auto *binfo = program.bitset_at(recorded->bitset_index);
                         if (!binfo) return std::nullopt;
                         const auto *einfo = program.enum_at(binfo->member_enum_type.enum_index);
                         if (!einfo) return std::nullopt;
@@ -892,8 +890,8 @@ namespace sema {
                         }
                         return std::nullopt;
                     }
-                    if (ty_it->second.kind != TypeKind::Enum) return std::nullopt;
-                    const auto *einfo = program.enum_at(ty_it->second.enum_index);
+                    if (recorded->kind != TypeKind::Enum) return std::nullopt;
+                    const auto *einfo = program.enum_at(recorded->enum_index);
                     if (!einfo) return std::nullopt;
                     if (const auto *field = find_enum_field_by_name(*einfo, v.name)) return field->value;
                     return std::nullopt;
@@ -904,11 +902,9 @@ namespace sema {
                     // pure-scalar constant form and are left to codegen's own emitters.
                     const auto *bitset_expr = std::get_if<ast::BitsetExpr>(v.get());
                     if (!bitset_expr) return std::nullopt;
-                    const auto mod_it = program.modules.find(module_path);
-                    if (mod_it == program.modules.end()) return std::nullopt;
-                    const auto ty_it = mod_it->second.expr_types.find(get_expr_key(expr));
-                    if (ty_it == mod_it->second.expr_types.end() || ty_it->second.kind != TypeKind::Bitset) return std::nullopt;
-                    const auto *binfo = program.bitset_at(ty_it->second.bitset_index);
+                    const auto *recorded = find_expr_record(program, module_path, &ExprSideTables::expr_types, get_expr_key(expr));
+                    if (!recorded || recorded->kind != TypeKind::Bitset) return std::nullopt;
+                    const auto *binfo = program.bitset_at(recorded->bitset_index);
                     if (!binfo) return std::nullopt;
                     const auto *einfo = program.enum_at(binfo->member_enum_type.enum_index);
                     if (!einfo) return std::nullopt;
@@ -956,11 +952,10 @@ namespace sema {
                                 return std::nullopt;
                             }
                             if (const auto *dot = std::get_if<ast::DotIdentExpr>(&side)) {
-                                const auto mod_it = program.modules.find(module_path);
-                                if (mod_it == program.modules.end()) return std::nullopt;
-                                const auto ty_it = mod_it->second.expr_types.find(get_expr_key(other));
-                                if (ty_it == mod_it->second.expr_types.end() || ty_it->second.kind != TypeKind::Enum) return std::nullopt;
-                                const auto *einfo = program.enum_at(ty_it->second.enum_index);
+                                const auto *recorded = find_expr_record(program, module_path,
+                                    &ExprSideTables::expr_types, get_expr_key(other));
+                                if (!recorded || recorded->kind != TypeKind::Enum) return std::nullopt;
+                                const auto *einfo = program.enum_at(recorded->enum_index);
                                 if (!einfo) return std::nullopt;
                                 if (const auto *field = find_enum_field_by_name(*einfo, dot->name)) return field->value;
                             }

@@ -32,6 +32,22 @@ namespace sema {
         Bitset,
         Type,
         Any,
+        // An UNBOUND generic type parameter, as seen while eagerly type-checking a generic
+        // declaration's body before any concrete instantiation exists. Deliberately permissive:
+        // an operation on it succeeds and yields Opaque again rather than reporting, so the
+        // eager pass only reports what is independent of the parameter (unknown names, arity,
+        // concrete-type mismatches). It is NOT 'any' — 'any' is a concrete 16-byte fat pointer
+        // with a NARROWER operation set than most real T, so binding T to it would invent
+        // errors on correct code.
+        //
+        // Reuses 'trait_index': -1 means unconstrained, >= 0 means bounded by that trait
+        // ('[T: Hashable]'), which flips the behavior from permissive to strict — only the
+        // trait's flattened method set plus a small universal core is allowed.
+        //
+        // Never reaches codegen: an instantiation whose arguments contain an Opaque is never
+        // registered (see instantiate_generic_function). Every codegen switch treats it as an
+        // internal error.
+        Opaque,
     };
 
     struct ResolvedType {

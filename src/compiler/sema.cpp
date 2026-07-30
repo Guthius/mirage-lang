@@ -12,6 +12,7 @@ namespace sema {
     void validate_method_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
     void validate_trait_impl_attributes_for_program(Program &program, DiagnosticEngine &diag);
     void validate_init_dependencies_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag);
+    void check_generic_templates_for_program(Program &program, DiagnosticEngine &diag);
 
     // Minimal human-readable rendering of a resolved type, used for trait conformance
     // and default-parameter-value diagnostics (there is no general ResolvedType-to-string
@@ -63,6 +64,16 @@ namespace sema {
             return name.empty() ? "<unknown type>" : name;
         }
         case TypeKind::Function: return "fn(...)";
+        case TypeKind::Opaque:
+            // Shown while eagerly checking a generic declaration, where no concrete type
+            // exists yet. The parameter's own spelling isn't recoverable from a ResolvedType,
+            // so name the bound when there is one — that is the part a reader needs.
+            if (t.trait_index >= 0) {
+                if (const auto *info = program.trait_at(t.trait_index)) {
+                    return std::format("<generic: {}>", info->name);
+                }
+            }
+            return "<generic>";
         default: return "<type>";
         }
     }
@@ -534,12 +545,12 @@ namespace sema {
                 if (!fn) {
                     continue;
                 }
-                // A generic function's body is checked lazily, per concrete instantiation,
-                // the first time that instantiation is actually requested — see
+                // A generic function's body is checked per concrete instantiation, the
+                // first time that instantiation is requested — see
                 // instantiate_generic_function -> check_generic_function_instance_body
-                // (sema_check.cpp). There is no "check every possible instantiation" pass
-                // here, unlike 'when', which always checks both branches — see spec.md §22,
-                // "No Bounds in v1".
+                // (sema_check.cpp). It is ALSO checked once at its own declaration with its
+                // parameters unbound, by check_generic_templates_for_program; that is a
+                // separate pass, and this loop is only about concrete code.
                 if (fn->decl && !fn->decl->generic_params.empty()) continue;
 
                 LocalScope locals;
@@ -679,6 +690,18 @@ namespace sema {
 
         check_trait_impl_bodies_for_program(out, diag);
 
+        // Every generic DECLARATION's own body, checked once with its parameters unbound.
+        // Position is load-bearing in all four directions:
+        //  - after register_trait_impls/resolve_trait_impl_signatures, since a '[T: Trait]'
+        //    bound resolves against the trait's flattened method set;
+        //  - after resolve_values_for_module, since the pass seeds its LocalScope from every
+        //    GlobalSymbol's resolved type;
+        //  - after check_bodies_for_module, so it cannot change WHICH instantiation gets
+        //    checked first and reorder diagnostics across unrelated code;
+        //  - before the generic field-defaults loop below, which walks to a fixed point over
+        //    program.structs and would otherwise re-run over slots this pass created.
+        check_generic_templates_for_program(out, diag);
+
         // After the bodies, because that is where most generic instantiations are created —
         // a generic struct's field defaults can only be checked once its type parameters are
         // bound, so unlike check_struct_field_defaults_for_module above this walks
@@ -744,7 +767,11 @@ namespace sema {
                 mod_it != program.modules.end()) {
                 for (const auto &[name, sym] : mod_it->second.symbols) {
                     if (const auto *ts = std::get_if<TypeSymbol>(&sym))
-                        if (ts->resolved && *ts->resolved == ty)
+                        // Skip a generic-parameter shadow: it is an alias for the duration of
+                        // one instantiation, not a declaration, and answering 'T' here would
+                        // break every name-keyed lookup (trait impls, methods) for the type it
+                        // stands in for. See TypeSymbol::is_generic_param_shadow.
+                        if (ts->resolved && *ts->resolved == ty && !ts->is_generic_param_shadow)
                             return {*defining_module, name};
                 }
             }
@@ -758,7 +785,7 @@ namespace sema {
         for (const auto &[path, mod] : program.modules) {
             for (const auto &[name, sym] : mod.symbols) {
                 if (const auto *ts = std::get_if<TypeSymbol>(&sym))
-                    if (ts->resolved && *ts->resolved == ty)
+                    if (ts->resolved && *ts->resolved == ty && !ts->is_generic_param_shadow)
                         return {path, name};
             }
         }

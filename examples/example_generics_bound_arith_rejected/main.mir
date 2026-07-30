@@ -1,0 +1,23 @@
+// example_generics_bound_arith_rejected/main.mir
+//
+// The universal core a bounded parameter keeps is assignment/copy, passing, returning,
+// address-of, and '=='/'!='. Arithmetic is NOT in it: 'Hashable' says nothing about '+',
+// so 'a + b' is rejected at the declaration.
+//
+// This is the deliberate cost of the strict reading of bounds — the same expression on an
+// unconstrained '[T: type]' is accepted (example_generics_eager_unbound_ok). Widen the bound,
+// or drop it, if arithmetic is genuinely wanted.
+//
+// Expected: rejected with "cannot apply arithmetic to a generic parameter bound by 'Hashable'".
+
+pub type Hashable = trait {
+    fn hash(self) -> i32
+}
+
+pub fn combine[T: Hashable](a: T, b: T) -> T {
+    return a + b
+}
+
+pub fn main() -> i32 {
+    return 0
+}

@@ -33,9 +33,18 @@ namespace sema {
     // anonymous-namespace helpers and sema.cpp's check_program can call it.
     void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const SourceLocation &trigger_location = {});
 
-    // Whether 'type' (a generic_param's declared type) is the builtin 'type' keyword itself
-    // — i.e. this is a TYPE parameter ('T: type') rather than a value parameter.
+    // Whether a generic_param's declared type marks it as a TYPE parameter rather than a value
+    // parameter. Two spellings qualify: the builtin 'type' keyword ('[T: type]', unconstrained)
+    // and a named trait used as a bound ('[T: Hashable]').
+    //
+    // Deliberately SYNTACTIC — it takes only an ast::Type, with no Program to resolve names
+    // against, so it cannot ask whether 'Hashable' really is a trait. That is sound because
+    // is_legal_generic_value_param_type only ever accepts an ast::BuiltinType: a NamedType in
+    // this position cannot be a value parameter, so it is a type parameter or a mistake. The
+    // "is it actually a trait?" diagnostic belongs to validate_generic_param_types, which does
+    // have a Program.
     auto is_generic_type_param(const ast::Type &type) -> bool {
+        if (std::holds_alternative<ast::NamedType>(type)) return true;
         const auto *builtin = std::get_if<ast::BuiltinType>(&type);
         return builtin != nullptr && builtin->kind == ast::BuiltinTypeKind::Type;
     }
@@ -69,12 +78,17 @@ namespace sema {
     // 'type' nor a legal builtin scalar — shared by declare_type/parse_function_decl's
     // caller (declare_one_decl for fn) and the impl-decl paths below, since all four decl
     // kinds that can carry generic_params (type/fn/impl/trait-impl) validate identically.
+    // Purely syntactic, and deliberately stays that way: this runs in the DECLARE phase, where
+    // resolving a bound's name would force that trait's layout before the declare pass has
+    // finished building symbol tables — the same premature-resolution hazard that already
+    // bites module-scope 'when'. Whether a named bound actually IS a trait is checked later,
+    // by generic_param_bound_trait_index, once every trait is registered and laid out.
     void validate_generic_param_types(const std::vector<ast::GenericParam> &generic_params, DiagnosticEngine &diag) {
         for (const auto &param : generic_params) {
             if (!is_generic_type_param(param.type) && !is_legal_generic_value_param_type(param.type)) {
                 diag.report_error(DiagnosticStage::Sema, param.location, std::format(
-                    "generic parameter '{}' declared type must be 'type' or a builtin scalar type "
-                    "(bool, an integer kind, or usize)", param.name));
+                    "generic parameter '{}' declared type must be 'type', a trait name, or a builtin scalar "
+                    "type (bool, an integer kind, or usize)", param.name));
             }
         }
     }

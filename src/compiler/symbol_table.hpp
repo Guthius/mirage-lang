@@ -69,6 +69,14 @@ namespace sema {
         std::optional<ResolvedType> resolved;
         bool is_pub = false;
         SourceLocation location;
+        // True only for the temporary entries shadow_generic_type_params installs to make a
+        // generic parameter name ('T') resolve to its bound type while one instantiation is
+        // checked. Such an entry is an ALIAS, not a declaration, so anything that maps a
+        // ResolvedType back to its declared NAME must skip it — otherwise
+        // find_type_module_and_name can answer "T" instead of "Point" (the scan is over an
+        // unordered_map, so it would do so only sometimes), and every lookup keyed on the type
+        // name — trait impls, methods — then misses.
+        bool is_generic_param_shadow = false;
     };
 
     using Symbol = std::variant<

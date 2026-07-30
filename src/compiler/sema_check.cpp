@@ -189,7 +189,82 @@ namespace sema {
             }
         }
 
+        // Names the bound in a diagnostic about a trait-bounded generic parameter, or "" when
+        // the parameter is unconstrained.
+        auto opaque_bound_name(const ResolvedType &ty, const Program &program) -> std::string {
+            if (ty.kind != TypeKind::Opaque || ty.trait_index < 0) return {};
+            const auto *info = program.trait_at(ty.trait_index);
+            return info ? info->name : std::string{};
+        }
+
+        // A unary operator applied to an unbound generic parameter. Same split as the binary
+        // case: unconstrained is permissive and silent, trait-bounded is rejected here.
+        // 'what' completes "cannot <what> a value of ...", e.g. "negate", "dereference".
+        auto opaque_unary_result(std::string_view what, const ResolvedType &operand, DiagnosticEngine &diag,
+                                  const SourceLocation loc, const Program &program) -> ResolvedType {
+            if (const auto bound = opaque_bound_name(operand, program); !bound.empty()) {
+                return error(diag, loc, std::format(
+                    "cannot {} a value of a generic parameter bound by '{}'; the bound grants only its own "
+                    "methods plus assignment, '==' and '!='", what, bound));
+            }
+            return ResolvedType{.kind = TypeKind::Opaque};
+        }
+
+        // Result of a binary operator with at least one unbound-generic-parameter operand.
+        //
+        // UNCONSTRAINED parameter: permissive. Whether the operator is valid depends entirely
+        // on the instantiation, so reporting here would be reporting against code that may be
+        // perfectly correct. Yields Opaque (or Bool for a comparison) and stays silent; the
+        // real check happens when a concrete instantiation is checked.
+        //
+        // TRAIT-BOUNDED parameter: strict, because now there IS a contract to check against.
+        // The bound grants exactly its method set plus a universal core — assignment, passing,
+        // returning, address-of, and equality. Arithmetic and ordering are not in that core,
+        // so they are an error at the declaration rather than a surprise at the first use.
+        auto opaque_binary_op_result(const ast::BinaryOp op, const ResolvedType &lhs, const ResolvedType &rhs,
+                                      DiagnosticEngine &diag, const SourceLocation loc, const Program &program) -> ResolvedType {
+            const auto bound = !opaque_bound_name(lhs, program).empty() ? opaque_bound_name(lhs, program)
+                                                                        : opaque_bound_name(rhs, program);
+
+            switch (op) {
+            case ast::BinaryOp::Equal:
+            case ast::BinaryOp::NotEqual:
+                return ResolvedType{.kind = TypeKind::Bool};
+
+            case ast::BinaryOp::Less:
+            case ast::BinaryOp::Greater:
+            case ast::BinaryOp::LessEqual:
+            case ast::BinaryOp::GreaterEqual:
+                if (!bound.empty()) {
+                    return error(diag, loc, std::format(
+                        "cannot order values of a generic parameter bound by '{}'; the bound grants only its "
+                        "own methods plus assignment, '==' and '!='", bound));
+                }
+                return ResolvedType{.kind = TypeKind::Bool};
+
+            case ast::BinaryOp::LogicalAnd:
+            case ast::BinaryOp::LogicalOr:
+                return ResolvedType{.kind = TypeKind::Bool};
+
+            default:
+                if (!bound.empty()) {
+                    return error(diag, loc, std::format(
+                        "cannot apply arithmetic to a generic parameter bound by '{}'; the bound grants only its "
+                        "own methods plus assignment, '==' and '!='", bound));
+                }
+                // Deliberately propagates Opaque rather than picking the concrete operand's
+                // type: 'n * 2' where 'n' is generic is only as known as 'n' is.
+                return ResolvedType{.kind = TypeKind::Opaque};
+            }
+        }
+
         auto binary_op_result(const ast::BinaryOp op, const ResolvedType &lhs, const ResolvedType &rhs, DiagnosticEngine &diag, SourceLocation loc, const Program &program) -> ResolvedType {
+            // Before the Bitset dispatch below, not after: 'Opaque op Bitset' would otherwise
+            // be swallowed by bitset_binary_op_result and reported against a type that isn't
+            // known yet.
+            if (lhs.kind == TypeKind::Opaque || rhs.kind == TypeKind::Opaque) {
+                return opaque_binary_op_result(op, lhs, rhs, diag, loc, program);
+            }
             if (lhs.kind == TypeKind::Bitset || rhs.kind == TypeKind::Bitset) {
                 return bitset_binary_op_result(op, lhs, rhs, diag, loc);
             }
@@ -504,12 +579,36 @@ namespace sema {
             return method.required_params;
         }
 
+        // "hash', 'eq'" — for the "the bound declares ..." half of a missing-method message.
+        auto join_method_names(const std::vector<TraitMethodInfo> &methods) -> std::string {
+            std::string out;
+            for (const auto &m : methods) {
+                if (!out.empty()) out += "', '";
+                out += m.name;
+            }
+            return out;
+        }
+
         auto try_trait_handle_dispatch(const ResolvedType &receiver_type, const std::string &method_name,
                                         const std::vector<ast::Expr> &args, const void *dispatch_key,
                                         LocalScope &locals, const std::string &module_path, Program &program,
                                         DiagnosticEngine &diag, const SourceLocation &loc, const int loop_depth,
                                         const int defer_loop_base, const ResolvedType *fn_error_type) -> std::optional<std::vector<ResolvedType>> {
-            if (receiver_type.kind != TypeKind::Trait) return std::nullopt;
+            // A method call on an unbound generic parameter. UNCONSTRAINED: permissive — 'T'
+            // may well have this method, so check the arguments as ordinary expressions and
+            // yield Opaque. BOUNDED: fall through to the trait-method lookup below, which is
+            // exactly the right check — the bound's flattened method set is the complete list
+            // of what 'T' offers.
+            if (receiver_type.kind == TypeKind::Opaque) {
+                if (receiver_type.trait_index < 0) {
+                    for (const auto &arg : args) {
+                        check_expr(arg, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    }
+                    return std::vector<ResolvedType>{ResolvedType{.kind = TypeKind::Opaque}};
+                }
+            } else if (receiver_type.kind != TypeKind::Trait) {
+                return std::nullopt;
+            }
 
             const auto *trait_info = program.trait_at(receiver_type.trait_index);
             const TraitMethodInfo *trait_method = nullptr;
@@ -525,6 +624,19 @@ namespace sema {
             }
 
             if (!trait_method) {
+                if (receiver_type.kind == TypeKind::Opaque) {
+                    // A BOUNDED parameter, and the bound does not declare this method. Unlike
+                    // a trait handle — which can still fall through to an inherent 'impl'
+                    // block — the bound is the complete statement of what 'T' offers, so this
+                    // is definitively wrong and is reported at the declaration.
+                    diag.report_error(DiagnosticStage::Sema, loc, std::format(
+                        "no method '{}' on a generic parameter bound by '{}'; the bound declares {}",
+                        method_name, trait_info ? trait_info->name : "<trait>",
+                        trait_info && !trait_info->methods.empty()
+                            ? std::format("'{}'", join_method_names(trait_info->methods))
+                            : "no methods"));
+                    return std::vector<ResolvedType>{ResolvedType{.kind = TypeKind::Invalid}};
+                }
                 // Not one of the trait's own (dynamically-dispatched) methods — it may still be
                 // an inherent method from a bare 'impl Control { ... }' block (e.g. a default
                 // method implemented in terms of the trait's dynamic methods). Let the caller
@@ -535,10 +647,15 @@ namespace sema {
 
             check_call_args(args, trait_method->params, false, locals, module_path, program, diag, loc, method_name, loop_depth, defer_loop_base, fn_error_type, false, trait_method->required_params);
 
-            program.modules.at(module_path).expr_trait_dispatch[dispatch_key] = TraitDispatchInfo{
-                .trait_index = receiver_type.trait_index,
-                .method_order_index = method_order_index,
-            };
+            // A bounded generic parameter is monomorphized: at each instantiation the concrete
+            // impl is called directly, so there is no vtable slot to record. Only a real trait
+            // HANDLE dispatches dynamically.
+            if (receiver_type.kind == TypeKind::Trait) {
+                expr_tables_for_write(program, module_path).expr_trait_dispatch[dispatch_key] = TraitDispatchInfo{
+                    .trait_index = receiver_type.trait_index,
+                    .method_order_index = method_order_index,
+                };
+            }
 
             return trait_method->return_types;
         }
@@ -594,7 +711,7 @@ namespace sema {
                     const size_t idx = instantiate_generic_function(program, diag, decl_module, fn_name, std::move(*resolved_args), call.location);
                     const auto &instance = *program.generic_fn_instances[idx];
                     check_call_args(call.args, instance.param_types, false, locals, module_path, program, diag, call.location, fn_name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                    program.modules.at(module_path).expr_generic_fn_instance[&call] = idx;
+                    expr_tables_for_write(program, module_path).expr_generic_fn_instance[&call] = idx;
                     return instance.return_types;
                 }
             }
@@ -621,7 +738,7 @@ namespace sema {
                             const size_t idx = instantiate_generic_function(program, diag, module_path, callee_ident->name, std::move(*resolved_args), call.location);
                             const auto &instance = *program.generic_fn_instances[idx];
                             check_call_args(call.args, instance.param_types, false, locals, module_path, program, diag, call.location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                            program.modules.at(module_path).expr_generic_fn_instance[&call] = idx;
+                            expr_tables_for_write(program, module_path).expr_generic_fn_instance[&call] = idx;
                             return instance.return_types;
                         }
                     }
@@ -678,7 +795,7 @@ namespace sema {
                         }
                         const auto &instance = *program.generic_fn_instances[*idx];
                         check_call_args(call.args, instance.param_types, false, locals, module_path, program, diag, call.location, (*member)->member, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                        program.modules.at(module_path).expr_generic_fn_instance[&call] = *idx;
+                        expr_tables_for_write(program, module_path).expr_generic_fn_instance[&call] = *idx;
                         return instance.return_types;
                     }
                     check_call_args(call.args, method->param_types, false, locals, module_path, program, diag, call.location, (*member)->member, loop_depth, defer_loop_base, fn_error_type, method->is_variadic, method_required_params(*method, program));
@@ -728,7 +845,7 @@ namespace sema {
                             const size_t idx = instantiate_generic_function(program, diag, target_module, name, std::move(*resolved_args), call.location);
                             const auto &instance = *program.generic_fn_instances[idx];
                             check_call_args(call.args, instance.param_types, false, locals, module_path, program, diag, call.location, name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                            program.modules.at(module_path).expr_generic_fn_instance[&call] = idx;
+                            expr_tables_for_write(program, module_path).expr_generic_fn_instance[&call] = idx;
                             return instance.return_types;
                         }
                         auto &resolved_fn = ensure_function_signature_resolved(target_module, name, program, diag);
@@ -1065,11 +1182,29 @@ namespace sema {
                 // cast(a, anyptr)/cast(a, *T) for the data pointer (see check_cast).
                 error(diag, m.location, std::format("'any' has no field '{}'", m.member));
                 return {ResolvedType{.kind = TypeKind::Invalid}, false};
+            } else if (object_type.kind == TypeKind::Opaque) {
+                effective_type = object_type;
+                writable = true;
             } else if (object_type.kind == TypeKind::Invalid) {
                 return {ResolvedType{.kind = TypeKind::Invalid}, false};
             } else {
                 error(diag, m.location, "'.' requires a struct, union, or pointer-to-struct/union value");
                 return {ResolvedType{.kind = TypeKind::Invalid}, false};
+            }
+
+            // Checked on 'effective_type', not 'object_type', so that '*T' — the shape 'self'
+            // always has inside a generic impl method — is covered as well as a bare 'T'.
+            // Whether an unconstrained 'T' has this field depends entirely on the
+            // instantiation, so stay silent and yield Opaque. A trait bound, however, IS a
+            // complete statement of what 'T' offers — and it offers methods, never fields.
+            if (effective_type.kind == TypeKind::Opaque) {
+                if (const auto bound = opaque_bound_name(effective_type, program); !bound.empty()) {
+                    error(diag, m.location, std::format(
+                        "no field '{}' on a generic parameter bound by '{}'; a trait bound grants methods, "
+                        "not fields", m.member, bound));
+                    return {ResolvedType{.kind = TypeKind::Invalid}, false};
+                }
+                return {ResolvedType{.kind = TypeKind::Opaque}, writable};
             }
 
             if (effective_type.kind == TypeKind::Struct) {
@@ -1135,6 +1270,11 @@ namespace sema {
                             return {ResolvedType{.kind = TypeKind::Invalid}, false};
                         }
                         const ResolvedType ptr_ty = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                        if (ptr_ty.kind == TypeKind::Opaque) {
+                            // Writable: 'p.* = x' through a generic pointer is only knowable
+                            // per-instantiation, so the eager pass must not reject it.
+                            return {opaque_unary_result("dereference", ptr_ty, diag, v->location, program), true};
+                        }
                         if (ptr_ty.kind == TypeKind::Trait) {
                             error(diag, v->location, "cannot dereference a trait handle");
                             return {ResolvedType{.kind = TypeKind::Invalid}, false};
@@ -1165,8 +1305,14 @@ namespace sema {
                         }
                         const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         const auto index = check_expr(std::get<ast::Expr>(v->args[0].value), locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                        if (!index.is_integer()) {
+                        if (!index.is_integer() && index.kind != TypeKind::Opaque) {
                             error(diag, v->location, "index must be an integer expression");
+                        }
+                        if (operand.kind == TypeKind::Opaque) {
+                            // Element type is unknowable until 'T' is; writable, since
+                            // 'buf[i] = x' through a generic array must not be pre-emptively
+                            // rejected.
+                            return {opaque_unary_result("index", operand, diag, v->location, program), true};
                         }
                         if (operand.kind == TypeKind::Pointer) {
                             const auto *pointee = program.pointee_at(operand.pointee_index);
@@ -1259,7 +1405,8 @@ namespace sema {
             std::optional<Symbol> prior;
             if (const auto it = module.symbols.find(name); it != module.symbols.end()) prior = it->second;
             shadowed.emplace_back(name, prior);
-            module.symbols[name] = TypeSymbol{.decl = nullptr, .resolved = args[i].type_arg, .is_pub = false, .location = {}};
+            module.symbols[name] = TypeSymbol{.decl = nullptr, .resolved = args[i].type_arg, .is_pub = false,
+                                               .location = {}, .is_generic_param_shadow = true};
         }
         return shadowed;
     }
@@ -1280,15 +1427,22 @@ namespace sema {
     // checking a default expression or a body can declare a module on demand, and inserting
     // into Program::modules (an unordered_map) may rehash and invalidate any outstanding
     // ProgramModule&.
+    // 'exprs', when non-null, additionally routes every per-node record produced inside the
+    // scope into that instantiation's own ExprSideTables instead of the module's — see
+    // ExprSideTables and expr_tables_for_write (sema.hpp). It is a THIRD thing that must be
+    // undone on every exit path, so it lives here rather than at the call sites.
     class ScopedGenericScope {
       public:
         ScopedGenericScope(Program &program, std::string module_path, const std::vector<ast::GenericParam> &decl_params,
-                            const std::vector<GenericArgValue> &args, const GenericBindingEnv &env)
-            : program_(program), module_path_(std::move(module_path)),
+                            const std::vector<GenericArgValue> &args, const GenericBindingEnv &env,
+                            ExprSideTables *exprs = nullptr)
+            : program_(program), module_path_(std::move(module_path)), pushed_exprs_(exprs != nullptr),
               shadowed_(shadow_generic_type_params(decl_params, args, program.modules.at(module_path_))) {
             program_.active_generic_env_stack.push_back(&env);
+            if (exprs) program_.active_expr_tables.push_back(exprs);
         }
         ~ScopedGenericScope() {
+            if (pushed_exprs_) program_.active_expr_tables.pop_back();
             program_.active_generic_env_stack.pop_back();
             restore_shadowed_symbols(program_.modules.at(module_path_), shadowed_);
         }
@@ -1299,6 +1453,7 @@ namespace sema {
       private:
         Program &program_;
         std::string module_path_;
+        bool pushed_exprs_;
         std::vector<std::pair<std::string, std::optional<Symbol>>> shadowed_;
     };
 
@@ -1315,11 +1470,11 @@ namespace sema {
 
     // Checks a generic function/method instance's body exactly once (idempotent —
     // body_checked guards re-entry, including a recursive generic call reaching the same
-    // instance while its own body is still being checked). No "eagerly check every possible
-    // instantiation" step exists anywhere (unlike 'when', which always checks both
-    // branches) — an instantiation is checked only once actually requested; see spec.md §22,
-    // "No Bounds in v1".
-    void check_generic_function_instance_body(GenericFunctionInstance &instance, Program &program, DiagnosticEngine &diag) {
+    // instance while its own body is still being checked). Drives both the per-instantiation
+    // check and, via check_generic_templates_for_program, the eager check of the DECLARATION
+    // itself with its parameters bound to Opaque; the two differ only in the arguments.
+    void check_generic_function_instance_body(size_t idx, Program &program, DiagnosticEngine &diag) {
+        auto &instance = *program.generic_fn_instances[idx];
         if (instance.body_checked) return;
         instance.body_checked = true;
         if (!instance.decl && !instance.impl_decl) return;
@@ -1335,7 +1490,8 @@ namespace sema {
         // (ordinary check_expr IdentExpr lookup only); the scope is what makes bare-type-
         // position resolution (not just value-expression lookup) inside the body work.
         const auto env = build_generic_binding_env(generic_params, instance.args);
-        const ScopedGenericScope generic_scope(program, instance.module_path, generic_params, instance.args, env);
+        const ScopedGenericScope generic_scope(program, instance.module_path, generic_params, instance.args, env,
+                                                &program.exprs_for_fn_instance(idx));
 
         LocalScope locals;
         for (auto &[gname, gsym] : program.modules.at(instance.module_path).symbols) {
@@ -1408,8 +1564,13 @@ namespace sema {
                 if (!struct_decl) continue;
 
                 const auto env = build_generic_binding_env(ts->decl->generic_params, instance_info.args);
+                // Field-default init exprs are shared across every instantiation of this
+                // struct exactly like a generic function's body is, so they need their own
+                // records too — keyed by the global slot, since a monomorphized struct has no
+                // GenericFunctionInstance to hang them off.
                 const ScopedGenericScope generic_scope(program, instance_info.decl_module,
-                                                        ts->decl->generic_params, instance_info.args, env);
+                                                        ts->decl->generic_params, instance_info.args, env,
+                                                        &program.exprs_for_type_instance(static_cast<int>(si)));
                 LocalScope scope;
                 add_generic_value_param_locals(ts->decl->generic_params, instance_info.args, scope);
 
@@ -1429,6 +1590,104 @@ namespace sema {
                 }
             }
         }
+    }
+
+    // Walks a braced initializer's element expressions without judging its SHAPE — used when
+    // the expected type is an unbound generic parameter, where there is no concrete aggregate
+    // to match field names or element counts against, but the elements themselves are still
+    // ordinary expressions worth checking. Each is checked with no expected type, so a nested
+    // literal stays unconstrained rather than being forced into a type that isn't known.
+    void check_braced_initializer_elements(const ast::BracedInitializerExpr &init, LocalScope &locals,
+                                            const std::string &module_path, Program &program, DiagnosticEngine &diag,
+                                            const int loop_depth, const int defer_loop_base,
+                                            const ResolvedType *fn_error_type) {
+        std::visit([&]<typename BV>(const BV &bv) {
+            using BVT = std::decay_t<BV>;
+            if constexpr (std::is_same_v<BVT, ast::StructExpr>) {
+                for (const auto &f : bv.fields) {
+                    if (std::holds_alternative<ast::UndefinedExpr>(f.expr)) continue;
+                    check_expr(f.expr, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                }
+            } else if constexpr (std::is_same_v<BVT, ast::ArrayExpr>) {
+                for (const auto &e : bv.values) {
+                    if (std::holds_alternative<ast::UndefinedExpr>(e)) continue;
+                    check_expr(e, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                }
+            }
+            // EmptyExpr ('{}') and BitsetExpr ('{.A, .B}') carry no sub-expressions.
+        }, init);
+    }
+
+    // Enforces '[T: Hashable]' at the point of instantiation: the argument supplied for a
+    // bounded parameter must implement the bound. This is the half of bounds that protects
+    // the CALLER — the declaration-side half (only the bound's methods are usable inside the
+    // body) is enforced by the Opaque operation rules.
+    // Returns false if any bound was unsatisfied, so the caller can skip checking the body
+    // against an argument already known to be wrong — otherwise every use of the bound's
+    // methods inside the body reports a second, more confusing "no method" error on top of
+    // the one real message.
+    auto check_generic_bounds(const std::vector<ast::GenericParam> &params, const std::vector<GenericArgValue> &args,
+                               const std::string &module_path, Program &program, DiagnosticEngine &diag,
+                               const SourceLocation &use_loc) -> bool {
+        bool ok = true;
+        for (size_t i = 0; i < params.size() && i < args.size(); ++i) {
+            if (!args[i].is_type) continue;
+            const int bound = generic_param_bound_trait_index(params[i], module_path, program, diag);
+            if (bound < 0) continue;
+
+            // Still a template: this is the eager pass instantiating with the parameter
+            // unbound, not a real argument. Nothing to check against.
+            if (contains_opaque(args[i].type_arg, program)) continue;
+
+            const auto [arg_module, arg_name] = find_type_module_and_name(args[i].type_arg, program);
+            if (arg_module.empty()) {
+                // A builtin or synthesized type (i32, *u8, a slice): those have no module and
+                // can carry no impl, so they satisfy no bound.
+                const auto *trait_info = program.trait_at(bound);
+                diag.report_error(DiagnosticStage::Sema, use_loc, std::format(
+                    "'{}' does not implement trait '{}', required by generic parameter '{}'",
+                    describe_type(args[i].type_arg, program), trait_info ? trait_info->name : "<trait>", params[i].name));
+                ok = false;
+                continue;
+            }
+            if (find_trait_provider(program, arg_module, arg_name, bound) < 0) {
+                const auto *trait_info = program.trait_at(bound);
+                diag.report_error(DiagnosticStage::Sema, use_loc, std::format(
+                    "'{}' does not implement trait '{}', required by generic parameter '{}'",
+                    arg_name, trait_info ? trait_info->name : "<trait>", params[i].name));
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
+    // The argument list that stands in for "no instantiation yet": each type parameter binds to
+    // an unconstrained Opaque (or, once bounds exist, one carrying the bound's trait index),
+    // and each value parameter to an Opaque-typed constant. See TypeKind::Opaque.
+    auto opaque_args_for(const std::vector<ast::GenericParam> &params, Program &program,
+                          const std::string &module_path, DiagnosticEngine &diag,
+                          const bool report_bad_bounds = false) -> std::vector<GenericArgValue> {
+        std::vector<GenericArgValue> args;
+        args.reserve(params.size());
+        for (const auto &param : params) {
+            if (is_generic_type_param(param.type)) {
+                args.push_back(GenericArgValue{
+                    .is_type = true,
+                    .type_arg = ResolvedType{.kind = TypeKind::Opaque,
+                                              .trait_index = generic_param_bound_trait_index(param, module_path, program, diag, report_bad_bounds)},
+                });
+            } else {
+                // The folded value is unused (a suppressed instantiation is never mangled or
+                // cached); the Opaque scalar TYPE is what makes every use of the parameter
+                // opaque. See args_contain_opaque.
+                args.push_back(GenericArgValue{
+                    .is_type = false,
+                    .value_arg = int64_t{0},
+                    .value_arg_scalar_type = ResolvedType{.kind = TypeKind::Opaque},
+                });
+            }
+        }
+        return args;
     }
 
     auto instantiate_generic_function(Program &program, DiagnosticEngine &diag, const std::string &module_path,
@@ -1452,10 +1711,24 @@ namespace sema {
             }
         }
 
+        // See args_contain_opaque: a 'g[T]' reached from inside a generic declaration is not a
+        // real monomorphization. Its signature is still resolved below so the call's arity and
+        // arguments are checked, but it is kept out of every registry.
+        const bool suppressed = args_contain_opaque(args, program);
+
         const GenericInstanceKey key{.module_path = module_path, .decl_name = decl_name, .args = args};
 
-        for (const auto &[k, idx] : program.generic_fn_instance_lookup) {
-            if (k == key) return idx;
+        if (!suppressed) {
+            for (const auto &[k, idx] : program.generic_fn_instance_lookup) {
+                if (k == key) {
+                    // Mark needed on the CACHE HIT too, not only on first creation. A generic
+                    // first reached by the eager pass is created with the mark suppressed; if
+                    // the first real call site then found it cached and returned here without
+                    // marking it, nothing would ever emit it and the link would fail.
+                    if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
+                    return idx;
+                }
+            }
         }
 
         auto push_invalid = [&]() -> size_t {
@@ -1488,6 +1761,12 @@ namespace sema {
             return push_invalid();
         }
 
+        // Not fatal: the SIGNATURE is still resolved below, so the call site gets sensible
+        // param/return types and is checked normally. Only the body is skipped (see the use of
+        // 'bounds_ok' further down) — checking it against an argument already known not to
+        // satisfy the bound produces a cascade that buries the one message that matters.
+        const bool bounds_ok = check_generic_bounds(decl.generic_params, args, module_path, program, diag, use_loc);
+
         const auto env = build_generic_binding_env(decl.generic_params, args);
 
         auto instance = std::make_unique<GenericFunctionInstance>();
@@ -1503,7 +1782,15 @@ namespace sema {
         // is_constant_expr, neither of which takes an explicit env. Held across the whole
         // signature region so 'hash := fnv1a[K]', 'n := size_of(K)' and
         // 'fill: [N]u8 = default' all resolve 'K'/'N'.
-        const ScopedGenericScope generic_scope(program, module_path, decl.generic_params, args, env);
+        //
+        // The signature region needs this instance's own ExprSideTables just as much as the
+        // body does: a default like 'hash := fnv1a[K]' records an expr_generic_fn_instance
+        // entry on a node SHARED by every instantiation, and the index it resolves to differs
+        // per instantiation. Owned locally and moved into the Program map once the instance's
+        // index exists — the index cannot be predicted here, since resolving this signature
+        // may itself instantiate other generics and push them first.
+        auto instance_exprs = std::make_unique<ExprSideTables>();
+        const ScopedGenericScope generic_scope(program, module_path, decl.generic_params, args, env, instance_exprs.get());
         LocalScope default_scope;
         add_generic_value_param_locals(decl.generic_params, args, default_scope);
 
@@ -1535,10 +1822,21 @@ namespace sema {
 
         program.generic_fn_instances.push_back(std::move(instance));
         const size_t idx = program.generic_fn_instances.size() - 1;
-        program.generic_fn_instance_lookup.push_back({key, idx});
-        program.generic_fn_instances_needed.insert(idx);
+        // 'generic_scope' is still live and holds a raw pointer to the pointee; moving the
+        // unique_ptr does not move what it points at.
+        program.generic_fn_instance_exprs[idx] = std::move(instance_exprs);
 
-        check_generic_function_instance_body(*program.generic_fn_instances[idx], program, diag);
+        if (suppressed) {
+            // Not cached, not marked for emission, body not checked here — the callee's own
+            // eager pass checks its body once, at its declaration. The index is still returned
+            // so the caller can check this call's arguments against the resolved signature.
+            return idx;
+        }
+
+        program.generic_fn_instance_lookup.push_back({key, idx});
+        if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
+
+        if (bounds_ok) check_generic_function_instance_body(idx, program, diag);
 
         return idx;
     }
@@ -1573,9 +1871,19 @@ namespace sema {
             break;
         }
 
+        // Same rule as instantiate_generic_function — see args_contain_opaque.
+        const bool suppressed = args_contain_opaque(args, program);
+
         const GenericInstanceKey key{.module_path = type_module, .decl_name = type_name + "::" + method_name, .args = args};
-        for (const auto &[k, idx] : program.generic_fn_instance_lookup) {
-            if (k == key) return idx;
+        if (!suppressed) {
+            for (const auto &[k, idx] : program.generic_fn_instance_lookup) {
+                if (k == key) {
+                    // Mark on the cache hit too — see the identical note in
+                    // instantiate_generic_function.
+                    if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
+                    return idx;
+                }
+            }
         }
 
         static const std::vector<ast::GenericParam> empty_generic_params;
@@ -1599,8 +1907,9 @@ namespace sema {
         instance->mangled_name = type_name + mangle_generic_args(args, program) + "::" + method_name;
 
         // Same generic scope as instantiate_generic_function above — see its comment for why a
-        // default expression needs it.
-        const ScopedGenericScope generic_scope(program, type_module, impl_generic_params, args, env);
+        // default expression needs it, and why the tables are owned locally until 'idx' exists.
+        auto instance_exprs = std::make_unique<ExprSideTables>();
+        const ScopedGenericScope generic_scope(program, type_module, impl_generic_params, args, env, instance_exprs.get());
         LocalScope default_scope;
         add_generic_value_param_locals(impl_generic_params, args, default_scope);
 
@@ -1628,12 +1937,177 @@ namespace sema {
 
         program.generic_fn_instances.push_back(std::move(instance));
         const size_t idx = program.generic_fn_instances.size() - 1;
-        program.generic_fn_instance_lookup.push_back({key, idx});
-        program.generic_fn_instances_needed.insert(idx);
+        program.generic_fn_instance_exprs[idx] = std::move(instance_exprs);
 
-        check_generic_function_instance_body(*program.generic_fn_instances[idx], program, diag);
+        if (suppressed) return idx; // see instantiate_generic_function's identical branch
+
+        program.generic_fn_instance_lookup.push_back({key, idx});
+        if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
+
+        check_generic_function_instance_body(idx, program, diag);
 
         return idx;
+    }
+
+    // The impl-method half of eager checking: every method of a generic type's 'impl' block,
+    // checked once with the type's parameters unbound.
+    //
+    // Built by hand rather than through instantiate_generic_method, which needs a concrete
+    // receiver to read the arguments off — and there is none here by construction.
+    //
+    // KNOWN LIMIT: 'self' is typed '*Opaque', not a struct whose fields are known, because
+    // instantiate_generic_type deliberately refuses to allocate a slot for an instantiation
+    // containing an unbound parameter (codegen's declare_structs walks every slot and asks
+    // each field for its LLVM type). So field ACCESS inside these bodies is permissive —
+    // 'self.typo' is not caught here, only at the first real instantiation. Everything
+    // independent of the receiver's layout is caught: unknown functions, arity, concrete-type
+    // mismatches, missing returns. Closing that gap needs opaque-argument type instantiation
+    // with per-slot 'is this a template?' guards through all four codegen declare loops.
+    void check_generic_type_method_bodies(const std::string &module_path, const std::string &type_name,
+                                           Program &program, DiagnosticEngine &diag) {
+        const auto mod_it = program.modules.find(module_path);
+        if (mod_it == program.modules.end()) return;
+        const auto methods_it = mod_it->second.methods.find(type_name);
+        if (methods_it == mod_it->second.methods.end()) return;
+
+        // Names collected first: checking one body can declare a module on demand and rehash
+        // Program::modules, invalidating this iterator. Sorted for stable diagnostic order.
+        std::vector<std::string> method_names;
+        for (const auto &mname : methods_it->second | std::views::keys) method_names.push_back(mname);
+        std::ranges::sort(method_names);
+
+        for (const auto &method_name : method_names) {
+            const auto m_mod_it = program.modules.find(module_path);
+            if (m_mod_it == program.modules.end()) continue;
+            const auto m_methods_it = m_mod_it->second.methods.find(type_name);
+            if (m_methods_it == m_mod_it->second.methods.end()) continue;
+            const auto info_it = m_methods_it->second.find(method_name);
+            if (info_it == m_methods_it->second.end()) continue;
+
+            const auto *decl = info_it->second.decl;
+            const auto *impl_params = info_it->second.impl_generic_params;
+            if (!decl || !impl_params) continue;
+            auto args = opaque_args_for(*impl_params, program, module_path, diag);
+            const auto env = build_generic_binding_env(*impl_params, args);
+
+            auto instance_exprs = std::make_unique<ExprSideTables>();
+            const ScopedGenericScope generic_scope(program, module_path, *impl_params, args, env, instance_exprs.get());
+
+            LocalScope default_scope;
+            add_generic_value_param_locals(*impl_params, args, default_scope);
+
+            auto instance = std::make_unique<GenericFunctionInstance>();
+            instance->impl_decl = decl;
+            instance->module_path = module_path;
+            instance->args = args;
+            instance->self_type = ResolvedType{.kind = TypeKind::Opaque};
+            instance->generic_params_for_method = impl_params;
+            // 'self' mutability is read straight off impl_decl by
+            // check_generic_function_instance_body; nothing to carry here.
+
+            for (const auto &p : decl->params) {
+                ResolvedType pt;
+                if (p.type) {
+                    pt = resolve_type_with_generic_env(*p.type, module_path, program, diag, env, impl_params);
+                } else {
+                    pt = check_expr(*p.default_value, default_scope, module_path, program, diag, std::nullopt, 0);
+                }
+                if (p.is_variadic) {
+                    instance->is_variadic = true;
+                    instance->variadic_element_type = pt;
+                    instance->param_types.push_back(intern_slice(program, pt));
+                } else {
+                    instance->param_types.push_back(pt);
+                }
+            }
+            for (const auto &rt : decl->return_types) {
+                instance->return_types.push_back(resolve_type_with_generic_env(rt, module_path, program, diag, env, impl_params));
+            }
+
+            // Registered in 'generic_fn_instances' only so an index exists to key its records
+            // by. Deliberately absent from generic_fn_instance_lookup and
+            // generic_fn_instances_needed: this is a template check, not a monomorphization.
+            program.generic_fn_instances.push_back(std::move(instance));
+            const size_t idx = program.generic_fn_instances.size() - 1;
+            program.generic_fn_instance_exprs[idx] = std::move(instance_exprs);
+
+            check_generic_function_instance_body(idx, program, diag);
+        }
+    }
+
+    // Type-checks every generic function's body ONCE at its own declaration, with its
+    // parameters bound to Opaque, so a generic that is never instantiated — or not yet
+    // instantiated at the argument set that would expose a mistake — still gets checked.
+    //
+    // What this catches is everything INDEPENDENT of the parameters: unknown identifiers and
+    // calls, wrong arity, fields on concrete types, mismatches between concrete types, missing
+    // returns, 'break' outside a loop. What it deliberately does not catch is anything that
+    // depends on an unconstrained parameter — 'a + b' for arbitrary 'T' is not checkable, and
+    // reporting it would flag correct code. A trait BOUND turns that around: it states what T
+    // offers, so the parameter becomes strict (see opaque_binary_op_result).
+    //
+    // Reuses instantiate_generic_function rather than re-deriving the signature: called with
+    // Opaque arguments it resolves param/return types (so the body sees correctly-typed
+    // locals) and then, being suppressed, skips caching, emission-marking and body-checking —
+    // leaving the body for this pass to drive explicitly.
+    void check_generic_templates_for_program(Program &program, DiagnosticEngine &diag) {
+        if (!program.options.eager_generic_check) return;
+
+        // Collected up front, and sorted: instantiating can declare a module on demand and
+        // rehash Program::modules mid-iteration, and 'modules'/'symbols' are unordered, which
+        // would otherwise make diagnostic ORDER vary between runs.
+        std::vector<std::pair<std::string, std::string>> targets;
+        // Generic TYPE declarations have no body to check, but their parameter bounds still
+        // need validating — and this is the only pass that visits each declaration exactly
+        // once, which is what keeps the diagnostic from repeating per instantiation.
+        std::vector<std::pair<std::string, std::string>> type_targets;
+        for (const auto &[path, module] : program.modules) {
+            for (const auto &[name, sym] : module.symbols) {
+                // A bare-import alias shares the origin's decl; the origin's own entry checks
+                // it once, under the right module. Mirrors check_bodies_for_module.
+                if (module.bare_import_origins.contains(name)) continue;
+                if (const auto *ts = std::get_if<TypeSymbol>(&sym); ts && ts->decl && !ts->decl->generic_params.empty()) {
+                    type_targets.emplace_back(path, name);
+                    continue;
+                }
+                const auto *fn = std::get_if<FunctionSymbol>(&sym);
+                if (!fn || !fn->decl || fn->decl->generic_params.empty()) continue;
+                targets.emplace_back(path, name);
+            }
+        }
+        std::ranges::sort(targets);
+        std::ranges::sort(type_targets);
+
+        for (const auto &[path, name] : type_targets) {
+            const auto mod_it = program.modules.find(path);
+            if (mod_it == program.modules.end()) continue;
+            const auto sym_it = mod_it->second.symbols.find(name);
+            if (sym_it == mod_it->second.symbols.end()) continue;
+            const auto *ts = std::get_if<TypeSymbol>(&sym_it->second);
+            if (!ts || !ts->decl) continue;
+            for (const auto &param : ts->decl->generic_params) {
+                generic_param_bound_trait_index(param, path, program, diag, /*report=*/true);
+            }
+            check_generic_type_method_bodies(path, name, program, diag);
+        }
+
+        ++program.template_check_depth;
+        for (const auto &[path, name] : targets) {
+            // Re-looked-up rather than captured: the loop body can insert into
+            // Program::modules and invalidate any held reference.
+            const auto mod_it = program.modules.find(path);
+            if (mod_it == program.modules.end()) continue;
+            const auto sym_it = mod_it->second.symbols.find(name);
+            if (sym_it == mod_it->second.symbols.end()) continue;
+            const auto *fn = std::get_if<FunctionSymbol>(&sym_it->second);
+            if (!fn || !fn->decl) continue;
+            const auto &decl = *fn->decl;
+
+            auto args = opaque_args_for(decl.generic_params, program, path, diag, /*report_bad_bounds=*/true);
+            const size_t idx = instantiate_generic_function(program, diag, path, name, std::move(args), decl.location);
+            check_generic_function_instance_body(idx, program, diag);
+        }
+        --program.template_check_depth;
     }
 
     // Resolves an explicit generic_args list ('make_list[i32]', 'Fixed[u8, 16]') against
@@ -1748,7 +2222,7 @@ namespace sema {
         }
         // Recorded under the ENCLOSING expr's key so codegen can map this node straight to
         // 'instance.mangled_name''s llvm::Function — the same side table generic CALLS use.
-        program.modules.at(module_path).expr_generic_fn_instance[expr_key] = idx;
+        expr_tables_for_write(program, module_path).expr_generic_fn_instance[expr_key] = idx;
         return generic_instance_function_pointer_type(instance, program);
     }
 
@@ -2086,10 +2560,13 @@ namespace sema {
                                 // CreateNeg. Record it here instead of re-checking the literal,
                                 // which would range-check its magnitude as a positive value and
                                 // reject '-128' for i8.
-                                program.modules.at(module_path).expr_types[get_expr_key(v->operand)] = *expected;
+                                expr_tables_for_write(program, module_path).expr_types[get_expr_key(v->operand)] = *expected;
                                 return *expected;
                             }
                             const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+                            if (operand.kind == TypeKind::Opaque) {
+                                return opaque_unary_result("negate", operand, diag, v->location, program);
+                            }
                             if (!operand.is_integer() && !operand.is_float()) {
                                 return error(diag, v->location, "unary '-' requires a numeric operand");
                             }
@@ -2101,6 +2578,9 @@ namespace sema {
                     case ast::UnaryOp::BitwiseNot:
                         {
                             const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                            if (operand.kind == TypeKind::Opaque) {
+                                return opaque_unary_result("apply '~' to", operand, diag, v->location, program);
+                            }
                             if (!operand.is_integer() && operand.kind != TypeKind::Bitset) {
                                 return error(diag, v->location, "unary '~' requires an integer or bitset operand");
                             }
@@ -2123,6 +2603,9 @@ namespace sema {
                     case ast::UnaryOp::Deref:
                         {
                             const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                            if (operand.kind == TypeKind::Opaque) {
+                                return opaque_unary_result("dereference", operand, diag, v->location, program);
+                            }
                             if (operand.kind == TypeKind::Trait) return error(diag, v->location, "cannot dereference a trait handle");
                             if (operand.kind != TypeKind::Pointer) return error(diag, v->location, "cannot dereference a non-pointer value");
                             const auto *pointee = program.pointee_at(operand.pointee_index);
@@ -2244,6 +2727,12 @@ namespace sema {
                         then_ty = check_expr(v->then_expr, then_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
                         else_ty = check_expr(v->else_expr, else_locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
                     }
+                    // An Opaque branch matches anything: inside a generic declaration
+                    // 'when N > 4 { 0 } else { t }' has a concrete 'then' and a generic 'else',
+                    // which is not a mismatch until 'N' and 't' are known. Yield the concrete
+                    // side when there is one so the surrounding context keeps its information.
+                    if (then_ty.kind == TypeKind::Opaque) return else_ty;
+                    if (else_ty.kind == TypeKind::Opaque) return then_ty;
                     if (then_ty != else_ty) {
                         return error(diag, v->location, "'when' expression branches have different types");
                     }
@@ -2258,7 +2747,7 @@ namespace sema {
                     if (is_constant_expr(v->condition, module_path, program)) {
                         if (const auto folded = evaluate_const_value(v->condition, module_path, program, diag)) {
                             if (const auto *iv = std::get_if<int64_t>(&*folded)) {
-                                program.modules[module_path].expr_when_selected[get_expr_key(expr)] = (*iv != 0);
+                                expr_tables_for_write(program, module_path).expr_when_selected[get_expr_key(expr)] = (*iv != 0);
                             }
                         }
                     }
@@ -2305,7 +2794,10 @@ namespace sema {
                         return target.type;
                     }
 
-                    if (!target.type.is_scalar()) {
+                    // 'total += v' where 'total: T': whether 'T' is scalar is exactly what
+                    // isn't known yet. Permissive for an unconstrained parameter; a bounded one
+                    // is rejected by binary_op_result below, which owns that message.
+                    if (!target.type.is_scalar() && target.type.kind != TypeKind::Opaque) {
                         error(diag, v->location, "compound assignment requires a scalar left-hand side");
                         return target.type;
                     }
@@ -2382,7 +2874,7 @@ namespace sema {
                             const size_t idx = instantiate_generic_function(program, diag, decl_module, fn_name, std::move(*resolved_args), v->location);
                             const auto &instance = *program.generic_fn_instances[idx];
                             check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                            program.modules.at(module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
+                            expr_tables_for_write(program, module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
                             if (instance.return_types.size() > 1) {
                                 return error(diag, v->location, "multi-value capture is not yet supported here");
                             }
@@ -2419,7 +2911,7 @@ namespace sema {
                                             const size_t idx = instantiate_generic_function(program, diag, *target_module, fn_name, std::move(*resolved_args), v->location);
                                             const auto &instance = *program.generic_fn_instances[idx];
                                             check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                                            program.modules.at(module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
+                                            expr_tables_for_write(program, module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
                                             if (instance.return_types.size() > 1) {
                                                 return error(diag, v->location, "multi-value capture is not yet supported here");
                                             }
@@ -2494,7 +2986,7 @@ namespace sema {
                             }
                             const auto &instance = *program.generic_fn_instances[*idx];
                             check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                            program.modules.at(module_path).expr_generic_fn_instance[get_expr_key(expr)] = *idx;
+                            expr_tables_for_write(program, module_path).expr_generic_fn_instance[get_expr_key(expr)] = *idx;
                             if (instance.return_types.size() > 1) {
                                 return error(diag, v->location, "multi-value capture is not yet supported here");
                             }
@@ -2559,7 +3051,7 @@ namespace sema {
                                     const size_t idx = instantiate_generic_function(program, diag, module_path, callee_ident->name, std::move(*resolved_args), v->location);
                                     const auto &instance = *program.generic_fn_instances[idx];
                                     check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                                    program.modules.at(module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
+                                    expr_tables_for_write(program, module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
                                     if (instance.return_types.size() > 1) {
                                         return error(diag, v->location, "multi-value capture is not yet supported here");
                                     }
@@ -2633,7 +3125,7 @@ namespace sema {
                             // codegen holds a const Program and cannot instantiate, so its
                             // 'size_of_operand' falls back to expr_types for anything its own
                             // ident/member fast paths do not recognize.
-                            program.modules.at(module_path).expr_types[get_expr_key(v->operand)] = *instantiated;
+                            expr_tables_for_write(program, module_path).expr_types[get_expr_key(v->operand)] = *instantiated;
                             return ResolvedType{.kind = TypeKind::USize};
                         }
                     }
@@ -2672,7 +3164,7 @@ namespace sema {
                             // codegen holds a const Program and cannot instantiate, so its
                             // 'align_of_operand' falls back to expr_types for anything its own
                             // ident/member fast paths do not recognize.
-                            program.modules.at(module_path).expr_types[get_expr_key(v->operand)] = *instantiated;
+                            expr_tables_for_write(program, module_path).expr_types[get_expr_key(v->operand)] = *instantiated;
                             return ResolvedType{.kind = TypeKind::USize};
                         }
                     }
@@ -2720,7 +3212,7 @@ namespace sema {
                                 // As in size_of/align_of above: codegen's type_of_operand falls
                                 // back to expr_types for operand shapes its own fast paths do
                                 // not recognize, and cannot instantiate one itself.
-                                program.modules.at(module_path).expr_types[get_expr_key(v->operand)] = operand_type;
+                                expr_tables_for_write(program, module_path).expr_types[get_expr_key(v->operand)] = operand_type;
                             }
                         }
                     }
@@ -2733,7 +3225,11 @@ namespace sema {
                         return error(diag, get_expr_location(v->operand),
                             "'type_of' requires a type or a value; this names an imported module");
                     }
-                    if (operand_type.kind != TypeKind::Invalid) {
+                    // 'contains_opaque': inside a generic DECLARATION 'type_of(x)' names a type
+                    // that does not exist yet, and registering it would make codegen emit a
+                    // '__type_info_<id>' global for it. Each real instantiation registers its
+                    // own concrete type when it is checked.
+                    if (operand_type.kind != TypeKind::Invalid && !contains_opaque(operand_type, program)) {
                         const auto id = intern_type_id(program, operand_type);
                         // Register for possible reflection unconditionally, not just when this
                         // TypeOfExpr is the direct syntactic argument of type_info_of — the
@@ -2744,7 +3240,7 @@ namespace sema {
                         program.types_needing_info.insert(id);
                         program.types_needing_info_types[id] = operand_type;
                     }
-                    program.modules.at(module_path).expr_type_of_operand_type[get_expr_key(expr)] = operand_type;
+                    expr_tables_for_write(program, module_path).expr_type_of_operand_type[get_expr_key(expr)] = operand_type;
                     return ResolvedType{.kind = TypeKind::Type};
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeInfoOfExpr>>) {
@@ -2764,11 +3260,19 @@ namespace sema {
                     // 'type' value, or an 'any') falls through to that generic runtime lookup at
                     // codegen time — see codegen.cpp's TypeInfoOfExpr case.
                     if (std::holds_alternative<std::unique_ptr<ast::TypeOfExpr>>(v->operand)) {
-                        const auto inner_ty = program.modules.at(module_path).expr_type_of_operand_type.at(get_expr_key(v->operand));
-                        const auto id = intern_type_id(program, inner_ty);
-                        program.modules.at(module_path).expr_type_info_const_id[get_expr_key(expr)] = id;
-                        program.types_needing_info.insert(id);
-                        program.types_needing_info_types[id] = inner_ty;
+                        // The inner 'type_of' was just checked above, so its record is in
+                        // whichever table is currently active — read through the accessor
+                        // rather than the module's, which an instantiation never writes to.
+                        const auto *recorded = find_expr_record(program, module_path,
+                            &ExprSideTables::expr_type_of_operand_type, get_expr_key(v->operand));
+                        if (!recorded) return ResolvedType{.kind = TypeKind::Anyptr};
+                        const auto inner_ty = *recorded;
+                        if (!contains_opaque(inner_ty, program)) { // see the TypeOfExpr case above
+                            const auto id = intern_type_id(program, inner_ty);
+                            expr_tables_for_write(program, module_path).expr_type_info_const_id[get_expr_key(expr)] = id;
+                            program.types_needing_info.insert(id);
+                            program.types_needing_info_types[id] = inner_ty;
+                        }
                     }
                     return ResolvedType{.kind = TypeKind::Anyptr};
 
@@ -2913,8 +3417,11 @@ namespace sema {
                     }
                     const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     const auto index = check_expr(std::get<ast::Expr>(v->args[0].value), locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                    if (!index.is_integer()) {
+                    if (!index.is_integer() && index.kind != TypeKind::Opaque) {
                         error(diag, v->location, "index must be an integer expression");
+                    }
+                    if (operand.kind == TypeKind::Opaque) {
+                        return opaque_unary_result("index", operand, diag, v->location, program);
                     }
                     if (operand.kind == TypeKind::Pointer) {
                         const auto *pointee = program.pointee_at(operand.pointee_index);
@@ -3014,7 +3521,7 @@ namespace sema {
                         const auto effective_type = wrapper.error_member_types.size() == 1
                             ? wrapper.error_member_types[0]
                             : failed_variant.payload_type;
-                        program.modules.at(module_path).expr_error_match_unwrap[get_expr_key(v->operand)] = ErrorMatchUnwrap{
+                        expr_tables_for_write(program, module_path).expr_error_match_unwrap[get_expr_key(v->operand)] = ErrorMatchUnwrap{
                             .wrapper_type = operand_type,
                             .effective_type = effective_type,
                         };
@@ -3422,6 +3929,16 @@ namespace sema {
                     }
                     return union_ty;
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
+                    // 'return { .a = p, .n = 1 }' where the return type is a generic
+                    // instantiation ('Tb[T, T]') has no concrete struct to match field names
+                    // and types against — that aggregate does not exist until 'T' does. Still
+                    // walk every element expression so mistakes INSIDE the initializer (an
+                    // unknown name, a bad call) are reported; just don't judge the shape.
+                    if (expected && expected->kind == TypeKind::Opaque) {
+                        check_braced_initializer_elements(*v, locals, module_path, program, diag,
+                                                           loop_depth, defer_loop_base, fn_error_type);
+                        return ResolvedType{.kind = TypeKind::Opaque};
+                    }
                     return std::visit(
                         [&]<typename BV>(const BV &bv) -> ResolvedType {
                             using BVT = std::decay_t<BV>;
@@ -3594,7 +4111,7 @@ namespace sema {
             },
             expr);
 
-        program.modules.at(module_path).expr_types[get_expr_key(expr)] = ty;
+        expr_tables_for_write(program, module_path).expr_types[get_expr_key(expr)] = ty;
 
         // Implicit tagged-union coercion: applies generically wherever an expected type is
         // threaded through check_expr (call args, return statements, var-decl initializers,
@@ -3628,7 +4145,7 @@ namespace sema {
                     }
                 }
                 if (match_names.size() == 1) {
-                    program.modules.at(module_path).expr_variant_coercions[get_expr_key(expr)] = VariantCoercion{
+                    expr_tables_for_write(program, module_path).expr_variant_coercions[get_expr_key(expr)] = VariantCoercion{
                         .union_type = *expected,
                         .tag_value = match->tag_value,
                         .payload_struct_index = match->payload_struct_index,
@@ -3670,7 +4187,7 @@ namespace sema {
                         [&](const auto &c) { return c.trait_index == expected->trait_index; });
                     if (it != from_info->component_traits.end()) {
                         const int ordinal = static_cast<int>(std::distance(from_info->component_traits.begin(), it));
-                        program.modules.at(module_path).expr_trait_handle_coercions[get_expr_key(expr)] = TraitHandleCoercion{
+                        expr_tables_for_write(program, module_path).expr_trait_handle_coercions[get_expr_key(expr)] = TraitHandleCoercion{
                             .from_trait_index = ty.trait_index,
                             .to_trait_index = expected->trait_index,
                             .slot_index = static_cast<int>(from_info->methods.size()) + ordinal,
@@ -3690,41 +4207,17 @@ namespace sema {
                 const auto *pointee = program.pointee_at(ty.pointee_index);
                 const auto [pointee_module, pointee_name] = pointee ? find_type_module_and_name(*pointee, program) : std::pair<std::string, std::string>{};
 
-                // Tier 1: an exact, directly-written 'impl D for TYPE' always wins over any
-                // composed-derived route to D — this is what keeps every pre-existing
-                // direct-impl program byte-for-byte unaffected by the search below.
-                int provider_trait_index = -1;
-                if (const auto it = program.trait_impls_by_type.find({pointee_module, pointee_name}); it != program.trait_impls_by_type.end()) {
-                    for (const auto &impl_info : it->second) {
-                        if (impl_info.trait_index == expected->trait_index) {
-                            provider_trait_index = expected->trait_index;
-                            break;
-                        }
-                    }
-
-                    // Tier 2: no exact impl — search every impl on this type whose trait
-                    // composes the expected trait (direct or transitive).
-                    if (provider_trait_index < 0) {
-                        std::vector<std::string> candidate_names;
-                        for (const auto &impl_info : it->second) {
-                            const auto *candidate_info = program.trait_at(impl_info.trait_index);
-                            if (!candidate_info) continue;
-                            const bool reaches = std::ranges::any_of(candidate_info->component_traits,
-                                [&](const auto &c) { return c.trait_index == expected->trait_index; });
-                            if (!reaches) continue;
-                            if (provider_trait_index < 0) provider_trait_index = impl_info.trait_index;
-                            candidate_names.push_back(impl_info.trait_name);
-                        }
-                        if (candidate_names.size() > 1) {
-                            const auto [trait_module, trait_name] = find_type_module_and_name(*expected, program);
-                            return error(diag, get_expr_location(expr), std::format(
-                                "ambiguous implicit coercion to trait '{}': type '{}' implements it via both '{}' and "
-                                "'{}'; implement '{}' directly for '{}' to disambiguate",
-                                trait_name.empty() ? "<trait>" : trait_name, pointee_name.empty() ? "<type>" : pointee_name,
-                                candidate_names[0], candidate_names[1],
-                                trait_name.empty() ? "<trait>" : trait_name, pointee_name.empty() ? "<type>" : pointee_name));
-                        }
-                    }
+                std::vector<std::string> candidate_names;
+                const int provider_trait_index = find_trait_provider(program, pointee_module, pointee_name,
+                                                                       expected->trait_index, &candidate_names);
+                if (candidate_names.size() > 1) {
+                    const auto [trait_module, trait_name] = find_type_module_and_name(*expected, program);
+                    return error(diag, get_expr_location(expr), std::format(
+                        "ambiguous implicit coercion to trait '{}': type '{}' implements it via both '{}' and "
+                        "'{}'; implement '{}' directly for '{}' to disambiguate",
+                        trait_name.empty() ? "<trait>" : trait_name, pointee_name.empty() ? "<type>" : pointee_name,
+                        candidate_names[0], candidate_names[1],
+                        trait_name.empty() ? "<trait>" : trait_name, pointee_name.empty() ? "<type>" : pointee_name));
                 }
 
                 if (provider_trait_index < 0) {
@@ -3734,7 +4227,7 @@ namespace sema {
                         pointee_name.empty() ? "<type>" : pointee_name, trait_name.empty() ? "<trait>" : trait_name));
                 }
 
-                program.modules.at(module_path).expr_trait_coercions[get_expr_key(expr)] = TraitCoercion{
+                expr_tables_for_write(program, module_path).expr_trait_coercions[get_expr_key(expr)] = TraitCoercion{
                     .trait_index = expected->trait_index,
                     .provider_trait_index = provider_trait_index,
                 };
@@ -3749,6 +4242,11 @@ namespace sema {
         // (for 'type_of'/the runtime Type_Info table lookup) and marks it as needing a
         // 'Type_Info' global, so the generic runtime lookup path has real entries to find.
         if (expected && expected->kind == TypeKind::Any && ty.kind != TypeKind::Invalid && ty.kind != TypeKind::Any) {
+            // A generic value coerced to 'any' inside a DECLARATION: the coercion itself is
+            // fine and is re-checked per instantiation, but there is no concrete type to
+            // register reflection data for, and no addressability rule to apply to a value
+            // whose type isn't known. Accept and record nothing.
+            if (contains_opaque(ty, program)) return *expected;
             if (!is_addressable_shape(expr)) {
                 return error(diag, get_expr_location(expr),
                     "cannot coerce non-addressable value to 'any'; bind it to a variable first.");
@@ -3756,7 +4254,7 @@ namespace sema {
             const auto id = intern_type_id(program, ty);
             program.types_needing_info.insert(id);
             program.types_needing_info_types[id] = ty;
-            program.modules.at(module_path).expr_any_coercions[get_expr_key(expr)] = AnyCoercion{.source_type = ty};
+            expr_tables_for_write(program, module_path).expr_any_coercions[get_expr_key(expr)] = AnyCoercion{.source_type = ty};
             return *expected;
         }
 
@@ -3998,7 +4496,7 @@ namespace sema {
             }
         }
 
-        program.modules[module_path].when_stmt_selected[&when_stmt] = selected;
+        expr_tables_for_write(program, module_path).when_stmt_selected[&when_stmt] = selected;
 
         auto then_locals = locals;
         for (auto &s : when_stmt.then_block.stmts) {
@@ -4249,7 +4747,7 @@ namespace sema {
     // function only ever runs on a function-body 'asm', since check_stmt is only ever invoked
     // starting from a function/method body.)
     void check_asm_stmt(const ast::AsmStmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag) {
-        program.modules.at(module_path).asm_stmt_info[&stmt] = check_asm_instructions(stmt.instructions, locals, module_path, program, diag);
+        expr_tables_for_write(program, module_path).asm_stmt_info[&stmt] = check_asm_instructions(stmt.instructions, locals, module_path, program, diag);
     }
 
     // 'asm -> reg { ... }' / 'asm -> reg: type { ... }' — the expression form. Runs the same
@@ -4303,7 +4801,7 @@ namespace sema {
             info.clobbered_families.insert(std::string(reg_info->family));
         }
 
-        program.modules.at(module_path).asm_expr_info[&expr] = std::move(info);
+        expr_tables_for_write(program, module_path).asm_expr_info[&expr] = std::move(info);
         return result_ty;
     }
 
@@ -4386,13 +4884,17 @@ namespace sema {
                             return;
                         }
                         const auto upper_type = check_expr(range.upper, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                        if (!upper_type.is_integer()) {
+                        // 'for i in 0..N' inside 'fn f[N: usize]()': the bound is a generic
+                        // value parameter, so it has no integer type yet. Accept and check the
+                        // body — the loop is perfectly well-formed once 'N' is known.
+                        const bool upper_opaque = upper_type.kind == TypeKind::Opaque;
+                        if (!upper_type.is_integer() && !upper_opaque) {
                             diag.report_error(DiagnosticStage::Sema, v->location, "range upper bound must be an integer type");
                             return;
                         }
                         if (range.lower) {
                             const auto lower_type = check_expr(*range.lower, locals, module_path, program, diag, upper_type, loop_depth, defer_loop_base, fn_error_type);
-                            if (lower_type != upper_type) {
+                            if (lower_type != upper_type && !upper_opaque && lower_type.kind != TypeKind::Opaque) {
                                 diag.report_error(DiagnosticStage::Sema, v->location, "range lower and upper bounds must have the same type");
                                 return;
                             }
@@ -4408,6 +4910,19 @@ namespace sema {
                         return;
                     }
                     const auto iterable_type = check_expr(v->iterable, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    // Iterating a generic aggregate ('for v in self.data' where the field is
+                    // '[N]T'): the element type is unknowable, but the loop is still checkable.
+                    if (iterable_type.kind == TypeKind::Opaque) {
+                        auto inner = locals;
+                        if (v->index_name != "_") {
+                            inner[v->index_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::USize}, .is_mut = false};
+                        }
+                        if (v->element_name != "_") {
+                            inner[v->element_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::Opaque}, .is_mut = false};
+                        }
+                        check_stmt(v->body, inner, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
+                        return;
+                    }
                     if (iterable_type.kind != TypeKind::Slice && iterable_type.kind != TypeKind::Array) {
                         diag.report_error(DiagnosticStage::Sema, v->location, "'for-in' requires a slice or array operand");
                         return;
@@ -4557,7 +5072,7 @@ namespace sema {
                         const auto effective_type = wrapper.error_member_types.size() == 1
                             ? wrapper.error_member_types[0]
                             : failed_variant.payload_type;
-                        program.modules.at(module_path).expr_error_match_unwrap[get_expr_key(v->operand)] = ErrorMatchUnwrap{
+                        expr_tables_for_write(program, module_path).expr_error_match_unwrap[get_expr_key(v->operand)] = ErrorMatchUnwrap{
                             .wrapper_type = operand_type,
                             .effective_type = effective_type,
                         };

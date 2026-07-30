@@ -109,8 +109,8 @@ namespace lsp::handlers {
                 // also means bitset flags are covered as soon as LSPH-2 taught that function
                 // about TypeKind::Bitset.
                 if (const auto *dot = std::get_if<ast::DotIdentExpr>(&expr)) {
-                    if (const auto ty_it = ctx.sema_module.expr_types.find(sema::get_expr_key(expr));
-                        ty_it != ctx.sema_module.expr_types.end()) {
+                    if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(expr));
+                        ty_it != ctx.sema_module.exprs.expr_types.end()) {
                         if (auto res = match_enum_or_variant(ty_it->second, dot->name, program);
                             res.kind != Resolution::Kind::None && same_declaration(res, target)) {
                             out.push_back(location_json(dot->location));
@@ -123,8 +123,8 @@ namespace lsp::handlers {
                 // same thing.
                 if (const auto *tagged_ptr = std::get_if<std::unique_ptr<ast::TaggedVariantExpr>>(&expr)) {
                     const auto &tagged = **tagged_ptr;
-                    if (const auto ty_it = ctx.sema_module.expr_types.find(sema::get_expr_key(expr));
-                        ty_it != ctx.sema_module.expr_types.end()) {
+                    if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(expr));
+                        ty_it != ctx.sema_module.exprs.expr_types.end()) {
                         if (auto res = match_enum_or_variant(ty_it->second, tagged.variant_name, program);
                             res.kind != Resolution::Kind::None && same_declaration(res, target)) {
                             out.push_back(location_json(tagged.location));
@@ -137,8 +137,8 @@ namespace lsp::handlers {
                 if (!member_ptr) return;
                 const auto &member = **member_ptr;
 
-                if (const auto ty_it = ctx.sema_module.expr_types.find(sema::get_expr_key(member.object));
-                    ty_it != ctx.sema_module.expr_types.end()) {
+                if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(member.object));
+                    ty_it != ctx.sema_module.exprs.expr_types.end()) {
                     if (auto res = resolve_member(ty_it->second, member.member, program); res.kind != Resolution::Kind::None) {
                         if (same_declaration(res, target)) out.push_back(location_json(member.location));
                     }

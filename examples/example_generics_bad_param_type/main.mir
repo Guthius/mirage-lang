@@ -1,7 +1,12 @@
 // example_generics_bad_param_type.mir — REJECTION CASE. A generic_param's declared type
-// must be exactly the builtin 'type' keyword, or one of bool/an integer kind/usize — an
-// enum (or any other non-scalar type) is a sema error. See spec.md §22, "Declaring Generic
-// Types".
+// must be the builtin 'type' keyword, the name of a TRAIT (a bound, '[T: Hashable]'), or
+// one of bool/an integer kind/usize. An enum is none of those.
+//
+// Since bounds were added, a NAMED type in this position is accepted on shape and then
+// checked for trait-ness, so the diagnostic names the actual problem ("'Color' is not a
+// trait") rather than restating the whole rule. That check runs late — after every trait is
+// registered and laid out — because resolving a bound's name during the declare phase would
+// force the named type's layout before symbol tables are finished.
 //
 // The same rule applies to a generic *function*, which used to escape it entirely:
 // validate_generic_param_types documents itself as shared by all four decl kinds carrying
@@ -11,10 +16,10 @@
 // must be a compile-time constant expression of type 'Color'".
 //
 // Expected: compilation fails with one error per bad parameter:
-//   error: generic parameter 'E' declared type must be 'type' or a builtin scalar type
-//          (bool, an integer kind, or usize)
-//   error: generic parameter 'F' declared type must be 'type' or a builtin scalar type
-//          (bool, an integer kind, or usize)
+//   error: generic parameter 'E' is bound by 'Color', which is not a trait; a bound must
+//          name a trait
+//   error: generic parameter 'F' is bound by 'Color', which is not a trait; a bound must
+//          name a trait
 
 pub type Color = enum { Red Green Blue }
 

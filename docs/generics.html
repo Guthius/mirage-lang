@@ -247,8 +247,9 @@
       <p>
         Codegen generates an instantiation only when it's actually reachable from a live call or
         type use, the same "unselected branch never visited" posture <code>when</code> uses for
-        dead branches — except stricter: an unreached generic instantiation is never
-        type-checked at all in v1, not merely never emitted (see "No Bounds in v1" below).
+        dead branches. Type-<em>checking</em> is not tied to emission, though: a generic
+        declaration's body is checked once at its point of definition whether or not it is ever
+        instantiated (see "Eager Checking" below).
       </p>
 
       <h2>Coherence</h2>
@@ -261,17 +262,67 @@
         defines <code>List</code> itself.
       </p>
 
-      <h2>No Bounds in v1</h2>
-      <div class="callout warning">
-        <div class="callout-title">Generic parameters are unconstrained</div>
-        There is no way in v1 to declare that a type parameter must implement a given trait, or
-        that a value parameter must satisfy some predicate. An operation a given instantiation's
-        body can't actually support is only caught when that specific instantiation is generated
-        and checked — not at the generic declaration's own point of definition. This is a real
-        departure from the "both branches always type-checked" posture the rest of the language
-        uses for <code>when</code>: a generic body that's never instantiated is never checked at
-        all, not merely never emitted.
+      <h2>Trait Bounds</h2>
+      <p>
+        A type parameter may be bounded by a trait, written where <code>type</code> would go:
+      </p>
+      <pre><code><span class="kw">pub type</span> <span class="ty">Hashable</span> = <span class="kw">trait</span> {
+    <span class="kw">fn</span> <span class="fn">hash</span>(<span class="var">self</span>) -&gt; <span class="ty">i32</span>
+}
+
+<span class="kw">pub fn</span> <span class="fn">hash_twice</span>[<span class="ty">T</span>: <span class="ty">Hashable</span>](<span class="var">v</span>: *<span class="ty">T</span>) -&gt; <span class="ty">i32</span> {
+    <span class="kw">const</span> <span class="var">h</span>: <span class="ty">i32</span> = <span class="var">v</span>.<span class="fn">hash</span>()   <span class="cm">// checked against Hashable</span>
+    <span class="kw">return</span> <span class="var">h</span> + <span class="var">h</span>
+}</code></pre>
+      <p>
+        A bound constrains both sides. At the call site, the argument must implement the trait —
+        by the same rule that governs coercion to a trait handle, so an <code>impl</code> of a
+        trait that <em>composes</em> the bound counts. Inside the body, the bound is the
+        complete statement of what the parameter offers: the trait's flattened method set, plus
+        a universal core of assignment, passing, returning, <code>&amp;</code>, and
+        <code>==</code>/<code>!=</code>. Field access, arithmetic, ordering, indexing and casts
+        are errors at the declaration.
+      </p>
+      <div class="callout">
+        <div class="callout-title">Bounds are still static dispatch</div>
+        A bounded parameter is monomorphized like any other, so each instantiation calls the
+        concrete <code>impl</code> method directly — no vtable, no indirection. That is what
+        distinguishes <code>[T: Hashable]</code> from a <code>Hashable</code> <em>handle</em>
+        parameter, which dispatches dynamically.
       </div>
+      <p>
+        Value parameters remain unconstrained; there is no way to require that an
+        <code>N: usize</code> satisfy a predicate.
+      </p>
+
+      <h2>Eager Checking</h2>
+      <p>
+        A generic declaration's body is type-checked once at its point of definition, with its
+        parameters left unbound, whether or not any instantiation is ever requested. That check
+        reports everything <em>independent</em> of the parameters: unknown identifiers and
+        functions, wrong argument counts, fields and methods on concrete types, mismatches
+        between concrete types, a missing return.
+      </p>
+      <div class="callout warning">
+        <div class="callout-title">An unconstrained parameter is checked permissively</div>
+        <code>a + b</code>, <code>x.field</code>, <code>p[i]</code> and <code>x.method()</code>
+        on a bare <code>[T: type]</code> are all accepted at the declaration: whether they are
+        valid is a property of the instantiation, not of the declaration, so reporting them
+        would reject correct code. They are re-checked concretely at each instantiation. Add a
+        trait bound to get them checked up front.
+      </div>
+      <p>
+        Two limits are worth knowing. Inside a generic type's <code>impl</code> methods,
+        <code>self</code> is a pointer to an unbound parameter rather than an aggregate with
+        known fields, so a misspelled <em>field</em> there is still caught at the first
+        instantiation. And a generic reached only from another generic's body
+        (<code>f[T]</code> calling <code>g[T]</code>) is not instantiated by this pass —
+        <code>g</code>'s own declaration is where <code>g</code>'s body is checked, though the
+        call is still checked for arity and arguments.
+      </p>
+      <p>
+        <code>--no-eager-generic-check</code> disables the pass.
+      </p>
 
       <h2>Full Example</h2>
       <pre><code><span class="kw">pub type</span> <span class="ty">Fixed</span>[<span class="ty">T</span>: <span class="kw">type</span>, <span class="ty">N</span>: <span class="ty">usize</span>] = <span class="kw">struct</span> {

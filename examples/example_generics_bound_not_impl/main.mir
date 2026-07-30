@@ -1,0 +1,23 @@
+// example_generics_bound_not_impl/main.mir
+//
+// The caller-facing half of bounds: the argument supplied for a bounded parameter must
+// actually implement the bound. 'Plain' has no 'impl Hashable', so 'hash_it[Plain]' is
+// rejected at the call site.
+//
+// Expected: rejected with "'Plain' does not implement trait 'Hashable', required by generic
+// parameter 'T'".
+
+pub type Hashable = trait {
+    fn hash(self) -> i32
+}
+
+pub type Plain = struct { x: i32 }
+
+pub fn hash_it[T: Hashable](v: *T) -> i32 {
+    return v.hash()
+}
+
+pub fn main() -> i32 {
+    mut p: Plain = { .x = 1 }
+    return hash_it[Plain](&p)
+}

@@ -1,0 +1,28 @@
+// example_generics_eager_impl_method/main.mir
+//
+// Eager checking covers the methods of a generic type's 'impl' block, not just generic free
+// functions. 'Box' is never instantiated anywhere in this program, so nothing else would
+// ever look at 'get's body.
+//
+// LIMIT worth knowing: inside these bodies 'self' is typed as a pointer to an unbound
+// parameter, not a struct with known fields — a monomorphized aggregate cannot be built
+// while its parameters are unbound. So a misspelled FIELD ('self.typo') is still only
+// caught at the first real instantiation; everything independent of the receiver's layout
+// — unknown functions, arity, concrete-type mismatches, missing returns — is caught here.
+//
+// Expected: rejected with "unknown function 'missing_helper'".
+
+pub type Box[T: type] = struct {
+    v: T
+}
+
+impl Box[T: type] {
+    pub fn get(self) -> T {
+        missing_helper(self)
+        return self.v
+    }
+}
+
+pub fn main() -> i32 {
+    return 0
+}

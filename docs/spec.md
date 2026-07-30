@@ -2988,20 +2988,28 @@ pub type Fixed[T: type, N: usize] = struct { data: [N]T }
 ```
 
 A `generic_params` clause (`[ name ':' type { ',' name ':' type } ]`) follows
-the type's name and precedes `=`. Each parameter's declared type must be
-either the builtin `type` keyword (a type parameter) or one of the builtin
-scalar types `bool`, an integer kind (`u8`..`u64`, `i8`..`i64`), or `usize`
-(a value parameter):
+the type's name and precedes `=`. Each parameter's declared type must be the
+builtin `type` keyword (an unconstrained type parameter), the name of a
+**trait** (a bounded type parameter — see [Trait Bounds](#trait-bounds)), or
+one of the builtin scalar types `bool`, an integer kind (`u8`..`u64`,
+`i8`..`i64`), or `usize` (a value parameter):
 
 ```
-error: generic parameter 'E' declared type must be 'type' or a builtin
-       scalar type (bool, an integer kind, or usize) — got 'Some_Enum'
+error: generic parameter 'E' declared type must be 'type', a trait name, or
+       a builtin scalar type (bool, an integer kind, or usize)
 ```
 
-`f32`/`f64` and every other non-scalar type (a struct, enum, union, another
-generic type, a trait, ...) are rejected the same way — this is a deliberate
-v1 restriction (see "No Bounds in v1" below); it may be lifted for `f32`/
-`f64` in a future revision.
+A *named* type in this position is accepted on shape and then checked for
+trait-ness, so binding to a non-trait reports the specific problem instead:
+
+```
+error: generic parameter 'E' is bound by 'Some_Enum', which is not a trait;
+       a bound must name a trait
+```
+
+`f32`/`f64` remain rejected as value parameters — a deliberate v1 restriction
+that keeps the monomorphization cache key an integer comparison; it may be
+lifted in a future revision.
 
 A generic type name alone is **never** a valid type — `List` by itself is a
 sema error naming the required arity; every use requires `generic_args` in
@@ -3230,10 +3238,10 @@ declarations).
 
 Codegen generates an instantiation only when it's actually reachable from a
 live call or type use — the same "unselected branch never visited" posture
-`when` uses for dead branches (see [`when` Statement](#when-statement-1)),
-except **stricter**: unlike `when`, which always type-checks both branches
-even though only one is emitted, an unreached generic instantiation is
-**never type-checked at all** in v1 — see "No Bounds in v1" below.
+`when` uses for dead branches (see [`when` Statement](#when-statement-1)).
+Type-*checking* is not tied to emission, though: a generic declaration's body
+is checked once at its point of definition regardless of whether it is ever
+instantiated — see "Eager Checking of Generic Declarations" below.
 
 ### Coherence
 
@@ -3247,23 +3255,85 @@ exists anywhere in the program, and it must live in the module that defines
 module" means `List`'s own unspecialized declaring module, not any
 particular instantiation).
 
-### No Bounds in v1
+### Trait Bounds
 
-A generic parameter — type or value — is **unconstrained** in v1: there is
-no way to declare that a type parameter must implement a given trait, or
-that a value parameter must satisfy some predicate. This is a deliberate
-scope decision, not an oversight.
+A type parameter may be **bounded** by a trait, written in the same position
+as `type`:
 
-Consequently, an operation a given instantiation's body cannot actually
-support (e.g. calling a method `T` doesn't have) is only caught when that
-specific instantiation is actually generated and its body is checked — not
-at the generic declaration's own point of definition. This is a real
-departure from the "both branches are always type-checked, even if only one
-is emitted" posture the rest of the language uses for `when` (see [`when`
-Statement](#when-statement-1)) — a generic body that is never instantiated
-is **never checked**, not merely never emitted. A future revision may add a
-bounds/constraints mechanism (e.g. `[T: Some_Trait]`) that restores
-eager checking for constrained parameters; v1 has none.
+```mirage
+pub type Hashable = trait {
+    fn hash(self) -> i32
+}
+
+pub fn hash_twice[T: Hashable](v: *T) -> i32 {
+    const h: i32 = v.hash()   // resolved against Hashable's method set
+    return h + h
+}
+```
+
+A bound means two things, one for each side of the declaration:
+
+- **At the call site**, the argument supplied for that parameter must
+  implement the trait, by the same rule that governs implicit coercion to a
+  trait handle (see [Implementing a Trait](#implementing-a-trait)): either a
+  direct `impl TRAIT for TYPE`, or an `impl` of some trait that composes it.
+  `hash_twice[Plain]` where `Plain` has no such `impl` is an error.
+- **Inside the body**, the bound is the *complete* statement of what the
+  parameter offers. The trait's (flattened) methods are callable with their
+  real signatures, plus a fixed **universal core**: assignment and copying,
+  passing and returning by value, `&`, and `==`/`!=`. Nothing else — field
+  access, arithmetic, ordering, indexing, `len`, dereference and casts are
+  all errors *at the declaration*.
+
+Dispatch remains static. A bounded parameter is monomorphized like any other,
+so each instantiation calls the concrete `impl` method directly; there is no
+vtable and no indirection. This is what distinguishes `[T: Hashable]` from a
+`Hashable` **handle** parameter, which does dispatch dynamically.
+
+A bound must name a trait. Binding a parameter to a struct or enum is an
+error, because it would otherwise read as a constraint while constraining
+nothing.
+
+Value parameters remain **unconstrained** — there is no way to require that
+an `N: usize` satisfy a predicate.
+
+### Eager Checking of Generic Declarations
+
+A generic declaration's body is type-checked **once at its point of
+definition**, with each of its parameters left unbound, whether or not any
+instantiation is ever requested. This matches the "both branches are always
+type-checked, even if only one is emitted" posture the language already uses
+for `when` (see [`when` Statement](#when-statement-1)).
+
+What that check reports is everything **independent of the parameters**:
+unknown identifiers and functions, wrong argument counts, fields and methods
+on concrete types, mismatches between concrete types, a missing return,
+`break` outside a loop.
+
+What it deliberately does **not** report is anything that depends on an
+*unconstrained* parameter. `a + b`, `x.field`, `p[i]` and `x.method()` on a
+bare `[T: type]` are all accepted, because whether they are valid is a
+property of the instantiation and not of the declaration — reporting them
+would reject correct code. Those are re-checked, concretely, each time a real
+instantiation is generated.
+
+A trait bound reverses that: once `T` is bounded, the declaration *does* say
+what `T` offers, so the same expressions are checked strictly against it (see
+[Trait Bounds](#trait-bounds) above).
+
+Two consequences worth stating explicitly:
+
+- Inside a generic type's `impl` methods, `self` is a pointer to an unbound
+  parameter rather than an aggregate with known fields, so a misspelled
+  **field** there is caught at the first instantiation rather than at the
+  declaration. Everything not dependent on the receiver's layout is caught
+  eagerly.
+- A generic reached only from another generic's body (`f[T]` calling `g[T]`)
+  is not itself instantiated by this pass — `g`'s own declaration is where
+  `g`'s body is checked. Its call is still checked for arity and arguments.
+
+`--no-eager-generic-check` disables the pass, restoring the older behavior in
+which a generic body is checked only when instantiated.
 
 ### RTTI: `is_generic` and `generic_args`
 

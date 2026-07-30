@@ -1,0 +1,49 @@
+// example_generics_eager_unbound_ok/main.mir
+//
+// The other half of eager checking: what it must NOT report. An UNCONSTRAINED type parameter
+// says nothing about what 'T' can do, so every operation that depends on 'T' has to be
+// accepted at the declaration and re-checked per instantiation. Reporting here would flag
+// correct code — which is exactly the failure mode that makes eager checking unusable.
+//
+// None of these generics is ever instantiated, so the eager pass is the only thing that sees
+// them. Each exercises an operation that is only knowable once 'T'/'N' is bound.
+//
+// Expected: compiles and runs, exit code 7.
+
+// Arithmetic and comparison on an unconstrained parameter.
+pub fn combine[T: type](a: T, b: T) -> T {
+    if a == b { return a }
+    return a + b
+}
+
+// Field access on an unconstrained parameter — 'T' may well be a struct with '.next'.
+pub fn walk[T: type](node: T) -> T {
+    return node.next
+}
+
+// Indexing, dereference and unary operators.
+pub fn poke[T: type](p: *T, i: usize) -> T {
+    const v: T = p[i]
+    return -v
+}
+
+// A value parameter with no known value: the array length, the loop bound and the
+// arithmetic on 'N' are all unresolvable until instantiation.
+pub fn buffer[N: usize]() -> usize {
+    mut buf: [N]u8 = default
+    const half: usize = N / 2
+    for i in 0..N {
+        buf[i] = 1
+    }
+    return half
+}
+
+// A generic calling another generic, forwarding its own parameter — no concrete
+// instantiation of 'combine' exists here either.
+pub fn forward[T: type](a: T, b: T) -> T {
+    return combine[T](a, b)
+}
+
+pub fn main() -> i32 {
+    return 7
+}

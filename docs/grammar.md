@@ -143,13 +143,17 @@ impl_decl     ::= 'impl' named_type [ generic_params ] '{' { method_decl } '}'  
 
 generic_params ::= '[' generic_param { ',' generic_param } ']'
 
-generic_param  ::= IDENT ':' type   (* the type after ':' must resolve, in sema, to either the
-                                        builtin 'type' keyword (a type parameter) or one of the
-                                        builtin scalar types 'bool'/an integer kind/'usize' (a
-                                        value, "const-generic" parameter, e.g. 'N: usize') —
-                                        anything else (a struct, enum, another generic type,
-                                        f32/f64, ...) is a sema error. See spec.md §22
-                                        "Generics" for the full semantics. *)
+generic_param  ::= IDENT ':' type   (* the type after ':' must resolve, in sema, to one of:
+                                        the builtin 'type' keyword (an unconstrained type
+                                        parameter); the name of a TRAIT (a bounded type
+                                        parameter, e.g. 'T: Hashable'); or one of the builtin
+                                        scalar types 'bool'/an integer kind/'usize' (a value,
+                                        "const-generic" parameter, e.g. 'N: usize').
+                                        Anything else — a struct, an enum, another generic
+                                        type, f32/f64, ... — is a sema error. Note a NAMED type
+                                        here is accepted on shape by the parser and checked for
+                                        trait-ness later, after every trait is registered. See
+                                        spec.md §22 "Generics" for the full semantics. *)
 
 method_decl   ::= [ attribute ] [ 'pub' ] 'fn' IDENT
                   '(' ( 'self' | 'mut' 'self' )

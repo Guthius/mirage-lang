@@ -38,6 +38,11 @@ namespace codegen {
             const ast::Expr *expr = nullptr;
             const std::string *module_path = nullptr;
             const sema::ProgramModule *module = nullptr;
+            // The call site's per-node records, captured alongside its module: a macro invoked
+            // from inside a generic instantiation has its ARGUMENT expressions checked into
+            // that instance's tables, not the module's, so restoring the module alone would
+            // look them up in the wrong place.
+            const sema::ExprSideTables *exprs = nullptr;
             // The macro parameter's declared type/module, so a reference to this argument
             // inside the macro body can go through emit_value_as() and pick up whatever
             // coercion (e.g. concrete pointer -> trait handle) sema recorded for the
@@ -268,6 +273,12 @@ namespace codegen {
 
             const std::string *current_module_path_ = nullptr;
             const sema::ProgramModule *current_module_ = nullptr;
+            // Which set of per-node records the AST under the cursor was checked into. Normally
+            // 'current_module_->exprs', but a generic instantiation's body/defaults were checked
+            // into that INSTANCE's own tables — see sema::ExprSideTables. Kept as a separate
+            // pointer rather than derived from current_module_ precisely because the two differ
+            // exactly when emitting a monomorphization, which is the bug this fixes.
+            const sema::ExprSideTables *current_exprs_ = nullptr;
             llvm::Function *current_function_ = nullptr;
             std::vector<llvm::BasicBlock *> continue_targets_;
             std::vector<llvm::BasicBlock *> break_targets_;
@@ -314,6 +325,85 @@ namespace codegen {
             auto module_for(const std::string &path) const -> const sema::ProgramModule & {
                 return sema_program_.modules.at(path);
             }
+
+            // RAII swap of "which module is the AST being emitted written in". Emitting a
+            // cross-module default argument, a struct field's default initializer, or a macro
+            // body re-points the AST under the cursor at another module's nodes, and every
+            // lookup keyed on the current module (llvm_type/module_for resolution, and the
+            // per-module expression side tables) has to follow it. The two fields must always
+            // move together: a half-swapped context reads one module's side tables while
+            // resolving names against another's, which fails silently rather than loudly.
+            // Replaces the hand-written save/restore pairs this file used to repeat ~15 times.
+            //
+            // 'path' is stored by address, so it must outlive the guard — pass a module_path
+            // field on a Program-owned info struct, or a local declared BEFORE the guard (it
+            // then outlives it, since destruction is reverse declaration order). Never a
+            // temporary.
+            class ScopedEmitModule {
+              public:
+                ScopedEmitModule(Generator &gen, const std::string &path)
+                    : ScopedEmitModule(gen, &path, &gen.module_for(path)) {}
+                // For callers already holding the ProgramModule: skips the map lookup, and is
+                // required where the module was reached by pointer rather than by path.
+                ScopedEmitModule(Generator &gen, const std::string &path, const sema::ProgramModule &module)
+                    : ScopedEmitModule(gen, &path, &module) {}
+                ScopedEmitModule(Generator &gen, const std::string *path, const sema::ProgramModule *module)
+                    : gen_(gen), saved_path_(gen.current_module_path_), saved_module_(gen.current_module_),
+                      saved_exprs_(gen.current_exprs_) {
+                    gen_.current_module_path_ = path;
+                    gen_.current_module_ = module;
+                    gen_.current_exprs_ = module ? &module->exprs : nullptr;
+                }
+                ~ScopedEmitModule() {
+                    gen_.current_module_path_ = saved_path_;
+                    gen_.current_module_ = saved_module_;
+                    gen_.current_exprs_ = saved_exprs_;
+                }
+
+                ScopedEmitModule(const ScopedEmitModule &) = delete;
+                auto operator=(const ScopedEmitModule &) -> ScopedEmitModule & = delete;
+
+              private:
+                Generator &gen_;
+                const std::string *saved_path_;
+                const sema::ProgramModule *saved_module_;
+                const sema::ExprSideTables *saved_exprs_;
+            };
+
+            // A monomorphized struct's field-default init exprs are shared across every
+            // instantiation of that struct, so sema checked them into per-slot records
+            // (check_generic_struct_field_defaults_for_program). Point lookups at those.
+            // No-op for an ordinary non-generic struct. Must be called AFTER the
+            // ScopedEmitModule for the struct's module — that guard's destructor undoes this.
+            void use_struct_instance_exprs(int struct_index) {
+                const auto *info = sema_program_.struct_at(struct_index);
+                if (!info || !info->generic_instance) return;
+                if (const auto *exprs = sema_program_.find_type_instance_exprs(struct_index)) {
+                    current_exprs_ = exprs;
+                }
+            }
+
+            // Re-points ONLY the per-node records, leaving the module context alone. Needed
+            // wherever the AST being walked belongs to a generic instantiation while the
+            // surrounding module is unchanged: an instance body, an instance's defaulted
+            // argument (whose expression physically lives in the generic decl's module but was
+            // checked per-instance), and a monomorphized struct's field initializers.
+            // Must be constructed AFTER any ScopedEmitModule it is meant to override.
+            class ScopedEmitExprs {
+              public:
+                ScopedEmitExprs(Generator &gen, const sema::ExprSideTables &exprs)
+                    : gen_(gen), saved_exprs_(gen.current_exprs_) {
+                    gen_.current_exprs_ = &exprs;
+                }
+                ~ScopedEmitExprs() { gen_.current_exprs_ = saved_exprs_; }
+
+                ScopedEmitExprs(const ScopedEmitExprs &) = delete;
+                auto operator=(const ScopedEmitExprs &) -> ScopedEmitExprs & = delete;
+
+              private:
+                Generator &gen_;
+                const sema::ExprSideTables *saved_exprs_;
+            };
 
             auto named_type_module(const std::string &start_module, const ast::NamedType &named) const -> std::string {
                 std::string module_path = start_module;
@@ -372,8 +462,8 @@ namespace codegen {
             }
 
             auto expr_type(const ast::Expr &expr) const -> sema::ResolvedType {
-                const auto it = current_module_->expr_types.find(sema::get_expr_key(expr));
-                if (it == current_module_->expr_types.end()) {
+                const auto it = current_exprs_->expr_types.find(sema::get_expr_key(expr));
+                if (it == current_exprs_->expr_types.end()) {
                     return sema::ResolvedType{.kind = sema::TypeKind::Invalid};
                 }
                 return it->second;
@@ -485,6 +575,15 @@ namespace codegen {
                     // Fat pointer: {id: type, data: anyptr} - note the field order is the
                     // opposite of Trait's {data, vtable} above, per the language spec.
                     return llvm::StructType::get(*context_, {llvm::Type::getInt64Ty(*context_), llvm::PointerType::getUnqual(*context_)});
+                case sema::TypeKind::Opaque:
+                    // Unreachable by construction: an unbound generic parameter only exists
+                    // while eagerly checking a generic DECLARATION, and no instantiation
+                    // carrying one is ever registered for emission (see the Opaque-argument
+                    // guard in instantiate_generic_function). Reaching here means that guard
+                    // was bypassed — report rather than silently lowering to void, which would
+                    // produce a miscompile instead of a message.
+                    report_codegen_error(diag_, {}, "internal error: unbound generic type parameter reached codegen");
+                    return llvm::Type::getVoidTy(*context_);
                 default: return llvm::Type::getVoidTy(*context_);
                 }
             }
@@ -531,7 +630,7 @@ namespace codegen {
                 // field) rather than the trait handle value itself — sema's dispatch decision
                 // auto-derefs one pointer level (see try_trait_handle_dispatch), so codegen must
                 // mirror that: load the fat-pointer struct through the pointer before extracting.
-                const auto receiver_static_type = current_module_->expr_types.at(sema::get_expr_key(receiver_expr));
+                const auto receiver_static_type = current_exprs_->expr_types.at(sema::get_expr_key(receiver_expr));
                 llvm::Value *handle;
                 if (receiver_static_type.kind == sema::TypeKind::Pointer) {
                     auto *handle_ptr = emit_expr(receiver_expr);
@@ -1056,10 +1155,8 @@ namespace codegen {
                     llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
                     const auto &lowering = struct_lowering(type.struct_index);
 
-                    const auto *saved_path = current_module_path_;
-                    const auto *saved_module = current_module_;
-                    current_module_path_ = &struct_module;
-                    current_module_ = &module_for(struct_module);
+                    const ScopedEmitModule module_scope(*this, struct_module);
+                    use_struct_instance_exprs(type.struct_index);
 
                     for (size_t i = 0; i < info.fields.size(); ++i) {
                         const auto &field = info.fields[i];
@@ -1073,8 +1170,6 @@ namespace codegen {
                         agg = builder_.CreateInsertValue(agg, fval, {ll_idx});
                     }
 
-                    current_module_path_ = saved_path;
-                    current_module_ = saved_module;
                     return agg;
                 }
                 if (type.kind == sema::TypeKind::Array) {
@@ -1104,10 +1199,8 @@ namespace codegen {
                     llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
                     const auto &lowering = struct_lowering(type.struct_index);
 
-                    const auto *saved_path = current_module_path_;
-                    const auto *saved_module = current_module_;
-                    current_module_path_ = &struct_module;
-                    current_module_ = &module_for(struct_module);
+                    const ScopedEmitModule module_scope(*this, struct_module);
+                    use_struct_instance_exprs(type.struct_index);
 
                     for (size_t i = 0; i < info.fields.size(); ++i) {
                         const auto &field = info.fields[i];
@@ -1118,8 +1211,6 @@ namespace codegen {
                         agg = builder_.CreateInsertValue(agg, fval, {ll_idx});
                     }
 
-                    current_module_path_ = saved_path;
-                    current_module_ = saved_module;
                     return llvm::cast<llvm::Constant>(agg);
                 }
                 if (type.kind == sema::TypeKind::Array) {
@@ -1153,15 +1244,9 @@ namespace codegen {
                 // reaches lookups keyed on current_module_ (sizeof_operand's type-symbol and
                 // expr_types lookups, for instance), and those must resolve against the module
                 // the expression was written and sema-checked in, not the caller's.
-                const auto *saved_path = current_module_path_;
-                const auto *saved_module = current_module_;
-                current_module_path_ = &declaring_module;
-                current_module_ = &module_for(declaring_module);
-                auto *val = is_const ? emit_constant_expr(default_expr)
-                                     : emit_value_as(default_expr, param_type, declaring_module);
-                current_module_path_ = saved_path;
-                current_module_ = saved_module;
-                return val;
+                const ScopedEmitModule module_scope(*this, declaring_module);
+                return is_const ? emit_constant_expr(default_expr)
+                                : emit_value_as(default_expr, param_type, declaring_module);
             }
 
             // As emit_default_arg, for a GENERIC instance's omitted trailing argument. A default
@@ -1172,14 +1257,29 @@ namespace codegen {
             // generic-param fallbacks in sizeof_operand/align_of_operand and friends resolve
             // against the right instantiation. Scoped per-argument rather than around the whole
             // call so the caller's own explicit arguments still emit in the caller's scope.
-            auto emit_generic_default_arg(const sema::GenericFunctionInstance &instance, const ast::Expr &default_expr,
+            auto emit_generic_default_arg(size_t instance_idx, const ast::Expr &default_expr,
                                            bool is_const, const sema::ResolvedType &param_type) -> llvm::Value * {
+                const auto &instance = *sema_program_.generic_fn_instances[instance_idx];
                 const auto &generic_params = instance.decl ? instance.decl->generic_params
                                                              : *instance.generic_params_for_method;
                 const auto env = sema::build_generic_binding_env(generic_params, instance.args);
                 const sema::ScopedResolvePush guard(
                     const_cast<sema::Program &>(sema_program_).active_generic_env_stack, &env);
-                return emit_default_arg(default_expr, is_const, instance.module_path, param_type);
+                // The default's AST node lives in the generic decl's module, but sema checked
+                // it per-instance (instantiate_generic_function holds the instance's scope
+                // across its whole signature region). emit_default_arg is about to swap the
+                // module context — which would also point the records at that MODULE's tables —
+                // so re-point them at the instance's afterwards. Declared after the call would
+                // be too late, so the override is scoped around it here.
+                const ScopedEmitModule module_scope(*this, instance.module_path);
+                // Assigned directly rather than via ScopedEmitExprs: module_scope's destructor
+                // already restores current_exprs_ to its pre-swap value, so this is undone on
+                // every exit path for free.
+                if (const auto *instance_exprs = sema_program_.find_fn_instance_exprs(instance_idx)) {
+                    current_exprs_ = instance_exprs;
+                }
+                return is_const ? emit_constant_expr(default_expr)
+                                : emit_value_as(default_expr, param_type, instance.module_path);
             }
 
             // As emit_default_arg, but for a call resolved via MethodInfo (static/inherent
@@ -1224,10 +1324,8 @@ namespace codegen {
                 }
 
                 // Insert remaining fields from their default init exprs (in declaration order)
-                const auto *saved_path = current_module_path_;
-                const auto *saved_module = current_module_;
-                current_module_path_ = &struct_module;
-                current_module_ = &module_for(struct_module);
+                const ScopedEmitModule module_scope(*this, struct_module);
+                use_struct_instance_exprs(ty.struct_index);
 
                 for (size_t i = 0; i < info.fields.size(); ++i) {
                     const auto &field = info.fields[i];
@@ -1237,8 +1335,6 @@ namespace codegen {
                     agg = builder_.CreateInsertValue(agg, emit_expr(*field.init_expr), {ll_idx});
                 }
 
-                current_module_path_ = saved_path;
-                current_module_ = saved_module;
                 return agg;
             }
 
@@ -1258,10 +1354,8 @@ namespace codegen {
                     agg = builder_.CreateInsertValue(agg, emit_value_as(ae.values[i], info.fields[i].type, struct_module), {ll_idx});
                 }
 
-                const auto *saved_path = current_module_path_;
-                const auto *saved_module = current_module_;
-                current_module_path_ = &struct_module;
-                current_module_ = &module_for(struct_module);
+                const ScopedEmitModule module_scope(*this, struct_module);
+                use_struct_instance_exprs(ty.struct_index);
 
                 for (size_t i = ae.values.size(); i < info.fields.size(); ++i) {
                     const auto &field = info.fields[i];
@@ -1270,8 +1364,6 @@ namespace codegen {
                     agg = builder_.CreateInsertValue(agg, emit_expr(*field.init_expr), {ll_idx});
                 }
 
-                current_module_path_ = saved_path;
-                current_module_ = saved_module;
                 return agg;
             }
 
@@ -1360,19 +1452,13 @@ namespace codegen {
                         llvm::Type::getInt8Ty(*context_), slot, union_info.payload_offset);
 
                     // Temporarily switch module context for the store
-                    const auto *saved_path = current_module_path_;
-                    const auto *saved_module = current_module_;
-                    current_module_path_ = &struct_module;
-                    current_module_ = &module_for(struct_module);
+                    const ScopedEmitModule module_scope(*this, struct_module);
 
                     // The store types itself from struct_val; nothing here needs the payload's
                     // llvm::Type. The module swap around it is still required, since
                     // llvm_type/module_for lookups inside CreateStore's operands resolve
                     // against the payload struct's own declaring module.
                     builder_.CreateStore(struct_val, payload_ptr);
-
-                    current_module_path_ = saved_path;
-                    current_module_ = saved_module;
                 }
 
                 return builder_.CreateLoad(ll_ty, slot);
@@ -1401,7 +1487,7 @@ namespace codegen {
                 // type_resolver.cpp) coerced from a value of that exact struct type. If not, sema
                 // matched via the single-field fallback (bare scalar/slice/etc. into a one-field
                 // payload struct), and the value still needs wrapping into field 0.
-                const auto from_ty = current_module_->expr_types.at(sema::get_expr_key(expr));
+                const auto from_ty = current_exprs_->expr_types.at(sema::get_expr_key(expr));
                 const bool is_struct_payload = from_ty.kind == sema::TypeKind::Struct && from_ty.struct_index == vc.payload_struct_index;
 
                 const sema::ResolvedType payload_ty{.kind = sema::TypeKind::Struct, .struct_index = vc.payload_struct_index};
@@ -1410,27 +1496,23 @@ namespace codegen {
                 const auto &lowering = struct_lowering(vc.payload_struct_index);
                 const auto &union_info = sema_program_.unions.at(vc.union_type.union_index);
 
-                const auto *saved_path = current_module_path_;
-                const auto *saved_module = current_module_;
-                current_module_path_ = &struct_module;
-                current_module_ = &module_for(struct_module);
+                {
+                    const ScopedEmitModule module_scope(*this, struct_module);
 
-                auto *struct_ll_ty = llvm_type(struct_module, payload_ty);
+                    auto *struct_ll_ty = llvm_type(struct_module, payload_ty);
 
-                llvm::Value *struct_agg;
-                if (is_struct_payload) {
-                    struct_agg = field_val;
-                } else {
-                    struct_agg = llvm::Constant::getNullValue(struct_ll_ty);
-                    struct_agg = builder_.CreateInsertValue(struct_agg, field_val, {lowering.field_indices.at(0)});
+                    llvm::Value *struct_agg;
+                    if (is_struct_payload) {
+                        struct_agg = field_val;
+                    } else {
+                        struct_agg = llvm::Constant::getNullValue(struct_ll_ty);
+                        struct_agg = builder_.CreateInsertValue(struct_agg, field_val, {lowering.field_indices.at(0)});
+                    }
+
+                    auto *payload_ptr = builder_.CreateConstInBoundsGEP1_64(
+                        llvm::Type::getInt8Ty(*context_), slot, union_info.payload_offset);
+                    builder_.CreateStore(struct_agg, payload_ptr);
                 }
-
-                auto *payload_ptr = builder_.CreateConstInBoundsGEP1_64(
-                    llvm::Type::getInt8Ty(*context_), slot, union_info.payload_offset);
-                builder_.CreateStore(struct_agg, payload_ptr);
-
-                current_module_path_ = saved_path;
-                current_module_ = saved_module;
 
                 return builder_.CreateLoad(ll_ty, slot);
             }
@@ -1448,7 +1530,7 @@ namespace codegen {
             auto emit_trait_coercion(const ast::Expr &expr, const sema::TraitCoercion &tc) -> llvm::Value * {
                 auto *data_ptr = emit_expr(expr);
 
-                const auto from = current_module_->expr_types.at(sema::get_expr_key(expr));
+                const auto from = current_exprs_->expr_types.at(sema::get_expr_key(expr));
                 const auto &pointee_ty = sema_program_.pointer_pointees.at(from.pointee_index);
                 const auto [pointee_module, pointee_name] = sema::find_type_module_and_name(pointee_ty, sema_program_);
 
@@ -1558,8 +1640,7 @@ namespace codegen {
 
             void emit_global_initializers() {
                 for (const auto &[path, mod] : sema_program_.modules) {
-                    current_module_path_ = &path;
-                    current_module_ = &mod;
+                    const ScopedEmitModule module_scope(*this, path, mod);
 
                     for (const auto &[name, sym] : mod.symbols) {
                         // A bare-import alias's storage was already initialized once, under
@@ -1578,13 +1659,12 @@ namespace codegen {
 
             void emit_functions() {
                 for (const auto &[path, mod] : sema_program_.modules) {
-                    current_module_path_ = &path;
-                    current_module_ = &mod;
+                    const ScopedEmitModule module_scope(*this, path, mod);
 
                     for (const auto &[name, sym] : mod.symbols) {
                         // A bare-import alias's body was already emitted once, under the
                         // origin's own key, by the origin module's own iteration — emitting
-                        // it again here would read 'current_module_->expr_types' (this
+                        // it again here would read 'current_exprs_->expr_types' (this
                         // importer's, populated only for names/expressions actually type-
                         // checked in THIS module) for AST nodes that were only ever
                         // type-checked under the origin's ProgramModule, crashing or
@@ -1668,9 +1748,10 @@ namespace codegen {
             // live" set; note the type side has no equivalent gating — see the note where
             // that set would live in sema.hpp) instead of ProgramModule::symbols/methods. Only
             // ever emits the instantiations sema actually recorded as reached — the same
-            // "unselected branch never visited" posture 'when' uses for dead branches,
-            // except stricter (an instantiation not in this set was never even checked, not
-            // merely never emitted — see spec.md §22, "No Bounds in v1").
+            // "unselected branch never visited" posture 'when' uses for dead branches. Note
+            // "not emitted" no longer implies "not checked": the DECLARATION's body is checked
+            // once regardless, by check_generic_templates_for_program (see spec.md §22, "Eager
+            // Checking of Generic Declarations").
             void declare_generic_functions() {
                 for (const size_t idx : sema_program_.generic_fn_instances_needed) {
                     const auto &instance = *sema_program_.generic_fn_instances[idx];
@@ -2306,7 +2387,7 @@ namespace codegen {
                     return llvm::ConstantPointerNull::get(ptr_ty);
                 }
 
-                const auto operand_ty = current_module_->expr_types.at(sema::get_expr_key(expr.operand));
+                const auto operand_ty = current_exprs_->expr_types.at(sema::get_expr_key(expr.operand));
                 llvm::Value *key = operand_ty.kind == sema::TypeKind::Any
                     ? builder_.CreateExtractValue(emit_expr(expr.operand), {0})
                     : emit_expr(expr.operand); // already an i64 'type' id value
@@ -2430,8 +2511,7 @@ namespace codegen {
 
             void emit_methods() {
                 for (const auto &[path, mod] : sema_program_.modules) {
-                    current_module_path_ = &path;
-                    current_module_ = &mod;
+                    const ScopedEmitModule module_scope(*this, path, mod);
                     for (const auto &[type_name, method_map] : mod.methods) {
                         for (const auto &info : method_map | std::views::values) {
                             if (!info.is_resolved) continue;
@@ -2447,8 +2527,7 @@ namespace codegen {
             void emit_trait_methods() {
                 for (const auto &impls : sema_program_.trait_impls_by_type | std::views::values) {
                     for (const auto &impl_info : impls) {
-                        current_module_path_ = &impl_info.impl_module;
-                        current_module_ = &module_for(impl_info.impl_module);
+                        const ScopedEmitModule module_scope(*this, impl_info.impl_module);
                         for (const auto &info : impl_info.methods | std::views::values) {
                             if (!info.is_resolved) continue;
                             emit_method(impl_info.impl_module, impl_info.type_name, info);
@@ -2479,8 +2558,13 @@ namespace codegen {
             void emit_generic_function_instance(size_t idx) {
                 auto &instance = *sema_program_.generic_fn_instances[idx];
                 const auto &module_path = instance.module_path;
-                current_module_path_ = &module_path;
-                current_module_ = &module_for(module_path);
+                const ScopedEmitModule module_scope(*this, module_path);
+                // The whole body was checked into THIS instance's records, not the module's —
+                // every monomorphization of one generic walks the same AST nodes. Undone by
+                // module_scope's destructor.
+                if (const auto *instance_exprs = sema_program_.find_fn_instance_exprs(idx)) {
+                    current_exprs_ = instance_exprs;
+                }
                 current_function_ = functions_.at(FunctionKey{module_path, instance.mangled_name});
                 current_returns_ = instance.return_types;
                 locals_.clear();
@@ -2933,8 +3017,8 @@ namespace codegen {
                     return emit_logical(expr);
                 }
 
-                const auto lhs_type = current_module_->expr_types.at(sema::get_expr_key(expr.lhs));
-                const auto rhs_type = current_module_->expr_types.at(sema::get_expr_key(expr.rhs));
+                const auto lhs_type = current_exprs_->expr_types.at(sema::get_expr_key(expr.lhs));
+                const auto rhs_type = current_exprs_->expr_types.at(sema::get_expr_key(expr.rhs));
                 auto *lhs = emit_expr(expr.lhs);
                 auto *rhs = emit_expr(expr.rhs);
 
@@ -3010,7 +3094,7 @@ namespace codegen {
                 auto *rhs_bb = llvm::BasicBlock::Create(*context_, "logic.rhs", fn);
                 auto *merge_bb = llvm::BasicBlock::Create(*context_, "logic.end", fn);
 
-                auto *lhs = coerce_to_bool(emit_expr(expr.lhs), current_module_->expr_types.at(sema::get_expr_key(expr.lhs)));
+                auto *lhs = coerce_to_bool(emit_expr(expr.lhs), current_exprs_->expr_types.at(sema::get_expr_key(expr.lhs)));
                 auto *lhs_done = builder_.GetInsertBlock();
                 if (expr.op == ast::BinaryOp::LogicalAnd) {
                     builder_.CreateCondBr(lhs, rhs_bb, merge_bb);
@@ -3019,7 +3103,7 @@ namespace codegen {
                 }
 
                 builder_.SetInsertPoint(rhs_bb);
-                auto *rhs = coerce_to_bool(emit_expr(expr.rhs), current_module_->expr_types.at(sema::get_expr_key(expr.rhs)));
+                auto *rhs = coerce_to_bool(emit_expr(expr.rhs), current_exprs_->expr_types.at(sema::get_expr_key(expr.rhs)));
                 auto *rhs_done = builder_.GetInsertBlock();
                 builder_.CreateBr(merge_bb);
 
@@ -3070,19 +3154,19 @@ namespace codegen {
             }
 
             auto emit_value_as(const ast::Expr &expr, const sema::ResolvedType &target, const std::string &target_module) -> llvm::Value * {
-                if (const auto it = current_module_->expr_variant_coercions.find(sema::get_expr_key(expr)); it != current_module_->expr_variant_coercions.end()) {
+                if (const auto it = current_exprs_->expr_variant_coercions.find(sema::get_expr_key(expr)); it != current_exprs_->expr_variant_coercions.end()) {
                     return emit_variant_coercion(expr, it->second);
                 }
-                if (const auto it = current_module_->expr_trait_coercions.find(sema::get_expr_key(expr)); it != current_module_->expr_trait_coercions.end()) {
+                if (const auto it = current_exprs_->expr_trait_coercions.find(sema::get_expr_key(expr)); it != current_exprs_->expr_trait_coercions.end()) {
                     return emit_trait_coercion(expr, it->second);
                 }
-                if (const auto it = current_module_->expr_trait_handle_coercions.find(sema::get_expr_key(expr)); it != current_module_->expr_trait_handle_coercions.end()) {
+                if (const auto it = current_exprs_->expr_trait_handle_coercions.find(sema::get_expr_key(expr)); it != current_exprs_->expr_trait_handle_coercions.end()) {
                     return emit_trait_handle_coercion(expr, it->second);
                 }
-                if (const auto it = current_module_->expr_any_coercions.find(sema::get_expr_key(expr)); it != current_module_->expr_any_coercions.end()) {
+                if (const auto it = current_exprs_->expr_any_coercions.find(sema::get_expr_key(expr)); it != current_exprs_->expr_any_coercions.end()) {
                     return emit_any_coercion(expr, it->second);
                 }
-                const auto from = current_module_->expr_types.at(sema::get_expr_key(expr));
+                const auto from = current_exprs_->expr_types.at(sema::get_expr_key(expr));
                 if (from.kind == sema::TypeKind::Array && target.kind == sema::TypeKind::Slice) {
                     return emit_array_to_slice(expr, from, target, expr_type_module_hint(expr));
                 }
@@ -3151,30 +3235,22 @@ namespace codegen {
             }
 
             auto emit_macro_arg(const MacroArg &arg) -> llvm::Value * {
-                const auto *saved_path = current_module_path_;
-                const auto *saved_module = current_module_;
                 auto saved_macro_args = std::move(macro_args_);
-                current_module_path_ = arg.module_path;
-                current_module_ = arg.module;
+                const ScopedEmitModule module_scope(*this, arg.module_path, arg.module);
+                if (arg.exprs) current_exprs_ = arg.exprs; // undone by module_scope
                 macro_args_ = arg.outer_args ? *arg.outer_args : std::unordered_map<std::string, MacroArg>{};
                 auto *value = emit_value_as(*arg.expr, *arg.param_type, *arg.param_module);
                 macro_args_ = std::move(saved_macro_args);
-                current_module_path_ = saved_path;
-                current_module_ = saved_module;
                 return value;
             }
 
             auto emit_const_macro_arg(const MacroArg &arg) -> llvm::Value * {
-                const auto *saved_path = current_module_path_;
-                const auto *saved_module = current_module_;
                 auto saved_macro_args = std::move(macro_args_);
-                current_module_path_ = arg.module_path;
-                current_module_ = arg.module;
+                const ScopedEmitModule module_scope(*this, arg.module_path, arg.module);
+                if (arg.exprs) current_exprs_ = arg.exprs; // undone by module_scope
                 macro_args_ = arg.outer_args ? *arg.outer_args : std::unordered_map<std::string, MacroArg>{};
                 auto *value = emit_const_or_runtime(*arg.expr, true);
                 macro_args_ = std::move(saved_macro_args);
-                current_module_path_ = saved_path;
-                current_module_ = saved_module;
                 return value;
             }
 
@@ -3200,7 +3276,7 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                             return expr_type_module_hint(v->object);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
-                            const auto operand_ty = current_module_->expr_types.at(sema::get_expr_key(v->operand));
+                            const auto operand_ty = current_exprs_->expr_types.at(sema::get_expr_key(v->operand));
                             if (operand_ty.kind == sema::TypeKind::Pointer || operand_ty.kind == sema::TypeKind::Array || operand_ty.kind == sema::TypeKind::Slice) {
                                 return expr_type_module_hint(v->operand);
                             }
@@ -3258,7 +3334,7 @@ namespace codegen {
                             }
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
                             if (v->op == ast::UnaryOp::Deref) {
-                                const auto ptr_type = current_module_->expr_types.at(sema::get_expr_key(v->operand));
+                                const auto ptr_type = current_exprs_->expr_types.at(sema::get_expr_key(v->operand));
                                 const auto pointee = sema_program_.pointer_pointees.at(ptr_type.pointee_index);
                                 const auto pointee_module = expr_type_module_hint(v->operand);
                                 return LValue{.ptr = emit_expr(v->operand), .type = pointee, .type_module = pointee_module, .storage_type = llvm_type_for(pointee, pointee_module)};
@@ -3289,7 +3365,7 @@ namespace codegen {
                     }
                 }
 
-                const auto object_type = current_module_->expr_types.at(sema::get_expr_key(member.object));
+                const auto object_type = current_exprs_->expr_types.at(sema::get_expr_key(member.object));
                 sema::ResolvedType struct_type;
                 std::string struct_module = *current_module_path_;
                 llvm::Value *base = nullptr;
@@ -3350,11 +3426,11 @@ namespace codegen {
                     return LValue{};
                 }
                 const auto &index_expr = std::get<ast::Expr>(index.args[0].value);
-                const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(index.operand));
+                const auto operand_type = current_exprs_->expr_types.at(sema::get_expr_key(index.operand));
                 const auto type_module = expr_type_module_hint(index.operand);
                 auto *idx = emit_expr(index_expr);
                 if (!idx->getType()->isIntegerTy(64)) {
-                    idx = integer_cast(idx, llvm::Type::getInt64Ty(*context_), current_module_->expr_types.at(sema::get_expr_key(index_expr)));
+                    idx = integer_cast(idx, llvm::Type::getInt64Ty(*context_), current_exprs_->expr_types.at(sema::get_expr_key(index_expr)));
                 }
 
                 if (operand_type.kind == sema::TypeKind::Pointer) {
@@ -3472,7 +3548,7 @@ namespace codegen {
                 std::vector<llvm::Value *> args;
                 if (instance.impl_decl) {
                     const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee);
-                    const auto obj_type = current_module_->expr_types.at(sema::get_expr_key((*member)->object));
+                    const auto obj_type = current_exprs_->expr_types.at(sema::get_expr_key((*member)->object));
                     llvm::Value *self_ptr = obj_type.kind == sema::TypeKind::Pointer
                         ? emit_expr((*member)->object)
                         : emit_lvalue((*member)->object).ptr;
@@ -3480,13 +3556,13 @@ namespace codegen {
                     for (size_t i = 0; i < instance.param_types.size(); ++i) {
                         args.push_back(i < call.args.size()
                             ? emit_value_as(call.args[i], instance.param_types[i], instance.module_path)
-                            : emit_generic_default_arg(instance, *instance.impl_decl->params[i].default_value, instance.param_default_is_const[i], instance.param_types[i]));
+                            : emit_generic_default_arg(instance_idx, *instance.impl_decl->params[i].default_value, instance.param_default_is_const[i], instance.param_types[i]));
                     }
                 } else {
                     for (size_t i = 0; i < instance.param_types.size(); ++i) {
                         args.push_back(i < call.args.size()
                             ? emit_value_as(call.args[i], instance.param_types[i], instance.module_path)
-                            : emit_generic_default_arg(instance, *instance.decl->params[i].default_value, instance.param_default_is_const[i], instance.param_types[i]));
+                            : emit_generic_default_arg(instance_idx, *instance.decl->params[i].default_value, instance.param_default_is_const[i], instance.param_types[i]));
                     }
                 }
                 return builder_.CreateCall(llvm_fn, args);
@@ -3500,7 +3576,7 @@ namespace codegen {
                 // entries by '&call' (the CallExpr's own stable address, same convention
                 // expr_trait_dispatch already uses), since it only ever sees the unwrapped
                 // CallExpr, never the outer Expr variant get_expr_key needs.
-                if (const auto inst_it = current_module_->expr_generic_fn_instance.find(&call); inst_it != current_module_->expr_generic_fn_instance.end()) {
+                if (const auto inst_it = current_exprs_->expr_generic_fn_instance.find(&call); inst_it != current_exprs_->expr_generic_fn_instance.end()) {
                     return emit_generic_call(call, inst_it->second);
                 }
 
@@ -3523,12 +3599,12 @@ namespace codegen {
                         name = (*member)->member;
                     } else {
                         // Method call on a value or pointer
-                        const auto obj_type = current_module_->expr_types.at(sema::get_expr_key((*member)->object));
+                        const auto obj_type = current_exprs_->expr_types.at(sema::get_expr_key((*member)->object));
                         sema::ResolvedType receiver_type = obj_type;
                         if (obj_type.kind == sema::TypeKind::Pointer) {
                             receiver_type = sema_program_.pointer_pointees.at(obj_type.pointee_index);
                         }
-                        if (const auto dispatch_it = current_module_->expr_trait_dispatch.find(&call); dispatch_it != current_module_->expr_trait_dispatch.end()) {
+                        if (const auto dispatch_it = current_exprs_->expr_trait_dispatch.find(&call); dispatch_it != current_exprs_->expr_trait_dispatch.end()) {
                             return emit_trait_handle_dispatch(call, (*member)->object, dispatch_it->second);
                         }
                         const auto *method = sema::find_method(receiver_type, (*member)->member, sema_program_);
@@ -3588,7 +3664,7 @@ namespace codegen {
                     }
                 } else {
                     // General expression callee (e.g. indexed array of fn ptrs, dereferenced ptr-to-fn)
-                    const auto callee_ty = current_module_->expr_types.at(sema::get_expr_key(call.callee));
+                    const auto callee_ty = current_exprs_->expr_types.at(sema::get_expr_key(call.callee));
                     if (callee_ty.kind == sema::TypeKind::Function) {
                         const auto &sig = sema_program_.fn_signatures.at(callee_ty.fn_index);
                         auto *fn_ptr = emit_expr(call.callee);
@@ -3614,25 +3690,19 @@ namespace codegen {
                     auto saved = macro_args_;
                     auto outer = std::make_shared<const std::unordered_map<std::string, MacroArg>>(saved);
                     for (size_t i = 0; i < macro->decl->params.size(); ++i) {
-                        macro_args_[macro->decl->params[i].name] = MacroArg{.expr = &call.args[i], .module_path = current_module_path_, .module = current_module_, .param_type = &macro->params[i], .param_module = &target_module, .outer_args = outer};
+                        macro_args_[macro->decl->params[i].name] = MacroArg{.expr = &call.args[i], .module_path = current_module_path_, .module = current_module_, .exprs = current_exprs_, .param_type = &macro->params[i], .param_module = &target_module, .outer_args = outer};
                     }
-                    const auto *saved_path = current_module_path_;
-                    const auto *saved_module = current_module_;
                     // A bare-import alias's 'expr_template' AST nodes were type-checked (and
                     // their 'expr_types' entries populated) under the TRUE ORIGIN module (see
                     // sema.cpp's resolve_values_for_module redirect-and-copy-back for
                     // MacroSymbol), not 'target_module' — which, for an unqualified bare-import
                     // call, defaults to the CALLING module, not the macro's declaring one.
-                    if (const auto origin = target.bare_import_origins.find(name); origin != target.bare_import_origins.end()) {
-                        current_module_path_ = &origin->second.module_path;
-                        current_module_ = &sema_program_.modules.at(origin->second.module_path);
-                    } else {
-                        current_module_path_ = &target_module;
-                        current_module_ = &target;
-                    }
+                    const auto origin = target.bare_import_origins.find(name);
+                    const bool via_origin = origin != target.bare_import_origins.end();
+                    const ScopedEmitModule module_scope(
+                        *this, via_origin ? origin->second.module_path : target_module,
+                        via_origin ? sema_program_.modules.at(origin->second.module_path) : target);
                     auto *value = emit_expr(macro->decl->expr_template);
-                    current_module_path_ = saved_path;
-                    current_module_ = saved_module;
                     macro_args_ = std::move(saved);
                     return value;
                 }
@@ -3728,7 +3798,7 @@ namespace codegen {
                 // be checked first or a 'try'/multi-return grouped call on one would compute
                 // the wrong return arity (e.g. 0 instead of 1), corrupting emit_try_expr's own
                 // CreateExtractValue indexing downstream.
-                if (const auto inst_it = current_module_->expr_generic_fn_instance.find(&call); inst_it != current_module_->expr_generic_fn_instance.end()) {
+                if (const auto inst_it = current_exprs_->expr_generic_fn_instance.find(&call); inst_it != current_exprs_->expr_generic_fn_instance.end()) {
                     const auto &instance = *sema_program_.generic_fn_instances[inst_it->second];
                     return {instance.module_path, instance.return_types};
                 }
@@ -3750,14 +3820,14 @@ namespace codegen {
                         name = (*member)->member;
                     } else {
                         // Method call or struct-field fn-ptr
-                        if (const auto dispatch_it = current_module_->expr_trait_dispatch.find(&call); dispatch_it != current_module_->expr_trait_dispatch.end()) {
+                        if (const auto dispatch_it = current_exprs_->expr_trait_dispatch.find(&call); dispatch_it != current_exprs_->expr_trait_dispatch.end()) {
                             const auto *trait_info = sema_program_.trait_at(dispatch_it->second.trait_index);
                             if (trait_info && dispatch_it->second.method_order_index >= 0 &&
                                 static_cast<size_t>(dispatch_it->second.method_order_index) < trait_info->methods.size()) {
                                 return {*current_module_path_, trait_info->methods[dispatch_it->second.method_order_index].return_types};
                             }
                         }
-                        const auto obj_type = current_module_->expr_types.at(sema::get_expr_key((*member)->object));
+                        const auto obj_type = current_exprs_->expr_types.at(sema::get_expr_key((*member)->object));
                         sema::ResolvedType receiver_type = obj_type;
                         if (obj_type.kind == sema::TypeKind::Pointer) {
                             receiver_type = sema_program_.pointer_pointees.at(obj_type.pointee_index);
@@ -3778,7 +3848,7 @@ namespace codegen {
                     }
                 } else {
                     // General expression callee
-                    const auto callee_ty = current_module_->expr_types.at(sema::get_expr_key(call.callee));
+                    const auto callee_ty = current_exprs_->expr_types.at(sema::get_expr_key(call.callee));
                     if (callee_ty.kind == sema::TypeKind::Function) {
                         return {*current_module_path_, sema_program_.fn_signatures.at(callee_ty.fn_index).return_types};
                     }
@@ -4075,7 +4145,7 @@ namespace codegen {
                                 return builder_.CreateLoad(lv.storage_type, lv.ptr);
                             }
                             auto *operand = emit_expr(v->operand);
-                            const auto operand_ty = current_module_->expr_types.at(sema::get_expr_key(v->operand));
+                            const auto operand_ty = current_exprs_->expr_types.at(sema::get_expr_key(v->operand));
                             switch (v->op) {
                             case ast::UnaryOp::Negate:     return operand_ty.is_float() ? builder_.CreateFNeg(operand) : builder_.CreateNeg(operand);
                             case ast::UnaryOp::LogicalNot: return builder_.CreateNot(coerce_to_bool(operand, operand_ty));
@@ -4089,8 +4159,8 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AssignExpr>>) {
                             return emit_assign(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
-                            if (const auto inst_it = current_module_->expr_generic_fn_instance.find(sema::get_expr_key(expr));
-                                inst_it != current_module_->expr_generic_fn_instance.end()) {
+                            if (const auto inst_it = current_exprs_->expr_generic_fn_instance.find(sema::get_expr_key(expr));
+                                inst_it != current_exprs_->expr_generic_fn_instance.end()) {
                                 return emit_generic_call(*v, inst_it->second);
                             }
                             return emit_call(*v);
@@ -4106,8 +4176,8 @@ namespace codegen {
                             // ident/member special-case) and so has no expr_types entry of its own
                             // - .find() rather than .at() here, matching type_of_operand's own
                             // ident/member-vs-generic split below.
-                            const auto ty_it = current_module_->expr_types.find(sema::get_expr_key(v->operand));
-                            if (ty_it != current_module_->expr_types.end() && ty_it->second.kind == sema::TypeKind::Any) {
+                            const auto ty_it = current_exprs_->expr_types.find(sema::get_expr_key(v->operand));
+                            if (ty_it != current_exprs_->expr_types.end() && ty_it->second.kind == sema::TypeKind::Any) {
                                 // Runtime load of the any value's 'id' field (word 0).
                                 return builder_.CreateExtractValue(emit_expr(v->operand), {0});
                             }
@@ -4117,7 +4187,7 @@ namespace codegen {
                             // at check_expr time (see expr_type_info_const_id). Nil for builtin
                             // scalar ids (1-15); else the (already emitted) '__type_info_<id>'
                             // global's address.
-                            if (const auto it = current_module_->expr_type_info_const_id.find(sema::get_expr_key(expr)); it != current_module_->expr_type_info_const_id.end()) {
+                            if (const auto it = current_exprs_->expr_type_info_const_id.find(sema::get_expr_key(expr)); it != current_exprs_->expr_type_info_const_id.end()) {
                                 const auto id = it->second;
                                 if (id >= 1 && id <= 15) {
                                     return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
@@ -4134,14 +4204,14 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, ast::ImportBinExpr>) {
                             return emit_import_bin(v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) {
-                            const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(v->operand));
+                            const auto operand_type = current_exprs_->expr_types.at(sema::get_expr_key(v->operand));
                             if (operand_type.kind == sema::TypeKind::Array) {
                                 return builder_.getInt64(sema_program_.arrays.at(operand_type.array_index).count);
                             }
                             auto *slice = emit_expr(v->operand);
                             return builder_.CreateExtractValue(slice, {1});
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StackAllocExpr>>) {
-                            const auto size_from = current_module_->expr_types.at(sema::get_expr_key(v->size));
+                            const auto size_from = current_exprs_->expr_types.at(sema::get_expr_key(v->size));
                             auto *size = emit_cast(emit_expr(v->size), size_from, sema::ResolvedType{.kind = sema::TypeKind::USize});
                             auto *alloc = builder_.CreateAlloca(llvm::Type::getInt8Ty(*context_), size, "stackalloc");
                             alloc->setAlignment(llvm::Align(16));
@@ -4149,7 +4219,7 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmExpr>>) {
                             return emit_asm_expr(*v, ty);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
-                            const auto from = current_module_->expr_types.at(sema::get_expr_key(v->value));
+                            const auto from = current_exprs_->expr_types.at(sema::get_expr_key(v->value));
                             if (ty.kind == sema::TypeKind::Slice) {
                                 return emit_slice_cast(*v, from, ty);
                             }
@@ -4177,7 +4247,7 @@ namespace codegen {
                             // declare_generic_functions() already created the llvm::Function, so
                             // this is just the address of that. Mirrors the IdentExpr fn-ptr path.
                             if (ty.kind == sema::TypeKind::Function) {
-                                const auto &table = current_module_->expr_generic_fn_instance;
+                                const auto &table = current_exprs_->expr_generic_fn_instance;
                                 if (const auto it = table.find(sema::get_expr_key(expr)); it != table.end()) {
                                     const auto &instance = *sema_program_.generic_fn_instances[it->second];
                                     return functions_.at(FunctionKey{instance.module_path, instance.mangled_name});
@@ -4393,12 +4463,12 @@ namespace codegen {
             }
 
             auto emit_slice_expr(const ast::SliceExpr &expr, const sema::ResolvedType &result_type) -> llvm::Value * {
-                const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(expr.operand));
+                const auto operand_type = current_exprs_->expr_types.at(sema::get_expr_key(expr.operand));
                 const auto type_module = expr_type_module_hint(expr.operand);
                 auto *start = emit_expr(expr.start);
                 auto *end = emit_expr(expr.end);
-                if (!start->getType()->isIntegerTy(64)) start = integer_cast(start, llvm::Type::getInt64Ty(*context_), current_module_->expr_types.at(sema::get_expr_key(expr.start)));
-                if (!end->getType()->isIntegerTy(64)) end = integer_cast(end, llvm::Type::getInt64Ty(*context_), current_module_->expr_types.at(sema::get_expr_key(expr.end)));
+                if (!start->getType()->isIntegerTy(64)) start = integer_cast(start, llvm::Type::getInt64Ty(*context_), current_exprs_->expr_types.at(sema::get_expr_key(expr.start)));
+                if (!end->getType()->isIntegerTy(64)) end = integer_cast(end, llvm::Type::getInt64Ty(*context_), current_exprs_->expr_types.at(sema::get_expr_key(expr.end)));
                 auto *count = builder_.CreateSub(end, start);
 
                 if (operand_type.kind == sema::TypeKind::Array) {
@@ -4451,15 +4521,15 @@ namespace codegen {
                 auto *fn = builder_.GetInsertBlock()->getParent();
                 auto *merge_bb = llvm::BasicBlock::Create(*context_, "match.end", fn);
 
-                auto operand_type = current_module_->expr_types.at(sema::get_expr_key(expr.operand));
+                auto operand_type = current_exprs_->expr_types.at(sema::get_expr_key(expr.operand));
 
                 // Transparent error-value matching: substitute the wrapper's Ok/Failed type
                 // for the inner representation sema actually dispatched arms against, and
                 // pre-evaluate the unwrapped value once (every branch below reads it via
                 // emit_operand() rather than re-evaluating expr.operand as the wrapper type).
                 llvm::Value *unwrapped_operand_val = nullptr;
-                if (const auto it = current_module_->expr_error_match_unwrap.find(sema::get_expr_key(expr.operand));
-                    it != current_module_->expr_error_match_unwrap.end()) {
+                if (const auto it = current_exprs_->expr_error_match_unwrap.find(sema::get_expr_key(expr.operand));
+                    it != current_exprs_->expr_error_match_unwrap.end()) {
                     auto *wrapper_val = emit_expr(expr.operand);
                     unwrapped_operand_val = unwrap_failed_error_value(wrapper_val, it->second.wrapper_type, it->second.effective_type);
                     operand_type = it->second.effective_type;
@@ -4634,12 +4704,12 @@ namespace codegen {
                 auto *fn = builder_.GetInsertBlock()->getParent();
                 auto *after_bb = llvm::BasicBlock::Create(*context_, "switch.end", fn);
 
-                auto operand_type = current_module_->expr_types.at(sema::get_expr_key(stmt.operand));
+                auto operand_type = current_exprs_->expr_types.at(sema::get_expr_key(stmt.operand));
 
                 // Transparent error-value matching — see the identical comment in emit_match.
                 llvm::Value *unwrapped_operand_val = nullptr;
-                if (const auto it = current_module_->expr_error_match_unwrap.find(sema::get_expr_key(stmt.operand));
-                    it != current_module_->expr_error_match_unwrap.end()) {
+                if (const auto it = current_exprs_->expr_error_match_unwrap.find(sema::get_expr_key(stmt.operand));
+                    it != current_exprs_->expr_error_match_unwrap.end()) {
                     auto *wrapper_val = emit_expr(stmt.operand);
                     unwrapped_operand_val = unwrap_failed_error_value(wrapper_val, it->second.wrapper_type, it->second.effective_type);
                     operand_type = it->second.effective_type;
@@ -4814,7 +4884,7 @@ namespace codegen {
                 auto *else_bb = llvm::BasicBlock::Create(*context_, "ternary.else", fn);
                 auto *merge_bb = llvm::BasicBlock::Create(*context_, "ternary.end", fn);
 
-                auto *cond = coerce_to_bool(emit_expr(expr.condition), current_module_->expr_types.at(sema::get_expr_key(expr.condition)));
+                auto *cond = coerce_to_bool(emit_expr(expr.condition), current_exprs_->expr_types.at(sema::get_expr_key(expr.condition)));
                 builder_.CreateCondBr(cond, then_bb, else_bb);
 
                 builder_.SetInsertPoint(then_bb);
@@ -4842,8 +4912,8 @@ namespace codegen {
             // compile-time here, not necessarily the branch's own value). Otherwise this
             // behaves exactly like an ordinary runtime ternary (shared emit_ternary).
             auto emit_when_expr(const ast::WhenExpr &expr, const ast::Expr &self_expr, const sema::ResolvedType &result_type) -> llvm::Value * {
-                if (const auto it = current_module_->expr_when_selected.find(sema::get_expr_key(self_expr));
-                    it != current_module_->expr_when_selected.end()) {
+                if (const auto it = current_exprs_->expr_when_selected.find(sema::get_expr_key(self_expr));
+                    it != current_exprs_->expr_when_selected.end()) {
                     return emit_value_as(it->second ? expr.then_expr : expr.else_expr, result_type, *current_module_path_);
                 }
                 return emit_ternary(expr, result_type);
@@ -4952,7 +5022,7 @@ namespace codegen {
                         }
                     }
                 }
-                return size_of(*current_module_path_, current_module_->expr_types.at(sema::get_expr_key(expr.operand)));
+                return size_of(*current_module_path_, current_exprs_->expr_types.at(sema::get_expr_key(expr.operand)));
             }
 
             // Mirrors sizeof_operand() above exactly, substituting align_of() for size_of().
@@ -4982,7 +5052,7 @@ namespace codegen {
                         }
                     }
                 }
-                return align_of(*current_module_path_, current_module_->expr_types.at(sema::get_expr_key(expr.operand)));
+                return align_of(*current_module_path_, current_exprs_->expr_types.at(sema::get_expr_key(expr.operand)));
             }
 
             // Mirrors sizeof_operand() above, but never invents a new id - every id a program
@@ -5006,7 +5076,7 @@ namespace codegen {
                         }
                     }
                 }
-                return sema_program_.type_ids.at(current_module_->expr_types.at(sema::get_expr_key(expr.operand)));
+                return sema_program_.type_ids.at(current_exprs_->expr_types.at(sema::get_expr_key(expr.operand)));
             }
 
             // Sema has already validated the path (containment, existence) by the time codegen
@@ -5150,7 +5220,7 @@ namespace codegen {
                             return emit_import_bin(v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                             auto *value = llvm::cast<llvm::Constant>(emit_const_or_runtime(v->value, true));
-                            const auto from = current_module_->expr_types.at(sema::get_expr_key(v->value));
+                            const auto from = current_exprs_->expr_types.at(sema::get_expr_key(v->value));
                             return llvm::ConstantFoldCastInstruction(cast_opcode(from, ty), value, llvm_type(*current_module_path_, ty));
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
                             auto *operand = llvm::cast<llvm::Constant>(emit_const_or_runtime(v->operand, true));
@@ -5181,8 +5251,8 @@ namespace codegen {
                             // branches) to itself be constant for a WhenExpr to ever be
                             // considered a constant expression in the first place, so
                             // expr_when_selected is always populated here.
-                            if (const auto it = current_module_->expr_when_selected.find(sema::get_expr_key(expr));
-                                it != current_module_->expr_when_selected.end()) {
+                            if (const auto it = current_exprs_->expr_when_selected.find(sema::get_expr_key(expr));
+                                it != current_exprs_->expr_when_selected.end()) {
                                 return emit_const_or_runtime(it->second ? v->then_expr : v->else_expr, true);
                             }
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
@@ -5205,23 +5275,17 @@ namespace codegen {
                                         auto saved_args = macro_args_;
                                         auto outer = std::make_shared<const std::unordered_map<std::string, MacroArg>>(saved_args);
                                         for (size_t i = 0; i < macro->decl->params.size(); ++i) {
-                                            macro_args_[macro->decl->params[i].name] = MacroArg{.expr = &v->args[i], .module_path = current_module_path_, .module = current_module_, .param_type = &macro->params[i], .param_module = &target_module, .outer_args = outer};
+                                            macro_args_[macro->decl->params[i].name] = MacroArg{.expr = &v->args[i], .module_path = current_module_path_, .module = current_module_, .exprs = current_exprs_, .param_type = &macro->params[i], .param_module = &target_module, .outer_args = outer};
                                         }
-                                        const auto *saved_path = current_module_path_;
-                                        const auto *saved_module = current_module_;
                                         // See the identical fix in emit_call's macro-expansion
                                         // branch above for why a bare-import alias needs the
                                         // TRUE ORIGIN module here, not 'target_module'.
-                                        if (const auto origin = target.bare_import_origins.find(name); origin != target.bare_import_origins.end()) {
-                                            current_module_path_ = &origin->second.module_path;
-                                            current_module_ = &sema_program_.modules.at(origin->second.module_path);
-                                        } else {
-                                            current_module_path_ = &target_module;
-                                            current_module_ = &target;
-                                        }
+                                        const auto origin = target.bare_import_origins.find(name);
+                                        const bool via_origin = origin != target.bare_import_origins.end();
+                                        const ScopedEmitModule module_scope(
+                                            *this, via_origin ? origin->second.module_path : target_module,
+                                            via_origin ? sema_program_.modules.at(origin->second.module_path) : target);
                                         auto *value = emit_const_or_runtime(macro->decl->expr_template, true);
-                                        current_module_path_ = saved_path;
-                                        current_module_ = saved_module;
                                         macro_args_ = std::move(saved_args);
                                         return value;
                                     }
@@ -5265,10 +5329,8 @@ namespace codegen {
                                             agg = builder_.CreateInsertValue(agg, llvm::cast<llvm::Constant>(emit_const_or_runtime(sf.expr, true)), {ll_idx});
                                         }
 
-                                        const auto *saved_path = current_module_path_;
-                                        const auto *saved_module = current_module_;
-                                        current_module_path_ = &struct_module;
-                                        current_module_ = &module_for(struct_module);
+                                        const ScopedEmitModule module_scope(*this, struct_module);
+                                        use_struct_instance_exprs(ty.struct_index);
 
                                         for (size_t i = 0; i < info.fields.size(); ++i) {
                                             const auto &field = info.fields[i];
@@ -5277,8 +5339,6 @@ namespace codegen {
                                             agg = builder_.CreateInsertValue(agg, llvm::cast<llvm::Constant>(emit_const_or_runtime(*field.init_expr, true)), {ll_idx});
                                         }
 
-                                        current_module_path_ = saved_path;
-                                        current_module_ = saved_module;
                                         return llvm::cast<llvm::Constant>(agg);
                                     } else if constexpr (std::is_same_v<BVT, ast::BitsetExpr>) {
                                         return llvm::cast<llvm::Constant>(emit_bitset_expr_value(bv, ty));
@@ -5295,10 +5355,8 @@ namespace codegen {
                                             agg = builder_.CreateInsertValue(agg, llvm::cast<llvm::Constant>(emit_const_or_runtime(bv.values[i], true)), {ll_idx});
                                         }
 
-                                        const auto *saved_path = current_module_path_;
-                                        const auto *saved_module = current_module_;
-                                        current_module_path_ = &struct_module;
-                                        current_module_ = &module_for(struct_module);
+                                        const ScopedEmitModule module_scope(*this, struct_module);
+                                        use_struct_instance_exprs(ty.struct_index);
 
                                         for (size_t i = bv.values.size(); i < info.fields.size(); ++i) {
                                             const auto &field = info.fields[i];
@@ -5307,8 +5365,6 @@ namespace codegen {
                                             agg = builder_.CreateInsertValue(agg, llvm::cast<llvm::Constant>(emit_const_or_runtime(*field.init_expr, true)), {ll_idx});
                                         }
 
-                                        current_module_path_ = saved_path;
-                                        current_module_ = saved_module;
                                         return llvm::cast<llvm::Constant>(agg);
                                     } else { // ast::ArrayExpr
                                         const auto &array_info = sema_program_.arrays.at(ty.array_index);
@@ -5342,15 +5398,11 @@ namespace codegen {
                                 const auto sym_it = target.symbols.find(v->member);
                                 if (sym_it != target.symbols.end()) {
                                     if (const auto *g = std::get_if<sema::GlobalSymbol>(&sym_it->second); g && !g->is_mut && g->decl->init) {
+                                        // 'target_path' is declared before the guard so it
+                                        // outlives it — the guard stores its address.
                                         const std::string target_path = *target_module;
-                                        const auto *saved_path = current_module_path_;
-                                        const auto *saved_module = current_module_;
-                                        current_module_path_ = &target_path;
-                                        current_module_ = &target;
-                                        auto *value = emit_const_or_runtime(*g->decl->init, true);
-                                        current_module_path_ = saved_path;
-                                        current_module_ = saved_module;
-                                        return value;
+                                        const ScopedEmitModule module_scope(*this, target_path, target);
+                                        return emit_const_or_runtime(*g->decl->init, true);
                                     }
                                 }
                             }
@@ -5379,7 +5431,7 @@ namespace codegen {
             }
 
             auto const_binary(const ast::BinaryExpr &expr, llvm::Constant *lhs, llvm::Constant *rhs) const -> llvm::Constant * {
-                const auto lhs_type = current_module_->expr_types.at(sema::get_expr_key(expr.lhs));
+                const auto lhs_type = current_exprs_->expr_types.at(sema::get_expr_key(expr.lhs));
                 if (expr.op == ast::BinaryOp::In) {
                     // See the runtime emit_binary_expr 'In' case: single-member and subset
                     // membership both reduce to the same '(rhs & lhs) == lhs' formula.
@@ -5474,7 +5526,7 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, ast::VarDeclStmt>) {
                             const auto ty = v.type
                                                 ? *sema::resolve_declared_type(v.type, v.init, *current_module_path_, const_cast<sema::Program &>(sema_program_), diag_, v.location)
-                                                : current_module_->expr_types.at(sema::get_expr_key(*v.init));
+                                                : current_exprs_->expr_types.at(sema::get_expr_key(*v.init));
                             const auto type_module = v.type
                                                          ? type_module_for_ast_type(*v.type, *current_module_path_, ty)
                                                          : *current_module_path_;
@@ -5576,8 +5628,8 @@ namespace codegen {
             }
 
             void emit_when_stmt(const ast::WhenStmt &stmt) {
-                const auto it = current_module_->when_stmt_selected.find(&stmt);
-                const bool selected = it != current_module_->when_stmt_selected.end() && it->second;
+                const auto it = current_exprs_->when_stmt_selected.find(&stmt);
+                const bool selected = it != current_exprs_->when_stmt_selected.end() && it->second;
 
                 if (selected) {
                     emit_when_block(stmt.then_block);
@@ -5636,7 +5688,7 @@ namespace codegen {
             // input. The '$N' placeholders written into the asm string use that same
             // outputs-first-then-inputs numbering.
             void emit_asm_stmt(const ast::AsmStmt &stmt) {
-                const auto &info = current_module_->asm_stmt_info.at(&stmt);
+                const auto &info = current_exprs_->asm_stmt_info.at(&stmt);
 
                 enum class RenderKind : uint8_t { Literal, Output, Input };
                 struct RenderedOperand {
@@ -5773,7 +5825,7 @@ namespace codegen {
             // the fixed-register output contributes no argument — the first '&var' output
             // pointer is still argument index 0, exactly as in emit_asm_stmt.
             auto emit_asm_expr(const ast::AsmExpr &expr, const sema::ResolvedType &result_ty) -> llvm::Value * {
-                const auto &info = current_module_->asm_expr_info.at(&expr);
+                const auto &info = current_exprs_->asm_expr_info.at(&expr);
 
                 enum class RenderKind : uint8_t { Literal, Output, Input };
                 struct RenderedOperand {
@@ -5890,7 +5942,7 @@ namespace codegen {
                 auto *then_bb = llvm::BasicBlock::Create(*context_, "if.then", fn);
                 auto *else_bb = stmt.else_stmt ? llvm::BasicBlock::Create(*context_, "if.else", fn) : nullptr;
                 auto *end_bb = llvm::BasicBlock::Create(*context_, "if.end", fn);
-                auto *cond = coerce_to_bool(emit_expr(stmt.condition), current_module_->expr_types.at(sema::get_expr_key(stmt.condition)));
+                auto *cond = coerce_to_bool(emit_expr(stmt.condition), current_exprs_->expr_types.at(sema::get_expr_key(stmt.condition)));
                 builder_.CreateCondBr(cond, then_bb, else_bb ? else_bb : end_bb);
 
                 builder_.SetInsertPoint(then_bb);
@@ -5914,7 +5966,7 @@ namespace codegen {
                 builder_.CreateBr(cond_bb);
 
                 builder_.SetInsertPoint(cond_bb);
-                auto *cond = coerce_to_bool(emit_expr(stmt.condition), current_module_->expr_types.at(sema::get_expr_key(stmt.condition)));
+                auto *cond = coerce_to_bool(emit_expr(stmt.condition), current_exprs_->expr_types.at(sema::get_expr_key(stmt.condition)));
                 builder_.CreateCondBr(cond, body_bb, end_bb);
 
                 builder_.SetInsertPoint(body_bb);
@@ -5935,7 +5987,7 @@ namespace codegen {
 
                 if (const auto *rp = std::get_if<std::unique_ptr<ast::RangeExpr>>(&stmt.iterable)) {
                     const auto &range = **rp;
-                    const auto upper_sema_type = current_module_->expr_types.at(sema::get_expr_key(range.upper));
+                    const auto upper_sema_type = current_exprs_->expr_types.at(sema::get_expr_key(range.upper));
                     auto *int_ty = llvm_type_for(upper_sema_type, *current_module_path_);
 
                     auto *idx_slot = create_entry_alloca(current_function_, int_ty, "for.idx");
@@ -5989,7 +6041,7 @@ namespace codegen {
                     return;
                 }
 
-                const auto iterable_type = current_module_->expr_types.at(sema::get_expr_key(stmt.iterable));
+                const auto iterable_type = current_exprs_->expr_types.at(sema::get_expr_key(stmt.iterable));
                 const auto type_module = expr_type_module_hint(stmt.iterable);
                 const bool is_array = (iterable_type.kind == sema::TypeKind::Array);
 
@@ -6137,7 +6189,7 @@ namespace codegen {
             // propagated as-is, translating tags if the two unions differ, exactly like 'try'
             // propagation. Shared by emit_return_err and emit_return's trailing error slot.
             auto emit_error_return_operand(const ast::Expr &error_value, const sema::ResolvedType &target) -> llvm::Value * {
-                const auto operand_type = current_module_->expr_types.at(sema::get_expr_key(error_value));
+                const auto operand_type = current_exprs_->expr_types.at(sema::get_expr_key(error_value));
                 auto *operand_val = emit_expr(error_value);
 
                 if (operand_type.kind == sema::TypeKind::Union) {

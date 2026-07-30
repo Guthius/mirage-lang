@@ -1,0 +1,20 @@
+// example_generics_bound_not_a_trait/main.mir
+//
+// A bound must name a TRAIT. 'Point' is a struct, and accepting it would silently produce an
+// unconstrained parameter — the bound would look enforced while enforcing nothing.
+//
+// The check deliberately runs late (not in the declare phase): resolving a bound's name
+// during declare would force that type's layout before symbol tables are finished, which is
+// a known source of order-dependent resolution failures.
+//
+// Expected: rejected with "is bound by 'Point', which is not a trait".
+
+pub type Point = struct { x: i32 }
+
+pub fn oops[T: Point](v: *T) -> i32 {
+    return 0
+}
+
+pub fn main() -> i32 {
+    return 0
+}

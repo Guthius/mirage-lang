@@ -117,7 +117,65 @@ CASES = [
         "build",
         1,
         [],
-        ["declared type must be 'type' or a builtin scalar type"],
+        # A NAMED type in this position is now accepted on shape and then checked for
+        # trait-ness, so the message names the actual problem instead of restating the rule.
+        # Both the type decl's 'E' and the fn decl's 'F' are reported.
+        [
+            "generic parameter 'E' is bound by 'Color', which is not a trait",
+            "generic parameter 'F' is bound by 'Color', which is not a trait",
+        ],
+    ),
+    # --- Eager checking of generic declarations -------------------------------------
+    # A generic body is type-checked once at its declaration, with parameters bound to
+    # Opaque, so a mistake surfaces there rather than at the first (or no) instantiation.
+    (
+        "example_generics_eager_unknown_call",
+        "build",
+        1,
+        [],
+        ["unknown function 'nonexistent_helper'"],
+    ),
+    # The other half: an UNCONSTRAINED parameter must not be reported for anything that
+    # depends on it. Regression guard against the eager pass flagging correct code.
+    ("example_generics_eager_unbound_ok", "run", 7, [], []),
+    (
+        "example_generics_eager_impl_method",
+        "build",
+        1,
+        [],
+        ["unknown function 'missing_helper'"],
+    ),
+    # One generic at two distinct argument sets — per-instance expression records.
+    ("example_generics_two_instances", "run", 30, [], []),
+    # --- Trait bounds '[T: Hashable]' -----------------------------------------------
+    ("example_generics_bound_ok", "run", 42, [], []),
+    (
+        "example_generics_bound_method_missing",
+        "build",
+        1,
+        [],
+        ["no method 'size' on a generic parameter bound by 'Hashable'"],
+    ),
+    (
+        "example_generics_bound_arith_rejected",
+        "build",
+        1,
+        [],
+        ["cannot apply arithmetic to a generic parameter bound by 'Hashable'"],
+    ),
+    (
+        "example_generics_bound_not_impl",
+        "build",
+        1,
+        [],
+        ["'Plain' does not implement trait 'Hashable', required by generic parameter 'T'"],
+    ),
+    (
+        "example_generics_bound_not_a_trait",
+        "build",
+        1,
+        [],
+        ["is bound by 'Point', which is not a trait"],
     ),
     (
         "example_generics_missing_args",

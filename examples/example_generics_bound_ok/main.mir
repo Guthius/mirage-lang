@@ -1,0 +1,41 @@
+// example_generics_bound_ok/main.mir
+//
+// Trait bounds on a generic parameter: '[T: Hashable]'.
+//
+// A bound is the declaration's statement of what 'T' offers, which is what makes the body
+// checkable at the declaration instead of only at each use. Inside 'hash_twice', 'v.hash()'
+// resolves against Hashable's method set with real signatures — and would be rejected here
+// if Hashable had no such method (see example_generics_bound_method_missing).
+//
+// Dispatch stays static: each instantiation is monomorphized and calls the concrete impl
+// directly, so a bound costs nothing at runtime — unlike a 'Hashable' trait HANDLE, which
+// goes through a vtable.
+//
+// Expected: compiles and runs, exit code 42 (10*2 + 11*2).
+
+pub type Hashable = trait {
+    fn hash(self) -> i32
+}
+
+pub type Point = struct { x: i32  y: i32 }
+impl Hashable for Point {
+    fn hash(self) -> i32 { return self.x + self.y }
+}
+
+pub type Tag = struct { id: i32 }
+impl Hashable for Tag {
+    fn hash(self) -> i32 { return self.id }
+}
+
+// The bound's method is usable on 'v'; '==' stays available as part of the universal core
+// every bounded parameter keeps.
+pub fn hash_twice[T: Hashable](v: *T) -> i32 {
+    const h: i32 = v.hash()
+    return h + h
+}
+
+pub fn main() -> i32 {
+    mut p: Point = { .x = 4, .y = 6 }
+    mut t: Tag = { .id = 11 }
+    return hash_twice[Point](&p) + hash_twice[Tag](&t)
+}

@@ -334,6 +334,26 @@
     "action": "run",
     "exit": 30
   },
+  "example_generics_bound_arith_rejected": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_generics_bound_method_missing": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_generics_bound_not_a_trait": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_generics_bound_not_impl": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_generics_bound_ok": {
+    "action": "run",
+    "exit": 42
+  },
   "example_generics_const": {
     "action": "run",
     "exit": 12
@@ -349,6 +369,18 @@
   "example_generics_default_type_param": {
     "action": "run",
     "exit": 12
+  },
+  "example_generics_eager_impl_method": {
+    "action": "build",
+    "exit": 1
+  },
+  "example_generics_eager_unbound_ok": {
+    "action": "run",
+    "exit": 7
+  },
+  "example_generics_eager_unknown_call": {
+    "action": "build",
+    "exit": 1
   },
   "example_generics_fn_value_missing_args": {
     "action": "build",
@@ -397,6 +429,10 @@
   "example_generics_struct_field_default": {
     "action": "run",
     "exit": 12
+  },
+  "example_generics_two_instances": {
+    "action": "run",
+    "exit": 30
   },
   "example_impl": {
     "action": "run",
