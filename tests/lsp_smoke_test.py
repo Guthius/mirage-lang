@@ -781,6 +781,45 @@ def main() -> int:
     check("error" not in no_context and no_context["result"],
           "references without a 'context' field is tolerated")
 
+    # --- member completion on a trait handle and a bitset ---
+    #
+    # Both branches of add_type_members were added without end-to-end coverage: completion
+    # has its own cursor-classification step that hover and go-to-definition do not share,
+    # so being right by symmetry with a verified fix proved nothing about this path.
+    #
+    # A trait handle's methods live on the trait, not on any implementing type, so the
+    # generic method sweep never finds them. A bitset declares no members of its own, so
+    # its completions have to come from its member enum.
+    def sym_completion(anchor: str, substr: str) -> list:
+        l, c = sym_pos(anchor, substr)
+        resp = client.request("textDocument/completion", {
+            "textDocument": {"uri": sym_uri},
+            "position": {"line": l, "character": c},
+        })
+        return resp["result"] or []
+
+    # Cursor immediately after 'shape.' — i.e. at the start of the method name.
+    shape_items = sym_completion("return shape.area()", "area")
+    shape_labels = [it["label"] for it in shape_items]
+    check("area" in shape_labels and "perimeter" in shape_labels,
+          f"completion on a trait handle offers the trait's methods, got {shape_labels}")
+    check(any(it["label"] == "area" and it.get("detail") == "trait method" for it in shape_items),
+          f"trait-handle completions are labelled 'trait method', got {shape_items}")
+
+    # add_type_members' Bitset arm is, by contrast, NOT reachable from completion at all.
+    # It needs a receiver whose type is a bitset, and there is no such expression: a flag is
+    # only ever written contextually, as a bare '.Name' whose meaning comes from the expected
+    # type. That form has no receiver chain, so the handler takes the no-receiver path
+    # (keywords + locals + module symbols) and never consults a type.
+    #
+    # Pinned as the CURRENT behaviour rather than the desired one, so that implementing
+    # contextual '.' completion is a deliberate, visible change here rather than a silent
+    # one. See DEFERRED.md.
+    flag_items = sym_completion("{.Close, .Flush}", "Close")
+    flag_labels = [it["label"] for it in flag_items]
+    check("Close" not in flag_labels,
+          f"contextual '.flag' completion is not implemented (offers no bitset flags), got {flag_labels}")
+
     client.notify("textDocument/didClose", {"textDocument": {"uri": sym_uri}})
     client.read_with_timeout(5)
 

@@ -141,8 +141,17 @@ namespace lsp::handlers {
                 }
             } else if (type.kind == sema::TypeKind::Bitset) {
                 // A bitset's completions are its member enum's fields (LSPH-2): the bitset
-                // declares none of its own, so without this 'modes.<complete>' and the
-                // contextual '.<complete>' offered nothing at all.
+                // declares none of its own.
+                //
+                // NOTE: this arm is currently UNREACHABLE from handle_completion, and adding
+                // it did not change any observable behaviour. Getting here needs a receiver
+                // expression whose type is a bitset, and no such expression exists -- a flag
+                // is only ever written contextually, as a bare '.Name' taking its meaning
+                // from the expected type. That form has no receiver chain, so the handler
+                // takes the no-receiver path and never consults a type at all. Reaching this
+                // needs contextual '.' completion, which is a separate feature; kept because
+                // it is correct and is what that feature will call. Pinned as unimplemented
+                // in lsp_smoke_test.py so wiring it up is a visible change.
                 if (const auto *info = program.bitset_at(type.bitset_index)) {
                     if (const auto *member_enum = program.enum_at(info->member_enum_type.enum_index)) {
                         for (const auto &field : member_enum->fields) {
