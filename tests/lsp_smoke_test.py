@@ -619,6 +619,58 @@ def main() -> int:
     client.notify("textDocument/didClose", {"textDocument": {"uri": a_uri}})
     client.read_with_timeout(5)
 
+    # --- didClose keeps diagnostics a still-open closure is responsible for ---
+    #
+    # Clearing unconditionally is right for diagnostics derived from the closed BUFFER and
+    # wrong for the rest: b.mir has an on-disk error and sits in the same module directory
+    # as a.mir, so with a.mir still open it is still being analysed every round. Only its
+    # squiggles used to disappear, until some unrelated edit re-touched the closure.
+    client.notify("textDocument/didOpen", {
+        "textDocument": {"uri": a_uri, "languageId": "mirage", "version": 1, "text": a_path.read_text()},
+    })
+    for _ in range(2):
+        if client.read_with_timeout(5) is None:
+            break
+    client.notify("textDocument/didOpen", {
+        "textDocument": {"uri": b_uri, "languageId": "mirage", "version": 1, "text": b_path.read_text()},
+    })
+    for _ in range(2):
+        if client.read_with_timeout(5) is None:
+            break
+
+    # Close B while A -- in the same closure -- stays open.
+    client.notify("textDocument/didClose", {"textDocument": {"uri": b_uri}})
+    b_after_close = None
+    for _ in range(3):
+        msg = client.read_with_timeout(5)
+        if msg is None:
+            break
+        if msg["params"]["uri"] == b_uri:
+            b_after_close = msg["params"]["diagnostics"]
+            break
+    check(b_after_close is not None and len(b_after_close) >= 1,
+          f"closing a file still inside an open closure keeps its on-disk diagnostics, got {b_after_close}")
+
+    # With nothing else open, the same close clears -- the ordinary case, and what the spec
+    # asks for.
+    client.notify("textDocument/didClose", {"textDocument": {"uri": a_uri}})
+    client.read_with_timeout(5)
+    client.notify("textDocument/didOpen", {
+        "textDocument": {"uri": b_uri, "languageId": "mirage", "version": 1, "text": b_path.read_text()},
+    })
+    client.read_with_timeout(5)
+    client.notify("textDocument/didClose", {"textDocument": {"uri": b_uri}})
+    b_alone = None
+    for _ in range(3):
+        msg = client.read_with_timeout(5)
+        if msg is None:
+            break
+        if msg["params"]["uri"] == b_uri:
+            b_alone = msg["params"]["diagnostics"]
+            break
+    check(b_alone == [],
+          f"closing the last file covering an error still clears its diagnostics, got {b_alone}")
+
     # A malformed or empty notification must be ignored, not crash the server.
     client.notify("workspace/didChangeWatchedFiles", {"changes": []})
     client.notify("workspace/didChangeWatchedFiles", {"changes": [{"type": 2}]})

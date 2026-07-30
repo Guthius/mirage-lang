@@ -161,6 +161,26 @@ namespace lsp {
                 }
             }
 
+            // Diagnostics for `path` as still seen from the documents that remain open.
+            //
+            // Called after a didClose, to decide whether the closed file's squiggles should
+            // survive. Empty in the ordinary case -- no remaining open document's import
+            // closure includes it -- which reproduces the old unconditional clear exactly.
+            //
+            // The closed file is read from DISK by this analysis, its buffer having just been
+            // dropped, which is the point: what survives is precisely the on-disk errors, not
+            // anything derived from the editor's copy.
+            auto closure_diagnostics_for(const std::string &path) -> json {
+                for (const auto &open_path : documents.open_paths()) {
+                    auto &result = documents.ensure_analysed(open_path);
+                    auto grouped = handlers::group_diagnostics_by_file(result.diagnostics);
+                    if (const auto it = grouped.find(path); it != grouped.end() && !it->second.empty()) {
+                        return std::move(it->second);
+                    }
+                }
+                return json::array();
+            }
+
           private:
             // After analysing `path`, publishes diagnostics for every file the analysis
             // touched, plus always for `path` itself (even if empty, so fixing the last
@@ -470,25 +490,26 @@ namespace lsp {
                     }
                 }});
             } else if (method == "textDocument/didClose") {
-                // Publishes an empty diagnostics list directly rather than going through
-                // do_publish_diagnostics. Kept deliberately: the spec's guidance is that a
-                // server clears diagnostics it computed from an in-memory buffer once that
-                // buffer closes, and re-analysing a just-closed file to re-derive squiggles is
-                // work the editor did not ask for.
+                // The spec's guidance is that a server clears diagnostics it computed from an
+                // in-memory buffer once that buffer closes, and this used to do exactly that
+                // -- unconditionally.
                 //
-                // LSPCORE-7's concern is real though: a closed file that still has on-disk
-                // errors AND stays inside an open module's import closure loses its squiggles
-                // until an unrelated edit re-touches that closure. Fixing it properly means
-                // distinguishing "from the open buffer" from "from a file in the closure",
-                // which the current bookkeeping does not track. Recorded as follow-up rather
-                // than traded for a different wrong behavior.
+                // That is right for BUFFER-derived diagnostics and wrong for the rest
+                // (LSPCORE-7). A closed file that still has on-disk errors and stays inside an
+                // open module's import closure is still being analysed on every round; only
+                // its squiggles vanished, until some unrelated edit re-touched the closure.
+                //
+                // Rather than track the provenance of each published diagnostic, the two cases
+                // are separated by re-deriving from what is still open: whatever the remaining
+                // open documents' closures say about this file is what it keeps. Nothing open
+                // covers it -> empty, which is the old behaviour and the common case.
                 const auto uri = message["params"]["textDocument"]["uri"].get<std::string>();
                 auto path = canonical_path_of(uri);
                 queue.push(Task{nullptr, [&worker, &channel, path, uri]() {
                     worker.documents.close(path);
                     send_notification(channel, "textDocument/publishDiagnostics", {
                         {"uri", uri},
-                        {"diagnostics", json::array()},
+                        {"diagnostics", worker.closure_diagnostics_for(path)},
                     });
                 }});
             } else if (method == "textDocument/hover" || method == "textDocument/definition") {
