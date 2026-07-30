@@ -3323,11 +3323,13 @@ what `T` offers, so the same expressions are checked strictly against it (see
 
 Two consequences worth stating explicitly:
 
-- Inside a generic type's `impl` methods, `self` is a pointer to an unbound
-  parameter rather than an aggregate with known fields, so a misspelled
-  **field** there is caught at the first instantiation rather than at the
-  declaration. Everything not dependent on the receiver's layout is caught
-  eagerly.
+- Inside a generic type's `impl` methods, `self` is a real instantiation of
+  that type with its arguments left unbound, so the receiver's **fields keep
+  whatever types are already known**: given `capacity: usize` and
+  `hash: Hash_Fn[K]` returning `u64`, the expression `self.hash(k) & self.capacity`
+  is reported as a `u64`/`usize` mismatch at the declaration, and a misspelled
+  field is reported there too. Only the genuinely parameter-dependent parts
+  stay unchecked.
 - A generic reached only from another generic's body (`f[T]` calling `g[T]`)
   is not itself instantiated by this pass — `g`'s own declaration is where
   `g`'s body is checked. Its call is still checked for arity and arguments.

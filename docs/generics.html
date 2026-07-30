@@ -312,13 +312,17 @@
         trait bound to get them checked up front.
       </div>
       <p>
-        Two limits are worth knowing. Inside a generic type's <code>impl</code> methods,
-        <code>self</code> is a pointer to an unbound parameter rather than an aggregate with
-        known fields, so a misspelled <em>field</em> there is still caught at the first
-        instantiation. And a generic reached only from another generic's body
-        (<code>f[T]</code> calling <code>g[T]</code>) is not instantiated by this pass —
-        <code>g</code>'s own declaration is where <code>g</code>'s body is checked, though the
-        call is still checked for arity and arguments.
+        Inside a generic type's <code>impl</code> methods, <code>self</code> is a real
+        instantiation of that type with its arguments left unbound, so the receiver's fields
+        keep whatever types are already known. Given <code>capacity: usize</code> and a
+        <code>hash</code> returning <code>u64</code>, the expression
+        <code>self.hash(k) &amp; self.capacity</code> is reported as a type mismatch at the
+        declaration — and a misspelled field is reported there too. Only the genuinely
+        parameter-dependent parts stay unchecked. One thing this pass does not do: a generic
+        reached only from another generic's body (<code>f[T]</code> calling <code>g[T]</code>)
+        is not instantiated by it — <code>g</code>'s own declaration is where
+        <code>g</code>'s body is checked, though the call is still checked for arity and
+        arguments.
       </p>
       <p>
         <code>--no-eager-generic-check</code> disables the pass.

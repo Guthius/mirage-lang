@@ -1,0 +1,125 @@
+// example_generics_eager_container/main.mir
+//
+// The realistic shape that eager checking has to get right: a generic hash-map-like
+// container whose 'impl' methods do essentially everything through 'self'. None of these
+// methods is ever instantiated, so the eager pass is the only thing that sees them — and
+// every operation below routes through a value whose type is an unbound parameter.
+//
+// This exists because each of the following was a FALSE POSITIVE at some point, reported
+// against this (correct) code:
+//   - 'try self.maybe_grow()'                    -> "'try' can only be used on a function
+//                                                    that returns 'error(...)'"
+//   - 'cast(self.capacity - 1, u64)'             -> "illegal cast between these types"
+//   - 'self.slots[idx].state != .Empty'          -> "cannot resolve '.Empty' without an
+//                                                    expected enum or tagged union type"
+//   - '{ .state = .Occupied, ... }'              -> same, inside a braced initializer
+//   - 'self.count++'                             -> "++ / -- requires an integer operand"
+//   - 'cond ? first_tombstone : idx'             -> "ternary branches have different types"
+//
+// The rule they all violated: an operation on an UNCONSTRAINED generic parameter is only
+// knowable at instantiation, so the declaration-time check must accept it silently. Add a
+// trait bound if you want these checked up front instead.
+//
+// What IS caught here, and only because the receiver is a real (if unbound) instantiation
+// rather than a bare opaque value: a generic aggregate's fields are usually only partly
+// parameter-dependent, so 'capacity: usize' and 'hash: Hash_Fn[K]' (returning a concrete
+// 'u64') stay fully typed. That makes 'self.hash(key) & mask' checkable as 'u64 & usize' at
+// the DECLARATION — note both 'mask' bindings below cast to u64 for exactly that reason.
+// Drop either cast and this fixture fails, with no instantiation anywhere.
+//
+// Expected: compiles cleanly (exit 0). Every method here is dead code.
+
+pub type Alloc_Code = enum(i32) { OutOfMemory = 1 }
+
+pub type Eq_Fn[K: type] = fn(K, K) -> bool
+pub type Hash_Fn[K: type] = fn(K) -> u64
+
+type Slot_State = enum(u8) { Empty  Occupied  Tombstone }
+
+type Slot[K: type, V: type] = struct {
+    state: Slot_State = .Empty
+    key: K
+    value: V
+}
+
+pub type Hash_Map[K: type, V: type] = struct {
+    slots: *Slot[K, V] = nil
+    capacity: usize = 0
+    count: usize = 0
+    tombstone_count: usize = 0
+    hash: Hash_Fn[K]
+    eq: Eq_Fn[K]
+}
+
+fn default_eq[K: type](a: K, b: K) -> bool { return a == b }
+
+impl Hash_Map[K: type, V: type] {
+    fn maybe_grow(self) -> error(Alloc_Code) {
+        if self.capacity == 0 { return self.grow_to(16) }
+        if (self.count + self.tombstone_count + 1) * 4 > self.capacity * 3 {
+            return self.grow_to(self.capacity * 2)
+        }
+        return_ok
+    }
+
+    fn grow_to(self, new_capacity: usize) -> error(Alloc_Code) {
+        const new_mask := cast(new_capacity - 1, u64)
+        if self.capacity > 0 {
+            for i in ..self.capacity {
+                if self.slots[i].state == .Occupied {
+                    mut j := self.hash(self.slots[i].key) & new_mask
+                    while self.slots[j].state == .Occupied {
+                        j = (j + 1) & new_mask
+                    }
+                    self.slots[j] = self.slots[i]
+                }
+            }
+        }
+        self.capacity = new_capacity
+        self.tombstone_count = 0
+        return_ok
+    }
+
+    pub fn put(self, key: K, value: V) -> error(Alloc_Code) {
+        try self.maybe_grow()
+        const mask := cast(self.capacity - 1, u64)
+        mut idx := self.hash(key) & mask
+        mut first_tombstone := ~cast(0, u64)
+        while self.slots[idx].state != .Empty {
+            if self.slots[idx].state == .Occupied {
+                if self.eq(self.slots[idx].key, key) {
+                    self.slots[idx].value = value
+                    return_ok
+                }
+            } else {
+                first_tombstone = idx
+            }
+            idx = (idx + 1) & mask
+        }
+        const target := first_tombstone != ~cast(0, u64) ? first_tombstone : idx
+        if self.slots[target].state == .Tombstone { self.tombstone_count++ }
+        self.count++
+        self.slots[target] = { .state = .Occupied, .key = key, .value = value }
+        return_ok
+    }
+
+    pub fn get(self, key: K) -> (V, bool) {
+        const zero: V = default
+        if self.capacity == 0 { return default, false }
+        const mask := cast(self.capacity - 1, u64)
+        mut idx := self.hash(key) & mask
+        while self.slots[idx].state != .Empty {
+            if self.slots[idx].state == .Occupied && self.eq(self.slots[idx].key, key) {
+                return self.slots[idx].value, true
+            }
+            idx = (idx + 1) & mask
+        }
+        return default, false
+    }
+}
+
+pub fn make_hash_map[K: type, V: type](hash: Hash_Fn[K], eq := default_eq[K]) -> Hash_Map[K, V] {
+    return { .hash = hash, .eq = eq }
+}
+
+pub fn main() -> i32 { return 0 }

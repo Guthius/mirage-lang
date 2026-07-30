@@ -712,6 +712,13 @@ namespace codegen {
 
                 for (size_t i = 0; i < sema_program_.structs.size(); ++i) {
                     const auto &info = sema_program_.structs[i];
+                    // A template placeholder built purely so the eager pass could check a
+                    // generic type's impl methods (see is_opaque_template_instance). Its
+                    // parameter-dependent fields have no layout, and no emitted code can
+                    // reference it. The opaque named StructType was still created above, so
+                    // anything that incidentally looks up its lowering finds an empty body
+                    // rather than throwing.
+                    if (sema::is_opaque_template_instance(info.generic_instance, sema_program_)) continue;
                     const auto &path = info.module_path;
                     std::vector<llvm::Type *> elements;
                     uint32_t cursor = 0;

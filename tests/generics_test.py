@@ -145,6 +145,9 @@ CASES = [
         [],
         ["unknown function 'missing_helper'"],
     ),
+    # A realistic generic container whose impl methods route everything through 'self'.
+    # Every operation here was a false positive from the eager pass at some point.
+    ("example_generics_eager_container", "run", 0, [], []),
     # One generic at two distinct argument sets — per-instance expression records.
     ("example_generics_two_instances", "run", 30, [], []),
     # --- Trait bounds '[T: Hashable]' -----------------------------------------------

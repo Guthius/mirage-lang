@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class SourceManager;
@@ -48,5 +49,7 @@ class DiagnosticEngine {
 
     SourceManager &source_manager_;
     std::vector<Diagnostic> diagnostics_;
+    // (level, stage, location, message) tuples already emitted — see report().
+    std::unordered_set<std::string> reported_;
     size_t error_count_ = 0;
 };

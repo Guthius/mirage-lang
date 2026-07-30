@@ -1796,6 +1796,11 @@ namespace sema {
         }
     }
 
+    auto is_opaque_template_instance(const std::optional<GenericInstanceInfo> &generic_instance,
+                                      const Program &program) -> bool {
+        return generic_instance && args_contain_opaque(generic_instance->args, program);
+    }
+
     auto args_contain_opaque(const std::vector<GenericArgValue> &args, const Program &program) -> bool {
         return std::ranges::any_of(args, [&](const GenericArgValue &a) {
             // A VALUE parameter carries its opaqueness on the scalar type rather than the
@@ -1907,18 +1912,15 @@ namespace sema {
     auto instantiate_generic_type(Program &program, DiagnosticEngine &diag, const std::string &module_path,
                                    const std::string &decl_name, std::vector<GenericArgValue> args,
                                    const SourceLocation &use_loc) -> ResolvedType {
-        // 'List[T]' written inside a generic declaration names no concrete type. Unlike the
-        // function case — which still resolves a signature so the call can be arity-checked —
-        // there is nothing here worth building, and building it would be actively harmful:
-        // this function's normal path ALLOCATES a struct/enum/union/bitset slot, and codegen's
-        // declare_structs walks every slot unconditionally and asks for each field's LLVM
-        // type. A slot with an unbound parameter in it would reach that walk. Yield Opaque,
-        // which is permissive for field access, indexing and assignment — exactly what a
-        // not-yet-known aggregate needs while its declaration is being checked.
-        if (args_contain_opaque(args, program)) {
-            return ResolvedType{.kind = TypeKind::Opaque};
-        }
-
+        // NOTE: an instantiation whose arguments are still unbound ('Slot[K, V]' written
+        // inside a generic declaration) IS built here, as an ordinary slot — it is simply
+        // tagged as a template by is_opaque_template_instance and never emitted.
+        //
+        // Building it is what makes eager checking useful for containers. A generic struct's
+        // fields are usually only PARTLY dependent on its parameters — 'capacity: usize' and
+        // 'hash: Hash_Fn[K]' (returning a concrete 'u64') stay fully known even when K is
+        // not. Collapsing the whole aggregate to Opaque, as an earlier version did, threw all
+        // of that away and made every expression through 'self' unverifiable.
         const GenericInstanceKey key{.module_path = module_path, .decl_name = decl_name, .args = args};
 
         for (const auto &[k, ty] : program.generic_type_instance_lookup) {

@@ -3,6 +3,7 @@
 #include "source_manager.hpp"
 
 #include <algorithm>
+#include <format>
 #include <iostream>
 
 void DiagnosticEngine::report(const DiagnosticLevel level, const DiagnosticStage stage, const SourceLocation &location, std::string message) {
@@ -12,6 +13,17 @@ void DiagnosticEngine::report(const DiagnosticLevel level, const DiagnosticStage
     // noise as signal -- and the "too many errors emitted, stopping." line below would
     // otherwise be followed by more output, which reads as if it had not stopped.
     if (error_count_ >= MAX_ERRORS) {
+        return;
+    }
+
+    // Exact-duplicate suppression, keyed on (stage, location, text). One source line can be
+    // checked many times over: a generic body is checked once per instantiation AND once at
+    // its declaration by the eager pass, so a genuine mistake in it would otherwise be
+    // printed once per check. Nothing is lost — a repeat carries no information the first
+    // copy didn't, and distinct problems at one location differ in their message.
+    const auto key = std::format("{}|{}|{}:{}:{}|{}", static_cast<int>(level), static_cast<int>(stage),
+                                  location.filename, location.line, location.column, message);
+    if (!reported_.insert(key).second) {
         return;
     }
 

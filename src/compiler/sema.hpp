@@ -953,6 +953,14 @@ namespace sema {
     // simply yields Opaque. Defined in type_resolver.cpp.
     auto args_contain_opaque(const std::vector<GenericArgValue> &args, const Program &program) -> bool;
 
+    // Whether a struct/enum/union/bitset slot is a TEMPLATE placeholder — an instantiation
+    // whose arguments are still unbound, built only so the eager pass can check a generic
+    // type's impl methods against a receiver whose partly-concrete fields are visible
+    // ('capacity: usize' stays known even when 'K' is not). Such a slot has no layout worth
+    // emitting and must be skipped by every codegen declare loop. Defined in type_resolver.cpp.
+    auto is_opaque_template_instance(const std::optional<GenericInstanceInfo> &generic_instance,
+                                      const Program &program) -> bool;
+
     auto is_assignable(const ResolvedType &from, const ResolvedType &to) -> bool;
     // Like is_assignable, but also allows the additional expected-type-position-only
     // coercions available at an ordinary call/assignment site (array<->slice/pointer,

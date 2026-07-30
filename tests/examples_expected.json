@@ -370,6 +370,10 @@
     "action": "run",
     "exit": 12
   },
+  "example_generics_eager_container": {
+    "action": "run",
+    "exit": 0
+  },
   "example_generics_eager_impl_method": {
     "action": "build",
     "exit": 1
