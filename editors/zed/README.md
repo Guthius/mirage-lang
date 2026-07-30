@@ -57,6 +57,41 @@ entirely to just search `PATH` and inherit Zed's own shell environment.
 After pushing a grammar change there, bump `rev` to the new commit SHA here
 and reload the dev extension.
 
+The `.scm` files in `languages/mirage/` are **queries against that grammar**, not
+part of it. A query can only match node types the grammar already produces — it
+cannot introduce one. So any syntax change that needs a new node is a two-step
+job: land it upstream first, bump `rev`, then write the query here.
+
+### Known stale, in landing order
+
+Neither of these can be fixed from this repository.
+
+**`//` and `/* */` comments (landed 2026-07-27)** replaced the older `#` comment
+syntax. `highlights.scm` already asks for `(comment) @comment` and `config.toml`
+already declares the right delimiters for comment toggling, so nothing here needs
+to change — but both depend on the upstream grammar's comment rule recognising the
+new forms. If it still matches `#`, comments highlight wrongly in Zed while being
+correct in VS Code, whose grammar lives in this repo
+(`editors/vscode/syntaxes/mirage.tmLanguage.json`, pinned by
+`tests/editor_grammar_test.py`).
+
+**`?` on the last return type (landed 2026-07-30)** marks an ignorable error:
+
+```mirage
+fn alloc(size: usize) -> (anyptr, ?Allocator_Error)
+fn touch(size: usize) -> ?error(Alloc_Error)
+```
+
+The grammar needs an optional-marker node on its return-slot rule — the `?` is
+legal only on the **last** return type, so it belongs to that rule rather than
+being a free-floating token. Once it exists, add a query for it here.
+
+Until then `highlights.scm` scopes a bare `"?"` as `@operator`, which is the
+ternary's scope. That is the right fallback: the marker gets operator colouring
+rather than no colouring, and nothing is mis-scoped as a type. Do not try to
+special-case it in a query — without a distinct node there is nothing to match on
+that the ternary would not also match.
+
 ## Publishing
 
 To publish for real (not just as a local dev extension), follow Zed's
