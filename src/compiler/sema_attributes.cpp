@@ -373,8 +373,8 @@ namespace sema {
                     }
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
                     walk_expr_for_foreign_refs(v->operand, locals, module_path, program, on_foreign_ref);
-                    walk_expr_for_foreign_refs(v->start, locals, module_path, program, on_foreign_ref);
-                    walk_expr_for_foreign_refs(v->end, locals, module_path, program, on_foreign_ref);
+                    if (v->start) walk_expr_for_foreign_refs(*v->start, locals, module_path, program, on_foreign_ref);
+                    if (v->end) walk_expr_for_foreign_refs(*v->end, locals, module_path, program, on_foreign_ref);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) {
                     walk_expr_for_foreign_refs(v->operand, locals, module_path, program, on_foreign_ref);
                     for (const auto &arm : v->arms) {

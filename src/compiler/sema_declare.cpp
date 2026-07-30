@@ -539,8 +539,8 @@ namespace sema {
                         }
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
                         ensure_condition_modules_declared(v->operand, program, module_path, module, sema_program, diag);
-                        ensure_condition_modules_declared(v->start, program, module_path, module, sema_program, diag);
-                        ensure_condition_modules_declared(v->end, program, module_path, module, sema_program, diag);
+                        if (v->start) ensure_condition_modules_declared(*v->start, program, module_path, module, sema_program, diag);
+                        if (v->end) ensure_condition_modules_declared(*v->end, program, module_path, module, sema_program, diag);
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) {
                         ensure_condition_modules_declared(v->operand, program, module_path, module, sema_program, diag);
                         for (const auto &arm : v->arms) {

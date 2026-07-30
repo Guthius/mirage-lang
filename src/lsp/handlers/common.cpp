@@ -923,8 +923,10 @@ namespace lsp::handlers {
                     return nullptr;
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SliceExpr>>) {
                     if (const auto *r = find_expr_by_location(node->operand, target)) return r;
-                    if (const auto *r = find_expr_by_location(node->start, target)) return r;
-                    return find_expr_by_location(node->end, target);
+                    if (node->start) {
+                        if (const auto *r = find_expr_by_location(*node->start, target)) return r;
+                    }
+                    return node->end ? find_expr_by_location(*node->end, target) : nullptr;
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::MemberExpr>>) {
                     if (location_matches(node->location, target)) return &expr;
                     return find_expr_by_location(node->object, target);

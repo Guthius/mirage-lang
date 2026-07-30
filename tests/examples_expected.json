@@ -611,6 +611,10 @@
     "action": "run",
     "exit": 0
   },
+  "example_slice_open_bounds": {
+    "action": "run",
+    "exit": 0
+  },
   "example_slice_to_array": {
     "action": "run",
     "exit": 0

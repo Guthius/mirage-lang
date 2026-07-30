@@ -60,8 +60,8 @@ namespace lsp::handlers {
                     }
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SliceExpr>>) {
                     walk_expr(node->operand, visitor);
-                    walk_expr(node->start, visitor);
-                    walk_expr(node->end, visitor);
+                    if (node->start) walk_expr(*node->start, visitor);
+                    if (node->end) walk_expr(*node->end, visitor);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::MemberExpr>>) {
                     walk_expr(node->object, visitor);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::MatchExpr>>) {

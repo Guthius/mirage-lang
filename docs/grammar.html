@@ -416,7 +416,8 @@ postfix_op    ::= '(' [ arg { ',' arg } ] ')'                       <span class=
                | '.' IDENT '{.' field_init { ',' field_init } '}'  <span class="bnf-cm">-- qualified tagged variant</span>
                | '.' '*'                                            <span class="bnf-cm">-- dereference: 'p.*' reads/writes the pointee</span>
                | '[' expr ']'                                       <span class="bnf-cm">-- index</span>
-               | '[' expr '..' expr ']'                             <span class="bnf-cm">-- slice range</span>
+               | '[' [ expr ] '..' [ expr ] ']'                     <span class="bnf-cm">-- slice range; both bounds optional
+                                                                          (absent lower = 0, absent upper = length)</span>
                | '++'                                               <span class="bnf-cm">-- post-increment</span>
                | '--'                                               <span class="bnf-cm">-- post-decrement</span>
 

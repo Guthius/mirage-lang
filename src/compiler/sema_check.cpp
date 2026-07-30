@@ -3448,9 +3448,16 @@ namespace sema {
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
                     const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                    const auto start = check_expr(v->start, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                    const auto end = check_expr(v->end, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                    if (!start.is_integer() || !end.is_integer()) {
+                    // An omitted bound has nothing to check: 'start' defaults to 0 and 'end'
+                    // to the operand's length, both supplied by codegen.
+                    bool bounds_ok = true;
+                    if (v->start) {
+                        bounds_ok &= check_expr(*v->start, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type).is_integer();
+                    }
+                    if (v->end) {
+                        bounds_ok &= check_expr(*v->end, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type).is_integer();
+                    }
+                    if (!bounds_ok) {
                         error(diag, v->location, "slice bounds must be integer expressions");
                     }
                     if (operand.kind == TypeKind::Array) {

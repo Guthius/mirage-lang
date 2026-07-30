@@ -4745,13 +4745,30 @@ namespace codegen {
             auto emit_slice_expr(const ast::SliceExpr &expr, const sema::ResolvedType &result_type) -> llvm::Value * {
                 const auto operand_type = current_exprs_->expr_types.at(sema::get_expr_key(expr.operand));
                 const auto type_module = expr_type_module_hint(expr.operand);
-                auto *start = emit_expr(expr.start);
-                auto *end = emit_expr(expr.end);
-                if (!start->getType()->isIntegerTy(64)) start = integer_cast(start, llvm::Type::getInt64Ty(*context_), current_exprs_->expr_types.at(sema::get_expr_key(expr.start)));
-                if (!end->getType()->isIntegerTy(64)) end = integer_cast(end, llvm::Type::getInt64Ty(*context_), current_exprs_->expr_types.at(sema::get_expr_key(expr.end)));
-                auto *count = builder_.CreateSub(end, start);
+
+                // Both bounds are optional. An absent 'start' is 0; an absent 'end' is the
+                // operand's length, which is a constant for an array but has to be read out
+                // of the slice header at runtime for a slice.
+                const auto emit_bound = [&](const std::optional<ast::Expr> &bound) -> llvm::Value * {
+                    if (!bound) return nullptr;
+                    auto *value = emit_expr(*bound);
+                    if (!value->getType()->isIntegerTy(64)) {
+                        value = integer_cast(value, llvm::Type::getInt64Ty(*context_),
+                                             current_exprs_->expr_types.at(sema::get_expr_key(*bound)));
+                    }
+                    return value;
+                };
+
+                auto *start = emit_bound(expr.start);
+                auto *end = emit_bound(expr.end);
+                if (!start) start = builder_.getInt64(0);
 
                 if (operand_type.kind == sema::TypeKind::Array) {
+                    if (!end) {
+                        const auto *array_info = sema_program_.array_at(operand_type.array_index);
+                        end = builder_.getInt64(array_info ? array_info->count : 0);
+                    }
+                    auto *count = builder_.CreateSub(end, start);
                     auto base = emit_lvalue(expr.operand);
                     auto *ptr = builder_.CreateInBoundsGEP(llvm_type(type_module, operand_type), base.ptr, {builder_.getInt32(0), start});
                     return build_slice_value(ptr, count, result_type, type_module);
@@ -4759,6 +4776,8 @@ namespace codegen {
 
                 auto *slice = emit_expr(expr.operand);
                 auto *base = builder_.CreateExtractValue(slice, {0});
+                if (!end) end = builder_.CreateExtractValue(slice, {1});
+                auto *count = builder_.CreateSub(end, start);
                 const auto element = sema_program_.slices.at(operand_type.slice_index).element_type;
                 auto *ptr = builder_.CreateInBoundsGEP(llvm_type_for(element, type_module), base, start);
                 return build_slice_value(ptr, count, result_type, type_module);

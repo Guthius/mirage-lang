@@ -1,0 +1,69 @@
+// Open-ended slice bounds: 'arr[..n]', 'arr[n..]' and 'arr[..]'.
+//
+// An absent lower bound is 0 and an absent upper bound is the operand's length. The two
+// are compiled differently for the two operand kinds: an array's length is a constant
+// known to the type, while a slice's has to be read back out of its header at runtime.
+// Both are covered below, which is the point of the fixture -- the array case alone would
+// not exercise the extractvalue path.
+//
+// Returns 0, or the number of the first check that failed.
+pub fn main() -> i32 {
+    const arr: [6]i32 = { 10, 20, 30, 40, 50, 60 }
+
+    // --- array operand ---
+
+    const a_full := arr[..]
+    if len(a_full) != 6 { return 1 }
+    if a_full[0] != 10 || a_full[5] != 60 { return 2 }
+
+    const a_head := arr[..3]
+    if len(a_head) != 3 { return 3 }
+    if a_head[0] != 10 || a_head[2] != 30 { return 4 }
+
+    const a_tail := arr[4..]
+    if len(a_tail) != 2 { return 5 }
+    if a_tail[0] != 50 || a_tail[1] != 60 { return 6 }
+
+    // Both bounds present still behaves as it always did.
+    const a_mid := arr[2..4]
+    if len(a_mid) != 2 { return 7 }
+    if a_mid[0] != 30 || a_mid[1] != 40 { return 8 }
+
+    // Empty results at either end.
+    if len(arr[..0]) != 0 { return 9 }
+    if len(arr[6..]) != 0 { return 10 }
+
+    // --- slice operand: the omitted upper bound comes from the slice header ---
+
+    const s := arr[1..5]        // { 20, 30, 40, 50 }
+    if len(s) != 4 { return 11 }
+
+    const s_full := s[..]
+    if len(s_full) != 4 { return 12 }
+    if s_full[0] != 20 || s_full[3] != 50 { return 13 }
+
+    const s_tail := s[2..]
+    if len(s_tail) != 2 { return 14 }
+    if s_tail[0] != 40 || s_tail[1] != 50 { return 15 }
+
+    const s_head := s[..2]
+    if len(s_head) != 2 { return 16 }
+    if s_head[0] != 20 || s_head[1] != 30 { return 17 }
+
+    // Re-slicing an already open-ended slice keeps the length consistent.
+    const s_again := s_tail[..]
+    if len(s_again) != 2 { return 18 }
+    if s_again[1] != 50 { return 19 }
+
+    // --- runtime (non-constant) bounds ---
+
+    mut lo: usize = 2
+    mut hi: usize = 5
+
+    if len(arr[lo..]) != 4 { return 20 }
+    if len(arr[..hi]) != 5 { return 21 }
+    if arr[lo..][0] != 30 { return 22 }
+    if arr[..hi][4] != 50 { return 23 }
+
+    return 0
+}

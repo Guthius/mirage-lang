@@ -179,7 +179,7 @@ An array whose size is inferred from its initializer. Valid only as the declared
 []T
 ```
 
-A fat pointer: a (data pointer, length) pair. Slices do not own memory. A slice into an array or pointer is created with `cast(ptr, []T, length)` or via `expr[start..end]`. Length is read with `len(slice)`. Slices are 16 bytes on 64-bit targets.
+A fat pointer: a (data pointer, length) pair. Slices do not own memory. A slice into an array or pointer is created with `cast(ptr, []T, length)` or via `expr[start..end]`, whose bounds are both optional — `expr[..]` views the whole operand. Length is read with `len(slice)`. Slices are 16 bytes on 64-bit targets.
 
 ### Struct Types
 
@@ -642,7 +642,18 @@ module_name.symbol   // cross-module access
 ```mirage
 arr[i]            // array or slice index
 arr[start..end]   // slice expression (produces []T)
+arr[..end]        // from 0
+arr[start..]      // through the end of the operand
+arr[..]           // the whole operand, as a slice
 ```
+
+Both bounds are optional. An omitted lower bound is `0`; an omitted upper bound is the
+operand's length — a constant for an array, and the length word of the slice header for a
+slice. The result is always `[]T`, including for `arr[..]`, which is the idiomatic way to
+view an array as a slice.
+
+A slice expression is never ambiguous with generic instantiation (§22): a generic argument
+list cannot contain `..`.
 
 ### Function Call
 

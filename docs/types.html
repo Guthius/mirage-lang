@@ -198,8 +198,12 @@
 <span class="cmt">// Slice from array (implicit coercion)</span>
 <span class="kw">mut</span> <span class="var">s</span>: []<span class="ty">i32</span> = <span class="var">arr</span>
 
-<span class="cmt">// Slice sub-range</span>
-<span class="kw">const</span> <span class="var">sub</span> := <span class="var">arr</span>[<span class="num">1</span>..<span class="num">3</span>]     <span class="cmt">// elements [1] and [2]</span>
+<span class="cmt">// Slice sub-range. Both bounds are optional: an omitted lower bound is 0,</span>
+<span class="cmt">// an omitted upper bound is the operand's length.</span>
+<span class="kw">const</span> <span class="var">sub</span>  := <span class="var">arr</span>[<span class="num">1</span>..<span class="num">3</span>]    <span class="cmt">// elements [1] and [2]</span>
+<span class="kw">const</span> <span class="var">head</span> := <span class="var">arr</span>[..<span class="num">3</span>]     <span class="cmt">// elements [0] through [2]</span>
+<span class="kw">const</span> <span class="var">tail</span> := <span class="var">arr</span>[<span class="num">2</span>..]     <span class="cmt">// element [2] to the end</span>
+<span class="kw">const</span> <span class="var">all</span>  := <span class="var">arr</span>[..]      <span class="cmt">// the whole array, as a slice</span>
 
 <span class="cmt">// Slice from pointer + length</span>
 <span class="kw">const</span> <span class="var">ps</span> := <span class="kw">cast</span>(<span class="var">ptr</span>, []<span class="ty">u8</span>, <span class="num">64</span>)

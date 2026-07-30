@@ -1494,10 +1494,33 @@ namespace ast {
 
             parser.expect(TokenKind::LBracket, "'['");
 
+            // A leading '..' ('arr[..5]', 'arr[..]') has to be recognized before
+            // parse_generic_arg runs: it would otherwise reach parse_primary and fail with
+            // "expected expression, got '..'". No ambiguity to resolve first -- a generic
+            // argument list can never begin with '..'.
+            if (parser.match(TokenKind::DotDot)) {
+                std::optional<Expr> end;
+                if (!parser.check(TokenKind::RBracket)) {
+                    end = parse_expr(parser);
+                }
+                parser.expect(TokenKind::RBracket, "']'");
+
+                return make_expr(SliceExpr{
+                    .operand = std::move(operand),
+                    .start = std::nullopt,
+                    .end = std::move(end),
+                    .location = location,
+                });
+            }
+
             auto first_arg = parse_generic_arg(parser);
 
             if (auto *first_expr = std::get_if<Expr>(&first_arg.value); first_expr != nullptr && parser.match(TokenKind::DotDot)) {
-                auto end = parse_expr(parser);
+                // 'arr[2..]' ends here; anything else is an upper bound.
+                std::optional<Expr> end;
+                if (!parser.check(TokenKind::RBracket)) {
+                    end = parse_expr(parser);
+                }
                 parser.expect(TokenKind::RBracket, "']'");
 
                 return make_expr(SliceExpr{

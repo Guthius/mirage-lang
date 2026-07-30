@@ -576,18 +576,19 @@ namespace ast {
         SourceLocation location;
     };
 
-    // 'operand[start..end]'. Both bounds are required, deliberately unlike RangeExpr::lower
-    // (which is optional, so 'for x in ..upper' means "from 0"). So 'arr[..5]' does not parse
-    // even though the conceptually identical range form does.
+    // 'operand[start..end]'. Both bounds are optional: an absent 'start' means 0 and an
+    // absent 'end' means the operand's length, so 'arr[..5]', 'arr[2..]' and 'arr[..]' are
+    // all well-formed. This matches RangeExpr::lower, which has always been optional
+    // ('for x in ..upper' means "from 0").
     //
-    // This asymmetry is scope, not an oversight: making 'start' optional here is a language
-    // change needing spec.md, grammar.md and the docs site updated alongside the parser, not
-    // a parser fix. 'arr[..5]' currently fails with a plain "expected expression, got '..'",
-    // which is a clear diagnostic rather than a misparse. Recorded as follow-up work.
+    // Never ambiguous with IndexOrInstantiateExpr: generic argument lists cannot contain
+    // '..', so a '..' anywhere inside the brackets settles the production as soon as it is
+    // seen -- including in leading position, which is why the parser must peek for it
+    // before trying to parse a generic argument.
     struct SliceExpr {
         Expr operand;
-        Expr start;
-        Expr end;
+        std::optional<Expr> start;
+        std::optional<Expr> end;
         SourceLocation location;
     };
 
