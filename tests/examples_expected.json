@@ -8,10 +8,8 @@
     "exit": 0
   },
   "dictionary": {
-    "action": "emit-ir",
-    "diag": "examples/dictionary/main.mir:7:15: error: expected '=', got '('",
-    "exit": 1,
-    "known_broken": "pre-existing on master: main.mir:7 uses the pre-'[]' paren-generics syntax 'type entry(K: type, V: type)', replaced by 'type entry[K: type, V: type]' when generics landed 2026-07-29"
+    "action": "run",
+    "exit": 0
   },
   "example_any_bad_cast": {
     "action": "build",

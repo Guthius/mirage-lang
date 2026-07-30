@@ -1,73 +1,179 @@
-// NOTE: Draft Design for Generics - Not Implemented Yet!!
+// A separate-chaining hash table over a generic key/value pair.
+//
+// The counterpart to example_generics_eager_container, which is open-addressing and never
+// instantiated. This one IS instantiated and allocates through examples/mem, so it covers a
+// generic aggregate reaching codegen: 'dictionary[i32, i32]' holds a '*entry[i32, i32]'
+// arena, which is a generic instantiation referenced from another generic instantiation.
+//
+// Chains are threaded by INDEX rather than by a 'next: *entry[K, V]' pointer. That is a
+// deliberate workaround, not a design preference: a generic type cannot currently refer to
+// its own instantiation even through a pointer -- 'type node[T: type] = struct { next:
+// *node[T] }' is rejected with "generic type instantiation cycle detected". The same shape
+// is fine for a non-generic type (see block_header in examples/mem). Indices are also the
+// reason 0 means "end of chain": entry slots are numbered from 1 so that a zeroed
+// 'dictionary' is already a valid empty one.
 
 const mem := import("../mem")
 
 const table_size: usize = 101
+const max_entries: i32 = 64
 
-pub type entry(K: type, V: type) = struct {
+pub type entry[K: type, V: type] = struct {
     key: K
     value: V
-    next: *entry(K, V)
+    next: i32 = 0
 }
 
-pub type dictionary(K: type, V: type) = struct {
-    buckets: *[table_size]entry(K, V)
+pub type dictionary[K: type, V: type] = struct {
+    buckets: [table_size]i32
+    entries: *entry[K, V] = nil
+    count: i32 = 0
 }
 
-fn hash(mut k: anyptr, count: usize) -> u32 {
-    const end := k + count
+// djb2 over the key's raw bytes. Keys are compared with '==' rather than byte-wise, which
+// agrees for the plain-data keys this is meant for and is what lets K stay unconstrained.
+fn hash(key: anyptr, count: usize) -> usize {
+    mut p := cast(key, *byte)
+    const end := p + count
 
-    mut hash: u32 = 5381
-    while cur < end {
-        hash = ((hash << 5) + hash) + k++.*
+    mut h: usize = 5381
+    while p < end {
+        h = ((h << 5) + h) + cast(p++.*, usize)
     }
 
-    return hash % table_size
+    return h % table_size
 }
 
-impl dictionary(K: type, V: type) {
-    pub fn put(self, key: K, value: V) {
-        const index := hash(&key, size_of(K))
-        mut cur := self.buckets[index]
-        while cur {
-            if mem.compare(&cur.key, &key, size_of(K)) == 0 {
-                cur.value = value
-                return
+impl dictionary[K: type, V: type] {
+    // false if the arena could not be allocated or is full.
+    pub fn put(self, key: K, value: V) -> bool {
+        if !self.entries {
+            self.entries = mem.malloc(size_of(entry[K, V]) * cast(max_entries, usize))
+            if !self.entries {
+                return false
             }
-            cur = cur.next
         }
-        mut new_entry: *entry(K, V) = mem.alloc(size_of(entry(K, V)))
-        new_entry.key = key
-        new_entry.value = value
-        new_entry.next = self.buckets[index]
-        self.buckets[index] = new_entry
-    }
 
-    pub fn try_get(self, key: K, mut *value: V) -> bool {
         const index := hash(&key, size_of(K))
-        mut cur := self.buckets[index]
-        while cur {
-            if mem.compare(&cur.key, &key, size_of(K)) == 0 {
-                value.* = cur.value
+
+        mut i := self.buckets[index]
+        while i != 0 {
+            if self.entries[i - 1].key == key {
+                self.entries[i - 1].value = value
                 return true
             }
-            cur = cur.next
+            i = self.entries[i - 1].next
         }
+
+        if self.count >= max_entries {
+            return false
+        }
+
+        self.entries[self.count].key = key
+        self.entries[self.count].value = value
+        self.entries[self.count].next = self.buckets[index]
+        self.count++
+        self.buckets[index] = self.count
+        return true
+    }
+
+    pub fn try_get(self, key: K, value: *V) -> bool {
+        const index := hash(&key, size_of(K))
+
+        mut i := self.buckets[index]
+        while i != 0 {
+            if self.entries[i - 1].key == key {
+                value.* = self.entries[i - 1].value
+                return true
+            }
+            i = self.entries[i - 1].next
+        }
+
         return false
     }
 
+    // Unlinks the entry from its chain. The arena slot is not reclaimed -- there is no free
+    // list, so a removed slot stays allocated until the whole dictionary is released.
     pub fn remove(self, key: K) -> bool {
         const index := hash(&key, size_of(K))
-        mut cur := &self.buckets[index]
-        while cur.* != nil {
-             const temp := cur.*
-            if mem.compare(&temp.key, &key, size_of(K)) == 0 {
-               cur.* = temp.next
-               mem.free(temp)
-               return true
+
+        mut i := self.buckets[index]
+        mut prev: i32 = 0
+        while i != 0 {
+            if self.entries[i - 1].key == key {
+                if prev == 0 {
+                    self.buckets[index] = self.entries[i - 1].next
+                } else {
+                    self.entries[prev - 1].next = self.entries[i - 1].next
+                }
+                return true
             }
-            cur = &temp.next
+            prev = i
+            i = self.entries[i - 1].next
         }
+
         return false
     }
+
+    pub fn release(self) {
+        if self.entries {
+            mem.free(self.entries)
+            self.entries = nil
+            self.count = 0
+        }
+    }
+}
+
+// Returns 0 when every check holds, otherwise the number of the first one that failed.
+// An exit status is a single byte, so a fixture must not pin a wide computed total: the
+// obvious "sum everything up" version of this returned 11242, which the shell reports as
+// 234 and which says nothing about which step broke.
+pub fn main() -> i32 {
+    mut d: dictionary[i32, i32] = default
+    mut got: i32 = 0
+
+    // 3, 104 and 205 all hash to bucket 62. Each insert goes to the front, so the chain
+    // ends up 205 -> 104 -> 3, which is what lets the removals below cover the head, the
+    // middle and the tail separately.
+    if !d.put(3, 30) { return 1 }
+    if !d.put(104, 40) { return 2 }
+    if !d.put(205, 50) { return 3 }
+    if !d.put(7, 70) { return 4 }
+
+    if !d.try_get(3, &got) || got != 30 { return 5 }
+    if !d.try_get(104, &got) || got != 40 { return 6 }
+    if !d.try_get(205, &got) || got != 50 { return 7 }
+    if !d.try_get(7, &got) || got != 70 { return 8 }
+
+    // An existing key is overwritten, not inserted twice.
+    if !d.put(3, 1) { return 9 }
+    if !d.try_get(3, &got) || got != 1 { return 10 }
+    if d.count != 4 { return 11 }
+
+    // Middle of the chain: 205 -> [104] -> 3. Relinks through the predecessor.
+    if !d.remove(104) { return 12 }
+    if d.try_get(104, &got) { return 13 }
+    if !d.try_get(205, &got) || got != 50 { return 14 }
+    if !d.try_get(3, &got) || got != 1 { return 15 }
+
+    // Head of the chain: [205] -> 3. Rewrites the bucket itself.
+    if !d.remove(205) { return 16 }
+    if d.try_get(205, &got) { return 17 }
+    if !d.try_get(3, &got) || got != 1 { return 18 }
+
+    // Last remaining link in the bucket.
+    if !d.remove(3) { return 19 }
+    if d.try_get(3, &got) { return 20 }
+
+    // Other buckets are untouched by all of that.
+    if !d.try_get(7, &got) || got != 70 { return 21 }
+
+    // A key that was never inserted.
+    if d.remove(999) { return 22 }
+    if d.try_get(999, &got) { return 23 }
+
+    d.release()
+    if d.entries != nil { return 24 }
+
+    return 0
 }
