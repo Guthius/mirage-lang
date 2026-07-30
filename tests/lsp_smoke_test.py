@@ -129,7 +129,14 @@ def main() -> int:
     client = Client(LSP_BINARY)
 
     # --- initialize: capability scope boundary ---
-    init = client.request("initialize", {"processId": None, "rootUri": None, "capabilities": {}})
+    # Declares dynamicRegistration so the server registers its '**/*.mir' watcher below.
+    # Without it the server skips registration entirely and never receives
+    # didChangeWatchedFiles, which is the degraded-but-working path for simpler clients.
+    init = client.request("initialize", {
+        "processId": None,
+        "rootUri": None,
+        "capabilities": {"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": True}}},
+    })
     caps = init["result"]["capabilities"]
     check(caps.get("hoverProvider") is True, "initialize advertises hoverProvider")
     check(caps.get("definitionProvider") is True, "initialize advertises definitionProvider")
@@ -138,6 +145,20 @@ def main() -> int:
     check(caps.get("referencesProvider") is True, "initialize advertises referencesProvider")
     check("renameProvider" not in caps, "initialize does NOT advertise renameProvider")
     client.notify("initialized", {})
+
+    # The server's one outbound request: a file watcher, registered after 'initialized'
+    # because that is the point the client is ready to receive server-initiated requests.
+    registration = client.read_with_timeout(5)
+    check(registration is not None and registration.get("method") == "client/registerCapability",
+          f"server registers a file watcher after 'initialized', got {registration}")
+    if registration and registration.get("method") == "client/registerCapability":
+        regs = registration["params"]["registrations"]
+        check(any(r["method"] == "workspace/didChangeWatchedFiles" for r in regs),
+              f"the registration is for didChangeWatchedFiles, got {regs}")
+        check(any("**/*.mir" in json.dumps(r.get("registerOptions", {})) for r in regs),
+              f"the watcher matches '.mir' files, got {regs}")
+        # Answer it, as a real client would.
+        client.send({"jsonrpc": "2.0", "id": registration["id"], "result": None})
 
     # --- diagnostics on the error fixture ---
     error_main = FIXTURES / "error_fixture" / "main.mir"
@@ -554,6 +575,57 @@ def main() -> int:
 
     client.notify("textDocument/didClose", {"textDocument": {"uri": a_uri}})
     client.read_with_timeout(5)
+
+    # --- didChangeWatchedFiles: an external change alone must refresh analysis ---
+    #
+    # The block above needed an unrelated EDIT to A before the server noticed B's on-disk
+    # fix. That is the bug: cached analysis was invalidated only by editor notifications, so
+    # a dependency changed by a git pull kept stale diagnostics indefinitely, bounded only
+    # by the unrelated MAX_CACHED_MODULES LRU. Here nothing is edited - only the watched-file
+    # notification arrives.
+    original_b_text = b_path.read_text()
+    try:
+        client.notify("textDocument/didOpen", {
+            "textDocument": {"uri": a_uri, "languageId": "mirage", "version": 1, "text": a_path.read_text()},
+        })
+        watched_initial = {}
+        for _ in range(2):
+            msg = client.read_with_timeout(5)
+            if msg is None:
+                break
+            watched_initial[msg["params"]["uri"]] = msg["params"]["diagnostics"]
+        check(len(watched_initial.get(b_uri, [])) >= 1,
+              f"b.mir starts with a real diagnostic again, got {watched_initial}")
+
+        b_path.write_text("pub fn bar() {\n    mut x: u32 = 0\n}\n")
+
+        # No didOpen, no didChange - just the notification a file watcher would send.
+        client.notify("workspace/didChangeWatchedFiles", {
+            "changes": [{"uri": b_uri, "type": 2}],  # 2 = Changed
+        })
+
+        cleared_externally = False
+        for _ in range(4):
+            msg = client.read_with_timeout(5)
+            if msg is None:
+                break
+            if msg["params"]["uri"] == b_uri and msg["params"]["diagnostics"] == []:
+                cleared_externally = True
+        check(cleared_externally,
+              "an external change to B clears B's diagnostics with no editor edit")
+    finally:
+        b_path.write_text(original_b_text)
+
+    client.notify("textDocument/didClose", {"textDocument": {"uri": a_uri}})
+    client.read_with_timeout(5)
+
+    # A malformed or empty notification must be ignored, not crash the server.
+    client.notify("workspace/didChangeWatchedFiles", {"changes": []})
+    client.notify("workspace/didChangeWatchedFiles", {"changes": [{"type": 2}]})
+    client.notify("workspace/didChangeWatchedFiles", {})
+    still_alive = client.request("initialize", {"processId": None, "rootUri": None, "capabilities": {}})
+    check("result" in still_alive or "error" in still_alive,
+          "server survives malformed didChangeWatchedFiles notifications")
 
     # --- Find All References ---
     #

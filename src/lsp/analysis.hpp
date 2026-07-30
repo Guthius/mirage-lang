@@ -92,6 +92,17 @@ namespace lsp::analysis {
         auto files_that_became_clean(const std::set<std::string> &closure_dirs,
                                       const std::set<std::string> &current_nonempty_files) -> std::vector<std::string>;
 
+        // Drops any cached analysis covering `canonical_path` after a change made OUTSIDE
+        // the editor (a git pull, a generated file, a checkout). Distinct from open/update/
+        // close in that it touches no buffer text: there may be no buffer at all, and if
+        // there is one it is still authoritative for its own file -- only the on-disk
+        // dependencies around it went stale.
+        void invalidate_external(const std::string &canonical_path);
+
+        // The directories whose cached analysis covers any currently-open file. Used to
+        // decide which open documents need re-publishing after an external change.
+        [[nodiscard]] auto open_paths() const -> std::vector<std::string>;
+
       private:
         void invalidate(const std::string &canonical_path);
 

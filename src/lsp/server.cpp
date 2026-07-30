@@ -69,6 +69,14 @@ namespace lsp {
             send(out, {{"method", std::move(method)}, {"params", std::move(params)}});
         }
 
+        // A request FROM the server. The client's response carries no "method", and the
+        // dispatch loop already skips those, so the reply is harmlessly ignored -- which is
+        // fine for the one request this server makes (registering a file watcher): there is
+        // nothing to do on success, and nothing useful to do on failure either.
+        void send_request(transport::OutputChannel &out, const json &id, std::string method, json params) {
+            send(out, {{"id", id}, {"method", std::move(method)}, {"params", std::move(params)}});
+        }
+
         // Derives the canonical filesystem path this analysis pipeline keys
         // everything by, from a client-supplied "file://..." URI.
         // Returns "" for a URI this server cannot handle, rather than feeding an empty path
@@ -272,6 +280,8 @@ namespace lsp {
 
         auto state = LifecycleState::Uninitialized;
         bool shutdown_received = false;
+        // Set from the client's initialize capabilities; consulted on 'initialized'.
+        bool supports_watch_registration = false;
         std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> in_flight_;
 
         while (true) {
@@ -299,8 +309,10 @@ namespace lsp {
             std::cerr << "mirage-lsp: <- " << (method.empty() ? "(response)" : method) << "\n";
 
             if (method.empty()) {
-                // A message with no "method" is a response to a request we
-                // sent (we don't send any requests yet), not something to dispatch.
+                // A message with no "method" is a response to a request WE sent, not
+                // something to dispatch. The only such request is the file-watcher
+                // registration on 'initialized', and there is nothing to do with its reply
+                // either way, so dropping it is the whole handling.
                 continue;
             }
 
@@ -339,6 +351,17 @@ namespace lsp {
 
             if (method == "initialize") {
                 state = LifecycleState::Running;
+                // Whether the client will accept a watcher registered at runtime. Read
+                // defensively: every level is optional, and nlohmann's operator[] would
+                // auto-vivify a missing key rather than report it.
+                if (const auto &params = message["params"]; params.is_object()) {
+                    const auto &client_caps = params.contains("capabilities") ? params["capabilities"] : json::object();
+                    const auto &workspace = client_caps.is_object() && client_caps.contains("workspace")
+                        ? client_caps["workspace"] : json::object();
+                    const auto &watched = workspace.is_object() && workspace.contains("didChangeWatchedFiles")
+                        ? workspace["didChangeWatchedFiles"] : json::object();
+                    supports_watch_registration = watched.is_object() && watched.value("dynamicRegistration", false);
+                }
                 const json capabilities = {
                     {"textDocumentSync", {{"openClose", true}, {"change", 1}}},
                     {"hoverProvider", true},
@@ -352,6 +375,28 @@ namespace lsp {
                 send_response(channel, message["id"], {{"capabilities", capabilities}});
             } else if (method == "initialized") {
                 std::cerr << "mirage-lsp: client finished initializing\n";
+                // Ask to be told about '.mir' files changed outside the editor. Registering
+                // here rather than in the initialize response is what the spec requires:
+                // the client is only ready to receive server-initiated requests once it has
+                // sent 'initialized'.
+                //
+                // A client without dynamicRegistration simply never sends
+                // didChangeWatchedFiles, and analysis stays editor-driven as before. That is
+                // a degradation, not a failure, so it is not worth an error.
+                if (supports_watch_registration) {
+                    send_request(channel, "mirage-watch-registration", "client/registerCapability", {
+                        {"registrations", json::array({
+                            {
+                                {"id", "mirage-watched-files"},
+                                {"method", "workspace/didChangeWatchedFiles"},
+                                {"registerOptions", {{"watchers", json::array({{{"globPattern", "**/*.mir"}}})}}},
+                            },
+                        })},
+                    });
+                } else {
+                    std::cerr << "mirage-lsp: client does not support dynamic file-watcher "
+                                 "registration; external changes will not invalidate analysis\n";
+                }
             } else if (method == "shutdown") {
                 shutdown_received = true;
                 send_response(channel, message["id"], nullptr);
@@ -391,6 +436,38 @@ namespace lsp {
                 queue.push(Task{nullptr, [&worker, path, text = std::move(text)]() mutable {
                     worker.documents.update(path, std::move(text));
                     worker.schedule_diagnostics(path);
+                }});
+            } else if (method == "workspace/didChangeWatchedFiles") {
+                // Files changed outside the editor: a git pull, a checkout, a generated file.
+                // Without this the cached analysis is only ever invalidated by editor
+                // notifications, so an edited dependency left stale diagnostics and hover
+                // indefinitely -- bounded only by the unrelated MAX_CACHED_MODULES LRU.
+                const auto &changes = message["params"]["changes"];
+                if (!changes.is_array() || changes.empty()) {
+                    continue;
+                }
+
+                std::vector<std::string> changed;
+                for (const auto &change : changes) {
+                    if (!change.contains("uri")) continue;
+                    changed.push_back(canonical_path_of(change["uri"].get<std::string>()));
+                }
+                if (changed.empty()) {
+                    continue;
+                }
+
+                queue.push(Task{nullptr, [&worker, changed = std::move(changed)] {
+                    for (const auto &path : changed) {
+                        worker.documents.invalidate_external(path);
+                    }
+                    // Re-publish for every open document. Only the bundles covering a changed
+                    // file were dropped, so an unaffected document just re-reads its cached
+                    // analysis; and an open file's own diagnostics can move because of a
+                    // change to a file it imports, which is the whole point. Debounced rather
+                    // than immediate, since a branch switch arrives as a burst.
+                    for (const auto &path : worker.documents.open_paths()) {
+                        worker.schedule_diagnostics(path);
+                    }
                 }});
             } else if (method == "textDocument/didClose") {
                 // Publishes an empty diagnostics list directly rather than going through

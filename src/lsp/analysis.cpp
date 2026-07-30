@@ -64,6 +64,22 @@ namespace lsp::analysis {
         evict_unreferenced_bundles();
     }
 
+    void DocumentStore::invalidate_external(const std::string &canonical_path) {
+        // Deliberately does not touch open_texts_. An externally changed file may have no
+        // buffer at all; and where it does, the buffer is still what the editor believes the
+        // file to be, so overwriting or dropping it here would fight the client. Only the
+        // cached ANALYSIS is stale, and invalidate() already evicts by module directory,
+        // which is exactly the granularity a dependency change needs.
+        invalidate(canonical_path);
+    }
+
+    auto DocumentStore::open_paths() const -> std::vector<std::string> {
+        std::vector<std::string> paths;
+        paths.reserve(open_texts_.size());
+        for (const auto &path : open_texts_ | std::views::keys) paths.push_back(path);
+        return paths;
+    }
+
     auto DocumentStore::text_of(const std::string &canonical_path) const -> const std::string * {
         const auto it = open_texts_.find(canonical_path);
         return it == open_texts_.end() ? nullptr : &it->second;
