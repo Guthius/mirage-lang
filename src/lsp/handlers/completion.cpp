@@ -260,12 +260,18 @@ namespace lsp::handlers {
         }
     }
 
-    // LSPH-9: there is no completion inside an explicit generic-instantiation argument list
-    // ('List[<cursor>]' offering type names). Deliberately not implemented -- it needs the
-    // cursor classifier below to recognize a '[' context and distinguish it from indexing,
-    // which is a different problem from the member-access and bare-identifier completion this
-    // file is built around. The finding itself rates it the lowest-value item in the review;
-    // recorded as follow-up.
+    // Three completion contexts, decided from the token stream alone (there is no parse --
+    // the buffer is usually mid-edit and often unparseable):
+    //
+    //   'receiver.<cursor>'    member access, via chain_prefix + add_type_members
+    //   'Generic[<cursor>]'    type arguments, via enclosing_bracket_owner + add_type_names
+    //   anything else          keywords, locals/params, module symbols
+    //
+    // Still missing: the contextual '.<cursor>' form, where a bare '.Name' takes its meaning
+    // from the expected type (an enum field, a tagged-union variant, a bitset flag). It has
+    // no receiver, so it lands in the third case and is offered value completions. Reaching
+    // add_type_members' Enum/Bitset arms from there needs the expected type at the cursor,
+    // which nothing here currently computes.
     auto handle_completion(analysis::ProgramResult &result, const std::string &module_path,
                             const std::string &path, const size_t line, const size_t column) -> json {
         DiagnosticEngine throwaway_diag(*result.source_manager);

@@ -146,10 +146,10 @@ def run_action(directory: Path, action: str, extra_args: list[str], timeout: int
 def first_diagnostic(stderr: str) -> str | None:
     """The first 'error:' line from stderr, made machine-independent.
 
-    The line:col is deliberately kept. Several findings in REVIEW_FINDINGS.md move a
-    diagnostic's underline (PARSE-1 moves it onto the operator token for 8 operators),
-    and the whole point of pinning this text is that such a move shows up as a
-    reviewable diff instead of passing silently.
+    The line:col is deliberately kept. Changes that move a diagnostic's underline are
+    common (operator diagnostics moved onto the operator token; bitset flag errors moved
+    from the whole literal onto the offending flag), and the whole point of pinning this
+    text is that such a move shows up as a reviewable diff instead of passing silently.
     """
     prefix = f"{REPO_ROOT}/"
     for line in stderr.splitlines():
