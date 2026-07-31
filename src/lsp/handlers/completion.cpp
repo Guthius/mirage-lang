@@ -302,10 +302,9 @@ namespace lsp::handlers {
     //
     // Deliberately conservative: an unrecognised shape returns nullopt and the caller falls
     // back to what it did before, rather than guessing.
-    auto expected_type_at(const std::vector<Token> &tokens, const size_t dot_index, const size_t line,
+    auto expected_type_at(const std::vector<Token> &tokens, const size_t dot_index,
                            const EnclosingFunction &enclosing, const LocalLookupContext &ctx,
                            const sema::ProgramModule &sema_module, sema::Program &program,
-                           const std::string &module_path,
                            const std::function<std::optional<Resolution>(const std::string &)> &resolve_base_name)
         -> std::optional<sema::ResolvedType> {
         // (1) sema's own answer.
@@ -481,8 +480,8 @@ namespace lsp::handlers {
         std::vector<json> items;
 
         if (contextual_dot) {
-            if (const auto expected = expected_type_at(tokens, *chain_anchor - 1, line, enclosing, ctx,
-                                                        sema_mod_it->second, result.sema_program, module_path,
+            if (const auto expected = expected_type_at(tokens, *chain_anchor - 1, enclosing, ctx,
+                                                        sema_mod_it->second, result.sema_program,
                                                         resolve_base)) {
                 add_type_members(*expected, result.sema_program, module_path, prefix, items);
                 return items;
