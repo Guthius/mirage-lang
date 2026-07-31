@@ -136,7 +136,15 @@ namespace lexer {
             // [: type]', ordinary tokens lexed normally by lex_token()) gets raw-captured
             // instead of being lexed as an ordinary LBrace. See tokenize()'s two call sites.
             bool awaiting_asm_expr_body_ = false;
-            int asm_header_budget_ = 0; // remaining header tokens before giving up (safety valve)
+            // How many tokens after 'asm ->' the retry keeps looking for the body's '{'.
+            // A well-formed header ('-> reg [: type]') is at most a handful of tokens, so
+            // 16 is generous. The cap is the safety valve for a MALFORMED header: while the
+            // window is open, ASI is suppressed and any '{' reached is raw-captured as an
+            // asm body — so an unbounded window would let 'asm -> <garbage>' swallow the
+            // '{' of some unrelated later construct (a function body, a struct literal)
+            // as "asm text". Past the budget, give up and let normal tokenization report.
+            static constexpr int asm_header_token_budget = 16;
+            int asm_header_budget_ = 0; // remaining tokens in the currently open window
             // Whether the last real token could legally end a statement/expression. Usually
             // just is_asi_trigger(last_real_kind_), but 'Star' is dual-purpose: it's the
             // binary-multiply operator (never a trigger — 'a *\n b' must keep continuing) AND
@@ -225,7 +233,7 @@ namespace lexer {
                             // brace-balanced capture, so arm the retry above for once the
                             // header has been lexed through.
                             awaiting_asm_expr_body_ = true;
-                            asm_header_budget_ = 16;
+                            asm_header_budget_ = asm_header_token_budget;
                         }
                     }
 
