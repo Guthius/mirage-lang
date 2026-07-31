@@ -248,6 +248,40 @@ namespace sema {
             }
         }
 
+        // Resolves one method's self, parameter and return types into 'info'.
+        //
+        // Stops deliberately short of the DEFAULTS policy, which is the one place the two
+        // callers genuinely diverge: a bare 'impl' method's defaults are its own
+        // (check_param_defaults), while a trait-impl method must never declare any — all
+        // defaulting for a trait-backed method flows from the trait's own TraitMethodInfo. That
+        // divergence is real and stays at the call sites; everything above it was two copies.
+        void resolve_method_signature(MethodInfo &info, const ResolvedType &self_type, const std::string &module_path,
+                                       Program &program, DiagnosticEngine &diag) {
+            info.self_type = self_type;
+
+            for (auto &p : info.decl->params) {
+                ResolvedType pt;
+                if (p.type) {
+                    pt = resolve_type(*p.type, module_path, program, diag);
+                } else {
+                    // ':=' inferred-type param — infer from the (required) default expr.
+                    LocalScope empty;
+                    pt = check_expr(*p.default_value, empty, module_path, program, diag, std::nullopt, 0);
+                }
+                if (p.is_variadic) {
+                    info.is_variadic = true;
+                    info.variadic_element_type = pt;
+                    info.param_types.push_back(intern_slice(program, pt));
+                } else {
+                    info.param_types.push_back(pt);
+                }
+            }
+
+            for (auto &rt : info.decl->return_types) {
+                info.return_types.push_back(resolve_type(rt, module_path, program, diag));
+            }
+        }
+
         void resolve_impl_signatures_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
             for (auto &[type_name, method_map] : module.methods) {
                 // A generic type's methods have no single "the" signature to resolve eagerly
@@ -268,28 +302,7 @@ namespace sema {
                 for (auto &info : method_map | std::views::values) {
                     if (info.is_resolved) continue;
 
-                    info.self_type = self_type;
-
-                    for (auto &p : info.decl->params) {
-                        ResolvedType pt;
-                        if (p.type) {
-                            pt = resolve_type(*p.type, module_path, program, diag);
-                        } else {
-                            // ':=' inferred-type param — infer from the (required) default expr.
-                            LocalScope empty;
-                            pt = check_expr(*p.default_value, empty, module_path, program, diag, std::nullopt, 0);
-                        }
-                        if (p.is_variadic) {
-                            info.is_variadic = true;
-                            info.variadic_element_type = pt;
-                            info.param_types.push_back(intern_slice(program, pt));
-                        } else {
-                            info.param_types.push_back(pt);
-                        }
-                    }
-                    for (auto &rt : info.decl->return_types) {
-                        info.return_types.push_back(resolve_type(rt, module_path, program, diag));
-                    }
+                    resolve_method_signature(info, self_type, module_path, program, diag);
 
                     check_param_defaults(info.decl->params, info.param_types, info.required_params,
                                           info.param_default_is_const, module_path, program, diag);
@@ -313,27 +326,7 @@ namespace sema {
                     for (auto &info : impl_info.methods | std::views::values) {
                         if (info.is_resolved) continue;
 
-                        info.self_type = self_type;
-
-                        for (auto &p : info.decl->params) {
-                            ResolvedType pt;
-                            if (p.type) {
-                                pt = resolve_type(*p.type, impl_info.impl_module, program, diag);
-                            } else {
-                                LocalScope empty;
-                                pt = check_expr(*p.default_value, empty, impl_info.impl_module, program, diag, std::nullopt, 0);
-                            }
-                            if (p.is_variadic) {
-                                info.is_variadic = true;
-                                info.variadic_element_type = pt;
-                                info.param_types.push_back(intern_slice(program, pt));
-                            } else {
-                                info.param_types.push_back(pt);
-                            }
-                        }
-                        for (auto &rt : info.decl->return_types) {
-                            info.return_types.push_back(resolve_type(rt, impl_info.impl_module, program, diag));
-                        }
+                        resolve_method_signature(info, self_type, impl_info.impl_module, program, diag);
 
                         // A trait-impl method must never declare its own defaults — see the
                         // redeclare/add-without-trait validation below, matched against the
