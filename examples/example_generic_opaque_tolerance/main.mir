@@ -1,0 +1,48 @@
+// example_generic_opaque_tolerance — the eager generic-declaration pass must stay silent
+// on constructs whose types depend on unbound parameters, reporting only parameter-
+// independent errors. Indexing/for-in/try already did; these siblings did not
+// (CODE_REVIEW.md CHECK-5, CHECK-6, CHECK-19):
+//
+//   - len(self.data)            hard-errored "len() requires an array or slice operand"
+//   - self.data[1..n]           hard-errored "slicing requires an array or slice operand"
+//   - stackalloc(N)             hard-errored "requires an integer size expression"
+//   - match self.tag { ... }    hard-errored "match operand must be an enum, ..."
+//   - printf("%d", N)           hard-errored the C-promotion width check on Opaque
+//
+// (also fixed alongside: codegen can now materialize a value generic param used as a
+// runtime operand — 'printf("%d", N)' previously died with "unsupported lvalue").
+//
+// Expected: exit code 16 — classify() 10 + size() 4 + len(view(3)) 2.
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+type Holder[T: type] = struct {
+    data: [4]T
+    tag: i32 = 0
+}
+
+impl Holder[T: type] {
+    fn size(self) -> usize {
+        return len(self.data)
+    }
+
+    fn view(self, n: usize) -> []T {
+        return self.data[1..n]
+    }
+
+    fn classify(self) -> i32 {
+        return match self.tag { 0: 10, _: 20 }
+    }
+}
+
+fn print_n[N: usize]() {
+    printf("%d\n", N)
+    const p := stackalloc(N)
+}
+
+pub fn main() -> i32 {
+    mut h: Holder[i32] = default
+    print_n[3]()
+    const v := h.view(3)
+    return h.classify() + cast(h.size(), i32) + cast(len(v), i32)
+}

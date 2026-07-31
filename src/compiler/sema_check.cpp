@@ -1001,6 +1001,10 @@ namespace sema {
             case TypeKind::USize:
             case TypeKind::F64:
             case TypeKind::Pointer: case TypeKind::Anyptr:
+            // Eager template pass: an unbound generic value ('printf("%d", N)' with
+            // '[N: usize]') has no width yet; the instantiation re-checks with the
+            // concrete type.
+            case TypeKind::Opaque:
                 return true;
             default:
                 return false;
@@ -2734,6 +2738,22 @@ namespace sema {
         if (!effective_operand) return ResolvedType{.kind = TypeKind::Invalid};
         const auto operand_type = *effective_operand;
 
+        // Eager template pass: the operand's type depends on unbound generic parameters
+        // ('match self.tag'), so pattern validation and exhaustiveness wait for the
+        // instantiation — the deliberate Opaque posture indexing/for-in/try already take.
+        // Only the arm values are checked, with any payload capture bound as Opaque so a
+        // valid template body doesn't report unknown identifiers.
+        if (operand_type.kind == TypeKind::Opaque) {
+            for (const auto &arm : v->arms) {
+                auto arm_locals = locals;
+                if (const auto *vp = std::get_if<ast::MatchExpr::VariantPattern>(&arm.pattern); vp && vp->capture_name) {
+                    arm_locals[*vp->capture_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::Opaque}, .is_mut = false};
+                }
+                check_expr(arm.value, arm_locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+            }
+            return ResolvedType{.kind = TypeKind::Opaque};
+        }
+
         // ---- Scalar match (integer or bool operand) ----
         if (operand_type.is_integer() || operand_type.kind == TypeKind::Bool) {
             std::unordered_map<int64_t, size_t> seen_values; // evaluated value -> arm index
@@ -3023,6 +3043,19 @@ namespace sema {
             loop_depth, defer_loop_base, fn_error_type, default_arm_idx);
         if (!effective_operand) return;
         const auto operand_type = *effective_operand;
+
+        // Eager template pass — mirrors check_match_expr's Opaque posture: check only the
+        // arm bodies, with captures bound Opaque; patterns wait for the instantiation.
+        if (operand_type.kind == TypeKind::Opaque) {
+            for (const auto &arm : v->arms) {
+                auto arm_locals = locals;
+                if (const auto *vp = std::get_if<ast::MatchExpr::VariantPattern>(&arm.pattern); vp && vp->capture_name) {
+                    arm_locals[*vp->capture_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::Opaque}, .is_mut = false};
+                }
+                check_stmt(arm.body, arm_locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
+            }
+            return;
+        }
 
         // Scalar switch (integer or bool)
         if (operand_type.is_integer() || operand_type.kind == TypeKind::Bool) {
@@ -4368,14 +4401,19 @@ namespace sema {
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) {
                     const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                    if (operand.kind != TypeKind::Array && operand.kind != TypeKind::Slice) {
+                    // 'len(self.data)' in the eager template pass: the operand type is an
+                    // unbound parameter's — accept, like indexing/for-in already do; the
+                    // result is usize either way, and the instantiation re-checks.
+                    if (operand.kind != TypeKind::Array && operand.kind != TypeKind::Slice && operand.kind != TypeKind::Opaque) {
                         return error(diag, v->location, "len() requires an array or slice operand");
                     }
                     return ResolvedType{.kind = TypeKind::USize};
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StackAllocExpr>>) {
                     const auto size_ty = check_expr(v->size, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::USize}, loop_depth, defer_loop_base, fn_error_type);
-                    if (!size_ty.is_integer()) {
+                    // 'stackalloc(N)' with a value generic param: Opaque scalar, sized at
+                    // instantiation.
+                    if (!size_ty.is_integer() && size_ty.kind != TypeKind::Opaque) {
                         return error(diag, v->location, "stackalloc() requires an integer size expression");
                     }
                     return ResolvedType{.kind = TypeKind::Anyptr};
@@ -4442,12 +4480,15 @@ namespace sema {
                     const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     // An omitted bound has nothing to check: 'start' defaults to 0 and 'end'
                     // to the operand's length, both supplied by codegen.
+                    // A bound may be an unbound generic value ('self.data[1..n]' with
+                    // '[n: usize]') — Opaque in the eager pass, integer at instantiation.
+                    const auto bound_ok = [](const ResolvedType &t) { return t.is_integer() || t.kind == TypeKind::Opaque; };
                     bool bounds_ok = true;
                     if (v->start) {
-                        bounds_ok &= check_expr(*v->start, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type).is_integer();
+                        bounds_ok &= bound_ok(check_expr(*v->start, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type));
                     }
                     if (v->end) {
-                        bounds_ok &= check_expr(*v->end, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type).is_integer();
+                        bounds_ok &= bound_ok(check_expr(*v->end, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type));
                     }
                     if (!bounds_ok) {
                         error(diag, v->location, "slice bounds must be integer expressions");
@@ -4458,6 +4499,11 @@ namespace sema {
                     }
                     if (operand.kind == TypeKind::Slice) {
                         return operand;
+                    }
+                    // Slicing an unbound generic aggregate: the element type is unknowable
+                    // here; the instantiation re-checks (same posture as indexing/for-in).
+                    if (operand.kind == TypeKind::Opaque) {
+                        return ResolvedType{.kind = TypeKind::Opaque};
                     }
                     return error(diag, v->location, "slicing requires an array or slice operand");
 
@@ -5607,6 +5653,17 @@ namespace sema {
         }
 
         if (is_try) {
+            // 'try a, b := self.helper()' inside a generic impl method: Opaque returns,
+            // no error union to recognize yet — the same tolerance the expression form
+            // has. Bind the names Opaque and let the instantiation check for real.
+            if (returns.back().kind == TypeKind::Opaque) {
+                for (const auto &name : v.names) {
+                    if (!name.empty() && name != "_") {
+                        locals[name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::Opaque}, .is_mut = v.is_mut};
+                    }
+                }
+                return;
+            }
             // Check enclosing function is fallible
             if (!fn_error_type) {
                 diag.report_error(DiagnosticStage::Sema, v.location,

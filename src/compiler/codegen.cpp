@@ -4773,6 +4773,19 @@ namespace codegen {
                                     }
                                 }
                             }
+                            // The active generic instance's own VALUE parameter used as a
+                            // runtime operand ('printf("%d", N)'): no storage exists for it,
+                            // so materialize the bound constant — mirrors
+                            // emit_const_or_runtime's identical fallback for const contexts.
+                            if (!locals_.contains(v.name) && !sema_program_.active_generic_env_stack.empty()) {
+                                for (const auto &binding : *sema_program_.active_generic_env_stack.back()) {
+                                    if (binding.is_type || binding.param_name != v.name) continue;
+                                    if (const auto *n = std::get_if<int64_t>(&binding.const_value)) {
+                                        return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty),
+                                                                       static_cast<uint64_t>(*n), ty.is_signed());
+                                    }
+                                }
+                            }
                             const auto lv = emit_lvalue(expr);
                             return builder_.CreateLoad(lv.storage_type, lv.ptr);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
