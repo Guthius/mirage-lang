@@ -229,7 +229,7 @@ namespace codegen {
                                         : method_fn_key(info.type_name, info.decl->name);
             }
 
-            auto run() -> std::unique_ptr<llvm::Module> {
+            auto run() -> GeneratedModule {
                 // Hosted '_start' glue, the panic writer, freestanding syscalls, and the
                 // SysV eightbyte classifier are all x86-64 Linux specific. The driver
                 // targets the HOST triple, so on any other host this refused cleanly —
@@ -241,7 +241,7 @@ namespace codegen {
                     report_codegen_error(diag_, {}, std::format(
                         "target '{}' is not supported: code generation currently targets x86-64 Linux only",
                         options_.target_triple));
-                    return nullptr;
+                    return {};
                 }
 
                 declare_unions();
@@ -273,17 +273,15 @@ namespace codegen {
                 }
 
                 if (diag_.has_errors()) {
-                    return nullptr;
+                    return {};
                 }
 
                 if (llvm::verifyModule(*module_, &llvm::errs())) {
                     report_codegen_error(diag_, {}, "LLVM module verification failed");
-                    return nullptr;
+                    return {};
                 }
 
-                static std::vector<std::unique_ptr<llvm::LLVMContext>> retained_contexts;
-                retained_contexts.push_back(std::move(context_));
-                return std::move(module_);
+                return {std::move(context_), std::move(module_)};
             }
 
           private:
@@ -6905,7 +6903,7 @@ namespace codegen {
         };
     }
 
-    auto generate(const ast::Program &ast_program, const sema::Program &sema_program, DiagnosticEngine &diag, const Options &options) -> std::unique_ptr<llvm::Module> {
+    auto generate(const ast::Program &ast_program, const sema::Program &sema_program, DiagnosticEngine &diag, const Options &options) -> GeneratedModule {
         return Generator(ast_program, sema_program, diag, options).run();
     }
 }

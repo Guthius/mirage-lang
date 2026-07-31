@@ -27,9 +27,19 @@ namespace codegen {
         std::string data_layout;
     };
 
+    // The generated module together with the LLVMContext that owns every type and
+    // constant in it. The context member is declared BEFORE the module so member
+    // destruction (reverse order) tears the module down first — a module must never
+    // outlive its context. Replaces an internal retain-forever list that parked every
+    // context for the life of the process.
+    struct GeneratedModule {
+        std::unique_ptr<llvm::LLVMContext> context;
+        std::unique_ptr<llvm::Module> module;
+    };
+
     auto generate(
         const ast::Program &ast_program,
         const sema::Program &sema_program,
         DiagnosticEngine &diag,
-        const Options &options = {}) -> std::unique_ptr<llvm::Module>;
+        const Options &options = {}) -> GeneratedModule;
 }

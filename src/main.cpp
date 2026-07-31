@@ -546,7 +546,10 @@ auto main(const int argc, char *argv[]) -> int {
     if (!target_machine) {
         return 1;
     }
-    const auto llvm_module = codegen::generate(ast, sema, diag, {
+    // Keeps the LLVMContext alive alongside the module for the rest of this
+    // function — the module must be destroyed (function exit, reverse member order)
+    // before the context that owns its types and constants.
+    const auto [llvm_context, llvm_module] = codegen::generate(ast, sema, diag, {
         .freestanding = options.freestanding,
         .noinit = options.noinit,
         .target_triple = target_machine->getTargetTriple().str(),
