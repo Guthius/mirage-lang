@@ -820,6 +820,38 @@ def main() -> int:
     check("Close" not in flag_labels,
           f"contextual '.flag' completion is not implemented (offers no bitset flags), got {flag_labels}")
 
+    # --- the two cursor conventions must stay different (LSPH-10) ---
+    #
+    # completion asks "did the cursor just FOLLOW this token" (half-open at the LEFT), while
+    # common.cpp's token_at asks "is the cursor ON this token" (half-open at the RIGHT). The
+    # inversion is what lets completion tell "mid-token, filter by the typed prefix" from
+    # "immediately after a token, nothing typed yet".
+    #
+    # The isolating position is the END of an identifier that is immediately followed by '.':
+    # completion reads that as still being on 'shape' (offer values, filtered by "shape"),
+    # while token_at's convention would read it as being on the '.' (offer shape's MEMBERS).
+    # Pinned because the two conventions look like an inconsistency and are one edit from
+    # being "fixed" into agreement.
+    end_line, end_col = sym_pos("return shape.area()", "shape")
+    at_ident_end = client.request("textDocument/completion", {
+        "textDocument": {"uri": sym_uri},
+        "position": {"line": end_line, "character": end_col + len("shape")},
+    })["result"] or []
+    end_labels = [it["label"] for it in at_ident_end]
+    check("shape" in end_labels,
+          f"cursor at the end of 'shape' completes the identifier itself, got {end_labels}")
+    check("area" not in end_labels,
+          "cursor at the end of 'shape' must NOT offer members - that is token_at's "
+          f"cursor convention, not completion's, got {end_labels}")
+    # The load-bearing assertion: the result must be FILTERED by the typed prefix. Under
+    # token_at's convention the cursor at this column lands on the '.' instead, which is not
+    # an identifier and (being half-open at the right) never satisfies 'column == end' either
+    # - so no anchor is set at all and the handler falls through to offering every keyword,
+    # local and module symbol unfiltered. That is the failure this pin exists to catch.
+    check("if" not in end_labels and "struct" not in end_labels,
+          "completion at the end of 'shape' must be filtered by that prefix, not the "
+          f"unfiltered keyword+symbol list, got {len(end_labels)} items")
+
     # --- completion inside a generic instantiation's argument list (LSPH-9) ---
     #
     # 'Bucket[i32]' and 'arr[idx]' are the same production to the parser, told apart in sema

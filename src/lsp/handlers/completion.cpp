@@ -313,8 +313,10 @@ namespace lsp::handlers {
         for (size_t i = 0; i < tokens.size(); ++i) {
             const auto &t = tokens[i];
             if (t.location.line != line) continue;
-            const auto start = t.location.column;
-            const auto end = start + t.lexeme.size();
+            const auto [start, end] = token_span(t);
+            // Half-open at the LEFT, the opposite of common.cpp's token_at — deliberately.
+            // The question here is "did the cursor just follow this token", not "is it on it";
+            // see token_span's doc comment. Do NOT align these two.
             if (column > start && column <= end) {
                 if (t.kind == TokenKind::Identifier) {
                     identifier_index = i;

@@ -1107,12 +1107,17 @@ namespace lsp::handlers {
             stmt);
     }
 
+    auto token_span(const Token &token) -> TokenSpan {
+        return {token.location.column, token.location.column + token.lexeme.size()};
+    }
+
     auto token_at(const std::vector<Token> &tokens, const size_t line, const size_t column) -> std::optional<size_t> {
         for (size_t i = 0; i < tokens.size(); ++i) {
             const auto &t = tokens[i];
             if (t.location.line != line) continue;
-            const auto start = t.location.column;
-            const auto end = start + t.lexeme.size();
+            const auto [start, end] = token_span(t);
+            // ON the token: half-open at the RIGHT. See token_span's comment — completion
+            // deliberately uses the opposite convention.
             if (column >= start && column < end) {
                 return i;
             }

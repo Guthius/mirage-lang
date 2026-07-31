@@ -264,8 +264,32 @@ namespace lsp::handlers {
     auto collect_locals_in_scope(const ast::Stmt &body, const LocalLookupContext &ctx, size_t before_line)
         -> std::unordered_map<std::string, LocalInfo>;
 
-    // Finds the token whose span contains 1-based (line, column); returns
-    // its index into `tokens`, or nullopt if the position isn't on a token.
+    // The half-open [start, end) column span a token occupies, 1-based.
+    //
+    // Exists because the TWO cursor conventions in this file both need it and must not be
+    // "unified" by accident (LSPH-10):
+    //
+    //   token_at, below, asks "is the cursor ON this token" — 'column >= start && column < end'.
+    //     Used by hover/definition/references, where the cursor sits somewhere within the
+    //     identifier the user is asking about.
+    //
+    //   completion.cpp's cursor classifier asks "did the cursor just FOLLOW this token" —
+    //     'column > start && column <= end'. That inversion is not a bug: it is what lets
+    //     completion tell "cursor mid-token, filter by the typed prefix" from "cursor sits
+    //     immediately after this token's last character, nothing typed yet", and the second
+    //     case yields an anchor index one PAST the matched token — something token_at can
+    //     never return.
+    //
+    // Both are correct for their question. Neither is correct for the other's.
+    struct TokenSpan {
+        size_t start;
+        size_t end;
+    };
+    auto token_span(const Token &token) -> TokenSpan;
+
+    // Finds the token whose span CONTAINS 1-based (line, column) — see token_span for why
+    // that is not the same test completion uses. Returns its index into `tokens`, or nullopt
+    // if the position isn't on a token.
     auto token_at(const std::vector<Token> &tokens, size_t line, size_t column) -> std::optional<size_t>;
 
     // Returns the dotted-chain identifier prefix immediately preceding
