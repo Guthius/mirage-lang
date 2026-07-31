@@ -19,6 +19,12 @@ namespace codegen {
         // functions still compile normally and remain individually callable — only the
         // automatic invocation is skipped; the user must call each one manually if needed.
         bool noinit = false;
+        // Target triple and DataLayout string, computed by the driver BEFORE generation and
+        // installed on the module up front — so every implicit alignment/constant fold made
+        // while BUILDING the IR uses the real target's layout, not LLVM's default. Empty
+        // means "leave the module's defaults" (unit tests, --dump-ast paths).
+        std::string target_triple;
+        std::string data_layout;
     };
 
     auto generate(

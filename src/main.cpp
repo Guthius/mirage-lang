@@ -175,19 +175,20 @@ namespace {
         return std::filesystem::path(tmpl);
     }
 
-    auto emit_object_file(llvm::Module &module, const std::filesystem::path &object_path) -> bool {
+    // Creates the native-target TargetMachine. Called once BEFORE codegen (so the module
+    // is built under the real DataLayout — implicit alignments and constant folds during
+    // IR construction depend on it) and reused for object emission.
+    auto create_native_target_machine() -> std::unique_ptr<llvm::TargetMachine> {
         llvm::InitializeNativeTarget();
         llvm::InitializeNativeTargetAsmPrinter();
         llvm::InitializeNativeTargetAsmParser();
 
         const llvm::Triple target_triple(llvm::sys::getDefaultTargetTriple());
-        module.setTargetTriple(target_triple);
-
         std::string error;
         const auto *target = llvm::TargetRegistry::lookupTarget(target_triple, error);
         if (!target) {
             llvm::errs() << "mirage: " << error << "\n";
-            return false;
+            return nullptr;
         }
 
         llvm::TargetOptions target_options;
@@ -195,10 +196,12 @@ namespace {
             target->createTargetMachine(target_triple, "generic", "", target_options, std::nullopt));
         if (!target_machine) {
             llvm::errs() << "mirage: failed to create target machine\n";
-            return false;
         }
+        return target_machine;
+    }
 
-        module.setDataLayout(target_machine->createDataLayout());
+    auto emit_object_file(llvm::Module &module, llvm::TargetMachine &target_machine_ref, const std::filesystem::path &object_path) -> bool {
+        auto *target_machine = &target_machine_ref;
 
         std::error_code ec;
         llvm::raw_fd_ostream out(object_path.string(), ec, llvm::sys::fs::OF_None);
@@ -539,7 +542,16 @@ auto main(const int argc, char *argv[]) -> int {
     }
 
     const auto codegen_start = std::chrono::steady_clock::now();
-    const auto llvm_module = codegen::generate(ast, sema, diag, {.freestanding = options.freestanding, .noinit = options.noinit});
+    const auto target_machine = create_native_target_machine();
+    if (!target_machine) {
+        return 1;
+    }
+    const auto llvm_module = codegen::generate(ast, sema, diag, {
+        .freestanding = options.freestanding,
+        .noinit = options.noinit,
+        .target_triple = target_machine->getTargetTriple().str(),
+        .data_layout = target_machine->createDataLayout().getStringRepresentation(),
+    });
     if (!llvm_module || diag.has_errors()) {
         return 1;
     }
@@ -571,7 +583,7 @@ auto main(const int argc, char *argv[]) -> int {
         return 1;
     }
     const auto object_start = std::chrono::steady_clock::now();
-    if (!emit_object_file(*llvm_module, object_path)) {
+    if (!emit_object_file(*llvm_module, *target_machine, object_path)) {
         // Clean up the partial/empty temp object, as the link-failure and success paths below
         // both do. mkstemp already created the file, so returning here always leaked one.
         std::error_code object_error;

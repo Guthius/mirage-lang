@@ -199,7 +199,14 @@ namespace codegen {
                   options_(options),
                   context_(std::make_unique<llvm::LLVMContext>()),
                   module_(std::make_unique<llvm::Module>("mirage", *context_)),
-                  builder_(*context_) {}
+                  builder_(*context_) {
+                if (!options_.target_triple.empty()) {
+                    module_->setTargetTriple(llvm::Triple(options_.target_triple));
+                }
+                if (!options_.data_layout.empty()) {
+                    module_->setDataLayout(options_.data_layout);
+                }
+            }
 
             static auto method_fn_key(const std::string &type_name, const std::string &method_name) -> std::string {
                 return type_name + "::" + method_name;
@@ -1008,10 +1015,15 @@ namespace codegen {
                         }
                         if (const auto *global = std::get_if<sema::GlobalSymbol>(&sym)) {
                             const auto gname = symbol_name(path, name);
-                            globals_[path + "\n" + name] = new llvm::GlobalVariable(
+                            auto *gv = new llvm::GlobalVariable(
                                 *module_, llvm_type(path, global->type), !global->is_mut,
                                 global->is_pub ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::InternalLinkage,
                                 nullptr, gname);
+                            // Same reasoning as create_entry_alloca's floor: packed-struct /
+                            // byte-array lowerings claim ABI align 1, while member accesses
+                            // are annotated with their scalar's natural alignment.
+                            gv->setAlignment(llvm::Align(std::max(align_of(path, global->type), 8U)));
+                            globals_[path + "\n" + name] = gv;
                         } else if (const auto *fn = std::get_if<sema::FunctionSymbol>(&sym)) {
                             // A generic function has no single "the" signature to declare here
                             // — 'fn->params'/'fn->return_types' were never resolved for it (see
@@ -3383,7 +3395,16 @@ namespace codegen {
             // misbehaving quietly.
             static auto create_entry_alloca(llvm::Function *fn, llvm::Type *type, llvm::StringRef name = "") -> llvm::AllocaInst * {
                 llvm::IRBuilder tmp(&fn->getEntryBlock(), fn->getEntryBlock().begin());
-                return tmp.CreateAlloca(type, nullptr, name);
+                auto *slot = tmp.CreateAlloca(type, nullptr, name);
+                // Structs lower as PACKED LLVM structs and unions as [N x i8] — both ABI
+                // align 1 — while scalar member loads/stores carry natural-alignment
+                // annotations (up to 8 for i64/f64/ptr). Floor every stack slot at 8 so
+                // those annotations are always valid; over-aligning a local is free.
+                // (Accesses into a genuinely 'struct(packed)' field at an unaligned offset
+                // remain annotated with the scalar's natural alignment — benign on x86-64,
+                // a known limitation for stricter targets.)
+                slot->setAlignment(llvm::Align(std::max<uint64_t>(slot->getAlign().value(), 8)));
+                return slot;
             }
 
             void emit_function(const std::string &module_path, const std::string &name, const sema::FunctionSymbol &fn) {
