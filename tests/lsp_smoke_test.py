@@ -507,12 +507,19 @@ def main() -> int:
     client._next_id += 1
     client.notify("$/cancelRequest", {"id": cancel_id})
 
-    got_cancelled_response = False
+    # Per the spec a cancelled request is still ANSWERED, with ErrorCodes.RequestCancelled
+    # (-32800) — a silent drop leaves stricter clients' promises pending forever. (The
+    # cancellation is cooperative-coarse, so a request that slipped past the check may
+    # legitimately complete with a result instead.)
+    cancelled_answer = None
     while (msg := client.read_with_timeout(2)) is not None:
         if msg.get("id") == cancel_id and ("result" in msg or "error" in msg):
-            got_cancelled_response = True
+            cancelled_answer = msg
             break
-    check(not got_cancelled_response, "a request cancelled immediately after sending gets no response")
+    check(cancelled_answer is not None, "a cancelled request is still answered")
+    if cancelled_answer is not None and "error" in cancelled_answer:
+        check(cancelled_answer["error"].get("code") == -32800,
+              f"cancelled request answers with RequestCancelled, got {cancelled_answer['error']}")
 
     resp = client.request_with_timeout(
         "textDocument/hover", {"textDocument": {"uri": multi_uri}, "position": {"line": 0, "character": 8}}, timeout=5)

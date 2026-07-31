@@ -41,6 +41,7 @@ namespace lsp {
         constexpr int METHOD_NOT_FOUND = -32601;
         constexpr int INTERNAL_ERROR = -32603;
         constexpr int SERVER_NOT_INITIALIZED = -32002;
+        constexpr int REQUEST_CANCELLED = -32800;
 
         // How long a burst of didChange notifications for the same file is allowed to
         // coalesce before diagnostics are republished for it. Only diagnostics are
@@ -254,7 +255,12 @@ namespace lsp {
                     // before the worker reached it. Fast cursor movement during hover leaked one
                     // entry per superseded request, forever, which is exactly the unbounded
                     // growth CompletedRequests exists to prevent.
+                    //
+                    // Per the spec a cancelled request is still ANSWERED, with
+                    // ErrorCodes.RequestCancelled — a silent drop left stricter clients'
+                    // promises pending forever.
                     if (!task->id_key.empty()) {
+                        answer_failed_task(out, task->id_key, REQUEST_CANCELLED, "request cancelled");
                         completed.mark_done(task->id_key);
                     }
                     continue; // caller already moved on; skip without doing any work
@@ -294,6 +300,7 @@ namespace lsp {
                                       const std::string &id_key, transport::OutputChannel &out, const json &id,
                                       const std::function<json()> &compute) {
             if (cancelled->load()) {
+                send_error(out, id, REQUEST_CANCELLED, "request cancelled");
                 completed.mark_done(id_key);
                 return;
             }
@@ -301,6 +308,7 @@ namespace lsp {
             auto result = compute();
 
             if (cancelled->load()) {
+                send_error(out, id, REQUEST_CANCELLED, "request cancelled");
                 completed.mark_done(id_key);
                 return;
             }
