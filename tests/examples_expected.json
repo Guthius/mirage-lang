@@ -255,6 +255,11 @@
     "action": "run",
     "exit": 112
   },
+  "example_char_literal_multibyte": {
+    "action": "build",
+    "diag": "examples/example_char_literal_multibyte/main.mir:9:17: error: multi-byte character literals are not supported",
+    "exit": 1
+  },
   "example_const_fold_overflow": {
     "action": "build",
     "diag": "examples/example_const_fold_overflow/main.mir:26:9: error: match arm pattern could not be folded to an integer constant (an overflowing division, a shift of 64 or more, or a constant that is not an integer)",

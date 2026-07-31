@@ -639,6 +639,20 @@ namespace lexer {
                     } else {
                         advance();
                     }
+                } else if (static_cast<unsigned char>(peek()) >= 0x80) {
+                    // A UTF-8 lead byte: char literals hold a single byte, so a multi-byte
+                    // code point can never fit. Consume the whole code point (and the
+                    // closing quote, if it is right there) so 'é' gets this one diagnostic
+                    // instead of a misleading "unterminated" plus trailing-garbage errors.
+                    advance();
+                    while (!at_end() && (static_cast<unsigned char>(peek()) & 0xC0) == 0x80) {
+                        advance();
+                    }
+                    if (!at_end() && peek() == '\'') {
+                        advance();
+                    }
+                    diagnostics_.report_error(DiagnosticStage::Lexer, literal_start_location(), "multi-byte character literals are not supported");
+                    return make_token(TokenKind::CharLiteral, start);
                 } else {
                     advance();
                 }

@@ -1,0 +1,11 @@
+// example_char_literal_multibyte — a char literal holds a single byte, so a multi-byte
+// UTF-8 code point can never fit. 'é' used to be reported as "unterminated character
+// literal" because the lexer read one byte and then didn't find the closing quote
+// (CODE_REVIEW.md FE-16); the whole code point must be consumed and named for what it is.
+//
+// Expected: compile error "multi-byte character literals are not supported".
+
+pub fn main() -> i32 {
+    mut c: u8 = 'é'
+    return 0
+}
