@@ -603,9 +603,14 @@ auto main(const int argc, char *argv[]) -> int {
 
     const auto link_start = std::chrono::steady_clock::now();
     if (!link_executable(object_path, exe_path, options, sema.link_directives)) {
+        // link_executable already printed a detailed diagnostic; no second banner. For
+        // 'run', the executable path is an mkstemp placeholder that would otherwise be
+        // orphaned in $TMPDIR on every failed link.
         std::error_code remove_error;
         std::filesystem::remove(object_path, remove_error);
-        llvm::errs() << "mirage: linker failed\n";
+        if (options.action == Action::Run) {
+            std::filesystem::remove(exe_path, remove_error);
+        }
         return 1;
     }
     const auto link_elapsed = std::chrono::steady_clock::now() - link_start;
