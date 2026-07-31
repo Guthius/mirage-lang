@@ -84,8 +84,11 @@ namespace ast {
             }
 
             auto match_identifier(const std::string_view lexeme) -> bool override {
-                if (check(TokenKind::Identifier)) {
-                    return advance().lexeme == lexeme;
+                // Only consume on a lexeme match — advancing over a NON-matching identifier
+                // silently swallowed it ('struct(align)' dropped 'align' with no diagnostic).
+                if (check(TokenKind::Identifier) && current().lexeme == lexeme) {
+                    advance();
+                    return true;
                 }
                 return false;
             }

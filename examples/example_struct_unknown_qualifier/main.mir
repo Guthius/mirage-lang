@@ -1,0 +1,13 @@
+// example_struct_unknown_qualifier — an unknown struct qualifier must be diagnosed.
+// match_identifier consumed a NON-matching identifier, so 'struct(align)' silently parsed
+// as an unpacked struct with the qualifier dropped (CODE_REVIEW.md FE-4).
+//
+// Expected: compile error "expected 'packed' in struct qualifier list, got 'align'".
+
+type A = struct(align) {
+    x: i32
+}
+
+pub fn main() -> i32 {
+    return 0
+}

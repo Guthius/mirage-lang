@@ -235,6 +235,13 @@ namespace ast {
             parser.expect(TokenKind::KwStruct, "'struct'");
             if (parser.match(TokenKind::LParen)) {
                 is_packed = parser.match_identifier("packed");
+                if (!is_packed) {
+                    // 'struct()' and 'struct(anything-else)' were silently accepted as
+                    // unpacked; the only defined qualifier is 'packed'.
+                    parser.report_error(parser.current_location(), std::format(
+                        "expected 'packed' in struct qualifier list, got '{}'", parser.current_lexeme()));
+                    if (parser.check(TokenKind::Identifier)) parser.advance();
+                }
 
                 parser.expect(TokenKind::RParen, "')'");
             }

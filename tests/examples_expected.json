@@ -750,6 +750,11 @@
     "action": "run",
     "exit": 73
   },
+  "example_struct_unknown_qualifier": {
+    "action": "build",
+    "diag": "examples/example_struct_unknown_qualifier/main.mir:7:17: error: expected 'packed' in struct qualifier list, got 'align'",
+    "exit": 1
+  },
   "example_switch_loop_stack": {
     "action": "run",
     "exit": 3
