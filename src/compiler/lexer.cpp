@@ -145,6 +145,12 @@ namespace lexer {
             // extra lookback (was the token before this Star a Dot?), which is still a purely
             // lexer-level, previous-token-based decision — just over 2 tokens instead of 1.
             bool last_token_is_asi_trigger_ = false;
+            // End position (just past the last character) of the last real token. Virtual
+            // semicolons are located here — at the end of the line they terminate — rather
+            // than at the *next* token's start: aliasing the next token's offset made a
+            // recovery iteration that consumed only the virtual ';' look like "no progress"
+            // to LoopProgressGuard, which then force-advanced past a real token.
+            SourceLocation last_token_end_{};
             // Line/column of the token currently being lexed, snapshotted by lex_token()
             // before it consumes anything. make_token() reports these verbatim rather than
             // back-computing the start from the end position, which is only correct while a
@@ -172,6 +178,7 @@ namespace lexer {
                             // so it must trigger ASI: a following line starting with '-',
                             // '(' or '[' was silently glued into the expression.
                             last_token_is_asi_trigger_ = true;
+                            last_token_end_ = make_location();
                             continue;
                         }
                         if (--asm_header_budget_ <= 0) {
@@ -197,7 +204,7 @@ namespace lexer {
                         tokens.push_back(Token{
                             .kind = TokenKind::Semicolon,
                             .lexeme = {},
-                            .location = token.location,
+                            .location = last_token_end_,
                         });
                         last_real_kind_ = TokenKind::Semicolon;
                         last_token_is_asi_trigger_ = false;
@@ -210,6 +217,7 @@ namespace lexer {
                             tokens.push_back(std::move(*asm_token));
                             last_real_kind_ = TokenKind::AsmBlock;
                             last_token_is_asi_trigger_ = true;
+                            last_token_end_ = make_location();
                         } else if (peek() == '-' && peek_next() == '>') {
                             // 'asm -> reg [: type] { ... }' — the header is ordinary Mirage
                             // grammar (Arrow, an identifier, an optional ':' + type), lexed
@@ -365,7 +373,7 @@ namespace lexer {
                     return Token{
                         .kind = TokenKind::Semicolon,
                         .lexeme = {},
-                        .location = make_location(),
+                        .location = last_token_end_,
                     };
                 }
 
@@ -417,6 +425,7 @@ namespace lexer {
                 const bool is_dot_star = token->kind == TokenKind::Star && last_real_kind_ == TokenKind::Dot;
                 last_token_is_asi_trigger_ = is_asi_trigger(token->kind) || is_dot_star;
                 last_real_kind_ = token->kind;
+                last_token_end_ = make_location();
                 return token;
             }
 
