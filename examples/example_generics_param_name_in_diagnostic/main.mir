@@ -1,0 +1,24 @@
+// example_generics_param_name_in_diagnostic/main.mir — REJECTION CASE, pinning how a
+// compiler diagnostic SPELLS an unbound generic parameter.
+//
+// '?' marks an ignorable error and requires an error type. 'T' is a plain type parameter,
+// so '?T' is rejected — and the message has to name the offending type. Before
+// ResolvedType::opaque_param_index carried the parameter's own spelling, every such
+// message said '<generic>', which told the reader nothing about WHICH parameter was at
+// fault in a multi-parameter declaration.
+//
+// This fixture exists because that spelling is otherwise untested: TypeKind::Opaque is
+// deliberately permissive (see its doc comment), so it suppresses almost every type
+// mismatch that would otherwise render it, and no other fixture in the corpus reaches
+// describe_type with a named Opaque at all. sema.cpp's describe_type and the LSP's
+// type_to_string (type_printer.cpp) must agree here; this is the compiler half.
+//
+// Expected: rejected with "got 'T'" (NOT "got '<generic>'").
+
+pub fn get[T: type](v: T) -> ?T {
+    return nil
+}
+
+pub fn main() -> i32 {
+    return 0
+}

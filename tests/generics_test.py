@@ -220,6 +220,21 @@ CASES = [
         [],
         ["arithmetic is not allowed on function pointer types"],
     ),
+    # A compiler diagnostic must SPELL an unbound generic parameter, not print "<generic>".
+    # Asserted as two separate substrings so a regression that reverts describe_type's Opaque
+    # arm fails on the second even if some other type in the message happens to contain "T".
+    #
+    # Hard to reach on purpose: TypeKind::Opaque is deliberately permissive, so it suppresses
+    # nearly every type mismatch that would otherwise render it — '?T' is one of the few
+    # rejections that survives. Verified by instrumenting describe_type and sweeping the whole
+    # corpus: no other fixture reaches it with a named Opaque.
+    (
+        "example_generics_param_name_in_diagnostic",
+        "build",
+        1,
+        [],
+        ["'?' requires an error type", "got 'T'"],
+    ),
 ]
 
 

@@ -66,8 +66,13 @@ namespace sema {
         case TypeKind::Function: return "fn(...)";
         case TypeKind::Opaque:
             // Shown while eagerly checking a generic declaration, where no concrete type
-            // exists yet. The parameter's own spelling isn't recoverable from a ResolvedType,
-            // so name the bound when there is one — that is the part a reader needs.
+            // exists yet. Prefer the parameter's own spelling — 'T' reads far better in a
+            // diagnostic than any description of it — falling back to the bound, then to a
+            // bare placeholder. Mirrors the LSP's type_to_string (type_printer.cpp) exactly;
+            // the two format the same types for different audiences and must agree.
+            if (const auto *name = program.opaque_param_name_at(t.opaque_param_index)) {
+                return *name;
+            }
             if (t.trait_index >= 0) {
                 if (const auto *info = program.trait_at(t.trait_index)) {
                     return std::format("<generic: {}>", info->name);

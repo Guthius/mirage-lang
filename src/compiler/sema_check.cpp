@@ -1451,7 +1451,23 @@ namespace sema {
         for (const auto &arg : args) {
             out += "__";
             if (arg.is_type) {
-                std::string name = describe_type(arg.type_arg, program);
+                // A symbol name must follow type IDENTITY, and ResolvedType::operator==
+                // deliberately ignores opaque_param_index — so two args that compare equal
+                // must not mangle differently just because one is spelled 'T' and the other
+                // 'U'. describe_type prefers that spelling (it is written for humans), so
+                // Opaque is answered here instead of going through it. Only reachable for a
+                // suppressed template instance, which is never emitted; kept exact anyway,
+                // since a name that disagrees with equality is a trap either way.
+                std::string name;
+                if (arg.type_arg.kind == TypeKind::Opaque) {
+                    // The bound is part of identity (it lives in trait_index, which operator==
+                    // DOES compare); the parameter's spelling is not. Rendered here rather than
+                    // by describe_type so the two can never drift apart silently.
+                    const auto *bound = program.trait_at(arg.type_arg.trait_index);
+                    name = bound ? std::format("<generic: {}>", bound->name) : "<generic>";
+                } else {
+                    name = describe_type(arg.type_arg, program);
+                }
                 for (char &c : name) {
                     if (!std::isalnum(static_cast<unsigned char>(c))) c = '_';
                 }

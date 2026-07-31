@@ -483,6 +483,11 @@
     "diag": "examples/example_generics_orphan_impl/main.mir:20:1: error: 'impl Drawable for Box' has 2 generic parameter(s), but 'Box' is declared with 1 \u2014 impl generic parameter lists must match the target type's own arity exactly",
     "exit": 1
   },
+  "example_generics_param_name_in_diagnostic": {
+    "action": "build",
+    "diag": "examples/example_generics_param_name_in_diagnostic/main.mir:18:30: error: '?' requires an error type; expected 'error(...)', an 'enum(i32)', a 'union(enum)', or a type alias to one, got 'T'",
+    "exit": 1
+  },
   "example_generics_rtti": {
     "action": "run",
     "exit": 0
