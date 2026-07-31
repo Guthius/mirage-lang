@@ -316,6 +316,60 @@ namespace lsp {
             send_response(out, id, std::move(result));
             completed.mark_done(id_key);
         }
+
+        // The one dispatch path for every cancellable textDocument request: id/id_key
+        // bookkeeping, the unsupported-URI guard, the in-flight id-reuse warning,
+        // queue-full rejection, and run_cancellable_request wrapping.
+        //
+        // `make_compute` runs on the main thread once the path guard has passed; its
+        // request-param parsing may throw, which the dispatch try/catch answers with an
+        // error response. The closure it returns runs on the worker thread, where the
+        // DocumentStore may be touched.
+        // `message` is non-const on purpose: nlohmann's non-const operator[] auto-vivifies
+        // a missing key to null, and .get<> on null throws into the dispatch try/catch;
+        // the const overload on a missing key is undefined behaviour instead.
+        template <typename MakeCompute>
+        void enqueue_cancellable_request(json &message, const std::string &method, TaskQueue &queue,
+                                         transport::OutputChannel &channel, CompletedRequests &completed,
+                                         std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> &in_flight,
+                                         MakeCompute &&make_compute) {
+            const auto id = message["id"];
+            const auto id_key = id_key_of(id);
+            auto path = canonical_path_of(message["params"]["textDocument"]["uri"].get<std::string>());
+            // An unsupported URI ('untitled:' buffer) has nothing to analyse; a null
+            // result is the spec's "no answer here", and skipping without one would
+            // leave the client's promise pending.
+            if (path.empty()) {
+                send_response(channel, id, nullptr);
+                return;
+            }
+
+            auto cancelled = std::make_shared<std::atomic<bool>>(false);
+            std::function<json()> compute = make_compute(path, cancelled);
+
+            // Reusing an id while the previous request with it is still in flight is a
+            // protocol violation, but assigning over the entry silently orphaned the older
+            // request's cancellation flag, so a later $/cancelRequest for that id would
+            // cancel the wrong one. Report rather than misattribute quietly.
+            if (in_flight.contains(id_key)) {
+                std::cerr << "mirage-lsp: request id " << id_key
+                          << " reused while still in flight; cancellation may be misattributed\n";
+            }
+            in_flight[id_key] = cancelled;
+
+            // A full queue means the single worker has fallen far behind. Answer now
+            // rather than leave the client waiting on a request that was never accepted.
+            if (queue.full()) {
+                std::cerr << "mirage-lsp: task queue full, rejecting '" << method << "'\n";
+                in_flight.erase(id_key);
+                send_error(channel, id, INTERNAL_ERROR, "server busy: task queue full");
+                return;
+            }
+
+            queue.push(Task{cancelled, [&channel, &completed, cancelled, id, id_key, compute = std::move(compute)] {
+                run_cancellable_request(cancelled, completed, id_key, channel, id, compute);
+            }, id_key});
+        }
     }
 
     auto Server::run(std::istream &in, std::ostream &out) -> int {
@@ -582,171 +636,66 @@ namespace lsp {
                     });
                 }});
             } else if (method == "textDocument/hover" || method == "textDocument/definition") {
-                const auto id = message["id"];
-                const auto id_key = id_key_of(id);
-                auto path = canonical_path_of(message["params"]["textDocument"]["uri"].get<std::string>());
-                // An unsupported URI ('untitled:' buffer) has nothing to analyse; a null
-                // result is the spec's "no answer here", and skipping without one would
-                // leave the client's promise pending.
-                if (path.empty()) {
-                    send_response(channel, id, nullptr);
-                    continue;
-                }
-                const auto line = message["params"]["position"]["line"].get<size_t>() + 1;
-                const auto character = message["params"]["position"]["character"].get<size_t>() + 1;
-
-                auto cancelled = std::make_shared<std::atomic<bool>>(false);
-                // Reusing an id while the previous request with it is still in flight is a
-                // protocol violation, but assigning over the entry silently orphaned the older
-                // request's cancellation flag, so a later $/cancelRequest for that id would
-                // cancel the wrong one. Report rather than misattribute quietly.
-                if (in_flight_.contains(id_key)) {
-                    std::cerr << "mirage-lsp: request id " << id_key
-                              << " reused while still in flight; cancellation may be misattributed\n";
-                }
-                in_flight_[id_key] = cancelled;
-
-                // A full queue means the single worker has fallen far behind. Answer now
-                // rather than leave the client waiting on a request that was never accepted.
-                if (queue.full()) {
-                    std::cerr << "mirage-lsp: task queue full, rejecting '" << method << "'\n";
-                    in_flight_.erase(id_key);
-                    send_error(channel, id, INTERNAL_ERROR, "server busy: task queue full");
-                    continue;
-                }
-
-                const bool is_hover = method == "textDocument/hover";
-                queue.push(Task{cancelled, [&worker, &channel, &completed, cancelled, id, id_key, path, line, character, is_hover] {
-                    run_cancellable_request(cancelled, completed, id_key, channel, id, [&]() -> json {
-                        const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
-                        auto &result = worker.documents.ensure_analysed(path);
-                        return is_hover ? handlers::handle_hover(result, module_path, path, line, character)
-                                        : handlers::handle_definition(result, module_path, path, line, character);
-                    });
-                }, id_key});
-            } else if (method == "textDocument/completion") {
-                const auto id = message["id"];
-                const auto id_key = id_key_of(id);
-                auto path = canonical_path_of(message["params"]["textDocument"]["uri"].get<std::string>());
-                if (path.empty()) {
-                    send_response(channel, id, nullptr);
-                    continue;
-                }
-                const auto line = message["params"]["position"]["line"].get<size_t>() + 1;
-                const auto character = message["params"]["position"]["character"].get<size_t>() + 1;
-
-                auto cancelled = std::make_shared<std::atomic<bool>>(false);
-                // Reusing an id while the previous request with it is still in flight is a
-                // protocol violation, but assigning over the entry silently orphaned the older
-                // request's cancellation flag, so a later $/cancelRequest for that id would
-                // cancel the wrong one. Report rather than misattribute quietly.
-                if (in_flight_.contains(id_key)) {
-                    std::cerr << "mirage-lsp: request id " << id_key
-                              << " reused while still in flight; cancellation may be misattributed\n";
-                }
-                in_flight_[id_key] = cancelled;
-
-                // A full queue means the single worker has fallen far behind. Answer now
-                // rather than leave the client waiting on a request that was never accepted.
-                if (queue.full()) {
-                    std::cerr << "mirage-lsp: task queue full, rejecting '" << method << "'\n";
-                    in_flight_.erase(id_key);
-                    send_error(channel, id, INTERNAL_ERROR, "server busy: task queue full");
-                    continue;
-                }
-
-                queue.push(Task{cancelled, [&worker, &channel, &completed, cancelled, id, id_key, path, line, character] {
-                    run_cancellable_request(cancelled, completed, id_key, channel, id, [&]() -> json {
-                        const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
-                        auto &result = worker.documents.ensure_analysed(path);
-                        return handlers::handle_completion(result, module_path, path, line, character);
-                    });
-                }, id_key});
-            } else if (method == "textDocument/references") {
-                const auto id = message["id"];
-                const auto id_key = id_key_of(id);
-                auto path = canonical_path_of(message["params"]["textDocument"]["uri"].get<std::string>());
-                if (path.empty()) {
-                    send_response(channel, id, nullptr);
-                    continue;
-                }
-                const auto line = message["params"]["position"]["line"].get<size_t>() + 1;
-                const auto character = message["params"]["position"]["character"].get<size_t>() + 1;
-                // 'context' is required by the spec, but tolerate its absence rather than
-                // throwing on a client that omits it; including the declaration is the more
-                // useful default.
-                const auto include_declaration = message["params"].contains("context")
-                    ? message["params"]["context"].value("includeDeclaration", true)
-                    : true;
-
-                auto cancelled = std::make_shared<std::atomic<bool>>(false);
-                if (in_flight_.contains(id_key)) {
-                    std::cerr << "mirage-lsp: request id " << id_key
-                              << " reused while still in flight; cancellation may be misattributed\n";
-                }
-                in_flight_[id_key] = cancelled;
-
-                if (queue.full()) {
-                    std::cerr << "mirage-lsp: task queue full, rejecting '" << method << "'\n";
-                    in_flight_.erase(id_key);
-                    send_error(channel, id, INTERNAL_ERROR, "server busy: task queue full");
-                    continue;
-                }
-
-                queue.push(Task{cancelled, [&worker, &channel, &completed, cancelled, id, id_key, path, line, character, include_declaration] {
-                    run_cancellable_request(cancelled, completed, id_key, channel, id, [&]() -> json {
-                        const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
-                        auto &result = worker.documents.ensure_analysed(path);
-
-                        // Discovered per request rather than cached: files appear and vanish
-                        // between searches, and a stale module list silently misses references.
-                        // The walk is filesystem-bound and dwarfed by analysing what it finds.
-                        handlers::WorkspaceSearch workspace{
-                            .module_dirs = analysis::discover_module_dirs(worker.workspace_root),
-                            .analyse = [&worker](const std::string &dir) { return worker.documents.analyse_uncached(dir); },
+                enqueue_cancellable_request(message, method, queue, channel, completed, in_flight_,
+                    [&](const std::string &path, const std::shared_ptr<std::atomic<bool>> &) -> std::function<json()> {
+                        const auto line = message["params"]["position"]["line"].get<size_t>() + 1;
+                        const auto character = message["params"]["position"]["character"].get<size_t>() + 1;
+                        const bool is_hover = method == "textDocument/hover";
+                        return [&worker, path, line, character, is_hover]() -> json {
+                            const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
+                            auto &result = worker.documents.ensure_analysed(path);
+                            return is_hover ? handlers::handle_hover(result, module_path, path, line, character)
+                                            : handlers::handle_definition(result, module_path, path, line, character);
                         };
-                        const auto *search = workspace.module_dirs.empty() ? nullptr : &workspace;
-                        return handlers::handle_references(result, module_path, path, line, character, include_declaration, search);
                     });
-                }, id_key});
+            } else if (method == "textDocument/completion") {
+                enqueue_cancellable_request(message, method, queue, channel, completed, in_flight_,
+                    [&](const std::string &path, const std::shared_ptr<std::atomic<bool>> &) -> std::function<json()> {
+                        const auto line = message["params"]["position"]["line"].get<size_t>() + 1;
+                        const auto character = message["params"]["position"]["character"].get<size_t>() + 1;
+                        return [&worker, path, line, character]() -> json {
+                            const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
+                            auto &result = worker.documents.ensure_analysed(path);
+                            return handlers::handle_completion(result, module_path, path, line, character);
+                        };
+                    });
+            } else if (method == "textDocument/references") {
+                enqueue_cancellable_request(message, method, queue, channel, completed, in_flight_,
+                    [&](const std::string &path, const std::shared_ptr<std::atomic<bool>> &) -> std::function<json()> {
+                        const auto line = message["params"]["position"]["line"].get<size_t>() + 1;
+                        const auto character = message["params"]["position"]["character"].get<size_t>() + 1;
+                        // 'context' is required by the spec, but tolerate its absence rather than
+                        // throwing on a client that omits it; including the declaration is the more
+                        // useful default.
+                        const auto include_declaration = message["params"].contains("context")
+                            ? message["params"]["context"].value("includeDeclaration", true)
+                            : true;
+                        return [&worker, path, line, character, include_declaration]() -> json {
+                            const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
+                            auto &result = worker.documents.ensure_analysed(path);
+
+                            // Discovered per request rather than cached: files appear and vanish
+                            // between searches, and a stale module list silently misses references.
+                            // The walk is filesystem-bound and dwarfed by analysing what it finds.
+                            handlers::WorkspaceSearch workspace{
+                                .module_dirs = analysis::discover_module_dirs(worker.workspace_root),
+                                .analyse = [&worker](const std::string &dir) { return worker.documents.analyse_uncached(dir); },
+                            };
+                            const auto *search = workspace.module_dirs.empty() ? nullptr : &workspace;
+                            return handlers::handle_references(result, module_path, path, line, character, include_declaration, search);
+                        };
+                    });
             } else if (method == "textDocument/inlayHint") {
-                const auto id = message["id"];
-                const auto id_key = id_key_of(id);
-                auto path = canonical_path_of(message["params"]["textDocument"]["uri"].get<std::string>());
-                if (path.empty()) {
-                    send_response(channel, id, nullptr);
-                    continue;
-                }
-                const auto start_line = message["params"]["range"]["start"]["line"].get<size_t>() + 1;
-                const auto end_line = message["params"]["range"]["end"]["line"].get<size_t>() + 1;
-
-                auto cancelled = std::make_shared<std::atomic<bool>>(false);
-                // Reusing an id while the previous request with it is still in flight is a
-                // protocol violation, but assigning over the entry silently orphaned the older
-                // request's cancellation flag, so a later $/cancelRequest for that id would
-                // cancel the wrong one. Report rather than misattribute quietly.
-                if (in_flight_.contains(id_key)) {
-                    std::cerr << "mirage-lsp: request id " << id_key
-                              << " reused while still in flight; cancellation may be misattributed\n";
-                }
-                in_flight_[id_key] = cancelled;
-
-                // A full queue means the single worker has fallen far behind. Answer now
-                // rather than leave the client waiting on a request that was never accepted.
-                if (queue.full()) {
-                    std::cerr << "mirage-lsp: task queue full, rejecting '" << method << "'\n";
-                    in_flight_.erase(id_key);
-                    send_error(channel, id, INTERNAL_ERROR, "server busy: task queue full");
-                    continue;
-                }
-
-                queue.push(Task{cancelled, [&worker, &channel, &completed, cancelled, id, id_key, path, start_line, end_line] {
-                    run_cancellable_request(cancelled, completed, id_key, channel, id, [&]() -> json {
-                        const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
-                        auto &result = worker.documents.ensure_analysed(path);
-                        return handlers::handle_inlay_hint(result, module_path, path, start_line, end_line);
+                enqueue_cancellable_request(message, method, queue, channel, completed, in_flight_,
+                    [&](const std::string &path, const std::shared_ptr<std::atomic<bool>> &) -> std::function<json()> {
+                        const auto start_line = message["params"]["range"]["start"]["line"].get<size_t>() + 1;
+                        const auto end_line = message["params"]["range"]["end"]["line"].get<size_t>() + 1;
+                        return [&worker, path, start_line, end_line]() -> json {
+                            const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
+                            auto &result = worker.documents.ensure_analysed(path);
+                            return handlers::handle_inlay_hint(result, module_path, path, start_line, end_line);
+                        };
                     });
-                }, id_key});
             } else {
                 std::cerr << "mirage-lsp: unhandled method '" << method << "'\n";
                 if (has_id) {
