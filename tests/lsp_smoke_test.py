@@ -1094,6 +1094,51 @@ def main() -> int:
     ws_exit = ws_client.close()
     check(ws_exit == 0, f"workspace session exits 0, got {ws_exit}")
 
+    # --- URI forms: RFC 8089's 'file://localhost/...' local form, RFC 3986's
+    # case-insensitive scheme, and percent-encoded non-ASCII paths (the spelling
+    # VS Code sends) must all reach the same documents (LSP-17) ---
+    import shutil
+    import tempfile
+    import urllib.parse
+
+    uri_client = Client(LSP_BINARY)
+    uri_client.request("initialize", {"processId": None, "rootUri": None, "capabilities": {}})
+    uri_client.notify("initialized", {})
+
+    localhost_uri = "FILE://localhost" + str(multi_main)
+    uri_client.notify("textDocument/didOpen", {
+        "textDocument": {"uri": localhost_uri, "languageId": "mirage", "version": 1, "text": text},
+    })
+    localhost_diag = uri_client.read()
+    check(localhost_diag["method"] == "textDocument/publishDiagnostics",
+          "a FILE://localhost didOpen is analysed, not rejected as unsupported")
+    check(localhost_diag["params"]["uri"] == uri_for(multi_main),
+          f"the localhost form publishes under the canonical local-form uri, got {localhost_diag['params']['uri']}")
+    l, c = pos_of(5, "hello")
+    resp = uri_client.request("textDocument/definition", {
+        "textDocument": {"uri": localhost_uri}, "position": {"line": l, "character": c},
+    })
+    check(resp["result"] is not None, "definition answers through a file://localhost uri")
+
+    unicode_root = Path(tempfile.mkdtemp(prefix="mirage-lsp-uri-test-"))
+    unicode_dir = unicode_root / "héllo"
+    unicode_dir.mkdir()
+    unicode_file = unicode_dir / "main.mir"
+    unicode_file.write_text("pub fn main() -> i32 {\n    return 0\n}\n")
+    encoded_uri = "file://" + urllib.parse.quote(str(unicode_file))
+    uri_client.notify("textDocument/didOpen", {
+        "textDocument": {"uri": encoded_uri, "languageId": "mirage", "version": 1, "text": unicode_file.read_text()},
+    })
+    unicode_diag = uri_client.read()
+    check(unicode_diag["method"] == "textDocument/publishDiagnostics",
+          "a percent-encoded non-ASCII uri is analysed")
+    check(unicode_diag["params"]["uri"] == encoded_uri,
+          f"the server-minted uri string-compares equal to the client's percent-encoded spelling, got {unicode_diag['params']['uri']}")
+
+    uri_exit = uri_client.close()
+    check(uri_exit == 0, f"uri-forms session exits 0, got {uri_exit}")
+    shutil.rmtree(unicode_root)
+
     # --- shutdown / exit ---
     client.notify("textDocument/didClose", {"textDocument": {"uri": multi_uri}})
     close_notification = client.read()
