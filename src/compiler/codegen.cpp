@@ -4723,7 +4723,7 @@ namespace codegen {
                 }
             }
 
-            auto emit_try_propagation(llvm::Value *err_val, const sema::ResolvedType &callee_error_ty, const SourceLocation &loc) -> llvm::BasicBlock * {
+            auto emit_try_propagation(llvm::Value *err_val, const sema::ResolvedType &callee_error_ty) -> llvm::BasicBlock * {
                 auto *fn = builder_.GetInsertBlock()->getParent();
                 auto *propagate_bb = llvm::BasicBlock::Create(*context_, "try.propagate", fn);
                 auto *ok_bb = llvm::BasicBlock::Create(*context_, "try.ok", fn);
@@ -4755,7 +4755,7 @@ namespace codegen {
                     err_val = builder_.CreateExtractValue(result, {static_cast<unsigned>(returns.size() - 1)});
                 }
 
-                emit_try_propagation(err_val, returns.back(), expr.location);
+                emit_try_propagation(err_val, returns.back());
 
                 // On the ok path: return the non-error value (if any)
                 if (returns.size() == 1) {
@@ -6212,7 +6212,7 @@ namespace codegen {
                                 auto *err_val = all_returns.size() == 1
                                     ? result
                                     : builder_.CreateExtractValue(result, {static_cast<unsigned>(all_returns.size() - 1)});
-                                emit_try_propagation(err_val, all_returns.back(), {});
+                                emit_try_propagation(err_val, all_returns.back());
                                 // On ok path: bind non-error names (all_returns[0..n-2])
                                 for (size_t i = 0; i < v.names.size(); ++i) {
                                     if (v.names[i].empty() || v.names[i] == "_") continue;
