@@ -2288,7 +2288,7 @@ appears in it as a bare identifier, in one of these positions:
 | `err` | `Failed` | `Ok` |
 | `!err` | `Ok` | `Failed` |
 | any operand of an `&&` chain (`x && err`, `err1 && err2`, `a && b && !err`) | that operand's state | `Unknown` |
-| an operand of a `\|\|` | `Unknown` | `Unknown` |
+| any operand of a `\|\|` chain (`x \|\| err`, `a \|\| b \|\| !err`) | `Unknown` | the negation of that operand's state |
 
 An `&&` chain narrows *every* operand that is a bare `err` or `!err`, at any depth
 in the chain — all of them must hold for the then-branch to be taken. The
@@ -2296,9 +2296,21 @@ else-branch learns nothing, since any one operand being false is enough to reach
 it. A chain that both asserts and denies the same variable (`err && !err`) leaves
 it `Unknown` rather than letting operand order decide.
 
-`||` narrows nothing, in either branch: the branch is taken when *either* side
-holds, so neither is known. This is not an omission — it degrades a previously
-known state to `Unknown`, which is the conservative reading.
+A `||` chain is the mirror image of `&&`. Its then-branch is taken when *any*
+operand holds, so no particular one is known — but its else-branch is reached only
+when *every* operand was false, which is exactly as informative as `&&`'s
+then-branch:
+
+```mirage
+if flag || err  { ... } else { /* err is Ok here     */ }
+if flag || !err { ... } else { /* err is Failed here */ }
+```
+
+The same reconciliation applies: a variable both asserted and denied in one chain
+(`err || !err`, whose else-branch is unreachable but legal to write) is left
+`Unknown`. The then-branch staying `Unknown` is not a no-op — it degrades a
+previously known state, which is the conservative reading once a variable has been
+branched on inconclusively.
 
 Anything else — the local behind a member access, a deref, a call, a comparison,
 or nested inside a `||` — narrows nothing. The rejection at a later `match err`

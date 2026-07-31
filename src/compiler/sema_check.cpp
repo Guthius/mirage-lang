@@ -2674,9 +2674,10 @@ namespace sema {
                     break;
                 case ErrorUnknownReason::UncheckedConditionShape:
                     detail = std::format(
-                        "the enclosing condition mentions it but does not narrow it -- only "
-                        "'err', '!err', or an operand of a '&&' chain do that, and '||' "
-                        "proves nothing about either side; {}", generic_advice);
+                        "the enclosing condition mentions it but does not narrow it HERE -- "
+                        "'err', '!err' and an operand of a '&&' chain narrow the then-branch, "
+                        "while an operand of a '||' chain narrows only the ELSE-branch; {}",
+                        generic_advice);
                     break;
                 case ErrorUnknownReason::AddressTaken:
                     detail = "its address was taken, so its state is no longer known here; "
@@ -4787,13 +4788,15 @@ namespace sema {
         return std::nullopt;
     }
 
-    // Appends every operand of a '&&' chain, flattened. Stops at anything that is not a
-    // '&&', so a nested '||' arrives as a single opaque operand and is never descended into.
-    void flatten_and_chain(const ast::Expr &expr, std::vector<const ast::Expr *> &out) {
+    // Appends every operand of a chain of 'op', flattened. Stops at anything that is not
+    // that operator, so a nested '||' inside an '&&' chain (or vice versa) arrives as a
+    // single opaque operand and is never descended into — which is correct, since what a
+    // mixed condition proves depends on how it nests.
+    void flatten_logical_chain(const ast::Expr &expr, const ast::BinaryOp op, std::vector<const ast::Expr *> &out) {
         if (const auto *bin = std::get_if<std::unique_ptr<ast::BinaryExpr>>(&expr)) {
-            if ((*bin)->op == ast::BinaryOp::LogicalAnd) {
-                flatten_and_chain((*bin)->lhs, out);
-                flatten_and_chain((*bin)->rhs, out);
+            if ((*bin)->op == op) {
+                flatten_logical_chain((*bin)->lhs, op, out);
+                flatten_logical_chain((*bin)->rhs, op, out);
                 return;
             }
         }
@@ -4820,7 +4823,7 @@ namespace sema {
             // single operand being false is enough to take it.
             if (b.op == ast::BinaryOp::LogicalAnd) {
                 std::vector<const ast::Expr *> operands;
-                flatten_and_chain(condition, operands);
+                flatten_logical_chain(condition, ast::BinaryOp::LogicalAnd, operands);
 
                 std::vector<ConditionNarrowing> result;
                 for (const auto *operand : operands) {
@@ -4843,16 +4846,45 @@ namespace sema {
                 return result;
             }
 
-            // '||': deliberately NOT widened, and deliberately not descended into. An operand
-            // of a '||' being true tells you nothing about any other operand, so the
-            // then-branch proves nothing -- including about the leftmost one. The
-            // Unknown/Unknown entry below is not a no-op: it DEGRADES whatever was previously
-            // known about the variable, which is the conservative and correct thing to do
-            // once its state has been branched on inconclusively.
+            // '||': the mirror image of '&&'. Taking the THEN-branch means at least one
+            // operand held, which says nothing about any particular one — so the then-branch
+            // still proves nothing. But reaching the ELSE-branch means EVERY operand was
+            // false, which is exactly as informative as '&&'\'s then-branch: each bare
+            // 'err'/'!err' operand narrows there, to the negation of what it asserts.
+            //
+            //     if a || err  { ... } else { /* err is Ok here     */ }
+            //     if a || !err { ... } else { /* err is Failed here */ }
+            //
+            // The then-state stays Unknown deliberately, and that is not a no-op: it DEGRADES
+            // whatever was previously known, which is the conservative reading once a
+            // variable's state has been branched on inconclusively.
             if (b.op == ast::BinaryOp::LogicalOr) {
-                if (const auto matched = match_error_operand(b.lhs, locals, program)) {
-                    return {ConditionNarrowing{matched->first, ErrorState::Unknown, ErrorState::Unknown, false, false}};
+                std::vector<const ast::Expr *> operands;
+                flatten_logical_chain(condition, ast::BinaryOp::LogicalOr, operands);
+
+                std::vector<ConditionNarrowing> result;
+                for (const auto *operand : operands) {
+                    const auto matched = match_error_operand(*operand, locals, program);
+                    if (!matched) continue;
+                    const auto &[name, negated] = *matched;
+                    // Negated: reaching the else-branch means '!err' was false, i.e. err holds.
+                    const auto else_state = negated ? ErrorState::Failed : ErrorState::Ok;
+
+                    // Same reconciliation as the '&&' chain, on the other branch: a variable
+                    // named twice consistently keeps its state, a contradiction ('err || !err'
+                    // — its else-branch is unreachable, but legal to write) degrades to
+                    // Unknown rather than letting operand order decide.
+                    const auto existing = std::ranges::find_if(result, [&](const auto &n) { return n.var_name == name; });
+                    if (existing != result.end()) {
+                        if (existing->else_state != else_state) existing->else_state = ErrorState::Unknown;
+                        continue;
+                    }
+                    // is_exact_* stay false: per spec the early-return rule and the
+                    // redundant-check warning apply only to a bare 'err'/'!err' condition,
+                    // never to a compound one.
+                    result.push_back(ConditionNarrowing{name, ErrorState::Unknown, else_state, false, false});
                 }
+                return result;
             }
         }
 

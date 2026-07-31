@@ -69,12 +69,12 @@ def test_unnarrowable_shapes_are_explained() -> None:
     stderr = result.stderr
 
     check(
-        "'||' proves nothing about either side" in stderr,
-        "a '||' condition explains that it narrows neither operand",
+        "narrows only the ELSE-branch" in stderr,
+        "a '||' condition explains that it narrows the other branch, not this one",
     )
     check(
-        "only 'err', '!err', or an operand of a '&&' chain" in stderr,
-        "the condition-shape diagnostic names the shapes that DO narrow",
+        "narrow the then-branch" in stderr,
+        "the condition-shape diagnostic names the shapes that DO narrow here",
     )
     check(
         "its address was taken" in stderr,
@@ -98,18 +98,31 @@ def test_unnarrowable_shapes_are_explained() -> None:
     )
 
 
-def test_or_still_does_not_narrow() -> None:
-    """'||' is deliberately NOT widened.
+def test_or_does_not_narrow_the_then_branch() -> None:
+    """'||' narrows its ELSE-branch only.
 
-    An operand of a '||' being true says nothing about any other operand, so the
-    then-branch proves nothing -- including about the leftmost one, which earlier versions
-    did report a (Unknown/Unknown) narrowing for. That entry is not a no-op: it DEGRADES a
-    previously-known state, which is the conservative and correct thing to do.
+    Its then-branch is taken when ANY operand holds, so no particular one is known -- which
+    is the half that must stay rejected. The Unknown then-state is not a no-op either: it
+    DEGRADES a previously-known state, which is the conservative reading once a variable has
+    been branched on inconclusively.
+
+    The other half (the else-branch, which IS narrowed) is covered by
+    example_error_narrow_or_else, whose exit code is pinned by the corpus harness.
     """
     result = run_mirage("build", "example_error_narrow_unknown")
     check(
-        "main.mir:23" in result.stderr,
-        "the '||' case is still rejected (at its own line)",
+        "main.mir:24" in result.stderr,
+        "the '||' THEN-branch case is still rejected (at its own line)",
+    )
+
+
+def test_or_narrows_the_else_branch() -> None:
+    """The half that was missing: every operand of a '||' is false in its else-branch."""
+    result = run_mirage("run", "example_error_narrow_or_else")
+    check(
+        result.returncode == 0,
+        "example_error_narrow_or_else runs clean (exit 0 = every check passed), got "
+        f"{result.returncode} (stderr: {result.stderr.strip()[:300]})",
     )
 
 
@@ -120,7 +133,8 @@ def main() -> int:
 
     test_and_chain_narrows()
     test_unnarrowable_shapes_are_explained()
-    test_or_still_does_not_narrow()
+    test_or_does_not_narrow_the_then_branch()
+    test_or_narrows_the_else_branch()
 
     if failures:
         print(f"\n{failures} failure(s)")

@@ -6,8 +6,8 @@
 // "unknown state" -- which read as a bug in the check rather than a limit of it.
 //
 // Every operand of a '&&' chain must hold for the then-branch to be taken, so each one
-// that is a bare 'err' or '!err' narrows that variable there. '||' is deliberately NOT
-// widened: see example_error_narrow_unknown.
+// that is a bare 'err' or '!err' narrows that variable there. '||' is the mirror image and
+// narrows its ELSE-branch instead: see example_error_narrow_or_else.
 //
 // Returns 0, or the number of the first check that failed.
 

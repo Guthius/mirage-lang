@@ -15,8 +15,9 @@ fn may_fail(n: i32) -> error(Code) {
 
 fn observe(p: *error(Code)) -> i32 { return 0 }
 
-// '||' proves nothing about either operand in the then-branch: the branch is taken when
-// EITHER holds, so neither is known.
+// '||' proves nothing about either operand in the THEN-branch: the branch is taken when
+// EITHER holds, so neither is known. Its ELSE-branch does narrow — every operand was false
+// there — which is what example_error_narrow_or_else pins.
 pub fn via_or() -> i32 {
     mut e := may_fail(-1)
     if e || (1 < 2) {

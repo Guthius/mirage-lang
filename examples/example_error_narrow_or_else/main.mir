@@ -1,0 +1,55 @@
+// Error-typestate narrowing through the ELSE branch of a '||' chain.
+//
+// '||' used to narrow nothing in either branch, which was half right. Its then-branch is
+// taken when ANY operand holds, so no particular one is known — but its else-branch is
+// reached only when EVERY operand was false, which is exactly as informative as the
+// then-branch of an '&&' chain. The two operators are mirror images; only one half of that
+// was implemented.
+//
+// So each bare 'err'/'!err' operand narrows in the else-branch, to the NEGATION of what it
+// asserts: after 'flag || !e' fails, '!e' was false, so 'e' has failed.
+//
+// The then-branch deliberately still narrows nothing — see example_error_narrow_unknown,
+// which pins that half.
+//
+// Returns 0, or the number of the first check that failed.
+
+type Code = enum(i32) { Bad = 1  Worse = 2 }
+
+fn may_fail(n: i32) -> error(Code) {
+    if n < 0 { return_err .Bad }
+    return_ok
+}
+
+pub fn main() -> i32 {
+    const flag := false
+
+    // '!e' is false in the else-branch, so 'e' is Failed there.
+    mut e := may_fail(-1)
+    if flag || !e {
+        return 1
+    } else {
+        if match e { .Bad: 1, .Worse: 2 } != 1 { return 2 }
+    }
+
+    // The un-negated form narrows the other way: 'e2' did NOT fail, so it is Ok. Matching on
+    // an Ok error is still rejected, so this only checks the branch is reachable at all.
+    mut e2 := may_fail(1)
+    mut reached: i32 = 0
+    if flag || e2 {
+        return 3
+    } else {
+        reached = 1
+    }
+    if reached != 1 { return 4 }
+
+    // A longer chain narrows every operand, not just the first or last.
+    mut e3 := may_fail(-1)
+    if flag || flag || !e3 {
+        return 5
+    } else {
+        if match e3 { .Bad: 1, .Worse: 2 } != 1 { return 6 }
+    }
+
+    return 0
+}
