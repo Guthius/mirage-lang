@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <format>
+#include <functional>
 
 namespace sema {
     auto resolve_import(const ast::Program &program, const std::string &importer, const std::string &imported) -> std::string {
@@ -108,69 +109,54 @@ namespace sema {
                 return;
             }
 
+            // Five declarable aggregate kinds, each needing the same three things: a slot index
+            // reserved BEFORE the symbol is published (so TypeSymbol::resolved carries a usable
+            // handle, which is what lets a self-referential pointer field resolve — see
+            // resolve_final_shallow), the matching *_index on ResolvedType set, and its Info
+            // pushed AFTERWARDS.
+            //
+            // 'reserve' keeps those together. The push-back is deferred rather than done inline
+            // because a rejected duplicate name must not leave an orphan Info behind — the slot
+            // index is reserved on the assumption the name is accepted, and abandoned if not.
+            //
+            // Previously three parallel places per kind (a slot variable, an if-else arm, and a
+            // guarded push-back), i.e. three chances to forget one when a sixth kind is added.
             std::optional<ResolvedType> resolved = std::nullopt;
+            std::function<void()> allocate_slot;
 
-            int struct_slot = -1;
-            int enum_slot = -1;
-            int union_slot = -1;
-            int trait_slot = -1;
-            int bitset_slot = -1;
-            if (std::holds_alternative<std::unique_ptr<ast::StructType>>(decl.type)) {
-                struct_slot = static_cast<int>(sema_program.structs.size());
-                resolved = ResolvedType{
-                    .kind = TypeKind::Struct,
-                    .struct_index = struct_slot,
-                };
+            const auto reserve = [&](const TypeKind kind, int ResolvedType::*index_of, auto &slots, auto make_info) {
+                ResolvedType ty{.kind = kind};
+                ty.*index_of = static_cast<int>(slots.size());
+                resolved = ty;
+                allocate_slot = [&slots, make_info] { slots.push_back(make_info()); };
+            };
+
+            if (const auto *st = std::get_if<std::unique_ptr<ast::StructType>>(&decl.type)) {
+                reserve(TypeKind::Struct, &ResolvedType::struct_index, sema_program.structs,
+                        [&module_path, st] { return StructInfo{.module_path = module_path, .is_packed = (*st)->is_packed}; });
             } else if (std::holds_alternative<std::unique_ptr<ast::EnumType>>(decl.type)) {
-                enum_slot = static_cast<int>(sema_program.enums.size());
-                resolved = ResolvedType{
-                    .kind = TypeKind::Enum,
-                    .enum_index = enum_slot,
-                };
-            } else if (std::holds_alternative<std::unique_ptr<ast::UnionType>>(decl.type)) {
-                union_slot = static_cast<int>(sema_program.unions.size());
-                resolved = ResolvedType{
-                    .kind = TypeKind::Union,
-                    .union_index = union_slot,
-                };
+                reserve(TypeKind::Enum, &ResolvedType::enum_index, sema_program.enums,
+                        [&module_path] { return EnumInfo{.module_path = module_path}; });
+            } else if (const auto *un = std::get_if<std::unique_ptr<ast::UnionType>>(&decl.type)) {
+                reserve(TypeKind::Union, &ResolvedType::union_index, sema_program.unions,
+                        [&module_path, un] { return UnionInfo{.module_path = module_path, .is_tagged = (*un)->is_tagged}; });
             } else if (std::holds_alternative<std::unique_ptr<ast::TraitType>>(decl.type)) {
-                trait_slot = static_cast<int>(sema_program.traits.size());
-                resolved = ResolvedType{
-                    .kind = TypeKind::Trait,
-                    .trait_index = trait_slot,
-                };
+                // 'name' is set here (declare time), not by layout_trait, so it's already
+                // available via program.trait_at(idx)->name for an ancestor trait that's still
+                // mid-layout (on ResolveState::trait_composition_stack) when a composition-cycle
+                // error needs to name it — layout_trait never touches this field.
+                reserve(TypeKind::Trait, &ResolvedType::trait_index, sema_program.traits,
+                        [&module_path, &decl] { return TraitInfo{.module_path = module_path, .name = decl.name}; });
             } else if (std::holds_alternative<std::unique_ptr<ast::BitsetType>>(decl.type)) {
-                bitset_slot = static_cast<int>(sema_program.bitsets.size());
-                resolved = ResolvedType{
-                    .kind = TypeKind::Bitset,
-                    .bitset_index = bitset_slot,
-                };
+                reserve(TypeKind::Bitset, &ResolvedType::bitset_index, sema_program.bitsets,
+                        [&module_path] { return BitsetInfo{.module_path = module_path}; });
             }
 
             if (!declare_symbol(module.symbols, decl.name, TypeSymbol{.decl = &decl, .resolved = resolved, .is_pub = decl.is_pub, .location = decl.location}, decl.location, diag)) {
                 return;
             }
 
-            if (struct_slot >= 0) {
-                sema_program.structs.push_back(StructInfo{.module_path = module_path, .is_packed = std::get<std::unique_ptr<ast::StructType>>(decl.type)->is_packed});
-            }
-            if (enum_slot >= 0) {
-                sema_program.enums.push_back(EnumInfo{.module_path = module_path});
-            }
-            if (union_slot >= 0) {
-                const auto &union_decl = std::get<std::unique_ptr<ast::UnionType>>(decl.type);
-                sema_program.unions.push_back(UnionInfo{.module_path = module_path, .is_tagged = union_decl->is_tagged});
-            }
-            if (trait_slot >= 0) {
-                // 'name' is set here (declare time), not by layout_trait, so it's already
-                // available via program.trait_at(idx)->name for an ancestor trait that's still
-                // mid-layout (on ResolveState::trait_composition_stack) when a composition-cycle
-                // error needs to name it — layout_trait never touches this field.
-                sema_program.traits.push_back(TraitInfo{.module_path = module_path, .name = decl.name});
-            }
-            if (bitset_slot >= 0) {
-                sema_program.bitsets.push_back(BitsetInfo{.module_path = module_path});
-            }
+            if (allocate_slot) allocate_slot();
         }
 
         void declare_global(const ast::VarDecl &decl, const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, DiagnosticEngine &diag) {
