@@ -459,6 +459,10 @@ namespace ast {
             case TokenKind::IntLiteral:
             case TokenKind::FloatLiteral:
             case TokenKind::StringLiteral:
+            case TokenKind::CharLiteral:
+            case TokenKind::Dollar:
+            case TokenKind::PlusPlus:
+            case TokenKind::MinusMinus:
             case TokenKind::KwTrue:
             case TokenKind::KwFalse:
             case TokenKind::KwNil:

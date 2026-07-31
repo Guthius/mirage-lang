@@ -709,6 +709,10 @@
     "action": "run",
     "exit": 0
   },
+  "example_return_char_literal": {
+    "action": "run",
+    "exit": 98
+  },
   "example_return_forward_coercion": {
     "action": "run",
     "exit": 49

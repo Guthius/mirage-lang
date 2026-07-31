@@ -1,0 +1,19 @@
+// example_return_char_literal — 'return' must recognize every expression-start token.
+// can_start_expr omitted CharLiteral, '$', and prefix '++'/'--', so 'return 'a'' parsed
+// as a BARE return followed by a separate expression statement — no parse error, just a
+// confusing downstream sema error or silently dead code (CODE_REVIEW.md FE-3).
+//
+// Expected: exit code 98 — ch() returns 'a' (97) and pre() pre-increments 0 to 1.
+
+fn ch() -> u8 {
+    return 'a'
+}
+
+fn pre(v: *i32) -> i32 {
+    return ++v.*
+}
+
+pub fn main() -> i32 {
+    mut x: i32 = 0
+    return cast(ch(), i32) + pre(&x)
+}
