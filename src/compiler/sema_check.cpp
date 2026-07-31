@@ -3558,15 +3558,22 @@ namespace sema {
         if (target.type.kind != TypeKind::Invalid && !target.writable) {
             error(diag, v->location, "left-hand side of assignment is not mutable");
         }
+        // The RHS is checked BEFORE the target's error typestate is invalidated: runtime
+        // order evaluates the RHS first, so 'err = match err { ... }' inside an
+        // 'if err { }' branch (the natural "map the error" idiom) must see the still-
+        // narrowed state. Invalidating first spuriously rejected it with "cannot match on
+        // an error value of unknown state".
+        const auto value_ty = check_expr(v->value, locals, module_path, program, diag, target.type, loop_depth, defer_loop_base, fn_error_type);
+
         // Reassigning an error-tracked local invalidates its typestate to Unknown,
-        // regardless of assignment operator.
+        // regardless of assignment operator. The reason resets too, so stale
+        // AddressTaken-style advice text never outlives the binding it described.
         if (const auto *ident = std::get_if<ast::IdentExpr>(&v->target)) {
             if (const auto it = locals.find(ident->name); it != locals.end() && it->second.err_state != ErrorState::NotApplicable) {
                 it->second.err_state = ErrorState::Unknown;
+                it->second.err_unknown_reason = ErrorUnknownReason::Unchecked;
             }
         }
-
-        const auto value_ty = check_expr(v->value, locals, module_path, program, diag, target.type, loop_depth, defer_loop_base, fn_error_type);
         if (v->op == ast::AssignOp::Assign) {
             if (!assignable_in_module(value_ty, target.type, module_path, program)) {
                 error(diag, v->location, "type mismatch in assignment");
@@ -5823,9 +5830,14 @@ namespace sema {
                     check_for_in_stmt(v, locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base, fn_error_type);
                 } else if constexpr (std::is_same_v<V, ast::ExprStmt>) {
                     const auto expr_ty = check_expr(v.expr, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                    // Detect ignored errors from fallible calls
+                    // Detect ignored errors from fallible calls. An ASSIGNMENT whose target
+                    // is error-typed is exempt: its statement-level "result" is the value
+                    // just stored into the (error-tracked) target, not an ignored error —
+                    // rejecting it made the 'err = match err { ... }' remap idiom (and even
+                    // 'err = other') impossible to write.
                     if (is_error_union_type(expr_ty, program) &&
-                        !std::holds_alternative<std::unique_ptr<ast::TryExpr>>(v.expr)) {
+                        !std::holds_alternative<std::unique_ptr<ast::TryExpr>>(v.expr) &&
+                        !std::holds_alternative<std::unique_ptr<ast::AssignExpr>>(v.expr)) {
                         // A call to a '?error(...)' function is allowed to ignore it here —
                         // that IS the feature — but the check still has to happen, so record
                         // the omission for codegen. This is the only place a lone '?E' return

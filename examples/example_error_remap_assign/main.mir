@@ -1,0 +1,32 @@
+// example_error_remap_assign — the "map the error" idiom must type-check:
+//
+//  1. 'err = match err { ... }' inside 'if err { }': the RHS is checked BEFORE the
+//     target's narrowed state is invalidated (runtime order evaluates the RHS first);
+//     invalidating first spuriously rejected the match with "unknown state"
+//     (CODE_REVIEW.md CHECK-2).
+//  2. an assignment statement whose target is error-typed is not an "ignored error" —
+//     the value was just stored into the tracked target; even 'err = other' used to be
+//     rejected with "must be captured or propagated" (found alongside, CHECK-20).
+//
+// Expected: exit code 7 — err remapped to 'other' (still Failed), so the inner if fires.
+
+type E = enum(i32) {
+    A = 1
+    B = 2
+}
+
+fn may_fail() -> error(E) {
+    return_err .A
+}
+
+pub fn main() -> i32 {
+    mut err := may_fail()
+    mut other := may_fail()
+    if err {
+        err = match err { .A: other, _: err }
+        if err {
+            return 7
+        }
+    }
+    return 0
+}

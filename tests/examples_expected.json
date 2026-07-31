@@ -355,6 +355,10 @@
     "diag": "examples/example_error_narrow_unknown/main.mir:47:12: error: cannot match on an error value of unknown state; the preceding branches left it in different states, so nothing is known about it here; re-check it",
     "exit": 1
   },
+  "example_error_remap_assign": {
+    "action": "run",
+    "exit": 7
+  },
   "example_error_typestate": {
     "action": "run",
     "exit": 0
