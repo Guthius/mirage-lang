@@ -153,38 +153,10 @@ namespace codegen {
             }
         }
 
-        auto primitive_size(const sema::TypeKind kind) -> uint32_t {
-            switch (kind) {
-            case sema::TypeKind::U8:
-            case sema::TypeKind::I8:
-            case sema::TypeKind::Bool:
-                return 1;
-            case sema::TypeKind::U16:
-            case sema::TypeKind::I16:
-                return 2;
-            case sema::TypeKind::U32:
-            case sema::TypeKind::I32:
-            case sema::TypeKind::F32:
-                return 4;
-            case sema::TypeKind::U64:
-            case sema::TypeKind::I64:
-            case sema::TypeKind::F64:
-            case sema::TypeKind::USize:
-            case sema::TypeKind::Pointer:
-            case sema::TypeKind::Anyptr:
-            case sema::TypeKind::Function:
-            case sema::TypeKind::Type: // compile-time-unique type identifier, backed by u64
-                return 8;
-            case sema::TypeKind::Slice:
-            case sema::TypeKind::Trait: // fat pointer: {data: anyptr, vtable: *const VTable}, 16 bytes
-            case sema::TypeKind::Any:  // fat pointer: {id: type, data: anyptr}, 16 bytes
-                return 16;
-            default:
-                return 0;
-            }
-        }
-
-        auto primitive_align(const sema::TypeKind kind) -> uint32_t { return primitive_size(kind); }
+        // Codegen's own copy of this was byte-identical to sema's; use sema's directly. Only
+        // the size form is still called here — alignment always arrives via align_of() below,
+        // which must apply the fat-pointer overrides primitive_align does not know about.
+        using sema::primitive_size;
 
         auto is_pointer_like(const sema::ResolvedType &type) -> bool {
             return type.kind == sema::TypeKind::Pointer || type.kind == sema::TypeKind::Anyptr;
@@ -483,60 +455,20 @@ namespace codegen {
                 return it->second;
             }
 
-            auto size_of(const std::string &module_path, const sema::ResolvedType &type) const -> uint32_t {
-                if (type.kind == sema::TypeKind::Struct) {
-                    return sema_program_.structs.at(type.struct_index).size;
-                }
-                if (type.kind == sema::TypeKind::Array) {
-                    return sema_program_.arrays.at(type.array_index).size;
-                }
-                if (type.kind == sema::TypeKind::Slice) {
-                    return 16;
-                }
-                if (type.kind == sema::TypeKind::Trait) {
-                    return 16;
-                }
-                if (type.kind == sema::TypeKind::Enum) {
-                    return primitive_size(sema_program_.enums.at(type.enum_index).underlying_type.kind);
-                }
-                if (type.kind == sema::TypeKind::Union) {
-                    return sema_program_.unions.at(type.union_index).size;
-                }
-                if (type.kind == sema::TypeKind::Bitset) {
-                    return primitive_size(sema_program_.bitsets.at(type.bitset_index).storage_type.kind);
-                }
-                return primitive_size(type.kind);
+            // Thin forwarders to sema's one implementation (sema.hpp). What codegen emits and
+            // what 'size_of(T)' folds to and what the LSP reports on hover are now the same
+            // function — previously three, agreeing only by hand.
+            //
+            // 'module_path' is unused and always was; kept because every call site already has
+            // one to pass. The old copies indexed with .at() and so threw on a malformed index;
+            // the shared version answers 0/1 instead, which lets whatever diagnostic was going
+            // to catch the Invalid type actually be printed rather than terminating first.
+            auto size_of(const std::string &, const sema::ResolvedType &type) const -> uint32_t {
+                return sema::resolved_type_size(type, sema_program_);
             }
 
-            // Mirrors size_of() above exactly, substituting alignment for size — including the
-            // Trait/Any override (primitive_align would wrongly forward to primitive_size's 16
-            // for these two 16-byte fat pointers, which are actually only 8-byte aligned).
-            auto align_of(const std::string &module_path, const sema::ResolvedType &type) const -> uint32_t {
-                if (type.kind == sema::TypeKind::Struct) {
-                    return sema_program_.structs.at(type.struct_index).align;
-                }
-                if (type.kind == sema::TypeKind::Array) {
-                    return sema_program_.arrays.at(type.array_index).align;
-                }
-                if (type.kind == sema::TypeKind::Slice) {
-                    return 8;
-                }
-                if (type.kind == sema::TypeKind::Trait) {
-                    return 8;
-                }
-                if (type.kind == sema::TypeKind::Any) {
-                    return 8;
-                }
-                if (type.kind == sema::TypeKind::Enum) {
-                    return primitive_align(sema_program_.enums.at(type.enum_index).underlying_type.kind);
-                }
-                if (type.kind == sema::TypeKind::Union) {
-                    return sema_program_.unions.at(type.union_index).align;
-                }
-                if (type.kind == sema::TypeKind::Bitset) {
-                    return primitive_align(sema_program_.bitsets.at(type.bitset_index).storage_type.kind);
-                }
-                return primitive_align(type.kind);
+            auto align_of(const std::string &, const sema::ResolvedType &type) const -> uint32_t {
+                return sema::resolved_type_align(type, sema_program_);
             }
 
             auto llvm_type(const std::string &module_path, const sema::ResolvedType &type) -> llvm::Type * {

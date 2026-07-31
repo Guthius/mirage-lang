@@ -210,58 +210,63 @@ namespace sema {
             return ResolvedType{.kind = TypeKind::Array, .array_index = static_cast<int>(program.arrays.size()) - 1};
         }
 
-        auto primitive_size(const TypeKind kind) -> uint32_t {
-            switch (kind) {
-            case TypeKind::U8:
-            case TypeKind::I8:
-            case TypeKind::Bool:
-                return 1;
+    }
 
-            case TypeKind::U16:
-            case TypeKind::I16:
-                return 2;
+    // Declared in sema.hpp. Public (rather than file-local, as it was) so codegen.cpp can
+    // drop its own byte-identical copy and share this one.
+    auto primitive_size(const TypeKind kind) -> uint32_t {
+        switch (kind) {
+        case TypeKind::U8:
+        case TypeKind::I8:
+        case TypeKind::Bool:
+            return 1;
 
-            case TypeKind::U32:
-            case TypeKind::I32:
-            case TypeKind::F32:
-                return 4;
+        case TypeKind::U16:
+        case TypeKind::I16:
+            return 2;
 
-            case TypeKind::U64:
-            case TypeKind::I64:
-            case TypeKind::F64:
-            case TypeKind::USize:
-            case TypeKind::Pointer:
-            case TypeKind::Anyptr:
-            case TypeKind::Function: // code pointer, 8 bytes
-            case TypeKind::Type:     // compile-time-unique type identifier, backed by u64
-                return 8;
+        case TypeKind::U32:
+        case TypeKind::I32:
+        case TypeKind::F32:
+            return 4;
 
-            case TypeKind::Slice:
-            case TypeKind::Trait: // fat pointer: {data: anyptr, vtable: *const VTable}, 16 bytes
-            case TypeKind::Any:   // fat pointer: {id: type, data: anyptr}, 16 bytes
-                return 16;
+        case TypeKind::U64:
+        case TypeKind::I64:
+        case TypeKind::F64:
+        case TypeKind::USize:
+        case TypeKind::Pointer:
+        case TypeKind::Anyptr:
+        case TypeKind::Function: // code pointer, 8 bytes
+        case TypeKind::Type:     // compile-time-unique type identifier, backed by u64
+            return 8;
 
-            // Not a value type and so has no size. Reaching here means a stage above failed to
-            // reject it: 'size_of(some_import)' used to land here and silently evaluate to 0.
-            // sema_check.cpp's SizeOfExpr/AlignOfExpr cases now report that, so this stays 0
-            // purely as the error-recovery value rather than as a meaningful answer.
-            case TypeKind::Namespace:
-                return 0;
+        case TypeKind::Slice:
+        case TypeKind::Trait: // fat pointer: {data: anyptr, vtable: *const VTable}, 16 bytes
+        case TypeKind::Any:   // fat pointer: {id: type, data: anyptr}, 16 bytes
+            return 16;
 
-            // An unbound generic parameter has no layout until it is substituted. 0 is the
-            // intended answer, not a fallthrough: layout_struct/layout_union already tolerate
-            // a zero-size, zero-align member (they seed max_align at 1 and guard on
-            // 'f_align > 0'), and no instantiation carrying one is ever emitted.
-            case TypeKind::Opaque:
-                return 0;
+        // Not a value type and so has no size. Reaching here means a stage above failed to
+        // reject it: 'size_of(some_import)' used to land here and silently evaluate to 0.
+        // sema_check.cpp's SizeOfExpr/AlignOfExpr cases now report that, so this stays 0
+        // purely as the error-recovery value rather than as a meaningful answer.
+        case TypeKind::Namespace:
+            return 0;
 
-            default:
-                return 0;
-            }
+        // An unbound generic parameter has no layout until it is substituted. 0 is the
+        // intended answer, not a fallthrough: layout_struct/layout_union already tolerate
+        // a zero-size, zero-align member (they seed max_align at 1 and guard on
+        // 'f_align > 0'), and no instantiation carrying one is ever emitted.
+        case TypeKind::Opaque:
+            return 0;
+
+        default:
+            return 0;
         }
+    }
 
-        auto primitive_align(const TypeKind kind) -> uint32_t { return primitive_size(kind); }
+    auto primitive_align(const TypeKind kind) -> uint32_t { return primitive_size(kind); }
 
+    namespace {
         auto error(DiagnosticEngine &diag, const SourceLocation &loc, std::string msg) -> ResolvedType {
             diag.report_error(DiagnosticStage::Sema, loc, std::move(msg));
             return ResolvedType{
@@ -765,26 +770,16 @@ namespace sema {
                 return resolve_type_impl(field_type, module_path);
             }
 
-            [[nodiscard]] auto size_of(const std::string &module_path, const ResolvedType &t) const -> uint32_t {
-                if (t.kind == TypeKind::Struct) { const auto *info = program.struct_at(t.struct_index); return info ? info->size : 0; }
-                if (t.kind == TypeKind::Array) { const auto *info = program.array_at(t.array_index); return info ? info->size : 0; }
-                if (t.kind == TypeKind::Slice) return 16;
-                if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_size(info->underlying_type.kind) : 0; }
-                if (t.kind == TypeKind::Union) { const auto *info = program.union_at(t.union_index); return info ? info->size : 0; }
-                if (t.kind == TypeKind::Bitset) { const auto *info = program.bitset_at(t.bitset_index); return info ? primitive_size(info->storage_type.kind) : 0; }
-                return primitive_size(t.kind);
+            // Thin forwarders to the one implementation (sema.hpp). 'module_path' is unused
+            // and always has been - size is a property of the resolved type alone - but the
+            // parameter is kept because every layout site already passes one and threading it
+            // out would touch far more code than it clarifies.
+            [[nodiscard]] auto size_of(const std::string &, const ResolvedType &t) const -> uint32_t {
+                return resolved_type_size(t, program);
             }
 
-            [[nodiscard]] auto align_of(const std::string &module_path, const ResolvedType &t) const -> uint32_t {
-                if (t.kind == TypeKind::Struct) { const auto *info = program.struct_at(t.struct_index); return info ? info->align : 1; }
-                if (t.kind == TypeKind::Array) { const auto *info = program.array_at(t.array_index); return info ? info->align : 1; }
-                if (t.kind == TypeKind::Slice) return 8;
-                if (t.kind == TypeKind::Trait) return 8; // primitive_align would wrongly forward to primitive_size's 16
-                if (t.kind == TypeKind::Any) return 8;   // same reasoning as Trait above
-                if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_align(info->underlying_type.kind) : 1; }
-                if (t.kind == TypeKind::Union) { const auto *info = program.union_at(t.union_index); return info ? info->align : 1; }
-                if (t.kind == TypeKind::Bitset) { const auto *info = program.bitset_at(t.bitset_index); return info ? primitive_align(info->storage_type.kind) : 1; }
-                return primitive_align(t.kind);
+            [[nodiscard]] auto align_of(const std::string &, const ResolvedType &t) const -> uint32_t {
+                return resolved_type_align(t, program);
             }
 
             auto sizeof_expr_operand(const std::string &module_path, const ast::SizeOfExpr &expr) -> uint64_t {
@@ -2145,24 +2140,25 @@ namespace sema {
         return resolver.resolve_final_full(module_path, name, false, loc);
     }
 
-    // Mirrors Resolver::size_of() above (and codegen.cpp's Generator::size_of(), which computes
-    // the identical thing over its own sema_program_ member) exactly - kept as a public free
-    // function since neither of those is reachable from a caller that only has a Program&, which
-    // is all the LSP's hover support for size_of()/len() has available.
+    // THE definition of what 'size_of(T)' evaluates to. Resolver::size_of (above) and
+    // codegen.cpp's Generator::size_of both forward here; see sema.hpp.
+    //
+    // Only the five indexed kinds need Program at all - everything else, fat pointers
+    // included, is a fixed width primitive_size already knows.
     auto resolved_type_size(const ResolvedType &t, const Program &program) -> uint32_t {
         if (t.kind == TypeKind::Struct) { const auto *info = program.struct_at(t.struct_index); return info ? info->size : 0; }
         if (t.kind == TypeKind::Array) { const auto *info = program.array_at(t.array_index); return info ? info->size : 0; }
-        if (t.kind == TypeKind::Slice) return 16;
-        if (t.kind == TypeKind::Trait) return 16;
         if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_size(info->underlying_type.kind) : 0; }
         if (t.kind == TypeKind::Union) { const auto *info = program.union_at(t.union_index); return info ? info->size : 0; }
         if (t.kind == TypeKind::Bitset) { const auto *info = program.bitset_at(t.bitset_index); return info ? primitive_size(info->storage_type.kind) : 0; }
         return primitive_size(t.kind);
     }
 
-    // Mirrors resolved_type_size() above exactly, substituting alignment for size - including
-    // the Trait/Any override (primitive_align would wrongly forward to primitive_size's 16 for
-    // these two 16-byte fat pointers, which are actually only 8-byte aligned).
+    // Mirrors resolved_type_size() above, substituting alignment for size - with one real
+    // difference, not a formatting one: Slice/Trait/Any are 16 bytes but only 8-byte aligned,
+    // so they must NOT fall through to primitive_align (which forwards to primitive_size and
+    // would answer 16). Those three overrides are the entire reason this is a separate
+    // function rather than a parameter on the one above.
     auto resolved_type_align(const ResolvedType &t, const Program &program) -> uint32_t {
         if (t.kind == TypeKind::Struct) { const auto *info = program.struct_at(t.struct_index); return info ? info->align : 1; }
         if (t.kind == TypeKind::Array) { const auto *info = program.array_at(t.array_index); return info ? info->align : 1; }

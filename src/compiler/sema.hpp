@@ -1099,13 +1099,26 @@ namespace sema {
     // defaults excluded) differ, i.e. they cannot be merged as the same flattened method
     // during trait-composition flattening (layout_trait, type_resolver.cpp).
     auto trait_methods_conflict(const TraitMethodInfo &a, const TraitMethodInfo &b) -> bool;
+    // Byte size/alignment of a SCALAR TypeKind - one that carries no index into Program.
+    // Returns 0 for every aggregate (Struct/Array/Union/Enum/Bitset), which have no size
+    // without their Program entry; use resolved_type_size/align below for a general type.
+    //
+    // Note primitive_align forwards to primitive_size, which is right for every scalar but
+    // NOT for the two 16-byte fat pointers (Slice/Trait/Any are 16 bytes but 8-byte
+    // aligned) - resolved_type_align overrides those, and is why nothing should call
+    // primitive_align on a fat pointer directly. Defined in type_resolver.cpp.
+    auto primitive_size(TypeKind kind) -> uint32_t;
+    auto primitive_align(TypeKind kind) -> uint32_t;
+
     // Byte size/alignment of an already-resolved type - exactly what 'size_of(T)'/
-    // 'align_of(T)' evaluate to at compile time. codegen.cpp's Generator::size_of()/
-    // align_of() and type_resolver.cpp's own Resolver::size_of()/align_of() each compute
-    // this identically but privately (codegen.cpp isn't linked into mirage-lsp, and
-    // Resolver is a file-local type_resolver.cpp class) - these free functions are the
-    // one copy exposed for callers with only a Program& in hand, namely the LSP's hover
-    // support for size_of()/align_of()/len().
+    // 'align_of(T)' evaluate to at compile time, and THE definition of it. Three copies of
+    // this logic used to exist (here, Resolver::size_of/align_of in type_resolver.cpp, and
+    // Generator::size_of/align_of in codegen.cpp); the other two now forward here, so the
+    // LSP's hover cannot report a size codegen does not actually emit.
+    //
+    // A malformed index answers 0/1 rather than throwing: reaching one means a stage above
+    // failed to reject an Invalid type, and a recoverable wrong answer lets the diagnostic
+    // that catches it actually get printed.
     auto resolved_type_size(const ResolvedType &t, const Program &program) -> uint32_t;
     auto resolved_type_align(const ResolvedType &t, const Program &program) -> uint32_t;
 
