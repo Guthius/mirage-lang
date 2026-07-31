@@ -265,10 +265,19 @@ namespace lexer {
                 return pos_ >= source_.size();
             }
 
+            // EOF reads as '\n' on purpose: the line-comment, string- and
+            // char-literal scanners test `peek() == '\n'` to detect an
+            // unterminated construct at end of line, and the sentinel makes
+            // end of file take those same paths without a separate at_end()
+            // check at every site. Do not change it to '\0'.
             [[nodiscard]] auto peek() const -> char {
                 return at_end() ? '\n' : source_[pos_];
             }
 
+            // Deliberately NOT the '\n' sentinel peek() uses: two-char
+            // lookahead only asks "is this specific character next", and a
+            // fabricated '\n' could satisfy such a test at EOF. '\0' matches
+            // nothing the lexer ever looks for.
             [[nodiscard]] auto peek_next() const -> char {
                 if (pos_ + 1 >= source_.size()) {
                     return '\0';
