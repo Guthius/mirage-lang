@@ -2448,6 +2448,72 @@ namespace ast {
         //      (braced-initializer parsing).
         //   5. Call-site spread: 'expr...' forwards an existing slice into a variadic parameter
         //      (parse_postfix's call-argument loop).
+        // One parsed parameter, before the caller narrows it to whichever Param struct its own
+        // declaration uses (FunctionDecl::Param, ImplDecl::Function::Param, TraitType::Param).
+        struct ParsedParam {
+            bool is_mut = false;
+            std::string name;
+            std::optional<Type> type;
+            std::optional<Expr> default_value;
+            bool is_variadic = false;
+            SourceLocation location;
+        };
+
+        struct ParamPolicy {
+            // Trait methods take no 'mut' prefix. False means 'mut' is not consumed at all, so
+            // writing it produces the ordinary "expected identifier" rather than being accepted
+            // and silently ignored.
+            bool allow_mut = true;
+            // Empty means variadics are allowed here. Otherwise this is the diagnostic to
+            // report for a '...', after which it is consumed and parsing continues — the
+            // parameter is still parsed, so one bad '...' does not cascade.
+            std::string_view variadic_rejection;
+        };
+
+        // Parses ONE parameter: 'mut'? IDENT ( ':' '...'? type ( '=' default )? | ':=' default ).
+        //
+        // Shared by the three parameter lists in the grammar — free functions, impl methods and
+        // trait methods. They differ only in the two ParamPolicy knobs above and in how the
+        // list around them is framed (a leading comma before each parameter, for the two that
+        // follow 'self'); everything else was three copies, and the trait copy had already
+        // drifted on variadic position tracking.
+        auto parse_one_param(Parser &parser, const ParamPolicy &policy, bool &seen_variadic) -> ParsedParam {
+            ParsedParam param;
+            param.location = parser.current_location();
+            param.is_mut = policy.allow_mut && parser.match(TokenKind::KwMut);
+            param.name = parser.expect_identifier();
+
+            if (parser.match(TokenKind::Colon)) {
+                if (policy.variadic_rejection.empty() && seen_variadic) {
+                    parser.report_error(param.location, "'...' variadic parameter must be the last parameter in the parameter list");
+                }
+
+                if (parser.check(TokenKind::DotDotDot)) {
+                    if (policy.variadic_rejection.empty()) {
+                        parser.advance();
+                        param.is_variadic = true;
+                        seen_variadic = true;
+                    } else {
+                        parser.report_error(param.location, std::string(policy.variadic_rejection));
+                        parser.advance();
+                    }
+                }
+
+                param.type = parse_type(parser);
+
+                // A variadic parameter cannot also have a default: it already absorbs "the rest",
+                // which is empty when nothing is passed.
+                if (!param.is_variadic && parser.match(TokenKind::Equal)) {
+                    param.default_value = parse_expr(parser);
+                }
+            } else {
+                parser.expect(TokenKind::ColonEqual, "':' or ':='");
+                param.default_value = parse_expr(parser);
+            }
+
+            return param;
+        }
+
         auto parse_function_params(Parser &parser) -> std::vector<FunctionDecl::Param> {
             parser.expect(TokenKind::LParen, "'('");
 
@@ -2465,42 +2531,14 @@ namespace ast {
                     break;
                 }
 
-                const auto param_location = parser.current_location();
-                const auto param_is_mutable = parser.match(TokenKind::KwMut);
-                const auto param_name = parser.expect_identifier();
-
-                std::optional<Type> param_type;
-                std::optional<Expr> default_value;
-                bool param_is_variadic = false;
-
-                if (parser.match(TokenKind::Colon)) {
-                    if (seen_variadic) {
-                        parser.report_error(param_location, "'...' variadic parameter must be the last parameter in the parameter list");
-                    }
-
-                    if (parser.check(TokenKind::DotDotDot)) {
-                        parser.advance();
-                        param_is_variadic = true;
-                        seen_variadic = true;
-                    }
-
-                    param_type = parse_type(parser);
-
-                    if (!param_is_variadic && parser.match(TokenKind::Equal)) {
-                        default_value = parse_expr(parser);
-                    }
-                } else {
-                    parser.expect(TokenKind::ColonEqual, "':' or ':='");
-                    default_value = parse_expr(parser);
-                }
-
+                auto param = parse_one_param(parser, ParamPolicy{}, seen_variadic);
                 params.push_back({
-                    .is_mut = param_is_mutable,
-                    .name = param_name,
-                    .type = std::move(param_type),
-                    .default_value = std::move(default_value),
-                    .is_variadic = param_is_variadic,
-                    .location = param_location,
+                    .is_mut = param.is_mut,
+                    .name = std::move(param.name),
+                    .type = std::move(param.type),
+                    .default_value = std::move(param.default_value),
+                    .is_variadic = param.is_variadic,
+                    .location = param.location,
                 });
 
                 skip_semicolons(parser);
@@ -2620,38 +2658,24 @@ namespace ast {
                 parser.report_error(location, "first parameter of trait method must be 'self' or 'mut self'");
             }
 
-            // Non-self params: 'IDENT : type' only — no 'mut' prefix, no variadics.
+            // Non-self params: 'IDENT : type' only — no 'mut' prefix, no variadics. Both
+            // restrictions are the ParamPolicy below; the parameter grammar itself is shared.
+            constexpr ParamPolicy trait_policy{
+                .allow_mut = false,
+                .variadic_rejection = "variadic parameters are not allowed in trait method declarations",
+            };
             std::vector<TraitType::Param> params;
+            bool seen_variadic = false; // unused: trait_policy rejects '...' outright
             while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
                 const LoopProgressGuard progress_guard(parser);
 
                 parser.expect(TokenKind::Comma, "','");
-                const auto param_location = parser.current_location();
-                auto param_name = parser.expect_identifier();
-
-                std::optional<Type> param_type;
-                std::optional<Expr> default_value;
-                if (parser.match(TokenKind::Colon)) {
-                    if (parser.check(TokenKind::DotDotDot)) {
-                        parser.report_error(param_location, "variadic parameters are not allowed in trait method declarations");
-                        parser.advance();
-                    }
-
-                    param_type = parse_type(parser);
-
-                    if (parser.match(TokenKind::Equal)) {
-                        default_value = parse_expr(parser);
-                    }
-                } else {
-                    parser.expect(TokenKind::ColonEqual, "':' or ':='");
-                    default_value = parse_expr(parser);
-                }
-
+                auto param = parse_one_param(parser, trait_policy, seen_variadic);
                 params.push_back(TraitType::Param{
-                    .name = std::move(param_name),
-                    .type = std::move(param_type),
-                    .default_value = std::move(default_value),
-                    .location = param_location,
+                    .name = std::move(param.name),
+                    .type = std::move(param.type),
+                    .default_value = std::move(param.default_value),
+                    .location = param.location,
                 });
             }
 
@@ -3362,42 +3386,14 @@ namespace ast {
             const LoopProgressGuard progress_guard(parser);
 
             parser.expect(TokenKind::Comma, "','");
-            const auto param_location = parser.current_location();
-            const bool param_is_mut = parser.match(TokenKind::KwMut);
-            auto param_name = parser.expect_identifier();
-
-            std::optional<Type> param_type;
-            std::optional<Expr> default_value;
-            bool param_is_variadic = false;
-
-            if (parser.match(TokenKind::Colon)) {
-                if (seen_variadic) {
-                    parser.report_error(param_location, "'...' variadic parameter must be the last parameter in the parameter list");
-                }
-
-                if (parser.check(TokenKind::DotDotDot)) {
-                    parser.advance();
-                    param_is_variadic = true;
-                    seen_variadic = true;
-                }
-
-                param_type = parse_type(parser);
-
-                if (!param_is_variadic && parser.match(TokenKind::Equal)) {
-                    default_value = parse_expr(parser);
-                }
-            } else {
-                parser.expect(TokenKind::ColonEqual, "':' or ':='");
-                default_value = parse_expr(parser);
-            }
-
+            auto param = parse_one_param(parser, ParamPolicy{}, seen_variadic);
             params.push_back(ImplDecl::Function::Param{
-                .name = std::move(param_name),
-                .type = std::move(param_type),
-                .default_value = std::move(default_value),
-                .is_mut = param_is_mut,
-                .is_variadic = param_is_variadic,
-                .location = param_location,
+                .name = std::move(param.name),
+                .type = std::move(param.type),
+                .default_value = std::move(param.default_value),
+                .is_mut = param.is_mut,
+                .is_variadic = param.is_variadic,
+                .location = param.location,
             });
         }
 
