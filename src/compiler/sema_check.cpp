@@ -1249,6 +1249,60 @@ namespace sema {
         // `f().field`) reports "not an assignable expression" - correct when something is
         // actually being assigned to or addressed, but a spurious compile error for an ordinary
         // read of a field on a temporary struct/union value, which is always legal.
+        // A diagnostic-free, single-pass writability probe over an already-type-checked
+        // object expression, reading the types check_expr just recorded. resolve_member
+        // used to probe via resolve_lvalue(m.object), whose MemberExpr case recurses back
+        // into resolve_member — re-type-checking every prefix of 'a.b.c.d = x' at every
+        // level (exponential in chain depth) and stacking a spurious "not an assignable
+        // expression" on top of the real diagnostic for 'f().field = x'.
+        // nullopt = not an lvalue shape at all.
+        auto probe_lvalue_writability(const ast::Expr &e, LocalScope &locals, const std::string &module_path, const Program &program) -> std::optional<bool> {
+            const auto recorded_type = [&](const ast::Expr &node) -> const ResolvedType * {
+                return find_expr_record(program, module_path, &ExprSideTables::expr_types, get_expr_key(node));
+            };
+            return std::visit(
+                [&]<typename T>(const T &v) -> std::optional<bool> {
+                    using V = std::decay_t<T>;
+                    if constexpr (std::is_same_v<V, ast::IdentExpr>) {
+                        if (const auto it = locals.find(v.name); it != locals.end()) {
+                            return it->second.is_mut;
+                        }
+                        if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
+                            if (const auto sym_it = mod_it->second.symbols.find(v.name); sym_it != mod_it->second.symbols.end()) {
+                                if (const auto *g = std::get_if<GlobalSymbol>(&sym_it->second)) {
+                                    return g->is_mut;
+                                }
+                            }
+                        }
+                        return std::nullopt;
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
+                        // Writing through a pointer is always allowed; the handle being
+                        // const says nothing about the pointee.
+                        return v->op == ast::UnaryOp::Deref ? std::optional(true) : std::nullopt;
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                        const auto *obj_ty = recorded_type(v->object);
+                        if (!obj_ty) return std::nullopt;
+                        if (obj_ty->kind == TypeKind::Pointer || obj_ty->kind == TypeKind::Opaque) return true;
+                        if (obj_ty->kind == TypeKind::Struct || obj_ty->kind == TypeKind::Union) {
+                            return probe_lvalue_writability(v->object, locals, module_path, program);
+                        }
+                        return std::nullopt;
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
+                        const auto *op_ty = recorded_type(v->operand);
+                        if (!op_ty) return std::nullopt;
+                        // An array is stored inline, so its element inherits the array's
+                        // writability; slice/pointer elements live behind the handle.
+                        if (op_ty->kind == TypeKind::Array) {
+                            return probe_lvalue_writability(v->operand, locals, module_path, program);
+                        }
+                        return true;
+                    } else {
+                        return std::nullopt;
+                    }
+                },
+                e);
+        }
+
         auto resolve_member(const ast::MemberExpr &m, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type, const bool need_writable = true) -> LvalueInfo {
             if (const auto target_module = try_resolve_namespace_chain(m.object, module_path, locals, program)) {
                 return check_member_cross_module(m, *target_module, program, diag);
@@ -1298,12 +1352,13 @@ namespace sema {
                 writable = true;
             } else if (object_type.kind == TypeKind::Struct || object_type.kind == TypeKind::Union) {
                 effective_type = object_type;
-                if (need_writable) {
-                    const auto object_lvalue = resolve_lvalue(m.object, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
-                    writable = object_lvalue.type == object_type && object_lvalue.writable;
-                } else {
-                    writable = false;
-                }
+                // Single linear probe over the types check_expr just recorded — never
+                // resolve_lvalue, whose MemberExpr case would recurse back into this
+                // function and re-check every prefix of the chain. A non-lvalue object
+                // ('f().field') probes nullopt -> not writable; the assignment path
+                // reports that once, instead of stacking two diagnostics.
+                writable = need_writable &&
+                           probe_lvalue_writability(m.object, locals, module_path, program).value_or(false);
             } else if (object_type.kind == TypeKind::Trait) {
                 error(diag, m.location, "cannot access fields on a trait handle; handles have no visible layout");
                 return {ResolvedType{.kind = TypeKind::Invalid}, false};

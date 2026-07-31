@@ -1,0 +1,32 @@
+// example_member_chain_writability — writability of a member chain derives from one
+// linear probe of the object, not a recursive re-type-check. resolve_member used to call
+// check_expr AND resolve_lvalue on its object, whose MemberExpr case recursed back into
+// resolve_member — exponential re-checking of 'a.b.c.d = x' prefixes, and 'f().field = x'
+// stacked "not an assignable expression" under a misleading "not mutable"
+// (CODE_REVIEW.md CHECK-8).
+//
+// Expected: compile error "left-hand side of assignment is not mutable" for the const
+// target; the deep mut chain and pointer chain compile (exercised before the error line).
+
+type Inner = struct {
+    x: i32 = 0
+}
+
+type Mid = struct {
+    inner: Inner = default
+}
+
+type Outer = struct {
+    mid: Mid = default
+}
+
+pub fn main() -> i32 {
+    mut o: Outer = default
+    o.mid.inner.x = 41
+    mut p := &o
+    p.mid.inner.x = p.mid.inner.x + 1
+
+    const c: Outer = default
+    c.mid.inner.x = 1
+    return o.mid.inner.x
+}

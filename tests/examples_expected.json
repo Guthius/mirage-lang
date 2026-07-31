@@ -656,6 +656,11 @@
     "action": "run",
     "exit": 0
   },
+  "example_member_chain_writability": {
+    "action": "build",
+    "diag": "examples/example_member_chain_writability/main.mir:30:19: error: left-hand side of assignment is not mutable",
+    "exit": 1
+  },
   "example_option_in_mut": {
     "action": "run",
     "exit": 0
