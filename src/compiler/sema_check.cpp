@@ -2844,8 +2844,16 @@ namespace sema {
                 if (!pattern_is_constant) {
                     error(diag, arm_loc, "match arm pattern must be a compile-time constant");
                 }
-                // Type-check the pattern against the operand type
-                check_expr(*lp.expr, arm_locals, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_error_type);
+                // Type-check the pattern against the operand type. A plain literal
+                // adapts to 'operand_type' via the expected-type coercion (and is
+                // range-checked by it); a non-literal constant keeps its own declared
+                // type and was never validated at all, so a u64 constant of 300 used as
+                // a pattern in a match on u8 reached codegen, where the LLVM case value
+                // silently truncates. The mismatched-type pattern's VALUE must fit the
+                // operand type; the types themselves may differ ('size_of(i64)' — a
+                // usize — is an accepted pattern for an i64 operand, see
+                // example_match_const_expr_pattern).
+                const auto pattern_ty = check_expr(*lp.expr, arm_locals, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_error_type);
                 // Evaluate for duplicate detection
                 const auto val = evaluate_integer_constant(*lp.expr, module_path, program, diag);
                 if (!val && pattern_is_constant) {
@@ -2865,6 +2873,14 @@ namespace sema {
                         "match arm pattern could not be folded to an integer constant "
                         "(an overflowing division, a shift of 64 or more, or a "
                         "constant that is not an integer)");
+                }
+                if (val && operand_type.is_integer() && pattern_ty.is_integer() && pattern_ty != operand_type) {
+                    const bool negative = *val < 0;
+                    const auto magnitude = negative ? ~static_cast<uint64_t>(*val) + 1 : static_cast<uint64_t>(*val);
+                    if (!integer_literal_fits(magnitude, negative, operand_type)) {
+                        error(diag, arm_loc, std::format("match arm pattern of type '{}' has value {}, which does not fit the operand type '{}' (range {})",
+                            describe_type(pattern_ty, program), *val, describe_type(operand_type, program), describe_integer_range(operand_type)));
+                    }
                 }
                 if (val) {
                     if (seen_values.count(*val)) {
@@ -3140,8 +3156,17 @@ namespace sema {
                 if (!pattern_is_constant) {
                     diag.report_error(DiagnosticStage::Sema, arm.location, "switch arm pattern must be a compile-time constant");
                 }
-                check_expr(*lp.expr, locals, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_error_type);
+                // Same value-fit validation as the match path above.
+                const auto pattern_ty = check_expr(*lp.expr, locals, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_error_type);
                 const auto val = evaluate_integer_constant(*lp.expr, module_path, program, diag);
+                if (val && operand_type.is_integer() && pattern_ty.is_integer() && pattern_ty != operand_type) {
+                    const bool negative = *val < 0;
+                    const auto magnitude = negative ? ~static_cast<uint64_t>(*val) + 1 : static_cast<uint64_t>(*val);
+                    if (!integer_literal_fits(magnitude, negative, operand_type)) {
+                        diag.report_error(DiagnosticStage::Sema, arm.location, std::format("switch arm pattern of type '{}' has value {}, which does not fit the operand type '{}' (range {})",
+                            describe_type(pattern_ty, program), *val, describe_type(operand_type, program), describe_integer_range(operand_type)));
+                    }
+                }
                 if (!val && pattern_is_constant) {
                     // See the matching comment in the match-expression path above.
                     diag.report_error(DiagnosticStage::Sema, arm.location,

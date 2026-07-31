@@ -1,0 +1,19 @@
+// example_match_pattern_out_of_range — a non-literal constant pattern was never checked
+// against the operand's type: a u64 constant of 300 was accepted as a pattern in a match
+// on u8 and reached codegen, where the LLVM case value silently truncates to 44
+// (CODE_REVIEW.md CHECK-13). Plain literals were already range-checked by the
+// expected-type coercion; a mismatched-typed constant's folded VALUE must fit the operand
+// type too. Differing types with a fitting value stay accepted — 'size_of(i64)' (a usize)
+// remains a valid pattern for an i64 operand, see example_match_const_expr_pattern.
+//
+// Expected: compile error "does not fit the operand type".
+
+const BIG: u64 = 300
+
+pub fn main() -> i32 {
+    mut b: u8 = 1
+    return match b {
+        BIG: 1,
+        _: 0,
+    }
+}

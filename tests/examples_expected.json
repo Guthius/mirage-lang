@@ -671,6 +671,11 @@
     "action": "run",
     "exit": 0
   },
+  "example_match_pattern_out_of_range": {
+    "action": "build",
+    "diag": "examples/example_match_pattern_out_of_range/main.mir:16:9: error: match arm pattern of type 'u64' has value 300, which does not fit the operand type 'u8' (range 0..255)",
+    "exit": 1
+  },
   "example_member_chain_writability": {
     "action": "build",
     "diag": "examples/example_member_chain_writability/main.mir:30:19: error: left-hand side of assignment is not mutable",
