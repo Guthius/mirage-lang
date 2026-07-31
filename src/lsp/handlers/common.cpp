@@ -492,25 +492,32 @@ namespace lsp::handlers {
     // 'visit_decl' is called with ForInStmt, VarDeclStmt or VarDeclGroupStmt, before the
     // walk descends into a loop body — so a name declared by the loop header is seen before
     // anything inside it, which is the order both callers' shadowing semantics assume.
-    template <typename VisitDecl>
-    void walk_declaring_stmts(const ast::Stmt &stmt, const VisitDecl &visit_decl) {
+    //
+    // 'enter_block' gates every BlockStmt (and, via the loop body, a ForInStmt's own header
+    // names, whose scope IS that body): returning false prunes the whole subtree. This is
+    // how block scope reaches the otherwise line-based lookups — see make_block_filter.
+    template <typename VisitDecl, typename EnterBlock>
+    void walk_declaring_stmts(const ast::Stmt &stmt, const VisitDecl &visit_decl, const EnterBlock &enter_block) {
         std::visit(
             [&]<typename T>(const T &node) {
                 using U = std::decay_t<T>;
                 if constexpr (std::is_same_v<U, std::unique_ptr<ast::BlockStmt>>) {
-                    for (const auto &s : node->stmts) walk_declaring_stmts(s, visit_decl);
+                    if (!enter_block(*node)) return;
+                    for (const auto &s : node->stmts) walk_declaring_stmts(s, visit_decl, enter_block);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IfStmt>>) {
-                    walk_declaring_stmts(node->then_stmt, visit_decl);
-                    if (node->else_stmt) walk_declaring_stmts(*node->else_stmt, visit_decl);
+                    walk_declaring_stmts(node->then_stmt, visit_decl, enter_block);
+                    if (node->else_stmt) walk_declaring_stmts(*node->else_stmt, visit_decl, enter_block);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::WhileStmt>>) {
-                    walk_declaring_stmts(node->body, visit_decl);
+                    walk_declaring_stmts(node->body, visit_decl, enter_block);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::ForInStmt>>) {
-                    visit_decl(*node);
-                    walk_declaring_stmts(node->body, visit_decl);
+                    // The header names live in the body's scope: once it closes they go too.
+                    const auto *body_block = std::get_if<std::unique_ptr<ast::BlockStmt>>(&node->body);
+                    if (!body_block || enter_block(**body_block)) visit_decl(*node);
+                    walk_declaring_stmts(node->body, visit_decl, enter_block);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SwitchStmt>>) {
-                    for (const auto &arm : node->arms) walk_declaring_stmts(arm.body, visit_decl);
+                    for (const auto &arm : node->arms) walk_declaring_stmts(arm.body, visit_decl, enter_block);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::DeferStmt>>) {
-                    walk_declaring_stmts(node->body, visit_decl);
+                    walk_declaring_stmts(node->body, visit_decl, enter_block);
                 } else if constexpr (std::is_same_v<U, ast::VarDeclStmt> || std::is_same_v<U, ast::VarDeclGroupStmt>) {
                     visit_decl(node);
                 }
@@ -518,6 +525,35 @@ namespace lsp::handlers {
                 // ReturnOkStmt declare no names.
             },
             stmt);
+    }
+
+    template <typename VisitDecl>
+    void walk_declaring_stmts(const ast::Stmt &stmt, const VisitDecl &visit_decl) {
+        walk_declaring_stmts(stmt, visit_decl, [](const ast::BlockStmt &) { return true; });
+    }
+
+    // Block scope for the line-based local lookups: "last declaration with line <= cursor"
+    // alone resolves a use AFTER an inner block to that block's shadowing declaration.
+    // Returns an enter_block predicate that prunes any block whose closing '}' sits on a
+    // line before the cursor. Extents come from the token stream's bracket index, keyed by
+    // the '{' token's offset (== BlockStmt::location.offset); an unmatched '{' (mid-edit)
+    // has no entry and is treated as still open. Without tokens (references' whole-module
+    // walks carry none) lookup stays purely line-based, as before.
+    auto make_block_filter(const LocalLookupContext &ctx, const size_t cursor_line)
+        -> std::function<bool(const ast::BlockStmt &)> {
+        if (!ctx.tokens) return [](const ast::BlockStmt &) { return true; };
+
+        std::unordered_map<size_t, size_t> close_lines;
+        const auto &tokens = *ctx.tokens;
+        for (const auto &[open, close] : build_bracket_index(tokens)) {
+            if (tokens[open].kind == TokenKind::LBrace) {
+                close_lines[tokens[open].location.offset] = tokens[close].location.line;
+            }
+        }
+        return [close_lines = std::move(close_lines), cursor_line](const ast::BlockStmt &block) {
+            const auto it = close_lines.find(block.location.offset);
+            return it == close_lines.end() || it->second >= cursor_line;
+        };
     }
 
     auto find_local(const ast::Stmt &body, const LocalLookupContext &ctx, const std::string &name,
@@ -543,7 +579,7 @@ namespace lsp::handlers {
                     }
                 }
             }
-        });
+        }, make_block_filter(ctx, before_line));
         return best;
     }
 
@@ -573,7 +609,7 @@ namespace lsp::handlers {
                     }
                 }
             }
-        });
+        }, make_block_filter(ctx, before_line));
     }
 
     auto collect_locals_in_scope(const ast::Stmt &body, const LocalLookupContext &ctx, const size_t before_line)
