@@ -889,51 +889,6 @@ namespace sema {
     }
 
     namespace {
-        // Resolves a (possibly dotted) NamedType reference used in trait-impl position to
-        // the (module, local_name) pair it names, walking import hops the same way
-        // type_resolver.cpp's walk_namespace_chain does for full type resolution. Only
-        // symbol-table presence is needed here (declare_type has already run for every
-        // module by the time register_trait_impls_for_program runs), not full layout
-        // resolution — this intentionally duplicates the chain-walk rather than reaching
-        // into type_resolver.cpp's anonymous namespace, which isn't externally callable.
-        auto walk_named_type_chain(const std::string &start_module, const ast::NamedType &named,
-                                    Program &sema_program, DiagnosticEngine &diag) -> std::optional<std::pair<std::string, std::string>> {
-            std::string current_module = start_module;
-            const ast::NamedType *current = &named;
-            bool crossed = false;
-
-            while (current->member != nullptr) {
-                const auto mod_it = sema_program.modules.find(current_module);
-                if (mod_it == sema_program.modules.end()) {
-                    diag.report_error(DiagnosticStage::Sema, current->location, std::format("internal error: module '{}' not found", current_module));
-                    return std::nullopt;
-                }
-                const auto sym_it = mod_it->second.symbols.find(current->name);
-                if (sym_it == mod_it->second.symbols.end()) {
-                    diag.report_error(DiagnosticStage::Sema, current->location, std::format("unknown identifier '{}'", current->name));
-                    return std::nullopt;
-                }
-                const auto *imp = std::get_if<ImportSymbol>(&sym_it->second);
-                if (!imp) {
-                    diag.report_error(DiagnosticStage::Sema, current->location, std::format("'{}' is not a namespace", current->name));
-                    return std::nullopt;
-                }
-                // Mirrors walk_namespace_chain's visibility rule: once the walk has crossed
-                // into another module, only pub re-exports may be traversed. This copy
-                // omitted the check, so 'impl a.b.Trait for a.b.Type' could traverse a
-                // non-pub namespace re-export that ordinary type resolution rejects.
-                if (crossed && !imp->is_pub) {
-                    diag.report_error(DiagnosticStage::Sema, current->location, std::format("'{}' is not pub", current->name));
-                    return std::nullopt;
-                }
-                current_module = imp->module_path;
-                current = current->member.get();
-                crossed = true;
-            }
-
-            return std::make_pair(current_module, current->name);
-        }
-
         struct ResolvedTypeRef {
             std::string module_path;
             std::string name;
@@ -942,9 +897,14 @@ namespace sema {
 
         auto resolve_type_ref(const std::string &start_module, const ast::NamedType &named,
                                Program &sema_program, DiagnosticEngine &diag) -> std::optional<ResolvedTypeRef> {
-            const auto chain = walk_named_type_chain(start_module, named, sema_program, diag);
+            // Shared with full type resolution (type_resolver.cpp) so the visibility
+            // rule cannot drift between impl position and ordinary type position.
+            // ast_program=nullptr: declare_type has already run for every module by the
+            // time register_trait_impls_for_program runs, so no on-demand declare.
+            const auto chain = walk_namespace_chain(start_module, named, sema_program, diag, /*ast_program=*/nullptr);
             if (!chain) return std::nullopt;
-            const auto &[mod_path, name] = *chain;
+            const auto &mod_path = chain->module_path;
+            const auto &name = chain->name;
 
             const auto mod_it = sema_program.modules.find(mod_path);
             if (mod_it == sema_program.modules.end()) {

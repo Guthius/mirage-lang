@@ -250,42 +250,15 @@ namespace sema {
         void walk_stmt_for_foreign_refs(const ast::Stmt &stmt, std::set<std::string> &locals, const std::string &module_path, const Program &program, const ForeignRefCallback &on_foreign_ref);
         void walk_when_stmt_for_foreign_refs(const ast::WhenStmt &when, std::set<std::string> &locals, const std::string &module_path, const Program &program, const ForeignRefCallback &on_foreign_ref);
 
-        // Resolves 'expr' to a module path IF it denotes a namespace value: an import-alias
-        // identifier (`const opts := import(...); opts.field`), an inline 'import(...)'
-        // expression (`import(...).field`), or a chain of '.field' accesses through re-exported
-        // namespaces. Returns nullopt for any ordinary value expression. Mirrors
-        // sema_check.cpp's identically-shaped try_resolve_namespace_chain, which can't be
-        // reused directly since it's private to that file's anonymous namespace.
+        // Thin wrapper over the shared walker (sema.cpp): the foreign-ref walk tracks
+        // bound names in a plain std::set rather than a LocalScope (it is a structural
+        // reference-finder, not a type checker), so shadowing is expressed as a
+        // predicate over that set.
         auto resolve_namespace_chain(const ast::Expr &expr, const std::string &module_path, const std::set<std::string> &locals, const Program &program) -> std::optional<std::string> {
-            if (const auto *imp = std::get_if<ast::ImportExpr>(&expr)) {
-                const auto mod_it = program.modules.find(module_path);
-                if (mod_it == program.modules.end()) return std::nullopt;
-                const auto path_it = mod_it->second.inline_import_paths.find(imp);
-                if (path_it == mod_it->second.inline_import_paths.end()) return std::nullopt;
-                return path_it->second;
-            }
-            if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
-                if (locals.contains(ident->name)) return std::nullopt;
-                const auto mod_it = program.modules.find(module_path);
-                if (mod_it == program.modules.end()) return std::nullopt;
-                const auto sym_it = mod_it->second.symbols.find(ident->name);
-                if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
-                if (const auto *imp_sym = std::get_if<ImportSymbol>(&sym_it->second)) return imp_sym->module_path;
-                return std::nullopt;
-            }
-            if (const auto *mem = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr)) {
-                const auto inner = resolve_namespace_chain((*mem)->object, module_path, locals, program);
-                if (!inner) return std::nullopt;
-                const auto mod_it = program.modules.find(*inner);
-                if (mod_it == program.modules.end()) return std::nullopt;
-                const auto sym_it = mod_it->second.symbols.find((*mem)->member);
-                if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
-                if (const auto *imp_sym = std::get_if<ImportSymbol>(&sym_it->second); imp_sym && imp_sym->is_pub) {
-                    return imp_sym->module_path;
-                }
-                return std::nullopt;
-            }
-            return std::nullopt;
+            return resolve_expr_namespace_chain(
+                expr, module_path, program,
+                [&locals](const std::string &name) { return locals.contains(name); },
+                /*follow_member_chains=*/true);
         }
 
         // Exhaustive walk over every ast::Expr alternative, invoking 'on_foreign_ref' for every

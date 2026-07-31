@@ -844,6 +844,57 @@ namespace sema {
         return out;
     }
 
+    // See sema.hpp's doc comment. External linkage: sema_check.cpp, sema_attributes.cpp
+    // and value_resolver.cpp each carried an identically-shaped copy of this probe
+    // (each noting it mirrored the others but couldn't reach across anonymous
+    // namespaces); one implementation keeps "what counts as a namespace value"
+    // identical everywhere.
+    auto resolve_expr_namespace_chain(const ast::Expr &expr, const std::string &module_path, const Program &program,
+                                       const std::function<bool(const std::string &)> &is_shadowed,
+                                       const bool follow_member_chains) -> std::optional<std::string> {
+        // Inline `import("...")` used directly as (part of) a MemberExpr chain's base,
+        // e.g. `import("...").target_arch` - its module path was already resolved and
+        // cached by declare_global (sema_declare.cpp), keyed by this exact node's
+        // address, since resolving it here would need ast::Program::module_imports,
+        // which isn't threaded through the check phase.
+        if (const auto *imp = std::get_if<ast::ImportExpr>(&expr)) {
+            const auto mod_it = program.modules.find(module_path);
+            if (mod_it == program.modules.end()) return std::nullopt;
+            const auto path_it = mod_it->second.inline_import_paths.find(imp);
+            if (path_it == mod_it->second.inline_import_paths.end()) return std::nullopt;
+            return path_it->second;
+        }
+
+        if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
+            if (is_shadowed && is_shadowed(ident->name)) return std::nullopt;
+            const auto mod_it = program.modules.find(module_path);
+            if (mod_it == program.modules.end()) return std::nullopt;
+            const auto sym_it = mod_it->second.symbols.find(ident->name);
+            if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
+            if (const auto *imp_sym = std::get_if<ImportSymbol>(&sym_it->second)) return imp_sym->module_path;
+            return std::nullopt;
+        }
+
+        if (follow_member_chains) {
+            if (const auto *mem = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr)) {
+                const auto inner = resolve_expr_namespace_chain((*mem)->object, module_path, program, is_shadowed, true);
+                if (!inner) return std::nullopt;
+                const auto mod_it = program.modules.find(*inner);
+                if (mod_it == program.modules.end()) return std::nullopt;
+                const auto sym_it = mod_it->second.symbols.find((*mem)->member);
+                if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
+                // A re-export reached through a member access has necessarily crossed a
+                // module boundary, so only pub re-exports may be traversed.
+                if (const auto *imp_sym = std::get_if<ImportSymbol>(&sym_it->second); imp_sym && imp_sym->is_pub) {
+                    return imp_sym->module_path;
+                }
+                return std::nullopt;
+            }
+        }
+
+        return std::nullopt;
+    }
+
     auto find_type_module_and_name(const ResolvedType &ty, const Program &program) -> std::pair<std::string, std::string> {
         // The defining module is stored directly on the info struct for every kind. Use
         // it to avoid accidentally matching a bare-import TypeSymbol alias in an

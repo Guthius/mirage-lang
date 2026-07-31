@@ -267,6 +267,54 @@ namespace sema {
 
     auto primitive_align(const TypeKind kind) -> uint32_t { return primitive_size(kind); }
 
+    // See sema.hpp's doc comment. External linkage: sema_declare.cpp's trait-impl
+    // registration used to carry its own copy of this walk, which drifted on the
+    // is_pub check (a non-pub namespace re-export was traversable in impl position
+    // but nowhere else) — one implementation is what keeps the visibility rule
+    // identical everywhere a dotted type name is resolved.
+    auto walk_namespace_chain(const std::string &start_module, const ast::NamedType &named, Program &program, DiagnosticEngine &diag, const ast::Program *ast_program) -> std::optional<NamespaceChainTarget> {
+        std::string current_module = start_module;
+        const auto *current = &named;
+        bool crossed = false;
+
+        while (current->member != nullptr) {
+            auto mod_it = program.modules.find(current_module);
+            if (mod_it == program.modules.end() && ast_program) {
+                ensure_module_declared(*ast_program, current_module, program, diag);
+                mod_it = program.modules.find(current_module);
+            }
+            if (mod_it == program.modules.end()) {
+                diag.report_error(DiagnosticStage::Sema, current->location, std::format("internal error: module '{}' not found", current_module));
+                return std::nullopt;
+            }
+
+            auto sym_it = mod_it->second.symbols.find(current->name);
+            if (sym_it == mod_it->second.symbols.end()) {
+                diag.report_error(DiagnosticStage::Sema, current->location, std::format("unknown identifier '{}'", current->name));
+                return std::nullopt;
+            }
+
+            const auto *imp = std::get_if<ImportSymbol>(&sym_it->second);
+            if (!imp) {
+                diag.report_error(DiagnosticStage::Sema, current->location, std::format("'{}' is not a namespace", current->name));
+                return std::nullopt;
+            }
+
+            // Once the walk has crossed into another module, only pub re-exports
+            // may be traversed.
+            if (crossed && !imp->is_pub) {
+                diag.report_error(DiagnosticStage::Sema, current->location, std::format("'{}' is not pub", current->name));
+                return std::nullopt;
+            }
+
+            current_module = imp->module_path;
+            current = current->member.get();
+            crossed = true;
+        }
+
+        return NamespaceChainTarget{current_module, current->name, crossed, current->location};
+    }
+
     namespace {
         auto error(DiagnosticEngine &diag, const SourceLocation &loc, std::string msg) -> ResolvedType {
             diag.report_error(DiagnosticStage::Sema, loc, std::move(msg));
@@ -288,54 +336,6 @@ namespace sema {
                     }
                 },
                 expr);
-        }
-
-        struct ChainTarget {
-            std::string module_path;
-            std::string name;
-            bool crossed_boundary;
-            SourceLocation location;
-        };
-
-        auto walk_namespace_chain(const std::string &start_module, const ast::NamedType &named, Program &program, DiagnosticEngine &diag, const ast::Program *ast_program) -> std::optional<ChainTarget> {
-            std::string current_module = start_module;
-            const auto *current = &named;
-            bool crossed = false;
-
-            while (current->member != nullptr) {
-                auto mod_it = program.modules.find(current_module);
-                if (mod_it == program.modules.end() && ast_program) {
-                    ensure_module_declared(*ast_program, current_module, program, diag);
-                    mod_it = program.modules.find(current_module);
-                }
-                if (mod_it == program.modules.end()) {
-                    diag.report_error(DiagnosticStage::Sema, current->location, std::format("internal error: module '{}' not found", current_module));
-                    return std::nullopt;
-                }
-
-                auto sym_it = mod_it->second.symbols.find(current->name);
-                if (sym_it == mod_it->second.symbols.end()) {
-                    diag.report_error(DiagnosticStage::Sema, current->location, std::format("unknown identifier '{}'", current->name));
-                    return std::nullopt;
-                }
-
-                const auto *imp = std::get_if<ImportSymbol>(&sym_it->second);
-                if (!imp) {
-                    diag.report_error(DiagnosticStage::Sema, current->location, std::format("'{}' is not a namespace", current->name));
-                    return std::nullopt;
-                }
-
-                if (crossed && !imp->is_pub) {
-                    diag.report_error(DiagnosticStage::Sema, current->location, std::format("'{}' is not pub", current->name));
-                    return std::nullopt;
-                }
-
-                current_module = imp->module_path;
-                current = current->member.get();
-                crossed = true;
-            }
-
-            return ChainTarget{current_module, current->name, crossed, current->location};
         }
 
         struct Resolver {

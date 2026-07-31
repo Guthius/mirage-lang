@@ -7,6 +7,7 @@
 #include "symbol_table.hpp"
 
 #include <format>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
@@ -1446,6 +1447,47 @@ namespace sema {
 
     // Look up a method on a type. Searches the type's defining module's method table.
     auto find_method(const ResolvedType &ty, const std::string &method_name, const Program &program) -> const MethodInfo *;
+
+    // The target of a dotted NamedType reference ('a.b.T'), after walking every
+    // import hop: the module the final name lives in, the name itself, whether the
+    // walk crossed into another module at all (callers use this to decide whether
+    // the final symbol must be pub), and the final segment's location.
+    struct NamespaceChainTarget {
+        std::string module_path;
+        std::string name;
+        bool crossed_boundary = false;
+        SourceLocation location;
+    };
+
+    // THE namespace walk for a (possibly dotted) NamedType: follows ImportSymbol
+    // hops, reporting a diagnostic and returning nullopt for an unknown segment, a
+    // non-namespace segment, or (once the walk has crossed into another module) a
+    // non-pub re-export. Defined in type_resolver.cpp.
+    //
+    // 'ast_program' is non-null only for declare-phase call sites that may run
+    // before every module is guaranteed declared (see resolve_type's doc comment) —
+    // it lets a cross-module reference declare its target module on demand instead
+    // of failing on iteration-order bad luck. Call sites that run strictly after
+    // every module has been declared pass nullptr.
+    auto walk_namespace_chain(const std::string &start_module, const ast::NamedType &named, Program &program,
+                               DiagnosticEngine &diag, const ast::Program *ast_program) -> std::optional<NamespaceChainTarget>;
+
+    // The namespace walk for an EXPRESSION chain base: resolves 'expr' to a module
+    // path IF it denotes a namespace value — an import-alias identifier
+    // ('const opts := import(...); opts.field'), an inline 'import(...)' expression
+    // used directly as a chain base (its path was cached in inline_import_paths by
+    // declare_global, keyed by node address), or, when 'follow_member_chains', a
+    // chain of '.field' accesses through PUB re-exported namespaces. Returns
+    // nullopt for any ordinary value expression — this is a silent probe, never a
+    // diagnostic (unlike walk_namespace_chain above). Defined in sema.cpp.
+    //
+    // 'is_shadowed' (optional, may be null): returns true when a name is bound
+    // locally at the use site, so a shadowing local is never mistaken for a
+    // module-level import alias. Call sites that run without local-scope
+    // information pass nullptr.
+    auto resolve_expr_namespace_chain(const ast::Expr &expr, const std::string &module_path, const Program &program,
+                                       const std::function<bool(const std::string &)> &is_shadowed,
+                                       bool follow_member_chains) -> std::optional<std::string>;
 
     // Does an implementing method's RESOLVED signature match the trait method it claims to
     // implement? Reports if not. Defined in sema.cpp.

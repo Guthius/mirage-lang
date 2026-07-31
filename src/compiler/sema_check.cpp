@@ -1106,64 +1106,13 @@ namespace sema {
             return ok;
         }
 
+        // Thin wrapper over the shared walker (sema.cpp): this file's call sites have a
+        // LocalScope, whose bindings shadow module-level import aliases.
         auto try_resolve_namespace_chain(const ast::Expr &expr, const std::string &module_path, LocalScope &locals, Program &program) -> std::optional<std::string> {
-            // Inline `import("...")` used directly as (part of) a MemberExpr chain's base,
-            // e.g. `import("...").target_arch` - its module path was already resolved and
-            // cached by declare_global (sema_declare.cpp), keyed by this exact node's
-            // address, since resolving it here would need ast::Program::module_imports,
-            // which isn't threaded through the check phase.
-            if (auto *imp = std::get_if<ast::ImportExpr>(&expr)) {
-                const auto mod_it = program.modules.find(module_path);
-                if (mod_it == program.modules.end()) {
-                    return std::nullopt;
-                }
-                const auto path_it = mod_it->second.inline_import_paths.find(imp);
-                if (path_it == mod_it->second.inline_import_paths.end()) {
-                    return std::nullopt;
-                }
-                return path_it->second;
-            }
-
-            if (auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
-                if (locals.contains(ident->name)) {
-                    return std::nullopt;
-                }
-                const auto mod_it = program.modules.find(module_path);
-                if (mod_it == program.modules.end()) {
-                    return std::nullopt;
-                }
-                const auto sym_it = mod_it->second.symbols.find(ident->name);
-                if (sym_it == mod_it->second.symbols.end()) {
-                    return std::nullopt;
-                }
-                if (auto *imp = std::get_if<ImportSymbol>(&sym_it->second)) {
-                    return imp->module_path;
-                }
-                return std::nullopt;
-            }
-
-            if (auto *mem = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr)) {
-                const auto inner_module = try_resolve_namespace_chain((*mem)->object, module_path, locals, program);
-                if (!inner_module) {
-                    return std::nullopt;
-                }
-                const auto mod_it = program.modules.find(*inner_module);
-                if (mod_it == program.modules.end()) {
-                    return std::nullopt;
-                }
-                const auto sym_it = mod_it->second.symbols.find((*mem)->member);
-                if (sym_it == mod_it->second.symbols.end()) {
-                    return std::nullopt;
-                }
-                if (auto *imp = std::get_if<ImportSymbol>(&sym_it->second)) {
-                    if (!imp->is_pub) {
-                        return std::nullopt;
-                    }
-                    return imp->module_path;
-                }
-                return std::nullopt;
-            }
-            return std::nullopt;
+            return resolve_expr_namespace_chain(
+                expr, module_path, program,
+                [&locals](const std::string &name) { return locals.contains(name); },
+                /*follow_member_chains=*/true);
         }
 
         // Resolves an expression as a type reference (not a value).
