@@ -139,6 +139,24 @@ def test_oversized_headers() -> None:
     check(b"header line exceeds" in result.stderr, "oversized header line is reported")
 
 
+def test_untitled_uri() -> None:
+    # canonical_path_of returns "" for non-file URIs, but no caller enforced that: an
+    # 'untitled:' buffer (a plain New File in VS Code) opened a phantom "" document,
+    # analysed it per request, and published diagnostics for the nonsense URI 'file://'.
+    result = drive(session(
+        frame({"jsonrpc": "2.0", "method": "textDocument/didOpen",
+               "params": {"textDocument": {"uri": "untitled:Untitled-1", "languageId": "mirage",
+                                           "version": 1, "text": "pub fn main() -> i32 { return 0 }\n"}}}),
+        frame({"jsonrpc": "2.0", "id": 5, "method": "textDocument/hover",
+               "params": {"textDocument": {"uri": "untitled:Untitled-1"},
+                          "position": {"line": 0, "character": 8}}}),
+    ))
+    check(result.returncode == 0, f"untitled URI session exits cleanly (got {result.returncode})")
+    check(responses(result.stdout).get(5) == "result", "hover on an untitled buffer answers (null result)")
+    check(b'"uri":"file://"' not in result.stdout.replace(b" ", b""),
+          "no diagnostics are published for the phantom 'file://' URI")
+
+
 def main() -> int:
     if not LSP_BINARY.exists():
         print(f"error: {LSP_BINARY} not found — run 'just build' first", file=sys.stderr)
@@ -147,6 +165,7 @@ def main() -> int:
     test_malformed_requests()
     test_empty_content_changes()
     test_oversized_headers()
+    test_untitled_uri()
 
     print()
     if failures:

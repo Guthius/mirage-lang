@@ -486,6 +486,10 @@ namespace lsp {
             } else if (method == "textDocument/didOpen") {
                 const auto &doc = message["params"]["textDocument"];
                 auto path = canonical_path_of(doc["uri"].get<std::string>());
+                // canonical_path_of returns "" for URIs this server cannot handle
+                // ('untitled:' buffers); a phantom "" document must not be opened,
+                // analysed, or given diagnostics for the nonsense URI 'file://'.
+                if (path.empty()) continue;
                 auto text = doc["text"].get<std::string>();
                 queue.push(Task{nullptr, [&worker, path, text = std::move(text)]() mutable {
                     worker.documents.open(path, std::move(text));
@@ -493,6 +497,7 @@ namespace lsp {
                 }});
             } else if (method == "textDocument/didChange") {
                 auto path = canonical_path_of(message["params"]["textDocument"]["uri"].get<std::string>());
+                if (path.empty()) continue;
                 // Full sync (textDocumentSync=1): exactly one change, containing
                 // the entire new buffer contents.
                 //
@@ -524,7 +529,8 @@ namespace lsp {
                 std::vector<std::string> changed;
                 for (const auto &change : changes) {
                     if (!change.contains("uri")) continue;
-                    changed.push_back(canonical_path_of(change["uri"].get<std::string>()));
+                    auto changed_path = canonical_path_of(change["uri"].get<std::string>());
+                    if (!changed_path.empty()) changed.push_back(std::move(changed_path));
                 }
                 if (changed.empty()) {
                     continue;
@@ -559,6 +565,7 @@ namespace lsp {
                 // covers it -> empty, which is the old behaviour and the common case.
                 const auto uri = message["params"]["textDocument"]["uri"].get<std::string>();
                 auto path = canonical_path_of(uri);
+                if (path.empty()) continue;
                 queue.push(Task{nullptr, [&worker, &channel, path, uri]() {
                     worker.documents.close(path);
                     send_notification(channel, "textDocument/publishDiagnostics", {
@@ -570,6 +577,13 @@ namespace lsp {
                 const auto id = message["id"];
                 const auto id_key = id_key_of(id);
                 auto path = canonical_path_of(message["params"]["textDocument"]["uri"].get<std::string>());
+                // An unsupported URI ('untitled:' buffer) has nothing to analyse; a null
+                // result is the spec's "no answer here", and skipping without one would
+                // leave the client's promise pending.
+                if (path.empty()) {
+                    send_response(channel, id, nullptr);
+                    continue;
+                }
                 const auto line = message["params"]["position"]["line"].get<size_t>() + 1;
                 const auto character = message["params"]["position"]["character"].get<size_t>() + 1;
 
@@ -606,6 +620,10 @@ namespace lsp {
                 const auto id = message["id"];
                 const auto id_key = id_key_of(id);
                 auto path = canonical_path_of(message["params"]["textDocument"]["uri"].get<std::string>());
+                if (path.empty()) {
+                    send_response(channel, id, nullptr);
+                    continue;
+                }
                 const auto line = message["params"]["position"]["line"].get<size_t>() + 1;
                 const auto character = message["params"]["position"]["character"].get<size_t>() + 1;
 
@@ -640,6 +658,10 @@ namespace lsp {
                 const auto id = message["id"];
                 const auto id_key = id_key_of(id);
                 auto path = canonical_path_of(message["params"]["textDocument"]["uri"].get<std::string>());
+                if (path.empty()) {
+                    send_response(channel, id, nullptr);
+                    continue;
+                }
                 const auto line = message["params"]["position"]["line"].get<size_t>() + 1;
                 const auto character = message["params"]["position"]["character"].get<size_t>() + 1;
                 // 'context' is required by the spec, but tolerate its absence rather than
@@ -683,6 +705,10 @@ namespace lsp {
                 const auto id = message["id"];
                 const auto id_key = id_key_of(id);
                 auto path = canonical_path_of(message["params"]["textDocument"]["uri"].get<std::string>());
+                if (path.empty()) {
+                    send_response(channel, id, nullptr);
+                    continue;
+                }
                 const auto start_line = message["params"]["range"]["start"]["line"].get<size_t>() + 1;
                 const auto end_line = message["params"]["range"]["end"]["line"].get<size_t>() + 1;
 
