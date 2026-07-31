@@ -6,6 +6,7 @@
 #include "compiler/token.hpp"
 
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -256,6 +257,22 @@ namespace lsp::handlers {
     // hover/definition use. Returns nullopt if `name` isn't declared anywhere in `body`.
     auto find_local(const ast::Stmt &body, const LocalLookupContext &ctx, const std::string &name,
                     size_t before_line) -> std::optional<LocalInfo>;
+
+    // The bare-identifier resolution every feature shares: params first, then locals
+    // declared in scope before `use_line` (via find_local), then module-scope symbols
+    // (ctx.sema_module / ctx.module_path). Carries display_override through on params and
+    // locals - the completion/references copies this replaced had drifted and dropped it.
+    auto resolve_base_name(const std::string &name, size_t use_line, const std::vector<ParamInfo> &params,
+                           const ast::Stmt *body, const LocalLookupContext &ctx) -> std::optional<Resolution>;
+
+    // The Container a resolved base starts a dotted chain from: a symbol goes through
+    // symbol_to_container, anything else is a value of its resolved type.
+    auto chain_start(const Resolution &base) -> Container;
+
+    // Steps `container` through each of `names` in order via step(); Kind::None from the
+    // first dead end onward.
+    auto walk_chain(Container container, std::span<const std::string> names, const sema::Program &program)
+        -> Container;
 
     // Collects every distinct local name declared at or before `before_line` within `body`,
     // keeping only the most recent declaration per name (same shadowing semantics as

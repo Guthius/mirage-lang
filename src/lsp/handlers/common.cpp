@@ -619,6 +619,42 @@ namespace lsp::handlers {
         return out;
     }
 
+    auto resolve_base_name(const std::string &name, const size_t use_line, const std::vector<ParamInfo> &params,
+                           const ast::Stmt *body, const LocalLookupContext &ctx) -> std::optional<Resolution> {
+        for (const auto &p : params) {
+            if (p.name == name) {
+                return Resolution{.kind = Resolution::Kind::Param, .name = name, .location = p.location, .type = p.type,
+                                   .display_override = p.display_override};
+            }
+        }
+        if (body) {
+            if (const auto local = find_local(*body, ctx, name, use_line)) {
+                return Resolution{.kind = Resolution::Kind::Local, .name = name, .location = local->location,
+                                   .type = local->type, .display_override = local->display_override};
+            }
+        }
+        if (const auto sym_it = ctx.sema_module.symbols.find(name); sym_it != ctx.sema_module.symbols.end()) {
+            return Resolution{.kind = Resolution::Kind::Symbol, .name = name, .module_path = ctx.module_path,
+                               .symbol = &sym_it->second};
+        }
+        return std::nullopt;
+    }
+
+    auto chain_start(const Resolution &base) -> Container {
+        return base.kind == Resolution::Kind::Symbol
+                   ? symbol_to_container(*base.symbol)
+                   : Container{.kind = Container::Kind::Type, .module_path = "", .type = base.type};
+    }
+
+    auto walk_chain(Container container, const std::span<const std::string> names, const sema::Program &program)
+        -> Container {
+        for (const auto &name : names) {
+            if (container.kind == Container::Kind::None) return container;
+            container = step(container, name, program).second;
+        }
+        return container;
+    }
+
     // Scans forward from `start_index` (a declaration's own first token, e.g. 'fn'/'ext
     // fn'/'macro') for the ASI-inserted or explicit ';' that terminates it, tracking
     // paren/bracket depth so a ';' inside e.g. a macro's parameter type isn't mistaken for
@@ -1522,28 +1558,8 @@ namespace lsp::handlers {
             .template_exprs = template_exprs_for(enclosing, result.sema_program),
         };
 
-        auto resolve_base_name = [&](const std::string &name) -> std::optional<Resolution> {
-            for (const auto &p : enclosing.params) {
-                if (p.name == name) {
-                    return Resolution{.kind = Resolution::Kind::Param, .name = name, .location = p.location, .type = p.type,
-                                       .display_override = p.display_override};
-                }
-            }
-            if (enclosing.body) {
-                if (const auto local = find_local(*enclosing.body, ctx, name, line)) {
-                    return Resolution{.kind = Resolution::Kind::Local, .name = name, .location = local->location, .type = local->type,
-                                       .display_override = local->display_override};
-                }
-            }
-            if (const auto sym_it = sema_mod_it->second.symbols.find(name); sym_it != sema_mod_it->second.symbols.end()) {
-                return Resolution{
-                    .kind = Resolution::Kind::Symbol,
-                    .name = name,
-                    .module_path = module_path,
-                    .symbol = &sym_it->second,
-                };
-            }
-            return std::nullopt;
+        auto resolve_base = [&](const std::string &name) -> std::optional<Resolution> {
+            return resolve_base_name(name, line, enclosing.params, enclosing.body, ctx);
         };
 
         // Asm operand hover (register or variable) - must run before the ordinary token-based
@@ -1561,7 +1577,7 @@ namespace lsp::handlers {
                 // Variable operand - resolves exactly like an ordinary identifier reference
                 // (param, then local, then module symbol); sema's own asm diagnostics already
                 // report "unknown identifier" for one that resolves to nothing here.
-                return resolve_base_name(hit->name).value_or(Resolution{});
+                return resolve_base(hit->name).value_or(Resolution{});
             }
         }
 
@@ -1628,7 +1644,7 @@ namespace lsp::handlers {
                     }
                 }
             }
-            if (const auto base = resolve_base_name(tokens[idx].lexeme)) return *base;
+            if (const auto base = resolve_base(tokens[idx].lexeme)) return *base;
             // Not a local/param/module symbol - could still be an enum field/union(enum)
             // variant name at its OWN declaration site (e.g. 'Red' in 'enum(i32) { Red = 0 }'),
             // which isn't a symbol in its own right. See resolve_type_decl_field_at's own doc
@@ -1637,18 +1653,11 @@ namespace lsp::handlers {
             return resolve_type_decl_field_at(mod_it->second, sema_mod_it->second, line, column).value_or(Resolution{});
         }
 
-        const auto base = resolve_base_name(prefix[0]);
+        const auto base = resolve_base(prefix[0]);
         if (!base) return {};
 
-        Container container = base->kind == Resolution::Kind::Symbol
-                                  ? symbol_to_container(*base->symbol)
-                                  : Container{.kind = Container::Kind::Type, .module_path = "", .type = base->type};
-
-        for (size_t i = 1; i < prefix.size(); ++i) {
-            auto [res, next] = step(container, prefix[i], result.sema_program);
-            if (next.kind == Container::Kind::None) return {};
-            container = next;
-        }
+        const auto container = walk_chain(chain_start(*base), std::span(prefix).subspan(1), result.sema_program);
+        if (container.kind == Container::Kind::None) return {};
 
         auto [final_res, unused] = step(container, tokens[idx].lexeme, result.sema_program);
         return final_res;

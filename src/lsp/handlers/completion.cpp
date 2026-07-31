@@ -380,13 +380,7 @@ namespace lsp::handlers {
                             if (auto ty = type_of_name(names.front()); ty && names.size() == 1) return ty;
                             // A dotted chain: resolve the base, then step through the fields.
                             if (const auto base = resolve_base_name(names.front())) {
-                                auto container = base->kind == Resolution::Kind::Symbol
-                                    ? symbol_to_container(*base->symbol)
-                                    : Container{.kind = Container::Kind::Type, .module_path = "", .type = base->type};
-                                for (size_t k = 1; k < names.size() && container.kind != Container::Kind::None; ++k) {
-                                    auto [res, next] = step(container, names[k], program);
-                                    container = next;
-                                }
+                                const auto container = walk_chain(chain_start(*base), std::span(names).subspan(1), program);
                                 if (container.kind == Container::Kind::Type && has_contextual_members(container.type)) {
                                     return container.type;
                                 }
@@ -480,21 +474,8 @@ namespace lsp::handlers {
             }
         }
 
-        auto resolve_base_name = [&](const std::string &name) -> std::optional<Resolution> {
-            for (const auto &p : enclosing.params) {
-                if (p.name == name) {
-                    return Resolution{.kind = Resolution::Kind::Param, .name = name, .location = p.location, .type = p.type};
-                }
-            }
-            if (enclosing.body) {
-                if (const auto local = find_local(*enclosing.body, ctx, name, line)) {
-                    return Resolution{.kind = Resolution::Kind::Local, .name = name, .location = local->location, .type = local->type};
-                }
-            }
-            if (const auto sym_it = sema_mod_it->second.symbols.find(name); sym_it != sema_mod_it->second.symbols.end()) {
-                return Resolution{.kind = Resolution::Kind::Symbol, .name = name, .module_path = module_path, .symbol = &sym_it->second};
-            }
-            return std::nullopt;
+        auto resolve_base = [&](const std::string &name) -> std::optional<Resolution> {
+            return resolve_base_name(name, line, enclosing.params, enclosing.body, ctx);
         };
 
         std::vector<json> items;
@@ -502,7 +483,7 @@ namespace lsp::handlers {
         if (contextual_dot) {
             if (const auto expected = expected_type_at(tokens, *chain_anchor - 1, line, enclosing, ctx,
                                                         sema_mod_it->second, result.sema_program, module_path,
-                                                        resolve_base_name)) {
+                                                        resolve_base)) {
                 add_type_members(*expected, result.sema_program, module_path, prefix, items);
                 return items;
             }
@@ -514,17 +495,10 @@ namespace lsp::handlers {
         }
 
         if (dot_triggered) {
-            const auto base = resolve_base_name(chain_prefix_names[0]);
+            const auto base = resolve_base(chain_prefix_names[0]);
             if (!base) return json::array();
 
-            Container container = base->kind == Resolution::Kind::Symbol
-                                       ? symbol_to_container(*base->symbol)
-                                       : Container{.kind = Container::Kind::Type, .module_path = "", .type = base->type};
-
-            for (size_t i = 1; i < chain_prefix_names.size() && container.kind != Container::Kind::None; ++i) {
-                auto [res, next] = step(container, chain_prefix_names[i], result.sema_program);
-                container = next;
-            }
+            const auto container = walk_chain(chain_start(*base), std::span(chain_prefix_names).subspan(1), result.sema_program);
 
             if (container.kind == Container::Kind::Module) {
                 if (const auto other_mod = result.sema_program.modules.find(container.module_path);

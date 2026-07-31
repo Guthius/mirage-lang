@@ -163,25 +163,11 @@ namespace lsp::handlers {
             const ast::Stmt *body = nullptr;
         };
 
-        // Resolves a bare identifier `name` used at `line` within `scope`, mirroring
-        // resolve_at's resolve_base_name lambda exactly: params, then locals declared before
-        // this line, then module-scope symbols.
+        // Resolves a bare identifier `name` used at `line` within `scope` — the shared
+        // params-then-locals-then-module-symbols resolution (see common.hpp).
         auto resolve_bare_name(const std::string &name, const size_t line, const Scope &scope,
-                                const LocalLookupContext &ctx, const std::string &module_path) -> std::optional<Resolution> {
-            for (const auto &p : scope.params) {
-                if (p.name == name) {
-                    return Resolution{.kind = Resolution::Kind::Param, .name = name, .location = p.location, .type = p.type};
-                }
-            }
-            if (scope.body) {
-                if (const auto local = find_local(*scope.body, ctx, name, line)) {
-                    return Resolution{.kind = Resolution::Kind::Local, .name = name, .location = local->location, .type = local->type};
-                }
-            }
-            if (const auto sym_it = ctx.sema_module.symbols.find(name); sym_it != ctx.sema_module.symbols.end()) {
-                return Resolution{.kind = Resolution::Kind::Symbol, .name = name, .module_path = module_path, .symbol = &sym_it->second};
-            }
-            return std::nullopt;
+                                const LocalLookupContext &ctx) -> std::optional<Resolution> {
+            return resolve_base_name(name, line, scope.params, scope.body, ctx);
         }
 
         // Resolves a type-position NamedType (possibly a dotted 'mod.Type' chain) and
@@ -223,7 +209,7 @@ namespace lsp::handlers {
             };
             visitor.on_expr = [&](const ast::Expr &expr) {
                 if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
-                    if (const auto res = resolve_bare_name(ident->name, ident->location.line, scope, ctx, module_path)) {
+                    if (const auto res = resolve_bare_name(ident->name, ident->location.line, scope, ctx)) {
                         if (same_declaration(*res, target, program)) out.push_back(location_json(ident->location));
                     }
                     return;
@@ -293,7 +279,7 @@ namespace lsp::handlers {
                 // value, so it has no expr_types entry; resolve it as a bare name instead and
                 // step into its module if it turns out to be an import alias.
                 if (const auto *object_ident = std::get_if<ast::IdentExpr>(&member.object)) {
-                    if (const auto object_res = resolve_bare_name(object_ident->name, member.location.line, scope, ctx, module_path);
+                    if (const auto object_res = resolve_bare_name(object_ident->name, member.location.line, scope, ctx);
                         object_res && object_res->kind == Resolution::Kind::Symbol) {
                         const auto container = symbol_to_container(*object_res->symbol);
                         if (container.kind != Container::Kind::None) {
