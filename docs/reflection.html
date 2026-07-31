@@ -127,26 +127,54 @@
         statements, variable initializers — the same expected-type mechanism used by tagged-union
         and trait-handle coercion:
       </p>
-      <pre><code><span class="kw">const</span> <span class="var">x</span>: <span class="ty">i32</span> = <span class="num">42</span>
-<span class="kw">const</span> <span class="var">a</span>: <span class="ty">any</span> = <span class="var">x</span>           <span class="cmt">// OK — x is addressable</span>
-<span class="kw">const</span> <span class="var">b</span>: <span class="ty">any</span> = <span class="num">42</span>          <span class="cmt">// ERROR — 42 is not addressable</span>
+      <pre><code><span class="kw">mut</span> <span class="var">x</span>: <span class="ty">i32</span> = <span class="num">42</span>
+<span class="kw">const</span> <span class="var">a</span>: <span class="ty">any</span> = <span class="var">x</span>           <span class="cmt">// data points at x</span>
+<span class="kw">const</span> <span class="var">b</span>: <span class="ty">any</span> = <span class="num">42</span>          <span class="cmt">// data points at a .rodata constant</span>
+<span class="kw">const</span> <span class="var">c</span>: <span class="ty">any</span> = <span class="var">x</span> + <span class="num">1</span>       <span class="cmt">// data points at a frame temporary</span>
 
-<span class="kw">mut</span> <span class="var">tmp</span>: <span class="ty">i32</span> = <span class="num">42</span>
-<span class="kw">const</span> <span class="var">c</span>: <span class="ty">any</span> = <span class="var">tmp</span>         <span class="cmt">// OK</span></code></pre>
+<span class="fn">print</span>(<span class="str">"hello {}"</span>, <span class="str">"world"</span>)  <span class="cmt">// '...any' variadics take literals directly</span></code></pre>
+      <p>
+        The source does <strong>not</strong> have to be addressable. <code>any</code> erases
+        whatever type the value already has, so a source with no storage of its own gets storage
+        invented for it:
+      </p>
+      <table>
+        <tr><th>Source</th><th>Where <code>data</code> points</th></tr>
+        <tr><td>Already <code>anyptr</code></td><td>That pointer itself — it already <em>is</em> the erased data pointer</td></tr>
+        <tr><td>Addressable (identifier, dereference, member access, index)</td><td>The value's own address</td></tr>
+        <tr><td>A non-addressable compile-time constant</td><td>A private, read-only <code>.rodata</code> object</td></tr>
+        <tr><td>Any other rvalue (arithmetic, call result, &hellip;)</td><td>A temporary in the enclosing function's frame</td></tr>
+      </table>
+      <p>
+        The coercion produces <code>{ id: type_of(T), data: &lt;the above&gt; }</code>, where
+        <code>T</code> is the source's own type. A materialized temporary lives as long as the
+        enclosing function — exactly what writing <code>mut tmp := &lt;expr&gt;</code> by hand
+        would have produced.
+      </p>
       <div class="callout warning">
-        <div class="callout-title">The source must be addressable</div>
-        Coercing a non-addressable value — a bare literal, an arithmetic result, a function call's
-        return value — to <code>any</code> is a sema error, because the coercion needs to take the
-        value's address:
-        <pre><code>error: cannot coerce non-addressable value to 'any'; bind it to a variable first.</code></pre>
-        Bind the value to a <code>const</code> or <code>mut</code> first, as with <code>c</code>
-        above, and the coercion works.
+        <div class="callout-title">A constant source is read-only</div>
+        Because a compile-time-constant source lives in <code>.rodata</code>, writing through it —
+        <code>cast(v, *T).* = &hellip;</code> — faults at runtime. Reading is always fine. Coerce
+        from a <code>mut</code> binding if the callee needs to write.
       </div>
       <p>
-        The coercion produces <code>{ id: type_of(T), data: &amp;value }</code>, where
-        <code>T</code> is the source's own type. If the source is already <code>anyptr</code>,
-        <code>data</code> is that pointer directly, rather than taking its address again.
+        An expression that yields no value at all cannot be erased, since there is nothing to point
+        <code>data</code> at:
       </p>
+      <pre><code>error: cannot coerce a valueless expression to 'any'</code></pre>
+      <p>
+        An <code>any</code> expectation never influences how the source expression types itself:
+        <code>takes(x + 1)</code> types <code>x + 1</code> as it would anywhere else and then
+        erases the <code>i32</code> result, rather than trying to make each operand an
+        <code>any</code>. (<code>undefined</code> and <code>default</code> are the exceptions,
+        having no natural type of their own.)
+      </p>
+      <p>
+        At module scope an <code>any</code> initializer is rejected, since the coercion
+        materializes a runtime <code>{id, data}</code> value while a global initializer must fold
+        at compile time:
+      </p>
+      <pre><code>error: global variable initializer must be a compile-time constant expression</code></pre>
       <div class="callout warning">
         <div class="callout-title"><code>any</code> has no fields</div>
         It's a fat pointer, not a struct — <code>a.id</code> and <code>a.data</code> are both a
@@ -355,7 +383,7 @@
         <tr><th>Feature</th><th>Purpose</th></tr>
         <tr><td><code>type</code></td><td>A compile-time-unique, comparable identity for a type. 8 bytes, <code>==</code>/<code>!=</code> only.</td></tr>
         <tr><td><code>type_of(expr_or_type)</code></td><td>Produces a <code>type</code> value. Compile-time constant, except for an <code>any</code> operand.</td></tr>
-        <tr><td><code>any</code></td><td>A type-erased fat pointer: <code>{ id: type, data: anyptr }</code>. Implicit coercion from any addressable value.</td></tr>
+        <tr><td><code>any</code></td><td>A type-erased fat pointer: <code>{ id: type, data: anyptr }</code>. Implicit coercion from any value that has one.</td></tr>
         <tr><td><code>type_info_of(expr)</code></td><td>Turns a <code>type</code> or <code>any</code> into a runtime <code>*Type_Info</code> descriptor, or <code>nil</code> for builtin scalars.</td></tr>
         <tr><td><code>runtime/type_info</code></td><td>The stdlib module defining <code>Type_Info</code>/<code>Type_Kind</code> — imported explicitly, never automatic.</td></tr>
       </table>

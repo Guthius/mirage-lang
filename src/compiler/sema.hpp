@@ -386,6 +386,19 @@ namespace sema {
     // directly if it's already an 'anyptr' — see emit_any_coercion).
     struct AnyCoercion {
         ResolvedType source_type;
+        // Whether the coerced expression folds to a compile-time constant, which is what lets
+        // emit_any_coercion put a non-addressable source in .rodata instead of spilling it to
+        // the stack. Answered HERE rather than in codegen because codegen has no safe way to
+        // ask: its emit_constant_expr forwards to emit_const_or_runtime, whose fall-through
+        // REPORTS "unsupported global constant initializer" — so it cannot be used as a
+        // speculative probe. is_constant_expr is the pure predicate, and is already what
+        // decides the same question for global initializers.
+        //
+        // One benign imprecision: is_constant_expr_impl short-circuits to false for any node
+        // that already carries an expr_any_coercions record, so a re-check of the same AST node
+        // (a generic instance checked twice) records false the second time. That only downgrades
+        // .rodata placement to a stack temporary — never wrong, just not optimal.
+        bool source_is_constant = false;
     };
 
     // Records where a '.method()' call was resolved against a trait's method list via

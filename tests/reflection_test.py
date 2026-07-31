@@ -51,10 +51,20 @@ def run(example_dir: str) -> subprocess.CompletedProcess:
     return subprocess.run([out_path], capture_output=True, text=True, timeout=30)
 
 
+def emit_ir(example_dir: str) -> str:
+    return subprocess.run(
+        [str(MIRAGE_BINARY), "build", str(EXAMPLES / example_dir), "--emit-ir"],
+        capture_output=True, text=True, timeout=30, check=True,
+    ).stdout
+
+
 # (example dir, expected substring in stderr) — must FAIL to build.
 NEGATIVE_CASES = [
     ("example_type_no_arith", "'type' values only support '==' and '!='"),
-    ("example_any_non_addressable", "cannot coerce non-addressable value to 'any'; bind it to a variable first."),
+    # A non-addressable source is NOT rejected any more (see example_any_rvalue) — but an
+    # any-coercion in a module-scope initializer still is, because it materializes a runtime
+    # {id, data} value and a global initializer has to fold at compile time.
+    ("example_any_global_init", "global variable initializer must be a compile-time constant expression"),
     ("example_any_no_fields", "'any' has no field 'id'"),
     ("example_any_bad_cast", "'any' may only be cast to a pointer type or 'anyptr'."),
     ("example_type_info_wrong_arg", "type_info_of() requires an argument of type 'type' or 'any'"),
@@ -76,6 +86,8 @@ POSITIVE_CASES = [
     # used to pass to an unchecked fn_signatures.at() — an uncaught std::out_of_range that
     # aborted the compiler outright, so "exits 0" is itself the regression assertion here.
     "example_reflect_trait_field",
+    # Non-addressable sources coerced to 'any' — the compiler materializes the storage.
+    "example_any_rvalue",
 ]
 
 
@@ -92,6 +104,25 @@ def main() -> int:
     for example_dir in POSITIVE_CASES:
         result = run(example_dir)
         check(result.returncode == 0, f"{example_dir}: builds and runs, exit 0 (stderr: {result.stderr!r})")
+
+    result = run("example_any_rvalue")
+    check(
+        result.stdout.strip() == "42 2 5 -1 5 7 1",
+        f"example_any_rvalue: non-addressable sources coerce correctly (got {result.stdout.strip()!r})",
+    )
+    # The value being right does not distinguish .rodata from a stack spill, so assert on the
+    # emitted IR too: two compile-time-constant sources (42 and the "hello" slice header) must
+    # become private constants, and the three runtime rvalues (x + 1, five(), -x) must become
+    # entry-block temporaries. Getting this backwards is silently correct but pointlessly slow.
+    ir = emit_ir("example_any_rvalue")
+    check(
+        ir.count("@.any.") >= 2 and "private unnamed_addr constant" in ir,
+        "example_any_rvalue: constant sources are emitted as private .rodata globals",
+    )
+    check(
+        ir.count("%any.tmp") >= 3,
+        "example_any_rvalue: runtime rvalue sources are spilled to entry-block temporaries",
+    )
 
     # Not just "did not crash": the trait method must come back as the DEGRADED
     # '.kind(Function)' encoding, which is what type_info_ptr_for returning nil for an unset

@@ -1564,16 +1564,56 @@ namespace codegen {
                 return build_trait_handle_value(data_ptr, sub_vtable_ptr, to_trait_ty, *current_module_path_);
             }
 
+            // A compile-time-constant 'any' source belongs in .rodata rather than on the stack:
+            // a private, constant, unnamed_addr global, which LLVM and the linker are free to
+            // merge with an identical one. Returns nullptr if the fold unexpectedly fails, so
+            // the caller degrades to the stack path rather than storing a null 'data' pointer.
+            //
+            // Only called when sema recorded source_is_constant, so emit_constant_expr's
+            // "unsupported global constant initializer" fall-through is unreachable for a
+            // well-formed program — the same sema/codegen constness contract global
+            // initializers already rely on (see emit_const_or_runtime's IdentExpr and
+            // DotIdentExpr arms, both written about that contract being violated).
+            auto emit_any_constant_global(const ast::Expr &expr, const sema::ResolvedType &ty) -> llvm::Constant * {
+                auto *init = emit_constant_expr(expr);
+                if (!init) return nullptr;
+
+                auto *global = new llvm::GlobalVariable(
+                    *module_, init->getType(), /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage, init,
+                    std::format(".any.{}", string_counter_++));
+                global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+                global->setAlignment(llvm::Align(std::max(align_of(*current_module_path_, ty), 1U)));
+                return global;
+            }
+
             // Materializes an implicit value-to-'any' coercion sema already decided (see
             // AnyCoercion's doc comment in sema.hpp): word 0 = the source type's id, word 1 =
-            // the 'data' pointer — the value's own address, except when the source is already
-            // an 'anyptr' (used directly, per the language spec, since it already IS the data
-            // pointer being erased). Sema already validated addressability (is_addressable_shape)
-            // before recording this coercion, so emit_lvalue is always safe to call here.
+            // the 'data' pointer.
+            //
+            // Where 'data' points depends on what the source is:
+            //   - already an 'anyptr': used directly, per the language spec, since it already IS
+            //     the data pointer being erased;
+            //   - addressable: its own address, as before;
+            //   - a non-addressable compile-time constant: a .rodata global;
+            //   - any other rvalue: an entry-block temporary, which lives as long as the
+            //     enclosing frame — identical to what 'mut tmp := <expr>' would have produced,
+            //     and the same spill emit_ext_call_arg does for a non-addressable struct arg.
             auto emit_any_coercion(const ast::Expr &expr, const sema::AnyCoercion &ac) -> llvm::Value * {
-                llvm::Value *data_ptr = ac.source_type.kind == sema::TypeKind::Anyptr
-                    ? emit_expr(expr)
-                    : emit_lvalue(expr).ptr;
+                llvm::Value *data_ptr = nullptr;
+                if (ac.source_type.kind == sema::TypeKind::Anyptr) {
+                    data_ptr = emit_expr(expr);
+                } else if (is_addressable_expr(expr)) {
+                    data_ptr = emit_lvalue(expr).ptr;
+                } else if (ac.source_is_constant) {
+                    data_ptr = emit_any_constant_global(expr, ac.source_type);
+                }
+                if (!data_ptr) {
+                    auto *value = emit_expr(expr);
+                    auto *slot = create_entry_alloca(current_function_, value->getType(), "any.tmp");
+                    slot->setAlignment(llvm::Align(std::max(align_of(*current_module_path_, ac.source_type), 1U)));
+                    builder_.CreateStore(value, slot);
+                    data_ptr = slot;
+                }
 
                 const auto type_id = sema_program_.type_ids.at(ac.source_type);
                 const sema::ResolvedType any_ty{.kind = sema::TypeKind::Any};

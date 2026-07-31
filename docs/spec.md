@@ -76,20 +76,41 @@ A `type` value is produced with `type_of` (below); its runtime shape is otherwis
 `any` is a fat pointer erasing a value's type: `{ id: type, data: anyptr }`, 16 bytes, 8-byte aligned. A value of any other type is implicitly coerced to `any` wherever `any` is the expected type (call arguments, return statements, `var`/`const` initializers, struct/array/union field initializers — the same expected-type channel used by tagged-union and trait-handle coercion):
 
 ```mirage
-const x: i32 = 42
-const a: any = x           // OK — x is addressable
-const b: any = 42          // ERROR — 42 is not addressable
-mut tmp: i32 = 42
-const c: any = tmp         // OK
+mut x: i32 = 42
+const a: any = x           // data points at x
+const b: any = 42          // data points at a .rodata constant
+const c: any = x + 1       // data points at a caller-frame temporary
+print("hello {}", "world") // '...any' variadics take literals directly
 ```
 
-The source value must be **addressable** (an identifier, a dereference, a member access, or an index expression) — coercing a non-addressable value (a bare literal, an arithmetic expression, a call result, ...) is a sema error:
+The source does **not** have to be addressable. `any` erases whatever type the value already has, so a source with no storage of its own gets storage invented for it:
+
+| Source | Where `data` points |
+| --- | --- |
+| Already `anyptr` | That pointer itself — it already *is* the erased data pointer |
+| Addressable (identifier, dereference, member access, index) | The value's own address |
+| A non-addressable compile-time constant (literal, `"str"`, constant fold) | A private, read-only `.rodata` object |
+| Any other rvalue (arithmetic, call result, ...) | A temporary in the enclosing function's frame |
+
+The coercion produces `{ id: type_of(T), data: <the above> }`, where `T` is the source value's own type.
+
+A materialized temporary lives as long as the enclosing function — exactly what writing `mut tmp := <expr>` by hand would have produced. Storing an `any` built from a temporary somewhere that outlives the frame dangles, just as taking the address of any other local would.
+
+Because a constant source lives in read-only memory, writing through it — `cast(v, *T).* = ...` — faults at runtime. Reading is always fine. Coerce from a `mut` binding if the callee needs to write.
+
+An expression that yields no value at all cannot be erased, since there is nothing to point `data` at:
 
 ```
-error: cannot coerce non-addressable value to 'any'; bind it to a variable first.
+error: cannot coerce a valueless expression to 'any'
 ```
 
-The coercion produces `{ id: type_of(T), data: &value }`, where `T` is the source value's own type. If the source is already `anyptr`, `data` is that pointer directly rather than `&value`.
+An `any` expectation never influences how the source expression types itself — `takes(x + 1)` types `x + 1` as it would anywhere else, then erases the `i32` result; it does not try to make each operand an `any`. (`undefined` and `default` are the exceptions, having no natural type of their own.)
+
+At module scope an `any` initializer is rejected, since the coercion materializes a runtime `{id, data}` value and a global initializer must fold at compile time:
+
+```
+error: global variable initializer must be a compile-time constant expression
+```
 
 `any` has no fields — it is not a struct, and field syntax would wrongly imply one. Its two words are reached through dedicated operations instead:
 

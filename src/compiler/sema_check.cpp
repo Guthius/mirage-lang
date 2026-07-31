@@ -88,35 +88,6 @@ namespace sema {
             bool writable = false;
         };
 
-        // Pure structural predicate (no diagnostics, no recursion into check_expr) mirroring
-        // codegen's is_addressable_expr exactly: true for the shapes that can plausibly resolve
-        // to an addressable lvalue (checked for real, WITH diagnostics, by resolve_lvalue if the
-        // value is actually taken further). Used only to decide whether an implicit 'any'
-        // coercion's source expression can be addressed.
-        auto is_addressable_shape(const ast::Expr &expr) -> bool {
-            return std::visit(
-                [&]<typename T>(const T &v) -> bool {
-                    using V = std::decay_t<T>;
-                    if constexpr (std::is_same_v<V, ast::IdentExpr>) {
-                        return true;
-                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
-                        return v->op == ast::UnaryOp::Deref;
-                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
-                        return true;
-                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
-                        // Structural approximation only (no declaration lookup here) — a real
-                        // generic instantiation is never addressable, but classifying that
-                        // precisely is check_expr's job (see the IndexOrInstantiateExpr
-                        // handling below); resolve_lvalue re-validates for real, with
-                        // diagnostics, if this expression's address is actually taken.
-                        return true;
-                    } else {
-                        return false;
-                    }
-                },
-                expr);
-        }
-
         auto error(DiagnosticEngine &diag, const SourceLocation &loc, std::string msg) -> ResolvedType {
             diag.report_error(DiagnosticStage::Sema, loc, std::move(msg));
             return ResolvedType{.kind = TypeKind::Invalid};
@@ -3964,7 +3935,21 @@ namespace sema {
 
     }
 
-    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
+    auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected_in, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
+        // An 'any' expectation must not steer how the expression types ITSELF. 'any' erases
+        // whatever natural type a value already has, so it carries no information downward —
+        // and several arms below forward the incoming expected type into their sub-expressions
+        // (BinaryExpr checks its LHS with it, check_unary_expr its operand). Forwarding 'any'
+        // there made both operands of 'takes(x + 1)' individually coerce, and the operator then
+        // saw two 16-byte fat pointers instead of two i32s. So the visit runs with no
+        // expectation and the any-coercion tail erases the natural result afterwards.
+        //
+        // 'undefined'/'default' are the exceptions: they have no natural type of their own and
+        // exist precisely to adopt the expected one.
+        const bool erase_any_expectation = expected_in && expected_in->kind == TypeKind::Any &&
+            !std::holds_alternative<ast::UndefinedExpr>(expr) && !std::holds_alternative<ast::DefaultExpr>(expr);
+        const std::optional<ResolvedType> expected = erase_any_expectation ? std::nullopt : expected_in;
+
         const auto ty = std::visit(
             [&]<typename T0>(const T0 &v) -> ResolvedType {
                 using V = std::decay_t<T0>;
@@ -4647,26 +4632,46 @@ namespace sema {
         }
 
         // Implicit value-to-'any' coercion: applies through the same expected-type channel as
-        // the coercions above. The source must be addressable (bindable to a memory location) -
-        // see AnyCoercion's doc comment in sema.hpp for why this is recorded in a side table
-        // rather than overwriting expr_types for this node. Also registers the source type's id
-        // (for 'type_of'/the runtime Type_Info table lookup) and marks it as needing a
-        // 'Type_Info' global, so the generic runtime lookup path has real entries to find.
-        if (expected && expected->kind == TypeKind::Any && ty.kind != TypeKind::Invalid && ty.kind != TypeKind::Any) {
+        // the coercions above. See AnyCoercion's doc comment in sema.hpp for why this is
+        // recorded in a side table rather than overwriting expr_types for this node. Also
+        // registers the source type's id (for 'type_of'/the runtime Type_Info table lookup) and
+        // marks it as needing a 'Type_Info' global, so the generic runtime lookup path has real
+        // entries to find.
+        //
+        // The source does NOT have to be addressable. 'any' erases to {id, data: anyptr}, so a
+        // non-addressable source needs storage invented for it — which codegen does, in .rodata
+        // for a compile-time constant and in a caller-frame temporary otherwise (see
+        // emit_any_coercion). Requiring the user to write 'mut tmp := 42' first bought nothing:
+        // it produced the identical stack slot with the identical lifetime, just noisier.
+        //
+        // Reads 'expected_in', not 'expected': this is the one tail that fires for an 'any'
+        // expectation, and 'expected' was deliberately blanked for exactly that case above.
+        if (expected_in && expected_in->kind == TypeKind::Any && ty.kind != TypeKind::Invalid && ty.kind != TypeKind::Any) {
             // A generic value coerced to 'any' inside a DECLARATION: the coercion itself is
             // fine and is re-checked per instantiation, but there is no concrete type to
-            // register reflection data for, and no addressability rule to apply to a value
-            // whose type isn't known. Accept and record nothing.
-            if (contains_opaque(ty, program)) return *expected;
-            if (!is_addressable_shape(expr)) {
+            // register reflection data for. Accept and record nothing.
+            if (contains_opaque(ty, program)) return *expected_in;
+
+            // The one thing that genuinely cannot be erased: an expression that yields no value
+            // at all, so there is nothing to point 'data' at. A void call used to be rejected
+            // only as a side effect of the addressability rule.
+            if (ty.kind == TypeKind::Void || ty.kind == TypeKind::Namespace) {
                 return error(diag, get_expr_location(expr),
-                    "cannot coerce non-addressable value to 'any'; bind it to a variable first.");
+                    "cannot coerce a valueless expression to 'any'");
             }
+
+            // Computed BEFORE the record below is inserted, and the order is load-bearing:
+            // is_constant_expr_impl returns false for any node that already carries an
+            // expr_any_coercions record (an any-coercion materializes a runtime {id, data}
+            // value), so asking afterwards would always answer false.
+            const bool source_is_constant = is_constant_expr(expr, module_path, program);
+
             const auto id = intern_type_id(program, ty);
             program.types_needing_info.insert(id);
             program.types_needing_info_types[id] = ty;
-            expr_tables_for_write(program, module_path).expr_any_coercions[get_expr_key(expr)] = AnyCoercion{.source_type = ty};
-            return *expected;
+            expr_tables_for_write(program, module_path).expr_any_coercions[get_expr_key(expr)] =
+                AnyCoercion{.source_type = ty, .source_is_constant = source_is_constant};
+            return *expected_in;
         }
 
         return ty;

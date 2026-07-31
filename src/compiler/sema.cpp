@@ -224,23 +224,86 @@ namespace sema {
             }
         }
 
+        // Snapshots a module's symbol NAMES, for loops whose body can check expressions.
+        //
+        // A plain 'for (auto &[name, sym] : module.symbols)' around anything that checks an
+        // expression is undefined behaviour, because the loop body can INSERT into the very map
+        // it is iterating:
+        //
+        //   - shadow_generic_type_params (sema_check.cpp) writes each generic parameter's name
+        //     into module.symbols for the duration of one instantiation, so any body that
+        //     instantiates a generic — 'format_int[T]' called from a plain function — mutates
+        //     the map mid-iteration;
+        //   - ensure_module_declared inserts into Program::modules, which can invalidate the
+        //     'ProgramModule &' the loop is reading through.
+        //
+        // Either insert can rehash, and a rehash invalidates every outstanding iterator. This
+        // stayed hidden for a long time because whether an insert actually rehashes depends on
+        // the symbol count relative to the bucket load factor: adding one unrelated 'pub' symbol
+        // to a bare-imported module was enough to flip a working build into checking exactly one
+        // function of a module and silently abandoning the other fourteen — which surfaced much
+        // later as an 'unordered_map::at' crash in codegen, emitting a body sema never typed.
+        //
+        // Callers re-look-up both the module (by path) and each symbol (by name) per iteration —
+        // see module_symbol_for below. Same defence find_type_info_union (sema_check.cpp) already
+        // uses when iterating Program::modules across a call that can declare a module.
+        auto snapshot_symbol_names(const ProgramModule &module) -> std::vector<std::string> {
+            std::vector<std::string> names;
+            names.reserve(module.symbols.size());
+            for (const auto &name : module.symbols | std::views::keys) {
+                names.push_back(name);
+            }
+            return names;
+        }
+
+        // Re-resolves (module_path, name) after a snapshot. Yields nulls when the module or the
+        // symbol is gone — most obviously a generic-parameter shadow that has since been
+        // restored, since those names only exist while one instantiation is in flight.
+        auto module_symbol_for(Program &program, const std::string &module_path, const std::string &name)
+            -> std::pair<ProgramModule *, Symbol *> {
+            const auto mod_it = program.modules.find(module_path);
+            if (mod_it == program.modules.end()) return {nullptr, nullptr};
+            const auto sym_it = mod_it->second.symbols.find(name);
+            if (sym_it == mod_it->second.symbols.end()) return {&mod_it->second, nullptr};
+            return {&mod_it->second, &sym_it->second};
+        }
+
         void resolve_values_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
-            for (auto &[name, sym] : module.symbols) {
-                if (auto *g = std::get_if<GlobalSymbol>(&sym)) {
+            // Snapshot + per-iteration re-lookup: a global's initializer is an expression, so
+            // resolve_global_symbol can instantiate a generic and shadow its parameter names
+            // into this very map. See snapshot_symbol_names.
+            for (const auto &name : snapshot_symbol_names(module)) {
+                auto [mod, sym] = module_symbol_for(program, module_path, name);
+                if (!mod || !sym) continue;
+
+                if (auto *g = std::get_if<GlobalSymbol>(sym)) {
                     const auto loc = g->decl->location;
-                    if (const auto origin = module.bare_import_origins.find(name); origin != module.bare_import_origins.end()) {
-                        resolve_global_symbol(origin->second.module_path, origin->second.symbol_name, program, diag, loc);
-                        *g = std::get<GlobalSymbol>(program.modules.at(origin->second.module_path).symbols.at(origin->second.symbol_name));
-                        g->is_pub = false;
+                    if (const auto origin = mod->bare_import_origins.find(name); origin != mod->bare_import_origins.end()) {
+                        const auto origin_module = origin->second.module_path;
+                        const auto origin_name = origin->second.symbol_name;
+                        resolve_global_symbol(origin_module, origin_name, program, diag, loc);
+                        // Re-resolve both sides: the call above can rehash either map.
+                        auto [mod_after, sym_after] = module_symbol_for(program, module_path, name);
+                        if (!sym_after) continue;
+                        auto *g_after = std::get_if<GlobalSymbol>(sym_after);
+                        if (!g_after) continue;
+                        *g_after = std::get<GlobalSymbol>(program.modules.at(origin_module).symbols.at(origin_name));
+                        g_after->is_pub = false;
                     } else {
                         resolve_global_symbol(module_path, name, program, diag, loc);
                     }
-                } else if (auto *m = std::get_if<MacroSymbol>(&sym)) {
+                } else if (auto *m = std::get_if<MacroSymbol>(sym)) {
                     const auto loc = m->decl->location;
-                    if (const auto origin = module.bare_import_origins.find(name); origin != module.bare_import_origins.end()) {
-                        auto &origin_sym = resolve_macro_symbol(origin->second.module_path, origin->second.symbol_name, program, diag, loc);
-                        *m = origin_sym;
-                        m->is_pub = false;
+                    if (const auto origin = mod->bare_import_origins.find(name); origin != mod->bare_import_origins.end()) {
+                        const auto origin_module = origin->second.module_path;
+                        const auto origin_name = origin->second.symbol_name;
+                        const auto origin_sym = resolve_macro_symbol(origin_module, origin_name, program, diag, loc);
+                        auto [mod_after, sym_after] = module_symbol_for(program, module_path, name);
+                        if (!sym_after) continue;
+                        auto *m_after = std::get_if<MacroSymbol>(sym_after);
+                        if (!m_after) continue;
+                        *m_after = origin_sym;
+                        m_after->is_pub = false;
                     } else {
                         resolve_macro_symbol(module_path, name, program, diag, loc);
                     }
@@ -441,12 +504,18 @@ namespace sema {
         }
 
         void check_struct_field_defaults_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
-            for (const auto &[name, sym] : module.symbols) {
+            // Snapshot + per-iteration re-lookup: a field default is an expression, so check_expr
+            // below can instantiate a generic and shadow its parameter names into this very map.
+            // See snapshot_symbol_names.
+            for (const auto &name : snapshot_symbol_names(module)) {
+                const auto [mod, sym] = module_symbol_for(program, module_path, name);
+                if (!mod || !sym) continue;
+
                 // A bare-import alias shares its struct's global index with the origin —
                 // the origin module's own pass over this loop already checks these field
                 // defaults once, correctly, under the origin's context.
-                if (module.bare_import_origins.contains(name)) continue;
-                const auto *ts = std::get_if<TypeSymbol>(&sym);
+                if (mod->bare_import_origins.contains(name)) continue;
+                const auto *ts = std::get_if<TypeSymbol>(sym);
                 if (!ts || !ts->resolved || ts->resolved->kind != TypeKind::Struct) continue;
 
                 const auto *struct_decl = std::get_if<std::unique_ptr<ast::StructType>>(&ts->decl->type);
@@ -592,15 +661,20 @@ namespace sema {
         }
 
         void check_bodies_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
-            for (auto &[name, sym] : module.symbols) {
+            // Snapshot + per-iteration re-lookup: check_stmt below instantiates generics, which
+            // shadow their parameter names into this very map. See snapshot_symbol_names.
+            for (const auto &name : snapshot_symbol_names(module)) {
+                const auto [mod, sym] = module_symbol_for(program, module_path, name);
+                if (!mod || !sym) continue;
+
                 // A bare-import alias shares its 'decl' AST pointer with the origin — the
                 // origin module's own pass over this loop already type-checks that body
                 // once, correctly, under the origin's context. Re-checking it here (under
                 // the importer's context) would write into the WRONG per-module
                 // 'expr_types' side table and spuriously fail to resolve any private
                 // sibling the origin's body references.
-                if (module.bare_import_origins.contains(name)) continue;
-                const auto *fn = std::get_if<FunctionSymbol>(&sym);
+                if (mod->bare_import_origins.contains(name)) continue;
+                const auto *fn = std::get_if<FunctionSymbol>(sym);
                 if (!fn) {
                     continue;
                 }
@@ -612,21 +686,38 @@ namespace sema {
                 // separate pass, and this loop is only about concrete code.
                 if (fn->decl && !fn->decl->generic_params.empty()) continue;
 
-                LocalScope locals = globals_in_scope(module);
+                LocalScope locals = globals_in_scope(*mod);
                 for (size_t i = 0; i < fn->decl->params.size(); ++i) {
                     locals[fn->decl->params[i].name] = LocalBinding{.type = fn->params[i], .is_mut = fn->decl->params[i].is_mut};
                 }
 
-                check_stmt(fn->decl->body, locals, module_path, program, diag, fn->return_types, 0);
-                warn_if_may_fall_through("function", fn->decl->name, fn->decl->body, fn->return_types, fn->decl->location, diag);
+                // 'fn' points into the map check_stmt may rehash, so copy out everything the
+                // call and the warning below need before making it.
+                const auto *decl = fn->decl;
+                const auto return_types = fn->return_types;
+
+                check_stmt(decl->body, locals, module_path, program, diag, return_types, 0);
+                warn_if_may_fall_through("function", decl->name, decl->body, return_types, decl->location, diag);
             }
 
-            // Check impl method bodies
-            for (auto &method_map : module.methods | std::views::values) {
-                for (auto &info : method_map | std::views::values) {
-                    if (!info.is_resolved) continue;
-                    check_method_body(info, module_path, module, program, diag);
+            // Check impl method bodies. 'methods' is keyed by type name and each MethodInfo is
+            // reached by reference, so the same rehash hazard applies — snapshot the keys and
+            // re-look-up per iteration.
+            std::vector<std::pair<std::string, std::string>> method_keys;
+            for (const auto &[type_name, method_map] : module.methods) {
+                for (const auto &method_name : method_map | std::views::keys) {
+                    method_keys.emplace_back(type_name, method_name);
                 }
+            }
+            for (const auto &[type_name, method_name] : method_keys) {
+                const auto mod_it = program.modules.find(module_path);
+                if (mod_it == program.modules.end()) continue;
+                const auto type_it = mod_it->second.methods.find(type_name);
+                if (type_it == mod_it->second.methods.end()) continue;
+                const auto method_it = type_it->second.find(method_name);
+                if (method_it == type_it->second.end()) continue;
+                if (!method_it->second.is_resolved) continue;
+                check_method_body(method_it->second, module_path, mod_it->second, program, diag);
             }
         }
 

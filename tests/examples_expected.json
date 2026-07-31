@@ -16,15 +16,19 @@
     "diag": "examples/example_any_bad_cast/main.mir:8:20: error: 'any' may only be cast to a pointer type or 'anyptr'.",
     "exit": 1
   },
+  "example_any_global_init": {
+    "action": "build",
+    "diag": "examples/example_any_global_init/main.mir:19:5: error: global variable initializer must be a compile-time constant expression",
+    "exit": 1
+  },
   "example_any_no_fields": {
     "action": "build",
     "diag": "examples/example_any_no_fields/main.mir:7:17: error: 'any' has no field 'id'",
     "exit": 1
   },
-  "example_any_non_addressable": {
-    "action": "build",
-    "diag": "examples/example_any_non_addressable/main.mir:5:20: error: cannot coerce non-addressable value to 'any'; bind it to a variable first.",
-    "exit": 1
+  "example_any_rvalue": {
+    "action": "run",
+    "exit": 0
   },
   "example_array_init": {
     "action": "run",

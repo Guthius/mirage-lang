@@ -1,0 +1,23 @@
+// example_any_global_init — REJECTION CASE. An 'any' coercion in a MODULE-SCOPE initializer.
+//
+// The companion to example_any_rvalue: lifting the addressability rule on 'any' deliberately did
+// NOT make this legal. An any-coercion materializes a runtime {id, data} value — is_constant_expr
+// classifies it non-constant for exactly that reason — and a global initializer has to fold at
+// compile time. This is also why codegen's emit_any_coercion can assume it always runs inside a
+// function body, and so never needs a module-scope path for the temporary it materializes.
+//
+// Note the diagnostic is the generic constness one, NOT an 'any'-specific message: it holds even
+// for an addressable source, so it is a property of global initializers rather than of the
+// coercion. 'G_ADDRESSABLE' below pins that.
+//
+// Expected: compilation fails with:
+//   error: global variable initializer must be a compile-time constant expression
+
+pub const X: i32 = 42
+
+pub const G_LITERAL: any = 42
+pub const G_ADDRESSABLE: any = X
+
+pub fn main() -> i32 {
+    return 0
+}

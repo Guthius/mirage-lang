@@ -1,0 +1,67 @@
+// example_any_rvalue — coercing NON-ADDRESSABLE values to 'any'.
+//
+// This used to be a sema error ("cannot coerce non-addressable value to 'any'; bind it to a
+// variable first"), on the grounds that 'any' erases to {id, data: anyptr} and a literal has no
+// address to put in 'data'. But the workaround the diagnostic prescribed — 'mut tmp := 42'
+// first — produced the identical stack slot with the identical lifetime, so the rule cost
+// nothing but noise at every '...any' call site: 'print("hello {}", "world")' was illegal.
+//
+// Now the compiler invents the storage. Where it puts it depends on the source:
+//   - a compile-time constant  -> a private unnamed_addr .rodata global ('@.any.N')
+//   - any other rvalue         -> an entry-block temporary ('%any.tmp')
+//   - addressable              -> its own address, exactly as before
+// See emit_any_coercion in codegen.cpp; the split is asserted on the emitted IR by
+// tests/reflection_test.py, not just on the values below.
+//
+// Also pins that an 'any' EXPECTATION does not steer how the source types itself: 'as_i32(x + 1)'
+// must type 'x + 1' as an ordinary i32 add. check_expr forwards its expected type into
+// BinaryExpr's LHS and check_unary_expr's operand, so an un-blanked 'any' made both operands
+// coerce individually and the operator then saw two 16-byte fat pointers — an LLVM module
+// verification failure, on valid code.
+//
+// Expected: compiles and runs, prints "42 2 5 -1 5 7 1", exit code 0.
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub type Point = struct {
+    x: i32
+    y: i32
+}
+
+fn as_i32(v: any) -> i32 {
+    return cast(v, *i32).*
+}
+
+fn as_len(v: any) -> i32 {
+    const s := cast(v, *[]u8)
+    return cast(len(s.*), i32)
+}
+
+fn as_point_sum(v: any) -> i32 {
+    const p := cast(v, *Point)
+    return p.x + p.y
+}
+
+fn five() -> i32 {
+    return 5
+}
+
+pub fn main() -> i32 {
+    mut x: i32 = 1
+
+    const from_literal   := as_i32(42)          // constant -> .rodata
+    const from_arith     := as_i32(x + 1)       // rvalue   -> frame temporary
+    const from_call      := as_i32(five())      // rvalue   -> frame temporary
+    const from_unary     := as_i32(-x)          // rvalue   -> frame temporary
+    const from_string    := as_len("hello")     // constant -> .rodata (the slice header)
+
+    const pt: Point = { .x = 3, .y = 4 }
+    const from_struct    := as_point_sum(pt)    // addressable -> its own address
+
+    // The control: an addressable source, the only shape that was ever legal.
+    const from_ident     := as_i32(x)
+
+    printf("%d %d %d %d %d %d %d\n",
+        from_literal, from_arith, from_call, from_unary, from_string, from_struct, from_ident)
+    return 0
+}
