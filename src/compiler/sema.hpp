@@ -4,6 +4,8 @@
 #include "diagnostic_engine.hpp"
 #include "module_resolver.hpp"
 #include "resolved_type.hpp"
+#include "sema_generics.hpp"
+#include "sema_resolve_state.hpp"
 #include "symbol_table.hpp"
 
 #include <format>
@@ -16,55 +18,11 @@
 #include <unordered_set>
 
 namespace sema {
-    // A '--opt key=value' or environment-variable value coerced (per $option's/$env's
-    // target-type coercion rules) or folded from a default expression: an integer/bool/
-    // enum-underlying value, or a []u8 string. Used for '$option'/'$env' themselves and for
-    // constant-folding 'when' conditions and '#link' data expressions that reference an
-    // '$option'/'$env'-backed const. Defined here (ahead of VariantCoercion/AsmStmtInfo
-    // etc. further below, which used to be its original home) so the generics structures
-    // immediately following — which also need it — can be declared next to the
-    // ResolvedType-adjacent structs above rather than split across the file.
-    using ConstFoldValue = std::variant<int64_t, std::string>;
-
-    // Substitution environment active while resolving one specific generic instantiation's
-    // signature/layout/body: one entry per the generic declaration's own params, binding
-    // each param name to either a concrete ResolvedType (a 'T: type' parameter) or a
-    // concrete compile-time constant of the parameter's declared scalar type (an
-    // 'N: usize'-style value parameter). Generalizes eval_integer_const_expr's existing
-    // 'macro_args' name->AST-node substitution map (type_resolver.cpp, used for iota/
-    // array-length const-folding) from "const-int folding only" to "any type/expr
-    // resolution reachable while walking a generic decl's own AST." Small (== the decl's
-    // own arity) — linear lookup by name is intentional, not a missed optimization.
-    struct GenericBinding {
-        std::string param_name;
-        bool is_type = true;
-        ResolvedType type_value{};       // valid when is_type
-        ConstFoldValue const_value{};    // valid when !is_type
-        ResolvedType const_value_type{}; // the param's declared scalar type, e.g. USize
-    };
-    using GenericBindingEnv = std::vector<GenericBinding>;
-
-    // The resolved, cacheable form of one generic argument — no param name (unlike
-    // GenericBinding above), since this is used as a monomorphization-cache key and for
-    // RTTI/name-mangling, not for substitution during a single resolution pass.
-    struct GenericArgValue {
-        bool is_type = true;
-        ResolvedType type_arg{};
-        ConstFoldValue value_arg{};
-        ResolvedType value_arg_scalar_type{};
-
-        auto operator==(const GenericArgValue &) const -> bool = default;
-    };
-
-    // Tags a monomorphized struct/enum/union/bitset slot with where it came from: the
-    // UNSPECIALIZED declaration's own (module, name) plus the concrete args this
-    // instantiation was created with, in declared parameter order. Never set on a
-    // non-generic slot (std::optional<GenericInstanceInfo> on each *Info struct below).
-    struct GenericInstanceInfo {
-        std::string decl_module;
-        std::string decl_name;
-        std::vector<GenericArgValue> args;
-    };
+    // ConstFoldValue, the generic-instantiation data structures (GenericBinding/
+    // GenericArgValue/GenericInstanceInfo/GenericInstanceKey/GenericFunctionInstance)
+    // and the ambient scope stacks live in sema_generics.hpp; the resolve-phase cycle
+    // guards (ResolveState, ScopedResolveMark/ScopedResolvePush) in
+    // sema_resolve_state.hpp — both included above.
 
     struct StructField {
         std::string name;
@@ -240,66 +198,6 @@ namespace sema {
         // signature, never from the impl (which is never allowed to declare its own).
         int trait_index = -1;
         int trait_method_index = -1;
-    };
-
-    // Identifies one generic function/method instantiation for cache lookup: the
-    // unspecialized declaration's own (module, name) plus its concrete args, in declared
-    // parameter order. Mirrors GenericInstanceInfo above but as a lookup key rather than a
-    // tag stored on the result.
-    struct GenericInstanceKey {
-        std::string module_path;
-        std::string decl_name;
-        std::vector<GenericArgValue> args;
-
-        auto operator==(const GenericInstanceKey &) const -> bool = default;
-    };
-
-    // Hash over exactly the fields operator== compares, so GenericInstanceKey can key an
-    // unordered_map. Deliberately NOT the instance's mangled name: mangling drops the
-    // module path and sanitizes type spellings, so two distinct keys can mangle alike.
-    struct GenericInstanceKeyHash {
-        auto operator()(const GenericInstanceKey &k) const -> size_t {
-            size_t h = std::hash<std::string>{}(k.module_path);
-            const auto mix = [&h](const size_t v) { h ^= v + 0x9e3779b9U + (h << 6) + (h >> 2); };
-            mix(std::hash<std::string>{}(k.decl_name));
-            for (const auto &arg : k.args) {
-                mix(std::hash<bool>{}(arg.is_type));
-                mix(std::hash<ResolvedType>{}(arg.type_arg));
-                mix(std::visit([]<typename V>(const V &v) { return std::hash<V>{}(v); }, arg.value_arg));
-                mix(std::hash<ResolvedType>{}(arg.value_arg_scalar_type));
-            }
-            return h;
-        }
-    };
-
-    // One concrete instantiation of a generic function OR method — both share this one
-    // shape (a method additionally sets 'self_type' and 'impl_decl'; a free function
-    // instantiation leaves those unset and uses 'decl' instead). Signature (param/return
-    // types, mangled name) is resolved eagerly when the instance is first created;
-    // 'body_checked' guards against re-checking/re-emitting the body if the same concrete
-    // instantiation is reached again from a different call site.
-    struct GenericFunctionInstance {
-        const ast::FunctionDecl *decl = nullptr;            // set for a free-function instance
-        const ast::ImplDecl::Function *impl_decl = nullptr;  // set for a method instance
-        std::string module_path; // module where the generic decl itself lives
-        std::vector<GenericArgValue> args;
-        std::optional<ResolvedType> self_type; // set only for a method instance
-        // Set only for a method instance (mirrors MethodInfo::impl_generic_params) — 'decl's
-        // own generic_params is used directly for a free-function instance instead, since
-        // FunctionDecl carries its own list.
-        const std::vector<ast::GenericParam> *generic_params_for_method = nullptr;
-        std::vector<ResolvedType> param_types; // non-self params
-        std::vector<ResolvedType> return_types;
-        std::string mangled_name; // e.g. "make_fixed__16", "List__i32::reserve" — see codegen
-        bool body_checked = false;
-        bool is_variadic = false;
-        ResolvedType variadic_element_type{};
-        size_t required_params = 0;
-        std::vector<bool> param_default_is_const; // parallel to param_types
-        // This instantiation's OWN per-node records live in Program::generic_fn_instance_exprs,
-        // keyed by this instance's index — not inline here, only because ExprSideTables names
-        // coercion structs declared further down this header. Reach them via
-        // Program::exprs_for_fn_instance().
     };
 
     // A single trait method's resolved signature (no body — trait methods are
@@ -585,103 +483,6 @@ namespace sema {
         bool ok = false;
     };
 
-    struct ResolveState {
-        std::set<std::pair<std::string, std::string>> alias_resolving;
-        std::set<std::pair<std::string, std::string>> struct_resolving;
-        std::set<std::pair<std::string, std::string>> union_resolving;
-        std::set<std::pair<std::string, std::string>> bitset_resolving;
-        std::set<std::pair<std::string, std::string>> trait_resolving;
-        std::set<std::pair<std::string, std::string>> value_resolving;
-        std::set<std::pair<std::string, std::string>> fn_signature_resolving;
-        // Cycle guard for the reentrant module-scope-'when' symbol declaration helper
-        // (ensure_module_declared, sema_declare.cpp) — a 'when' condition that references
-        // another module's const can force that module's symbol table to be built
-        // on-demand, out of Program::modules' unordered iteration order; this detects a
-        // circular dependency between modules' 'when' conditions.
-        std::set<std::string> when_module_declaring;
-        // One in-flight instantiate_generic_type call: its (decl, concrete args) key, plus
-        // the slot it pre-allocated for the result before resolving the declaration's RHS.
-        struct GenericTypeInProgress {
-            GenericInstanceKey key;
-            // The already-allocated, NOT-yet-laid-out handle, when the declaration's RHS is
-            // an aggregate. Re-entering with the same key returns this instead of erroring,
-            // which is what lets 'type Node[T: type] = struct { next: *Node[T] }' work: the
-            // pointer field only needs the handle, never the layout.
-            //
-            // nullopt when the RHS is NOT an aggregate ('type Ptr[T: type] = *T'), where
-            // there is no slot to hand back and self-reference really is an infinite
-            // regress. Those still report a cycle at instantiation time.
-            std::optional<ResolvedType> slot;
-        };
-        // In-flight generic type instantiations, innermost last. Mirrors what the non-generic
-        // path gets for free from TypeSymbol::resolved being populated at declare time (see
-        // resolve_final_shallow's early return, which is exactly why '*block_header' works
-        // and '*Node[T]' did not until this existed).
-        //
-        // By-value cycles are NOT detected here — a slot handed back is indistinguishable
-        // from a finished one at this point. They are caught at LAYOUT time instead, by
-        // layout_struct/layout_union rejecting a field whose type is an aggregate still
-        // missing its layout_done. Linear-scan (small, rare), not a set, since
-        // GenericInstanceKey has no operator<.
-        std::vector<GenericTypeInProgress> generic_type_resolving;
-        // Ordered ancestor stack of trait_index currently mid-flattening (layout_trait's
-        // composition-resolution step, type_resolver.cpp) — pushed/popped around that step
-        // only. Distinct from trait_resolving above: that set exists purely to short-circuit
-        // a trait referencing ITSELF in a METHOD SIGNATURE (not a true cycle, since a trait
-        // handle is a fixed-size fat pointer); this stack instead detects a genuine trait
-        // COMPOSITION cycle ('trait(A)' -> ... -> 'trait(A)'), which must be a hard error
-        // naming the full chain.
-        std::vector<int> trait_composition_stack;
-    };
-
-    // RAII helpers for the cycle guards above.
-    //
-    // Every guard used to be a hand-written insert(key) ... erase(key) (or push_back/pop_back)
-    // pair spanning a large recursive body. Any exception thrown in between -- an .at() miss,
-    // a bad std::get, an uncaught std::stoll -- left the key permanently marked "resolving",
-    // so every later attempt to resolve that type reported a spurious "circular dependency".
-    // For the vector stacks the leak is worse: active_generic_env_stack holds a pointer to a
-    // stack-local env, and a missed pop leaves it dangling for the next .back() read.
-    //
-    // These make the unwind path correct by construction. lsp/server.cpp runs sema on a
-    // worker thread with no try/catch anywhere above it, so a poisoned guard would otherwise
-    // persist for the lifetime of the editor session.
-    template <typename Set, typename Key>
-    class ScopedResolveMark {
-      public:
-        ScopedResolveMark(Set &set, Key key) : set_(set), key_(std::move(key)) { set_.insert(key_); }
-        ~ScopedResolveMark() { set_.erase(key_); }
-
-        ScopedResolveMark(const ScopedResolveMark &) = delete;
-        auto operator=(const ScopedResolveMark &) -> ScopedResolveMark & = delete;
-
-      private:
-        Set &set_;
-        Key key_;
-    };
-
-    template <typename Set, typename Key>
-    ScopedResolveMark(Set &, Key) -> ScopedResolveMark<Set, Key>;
-
-    template <typename Stack>
-    class ScopedResolvePush {
-      public:
-        template <typename Value>
-        ScopedResolvePush(Stack &stack, Value &&value) : stack_(stack) {
-            stack_.push_back(std::forward<Value>(value));
-        }
-        ~ScopedResolvePush() { stack_.pop_back(); }
-
-        ScopedResolvePush(const ScopedResolvePush &) = delete;
-        auto operator=(const ScopedResolvePush &) -> ScopedResolvePush & = delete;
-
-      private:
-        Stack &stack_;
-    };
-
-    template <typename Stack, typename Value>
-    ScopedResolvePush(Stack &, Value &&) -> ScopedResolvePush<Stack>;
-
     // Compiler-driver-supplied configuration read by '$option' during sema. Threaded
     // through check_program the same way codegen::Options is threaded through
     // codegen::generate (see codegen.hpp) — a single defaulted struct parameter, copied
@@ -842,7 +643,9 @@ namespace sema {
         // union/bitset field resolution, a generic instance's own signature resolution via
         // resolve_type_with_generic_env). A stack (not a single pointer) because checking one
         // instance's body can recursively trigger another instantiation before returning.
-        std::vector<const GenericBindingEnv *> active_generic_env_stack;
+        // The stack points at STACK-LOCAL envs and mutation is only possible through
+        // AmbientScopeStack's RAII PushGuard, so a push cannot outlive its env.
+        ActiveGenericEnvStack active_generic_env_stack;
 
         // Per-instantiation expression records (see ExprSideTables). Heap-allocated and
         // lazily created so a pointer handed out here survives any later insertion, and so
@@ -910,9 +713,11 @@ namespace sema {
         }
 
         // Selects which ExprSideTables the node currently being checked/emitted belongs to.
-        // Pushed by ScopedGenericScope (sema) and ScopedEmitExprs (codegen); empty means
-        // "ordinary module-level code".
-        std::vector<ExprSideTables *> active_expr_tables;
+        // Pushed by ScopedGenericScope (sema) and the LSP's GenericEnvGuard; empty means
+        // "ordinary module-level code". Mutation only through AmbientScopeStack's RAII
+        // PushGuard — expr_tables_for_write's "writes never reach the module tables while
+        // a scope is active" contract rests on pushes always being popped.
+        ActiveExprTableStack active_expr_tables;
 
         // Non-zero while the eager pass is checking a generic DECLARATION's body with its
         // parameters bound to Opaque. Suppresses side effects that would otherwise leak
@@ -1002,7 +807,7 @@ namespace sema {
     // is that instantiation's, so the module's tables must not be touched at all (writing
     // there is the monomorphization-collision bug this split exists to fix).
     inline auto expr_tables_for_write(Program &program, const std::string &module_path) -> ExprSideTables & {
-        if (!program.active_expr_tables.empty()) return *program.active_expr_tables.back();
+        if (auto *active = program.active_expr_tables.current()) return *active;
         // operator[], not at(): two pre-existing write sites (the 'when' expression and
         // statement selectors) already used the module-creating form, and a throw here would
         // be a hard crash where a default-constructed module is harmless.
@@ -1044,7 +849,7 @@ namespace sema {
     template <typename Map, typename Key>
     auto find_expr_record(const Program &program, const std::string &module_path,
                            Map ExprSideTables::*member, const Key &key) -> const typename Map::mapped_type * {
-        return find_expr_record_in(program.active_expr_tables.empty() ? nullptr : program.active_expr_tables.back(),
+        return find_expr_record_in(program.active_expr_tables.current(),
                                     program, module_path, member, key);
     }
 

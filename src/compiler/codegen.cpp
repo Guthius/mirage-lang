@@ -1286,7 +1286,7 @@ namespace codegen {
                 const auto &generic_params = instance.decl ? instance.decl->generic_params
                                                              : *instance.generic_params_for_method;
                 const auto env = sema::build_generic_binding_env(generic_params, instance.args);
-                const sema::ScopedResolvePush guard(
+                const sema::ActiveGenericEnvStack::PushGuard guard(
                     const_cast<sema::Program &>(sema_program_).active_generic_env_stack, &env);
                 // The default's AST node lives in the generic decl's module, but sema checked
                 // it per-instance (instantiate_generic_function holds the instance's scope
@@ -3007,7 +3007,8 @@ namespace codegen {
                 const auto &generic_params = instance.decl ? instance.decl->generic_params
                                                              : *instance.generic_params_for_method;
                 const auto env = build_generic_binding_env(generic_params, instance.args);
-                const_cast<sema::Program &>(sema_program_).active_generic_env_stack.push_back(&env);
+                const sema::ActiveGenericEnvStack::PushGuard env_guard(
+                    const_cast<sema::Program &>(sema_program_).active_generic_env_stack, &env);
 
                 auto arg_it = current_function_->arg_begin();
                 if (instance.impl_decl) {
@@ -3062,8 +3063,6 @@ namespace codegen {
                         builder_.CreateUnreachable();
                     }
                 }
-
-                const_cast<sema::Program &>(sema_program_).active_generic_env_stack.pop_back();
             }
 
             // Pass by value: emit_stmt called inside can push/pop defer_scopes_,
@@ -4843,7 +4842,7 @@ namespace codegen {
                             // so materialize the bound constant — mirrors
                             // emit_const_or_runtime's identical fallback for const contexts.
                             if (!locals_.contains(v.name) && !sema_program_.active_generic_env_stack.empty()) {
-                                for (const auto &binding : *sema_program_.active_generic_env_stack.back()) {
+                                for (const auto &binding : *sema_program_.active_generic_env_stack.current()) {
                                     if (binding.is_type || binding.param_name != v.name) continue;
                                     if (const auto *n = std::get_if<int64_t>(&binding.const_value)) {
                                         return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty),
@@ -5744,7 +5743,7 @@ namespace codegen {
                         }
                     }
                     if (!sema_program_.active_generic_env_stack.empty()) {
-                        for (const auto &binding : *sema_program_.active_generic_env_stack.back()) {
+                        for (const auto &binding : *sema_program_.active_generic_env_stack.current()) {
                             if (binding.is_type && binding.param_name == ident->name) {
                                 return {*current_module_path_, binding.type_value};
                             }
@@ -5845,7 +5844,7 @@ namespace codegen {
                             // with "unsupported global constant initializer" below. Mirrors
                             // sizeof_operand's identical generic-param fallback.
                             if (!sema_program_.active_generic_env_stack.empty()) {
-                                for (const auto &binding : *sema_program_.active_generic_env_stack.back()) {
+                                for (const auto &binding : *sema_program_.active_generic_env_stack.current()) {
                                     if (binding.is_type || binding.param_name != v.name) continue;
                                     if (const auto *n = std::get_if<int64_t>(&binding.const_value)) {
                                         return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty),

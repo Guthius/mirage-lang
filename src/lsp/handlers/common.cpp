@@ -352,18 +352,19 @@ namespace lsp::handlers {
     struct GenericEnvGuard {
         sema::Program &program;
         sema::ExprSideTables throwaway_exprs;
+        sema::ActiveGenericEnvStack::PushGuard env_guard;
+        sema::ActiveExprTableStack::PushGuard exprs_guard;
 
-        GenericEnvGuard(sema::Program &p, const sema::GenericBindingEnv &env) : program(p) {
-            program.active_generic_env_stack.push_back(&env);
-            program.active_expr_tables.push_back(&throwaway_exprs);
+        GenericEnvGuard(sema::Program &p, const sema::GenericBindingEnv &env)
+            : program(p), env_guard(p.active_generic_env_stack, &env),
+              exprs_guard(p.active_expr_tables, &throwaway_exprs) {
             ++program.template_check_depth;
         }
         GenericEnvGuard(const GenericEnvGuard &) = delete;
         auto operator=(const GenericEnvGuard &) -> GenericEnvGuard & = delete;
         ~GenericEnvGuard() {
             --program.template_check_depth;
-            program.active_expr_tables.pop_back();
-            program.active_generic_env_stack.pop_back();
+            // env_guard/exprs_guard pop themselves in reverse order.
         }
     };
 

@@ -1618,14 +1618,14 @@ namespace sema {
         ScopedGenericScope(Program &program, std::string module_path, const std::vector<ast::GenericParam> &decl_params,
                             const std::vector<GenericArgValue> &args, const GenericBindingEnv &env,
                             ExprSideTables *exprs = nullptr)
-            : program_(program), module_path_(std::move(module_path)), pushed_exprs_(exprs != nullptr),
-              shadowed_(shadow_generic_type_params(decl_params, args, program.modules.at(module_path_))) {
-            program_.active_generic_env_stack.push_back(&env);
-            if (exprs) program_.active_expr_tables.push_back(exprs);
+            : program_(program), module_path_(std::move(module_path)),
+              shadowed_(shadow_generic_type_params(decl_params, args, program.modules.at(module_path_))),
+              env_guard_(program.active_generic_env_stack, &env) {
+            if (exprs) exprs_guard_.emplace(program.active_expr_tables, exprs);
         }
         ~ScopedGenericScope() {
-            if (pushed_exprs_) program_.active_expr_tables.pop_back();
-            program_.active_generic_env_stack.pop_back();
+            // The guards pop themselves (member destruction, reverse order); only the
+            // symbol shadowing needs undoing by hand.
             restore_shadowed_symbols(program_.modules.at(module_path_), shadowed_);
         }
 
@@ -1635,8 +1635,9 @@ namespace sema {
       private:
         Program &program_;
         std::string module_path_;
-        bool pushed_exprs_;
         std::vector<std::pair<std::string, std::optional<Symbol>>> shadowed_;
+        ActiveGenericEnvStack::PushGuard env_guard_;
+        std::optional<ActiveExprTableStack::PushGuard> exprs_guard_;
     };
 
     // RAII for Program::template_check_depth, the last bare set/reset counter in this

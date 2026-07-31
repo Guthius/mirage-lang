@@ -2121,7 +2121,7 @@ namespace sema {
         // decl's type annotation, a cast target, size_of's operand, etc. inside a generic
         // function/method body resolve a bare type/value generic-param reference correctly,
         // without threading a new parameter through check_expr/check_stmt.
-        const auto *env = program.active_generic_env_stack.empty() ? nullptr : program.active_generic_env_stack.back();
+        const auto *env = program.active_generic_env_stack.current();
         Resolver resolver{program, diag, ast_program, env, nullptr};
         return resolver.resolve_type_impl(type, module_path);
     }
@@ -2134,14 +2134,14 @@ namespace sema {
     // handled them, which is why 'const N := size_of(T)' and '[size_of(T)]u8' worked.
     auto eval_size_of_operand(const ast::SizeOfExpr &expr, const std::string &module_path, Program &program,
                               DiagnosticEngine &diag) -> uint64_t {
-        const auto *env = program.active_generic_env_stack.empty() ? nullptr : program.active_generic_env_stack.back();
+        const auto *env = program.active_generic_env_stack.current();
         Resolver resolver{program, diag, nullptr, env, nullptr};
         return resolver.sizeof_expr_operand(module_path, expr);
     }
 
     auto eval_align_of_operand(const ast::AlignOfExpr &expr, const std::string &module_path, Program &program,
                                DiagnosticEngine &diag) -> uint64_t {
-        const auto *env = program.active_generic_env_stack.empty() ? nullptr : program.active_generic_env_stack.back();
+        const auto *env = program.active_generic_env_stack.current();
         Resolver resolver{program, diag, nullptr, env, nullptr};
         return resolver.align_of_expr_operand(module_path, expr);
     }
@@ -2313,7 +2313,7 @@ namespace sema {
             return error(diag, array_lit->location, "cannot infer array length: initializer must not use '...' to fill remaining elements");
         }
 
-        const auto *env = program.active_generic_env_stack.empty() ? nullptr : program.active_generic_env_stack.back();
+        const auto *env = program.active_generic_env_stack.current();
         Resolver resolver{program, diag, nullptr, env, nullptr};
         const auto element = resolver.resolve_type_impl((*array_type)->base_type, module_path);
         const auto count = static_cast<uint64_t>(array_lit->values.size());

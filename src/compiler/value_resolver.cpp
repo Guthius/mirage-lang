@@ -607,7 +607,7 @@ namespace sema {
             return is_constant_expr_impl(expr, module_path, program, extra_const_names);
         }
         auto names = extra_const_names;
-        for (const auto &binding : *program.active_generic_env_stack.back()) {
+        for (const auto &binding : *program.active_generic_env_stack.current()) {
             if (!binding.is_type) names.insert(binding.param_name);
         }
         return is_constant_expr_impl(expr, module_path, program, names);
@@ -846,7 +846,7 @@ namespace sema {
                     // 'when N > 2' inside a generic used to fold to false for EVERY
                     // instantiation because this lookup was missing.
                     if (!program.active_generic_env_stack.empty()) {
-                        for (const auto &binding : *program.active_generic_env_stack.back()) {
+                        for (const auto &binding : *program.active_generic_env_stack.current()) {
                             if (!binding.is_type && binding.param_name == v.name) {
                                 return binding.const_value;
                             }
