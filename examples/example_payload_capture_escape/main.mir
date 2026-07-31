@@ -22,6 +22,11 @@ type Holder = struct {
     ptr: *u64 = nil
 }
 
+type Boxed = union(enum) {
+    none
+    ptr: struct { p: *u64 }
+}
+
 // via an assignment to a binding declared outside the arm
 pub fn escape_via_assignment(a: Arg) -> u64 {
     mut out: *u64 = nil
@@ -78,6 +83,51 @@ pub fn escape_via_return(a: Arg) -> *u64 {
         .small(v): {},
     }
     return nil
+}
+
+// via a local BOUND to the capture first. This is the under-report the check used to have:
+// 'p' holds the same pointer, but nothing followed it there, so 'global_ptr = p' escaped
+// silently. Binding it is not itself an escape -- 'p' is arm-local too -- so what matters is
+// that the pointer is followed, not that the binding is flagged.
+pub fn escape_via_alias(a: Arg) -> u64 {
+    switch a {
+        .large(&v): {
+            const p := v
+            global_ptr = p
+        },
+        .small(v): {},
+    }
+    if !global_ptr { return 0 }
+    return global_ptr.*
+}
+
+// via a tagged-variant payload. Structurally identical to the struct-literal case above,
+// which WAS detected -- this arm was simply missing from the walker.
+pub fn escape_via_variant_payload(a: Arg) -> u64 {
+    mut boxed: Boxed = .none
+    switch a {
+        .large(&v): {
+            boxed = .ptr{.p = v}
+        },
+        .small(v): {},
+    }
+    return 0
+}
+
+// SAFE: a local bound to something else SHADOWS the capture, so uses of that name afterwards
+// are not uses of the pointer. Must not warn.
+pub fn safe_shadowed_alias(a: Arg) -> u64 {
+    mut sink: *u64 = nil
+    switch a {
+        .large(&v): {
+            const p := v
+            const q := p
+            const p2: *u64 = nil
+            sink = p2
+        },
+        .small(v): {},
+    }
+    return 0
 }
 
 // SAFE: reading through the pointer while the arm is still live. Must not warn.

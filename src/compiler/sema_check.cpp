@@ -49,6 +49,15 @@ namespace sema {
     auto apply_condition_narrowing(LocalScope &scope, const std::vector<ConditionNarrowing> &narrowings,
                                    bool then_branch, const ast::Expr &condition, const Program &program) -> void;
 
+    // Every name that currently holds the capture pointer. Starts as just the capture itself
+    // and grows as the arm binds it to further locals ('const p := v').
+    //
+    // This is the provenance the check was missing. DEFERRED proposed putting it on
+    // LocalBinding, but this walk never consults LocalScope at all — it is a syntactic pass
+    // over one arm body, and the only aliases it can possibly need are the ones introduced
+    // inside that body. A name set is the same information at the granularity actually used.
+    using CaptureAliases = std::set<std::string>;
+
     // Warns when a by-ref payload capture ('.Variant(&v):') is let out of its own arm.
     //
     // Codegen emits the match/switch operand as a VALUE into one scratch slot per function
@@ -56,15 +65,22 @@ namespace sema {
     // not at the user's object -- and the next match through that slot overwrites it. Any use
     // after the arm ends therefore reads something the program never stored there.
     //
-    // Diagnosing this properly needs escape analysis, and sema has no lifetime machinery at
-    // all (LocalBinding is {type, is_mut, err_state}). This is the cheap conservative
-    // approximation: a syntactic check for the pointer reaching a return, an assignment, a
-    // call argument, or an aggregate initializer. It is a WARNING because it over-reports --
-    // passing the pointer to something that only reads it during the arm, like a compare, is
-    // perfectly safe and still flagged. It also under-reports: assigning the pointer to an
-    // arm-local first and letting THAT escape is not tracked.
-    auto check_payload_capture_escape(const ast::Stmt &body, const std::string &name, DiagnosticEngine &diag) -> void;
-    auto check_payload_capture_escape_expr(const ast::Expr &value, const std::string &name, DiagnosticEngine &diag) -> void;
+    // Diagnosing this properly needs full escape analysis, and sema has no lifetime machinery.
+    // This is the conservative syntactic approximation: the pointer reaching a return, an
+    // assignment, a call argument, an aggregate initializer or a variant payload.
+    //
+    // It DOES follow the pointer through arm-local bindings ('const p := v', then letting 'p'
+    // escape) — see CaptureAliases — which is the under-report it used to have. A name later
+    // rebound to something else drops out of that set, so shadowing does not produce a false
+    // positive.
+    //
+    // It remains a WARNING because it still OVER-reports, and that half cannot be fixed
+    // without per-callee summaries: passing the pointer to something that only reads it
+    // during the arm — a comparison, a print — is perfectly safe and is still flagged. Until
+    // sema can answer "does this function let its argument escape", every call argument has
+    // to be treated as an escape.
+    auto check_payload_capture_escape(const ast::Stmt &body, CaptureAliases &aliases, DiagnosticEngine &diag) -> void;
+    auto check_payload_capture_escape_expr(const ast::Expr &value, const CaptureAliases &aliases, DiagnosticEngine &diag) -> void;
 
     namespace {
         struct LvalueInfo {
@@ -2894,7 +2910,8 @@ namespace sema {
                                         .type = intern_pointer(program, payload_ty),
                                         .is_mut = false,
                                     };
-                                    check_payload_capture_escape_expr(arm.value, *vp.capture_name, diag);
+                                    CaptureAliases aliases{*vp.capture_name};
+                                    check_payload_capture_escape_expr(arm.value, aliases, diag);
                                 } else {
                                     arm_locals[*vp.capture_name] = LocalBinding{.type = payload_ty, .is_mut = false};
                                 }
@@ -3132,7 +3149,8 @@ namespace sema {
                                         .type = intern_pointer(program, payload_ty),
                                         .is_mut = false,
                                     };
-                                    check_payload_capture_escape(arm.body, *vp.capture_name, diag);
+                                    CaptureAliases aliases{*vp.capture_name};
+                                    check_payload_capture_escape(arm.body, aliases, diag);
                                 } else {
                                     arm_locals[*vp.capture_name] = LocalBinding{.type = payload_ty, .is_mut = false};
                                 }
@@ -4914,23 +4932,35 @@ namespace sema {
     // Whether evaluating 'expr' yields the capture pointer ITSELF, as opposed to reading
     // through it. 'v' does; 'v.*', 'v.field' and 'v[i]' do not -- those copy out of the
     // scratch slot while the arm is still live, which is exactly the safe usage.
-    auto yields_capture_pointer(const ast::Expr &expr, const std::string &name) -> bool {
+    auto yields_capture_pointer(const ast::Expr &expr, const CaptureAliases &aliases) -> bool {
         if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
-            return ident->name == name;
+            return aliases.contains(ident->name);
         }
         // 'cast(v, anyptr)' launders the pointer but still yields it.
         if (const auto *cast = std::get_if<std::unique_ptr<ast::CastExpr>>(&expr)) {
-            return yields_capture_pointer((*cast)->value, name);
+            return yields_capture_pointer((*cast)->value, aliases);
         }
         // Either branch escaping is enough.
         if (const auto *ternary = std::get_if<std::unique_ptr<ast::TernaryExpr>>(&expr)) {
-            return yields_capture_pointer((*ternary)->then_expr, name)
-                || yields_capture_pointer((*ternary)->else_expr, name);
+            return yields_capture_pointer((*ternary)->then_expr, aliases)
+                || yields_capture_pointer((*ternary)->else_expr, aliases);
+        }
+        // '&v.field' derives from the capture and outlives the arm exactly as 'v' does.
+        if (const auto *unary = std::get_if<std::unique_ptr<ast::UnaryExpr>>(&expr)) {
+            if ((*unary)->op == ast::UnaryOp::AddressOf) {
+                return yields_capture_pointer((*unary)->operand, aliases);
+            }
+        }
+        if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr)) {
+            // Only under '&' — a bare 'v.field' is a COPY, which is the safe usage. Reached
+            // here only via the AddressOf arm above.
+            return yields_capture_pointer((*member)->object, aliases);
         }
         return false;
     }
 
-    void report_capture_escape(const std::string &name, const SourceLocation &loc, const char *what, DiagnosticEngine &diag) {
+    void report_capture_escape(const CaptureAliases &aliases, const SourceLocation &loc, const char *what, DiagnosticEngine &diag) {
+        const auto &name = *aliases.begin();
         diag.warn(DiagnosticStage::Sema, loc, std::format(
             "by-ref payload capture '{}' escapes its arm via {}; the match operand is emitted as a "
             "value into one scratch slot per function, so '{}' points at a compiler temporary rather "
@@ -4939,120 +4969,143 @@ namespace sema {
             name, what, name, name));
     }
 
-    auto check_payload_capture_escape_expr(const ast::Expr &value, const std::string &name, DiagnosticEngine &diag) -> void {
+    auto check_payload_capture_escape_expr(const ast::Expr &value, const CaptureAliases &aliases, DiagnosticEngine &diag) -> void {
         std::visit([&]<typename T>(const T &node) {
             using U = std::decay_t<T>;
             if constexpr (std::is_same_v<U, std::unique_ptr<ast::CallExpr>>) {
                 for (const auto &arg : node->args) {
-                    if (yields_capture_pointer(arg, name)) {
-                        report_capture_escape(name, node->location, "a call argument", diag);
+                    if (yields_capture_pointer(arg, aliases)) {
+                        report_capture_escape(aliases, node->location, "a call argument", diag);
                     }
-                    check_payload_capture_escape_expr(arg, name, diag);
+                    check_payload_capture_escape_expr(arg, aliases, diag);
                 }
-                check_payload_capture_escape_expr(node->callee, name, diag);
+                check_payload_capture_escape_expr(node->callee, aliases, diag);
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::AssignExpr>>) {
-                if (yields_capture_pointer(node->value, name)) {
-                    report_capture_escape(name, node->location, "an assignment", diag);
+                if (yields_capture_pointer(node->value, aliases)) {
+                    report_capture_escape(aliases, node->location, "an assignment", diag);
                 }
-                check_payload_capture_escape_expr(node->target, name, diag);
-                check_payload_capture_escape_expr(node->value, name, diag);
+                check_payload_capture_escape_expr(node->target, aliases, diag);
+                check_payload_capture_escape_expr(node->value, aliases, diag);
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::BracedInitializerExpr>>) {
                 std::visit([&]<typename V>(const V &alt) {
                     using W = std::decay_t<V>;
                     if constexpr (std::is_same_v<W, ast::StructExpr>) {
                         for (const auto &field : alt.fields) {
-                            if (yields_capture_pointer(field.expr, name)) {
-                                report_capture_escape(name, field.location, "a struct field", diag);
+                            if (yields_capture_pointer(field.expr, aliases)) {
+                                report_capture_escape(aliases, field.location, "a struct field", diag);
                             }
-                            check_payload_capture_escape_expr(field.expr, name, diag);
+                            check_payload_capture_escape_expr(field.expr, aliases, diag);
                         }
                     } else if constexpr (std::is_same_v<W, ast::ArrayExpr>) {
                         for (const auto &element : alt.values) {
-                            if (yields_capture_pointer(element, name)) {
-                                report_capture_escape(name, alt.location, "an array element", diag);
+                            if (yields_capture_pointer(element, aliases)) {
+                                report_capture_escape(aliases, alt.location, "an array element", diag);
                             }
-                            check_payload_capture_escape_expr(element, name, diag);
+                            check_payload_capture_escape_expr(element, aliases, diag);
                         }
                     }
                 }, *node);
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::UnaryExpr>>) {
-                check_payload_capture_escape_expr(node->operand, name, diag);
+                check_payload_capture_escape_expr(node->operand, aliases, diag);
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::BinaryExpr>>) {
-                check_payload_capture_escape_expr(node->lhs, name, diag);
-                check_payload_capture_escape_expr(node->rhs, name, diag);
+                check_payload_capture_escape_expr(node->lhs, aliases, diag);
+                check_payload_capture_escape_expr(node->rhs, aliases, diag);
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TernaryExpr>>) {
-                check_payload_capture_escape_expr(node->condition, name, diag);
-                check_payload_capture_escape_expr(node->then_expr, name, diag);
-                check_payload_capture_escape_expr(node->else_expr, name, diag);
+                check_payload_capture_escape_expr(node->condition, aliases, diag);
+                check_payload_capture_escape_expr(node->then_expr, aliases, diag);
+                check_payload_capture_escape_expr(node->else_expr, aliases, diag);
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::MemberExpr>>) {
-                check_payload_capture_escape_expr(node->object, name, diag);
+                check_payload_capture_escape_expr(node->object, aliases, diag);
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::CastExpr>>) {
-                check_payload_capture_escape_expr(node->value, name, diag);
+                check_payload_capture_escape_expr(node->value, aliases, diag);
+            } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TaggedVariantExpr>>) {
+                // Constructing a variant whose payload holds the pointer carries it out
+                // exactly as a struct literal field does — this arm was simply missing.
+                if (node->payload) {
+                    for (const auto &field : node->payload->fields) {
+                        if (yields_capture_pointer(field.expr, aliases)) {
+                            report_capture_escape(aliases, field.location, "a variant payload", diag);
+                        }
+                        check_payload_capture_escape_expr(field.expr, aliases, diag);
+                    }
+                }
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::MatchExpr>>) {
                 // A nested match shadowing the same capture name rebinds it; the outer
                 // capture is no longer what the name refers to inside those arms.
-                check_payload_capture_escape_expr(node->operand, name, diag);
+                check_payload_capture_escape_expr(node->operand, aliases, diag);
                 for (const auto &arm : node->arms) {
                     const auto *vp = std::get_if<ast::MatchExpr::VariantPattern>(&arm.pattern);
-                    if (vp && vp->capture_name && *vp->capture_name == name) continue;
-                    check_payload_capture_escape_expr(arm.value, name, diag);
+                    if (vp && vp->capture_name && aliases.contains(*vp->capture_name)) continue;
+                    check_payload_capture_escape_expr(arm.value, aliases, diag);
                 }
             }
             // Everything else either has no sub-expressions or cannot carry the pointer out.
         }, value);
     }
 
-    auto check_payload_capture_escape(const ast::Stmt &body, const std::string &name, DiagnosticEngine &diag) -> void {
+    auto check_payload_capture_escape(const ast::Stmt &body, CaptureAliases &aliases, DiagnosticEngine &diag) -> void {
         std::visit([&]<typename T>(const T &node) {
             using U = std::decay_t<T>;
             if constexpr (std::is_same_v<U, std::unique_ptr<ast::BlockStmt>>) {
-                for (const auto &s : node->stmts) check_payload_capture_escape(s, name, diag);
+                for (const auto &s : node->stmts) check_payload_capture_escape(s, aliases, diag);
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IfStmt>>) {
-                check_payload_capture_escape_expr(node->condition, name, diag);
-                check_payload_capture_escape(node->then_stmt, name, diag);
-                if (node->else_stmt) check_payload_capture_escape(*node->else_stmt, name, diag);
+                check_payload_capture_escape_expr(node->condition, aliases, diag);
+                check_payload_capture_escape(node->then_stmt, aliases, diag);
+                if (node->else_stmt) check_payload_capture_escape(*node->else_stmt, aliases, diag);
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::WhileStmt>>) {
-                check_payload_capture_escape_expr(node->condition, name, diag);
-                check_payload_capture_escape(node->body, name, diag);
+                check_payload_capture_escape_expr(node->condition, aliases, diag);
+                check_payload_capture_escape(node->body, aliases, diag);
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::ForInStmt>>) {
-                check_payload_capture_escape_expr(node->iterable, name, diag);
-                check_payload_capture_escape(node->body, name, diag);
+                check_payload_capture_escape_expr(node->iterable, aliases, diag);
+                check_payload_capture_escape(node->body, aliases, diag);
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SwitchStmt>>) {
-                check_payload_capture_escape_expr(node->operand, name, diag);
+                check_payload_capture_escape_expr(node->operand, aliases, diag);
                 for (const auto &arm : node->arms) {
                     const auto *vp = std::get_if<ast::MatchExpr::VariantPattern>(&arm.pattern);
-                    if (vp && vp->capture_name && *vp->capture_name == name) continue;
-                    check_payload_capture_escape(arm.body, name, diag);
+                    if (vp && vp->capture_name && aliases.contains(*vp->capture_name)) continue;
+                    check_payload_capture_escape(arm.body, aliases, diag);
                 }
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::DeferStmt>>) {
                 // A defer runs at scope exit, by which point the slot may already have been
                 // reused -- so the pointer reaching one is an escape in its own right.
-                check_payload_capture_escape(node->body, name, diag);
+                check_payload_capture_escape(node->body, aliases, diag);
             } else if constexpr (std::is_same_v<U, ast::ExprStmt>) {
-                check_payload_capture_escape_expr(node.expr, name, diag);
+                check_payload_capture_escape_expr(node.expr, aliases, diag);
             } else if constexpr (std::is_same_v<U, ast::VarDeclStmt>) {
-                if (node.init) check_payload_capture_escape_expr(*node.init, name, diag);
+                if (node.init) {
+                    check_payload_capture_escape_expr(*node.init, aliases, diag);
+                    // THE under-report this check used to have: binding the capture to a local
+                    // ('const p := v') is not itself an escape — 'p' is arm-local too — but
+                    // whatever 'p' does next is. Follow the pointer instead of losing it here.
+                    if (yields_capture_pointer(*node.init, aliases)) {
+                        aliases.insert(node.name);
+                    } else {
+                        // A declaration of a tracked name that does NOT hold the capture
+                        // shadows it; the name no longer refers to the pointer.
+                        aliases.erase(node.name);
+                    }
+                }
             } else if constexpr (std::is_same_v<U, ast::VarDeclGroupStmt>) {
-                check_payload_capture_escape_expr(node.init, name, diag);
+                check_payload_capture_escape_expr(node.init, aliases, diag);
             } else if constexpr (std::is_same_v<U, ast::ReturnStmt>) {
                 for (const auto &e : node.return_values) {
-                    if (yields_capture_pointer(e, name)) {
-                        report_capture_escape(name, node.location, "a return", diag);
+                    if (yields_capture_pointer(e, aliases)) {
+                        report_capture_escape(aliases, node.location, "a return", diag);
                     }
-                    check_payload_capture_escape_expr(e, name, diag);
+                    check_payload_capture_escape_expr(e, aliases, diag);
                 }
             } else if constexpr (std::is_same_v<U, ast::ReturnOkStmt>) {
                 for (const auto &e : node.return_values) {
-                    if (yields_capture_pointer(e, name)) {
-                        report_capture_escape(name, node.location, "a return", diag);
+                    if (yields_capture_pointer(e, aliases)) {
+                        report_capture_escape(aliases, node.location, "a return", diag);
                     }
-                    check_payload_capture_escape_expr(e, name, diag);
+                    check_payload_capture_escape_expr(e, aliases, diag);
                 }
             } else if constexpr (std::is_same_v<U, ast::ReturnErrStmt>) {
-                if (yields_capture_pointer(node.error_value, name)) {
-                    report_capture_escape(name, node.location, "a return", diag);
+                if (yields_capture_pointer(node.error_value, aliases)) {
+                    report_capture_escape(aliases, node.location, "a return", diag);
                 }
-                check_payload_capture_escape_expr(node.error_value, name, diag);
+                check_payload_capture_escape_expr(node.error_value, aliases, diag);
             }
         }, body);
     }

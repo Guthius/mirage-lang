@@ -68,15 +68,51 @@ def test_every_escape_route_is_caught() -> None:
             f"escape via {route} is reported",
         )
 
-    # Two distinct assignment escapes (a local and a global), plus the three others.
+    # Two distinct assignment escapes (a local and a global), the three other direct routes,
+    # and the two the check used to miss: one via a local BOUND to the capture, one via a
+    # tagged-variant payload.
     check(
-        len(warned_lines(stderr)) == 5,
-        f"all five escaping arms are reported, once each (got {sorted(warned_lines(stderr))})",
+        len(warned_lines(stderr)) == 7,
+        f"all seven escaping arms are reported, once each (got {sorted(warned_lines(stderr))})",
     )
 
     check(
         "points at a compiler temporary" in stderr,
         "the warning explains the mechanism rather than just naming the rule",
+    )
+
+    check(
+        "a variant payload" in stderr,
+        "escape via a tagged-variant payload is reported (the arm that was missing)",
+    )
+
+
+def test_the_pointer_is_followed_through_a_local() -> None:
+    """The under-report DEFERRED named: 'const p := v' then letting 'p' escape.
+
+    Binding the capture to a local is not itself an escape -- 'p' is arm-local too -- so what
+    is checked is that the pointer is FOLLOWED there, not that the binding is flagged. A
+    warning must land in escape_via_alias, and none in safe_shadowed_alias, where a later
+    declaration of the same name rebinds it to something else.
+    """
+    result = build("example_payload_capture_escape")
+    source = (EXAMPLES / "example_payload_capture_escape" / "main.mir").read_text().splitlines()
+
+    def function_of(line_no: int) -> str:
+        for i in range(line_no - 1, -1, -1):
+            if source[i].startswith("pub fn "):
+                return source[i].split("(")[0].removeprefix("pub fn ").strip()
+        return "?"
+
+    warned_functions = {function_of(n) for n in warned_lines(result.stderr)}
+    check(
+        "escape_via_alias" in warned_functions,
+        f"an escape through a local bound to the capture is reported, got {sorted(warned_functions)}",
+    )
+    check(
+        "safe_shadowed_alias" not in warned_functions,
+        "a name rebound to something else stops being tracked, so shadowing does not "
+        f"produce a false positive, got {sorted(warned_functions)}",
     )
 
 
@@ -118,6 +154,7 @@ def main() -> int:
         return 1
 
     test_every_escape_route_is_caught()
+    test_the_pointer_is_followed_through_a_local()
     test_reading_through_the_pointer_is_not_flagged()
     test_existing_corpus_fixture_stays_clean()
 
