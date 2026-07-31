@@ -696,6 +696,42 @@ namespace ast {
             return LiteralCharExpr{.value = val, .location = location};
         }
 
+        // Parses a '.field = expr, ...' list and its closing '}', starting from just after the
+        // opening '{'. The caller consumes the '{' itself, because the three constructs that
+        // use this reach it differently: a braced initializer expects one, while both tagged-
+        // variant forms only get here after a lookahead has already confirmed it.
+        //
+        // Shared by '{.x = 1}' (StructExpr), '.variant{.x = 1}' (contextual) and
+        // 'Type.variant{.x = 1}' (qualified). All three build the same StructExpr::Field list
+        // and are read by the same sema code, so a divergence between them would be a
+        // divergence in the language, not just in the parser.
+        auto parse_dot_field_list(Parser &parser) -> std::vector<StructExpr::Field> {
+            std::vector<StructExpr::Field> fields;
+            while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
+                const LoopProgressGuard progress_guard(parser);
+                parser.expect(TokenKind::Dot, "'.'");
+                const auto field_name = parser.expect_identifier();
+                parser.expect(TokenKind::Equal, "'='");
+                // Taken after '=', so the location spans the VALUE rather than the field name.
+                const auto field_location = parser.current_location();
+                fields.push_back(StructExpr::Field{
+                    .name = field_name,
+                    .expr = parse_expr(parser),
+                    .location = field_location,
+                });
+
+                skip_semicolons(parser);
+                if (parser.check(TokenKind::RBrace)) {
+                    break;
+                }
+
+                parser.expect(TokenKind::Comma, "','");
+            }
+
+            parser.expect(TokenKind::RBrace, "'}'");
+            return fields;
+        }
+
         auto parse_braced_initializer(Parser &parser) -> std::unique_ptr<BracedInitializerExpr> {
             const auto location = parser.current_location();
 
@@ -720,34 +756,8 @@ namespace ast {
                 // payload. Both fall through to ordinary element parsing below, where
                 // parse_primary's own '.' handling parses the variant correctly.
                 if (parser.peek_next().kind == TokenKind::Equal) {
-                    std::vector<StructExpr::Field> fields;
-                    while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
-                        const LoopProgressGuard progress_guard(parser);
-                        parser.expect(TokenKind::Dot, "'.'");
-                        const auto value_name = parser.expect_identifier();
-
-                        parser.expect(TokenKind::Equal, "'='");
-
-                        const auto value_location = parser.current_location();
-
-                        fields.push_back(StructExpr::Field{
-                            .name = value_name,
-                            .expr = parse_expr(parser),
-                            .location = value_location,
-                        });
-
-                        skip_semicolons(parser);
-                        if (parser.check(TokenKind::RBrace)) {
-                            break;
-                        }
-
-                        parser.expect(TokenKind::Comma, "','");
-                    }
-
-                    parser.expect(TokenKind::RBrace, "'}'");
-
                     return std::make_unique<BracedInitializerExpr>(StructExpr{
-                        .fields = std::move(fields),
+                        .fields = parse_dot_field_list(parser),
                         .location = location,
                     });
                 }
@@ -1337,27 +1347,10 @@ namespace ast {
                 if (parser.check(TokenKind::LBrace) && parser.peek().kind == TokenKind::Dot) {
                     const auto brace_loc = parser.current_location();
                     parser.advance(); // consume '{'
-                    std::vector<StructExpr::Field> fields;
-                    while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
-                        const LoopProgressGuard progress_guard(parser);
-                        parser.expect(TokenKind::Dot, "'.'");
-                        const auto field_name = parser.expect_identifier();
-                        parser.expect(TokenKind::Equal, "'='");
-                        const auto field_loc = parser.current_location();
-                        fields.push_back(StructExpr::Field{
-                            .name = field_name,
-                            .expr = parse_expr(parser),
-                            .location = field_loc,
-                        });
-                        skip_semicolons(parser);
-                        if (parser.check(TokenKind::RBrace)) break;
-                        parser.expect(TokenKind::Comma, "','");
-                    }
-                    parser.expect(TokenKind::RBrace, "'}'");
                     return std::make_unique<TaggedVariantExpr>(TaggedVariantExpr{
                         .type_path = std::nullopt,
                         .variant_name = name,
-                        .payload = StructExpr{.fields = std::move(fields), .location = brace_loc},
+                        .payload = StructExpr{.fields = parse_dot_field_list(parser), .location = brace_loc},
                         .location = span,
                     });
                 }
@@ -1644,27 +1637,10 @@ namespace ast {
                         if (auto type_path = named_type_from_expr(expr)) {
                             const auto brace_loc = parser.current_location();
                             parser.advance(); // consume '{'
-                            std::vector<StructExpr::Field> fields;
-                            while (!parser.check(TokenKind::RBrace) && !parser.at_end()) {
-                                const LoopProgressGuard progress_guard(parser);
-                                parser.expect(TokenKind::Dot, "'.'");
-                                const auto field_name = parser.expect_identifier();
-                                parser.expect(TokenKind::Equal, "'='");
-                                const auto field_loc = parser.current_location();
-                                fields.push_back(StructExpr::Field{
-                                    .name = field_name,
-                                    .expr = parse_expr(parser),
-                                    .location = field_loc,
-                                });
-                                skip_semicolons(parser);
-                                if (parser.check(TokenKind::RBrace)) break;
-                                parser.expect(TokenKind::Comma, "','");
-                            }
-                            parser.expect(TokenKind::RBrace, "'}'");
                             expr = std::make_unique<TaggedVariantExpr>(TaggedVariantExpr{
                                 .type_path = std::move(type_path),
                                 .variant_name = member_name,
-                                .payload = StructExpr{.fields = std::move(fields), .location = brace_loc},
+                                .payload = StructExpr{.fields = parse_dot_field_list(parser), .location = brace_loc},
                                 .location = location,
                             });
                             continue;
