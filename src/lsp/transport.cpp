@@ -42,7 +42,13 @@ namespace lsp::transport {
             for (;;) {
                 const auto c = in.get();
                 if (c == std::char_traits<char>::eof()) {
-                    return line.empty() ? std::nullopt : std::optional{line};
+                    if (line.empty()) {
+                        return std::nullopt;
+                    }
+                    // Fall through to the shared '\r' strip: a final header line ending
+                    // in "\r" at EOF must not keep the '\r' just because the '\n' never
+                    // arrived.
+                    break;
                 }
                 if (c == '\n') {
                     break;
