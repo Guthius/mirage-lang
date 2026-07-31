@@ -309,6 +309,21 @@ namespace lsp {
             return result;
         }
 
+        // An unbound generic parameter, as seen anywhere inside a generic declaration's body
+        // before any concrete instantiation binds it - which is what every hover/inlay-hint
+        // query about such a body resolves to (see LocalLookupContext::template_exprs). Name
+        // it when the type still knows which parameter it came from, and otherwise mirror
+        // sema.cpp's describe_type exactly, so an editor and a compiler diagnostic never
+        // disagree about how to spell the same thing.
+        //
+        // One case covers every nested position too: the Pointer/Array/Slice arms above and
+        // generic_args_suffix all recurse back through here, so '*T', '[N]T' and 'List[T]'
+        // come out right without any of them knowing about Opaque.
+        case TypeKind::Opaque:
+            if (const auto *name = program.opaque_param_name_at(type.opaque_param_index)) return *name;
+            if (const auto *info = program.trait_at(type.trait_index)) return "<generic: " + info->name + ">";
+            return "<generic>";
+
         case TypeKind::Namespace: return "<namespace>";
         default: return "<invalid>";
         }

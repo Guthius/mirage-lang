@@ -1,0 +1,88 @@
+// LSP fixture for type resolution inside UNINSTANTIATED generic bodies.
+//
+// Nothing here instantiates 'write_int', 'pair_first' or any 'Ring' method — that is the
+// whole point. Sema still type-checks each of those bodies once, with the parameters bound
+// to TypeKind::Opaque, and records the results in that declaration's own template instance
+// rather than in the module's tables (see Program::template_fn_instance_for_decl). The LSP
+// used to read only the module's tables, so every one of these declarations answered with a
+// placeholder 'u8' or with nothing at all.
+//
+// lsp_smoke_test.py locates lines by searching for a nearby anchor string rather than by
+// number, so this file may be reordered freely — but the anchors it searches for must stay
+// unique and must keep their exact spelling.
+//
+// Compiles cleanly: the smoke test asserts an empty diagnostics list on didOpen.
+
+fn digit_to_char(v: u32, uppercase: bool) -> u8 {
+    if v < 10 {
+        return cast(v, u8) + '0'
+    }
+    return cast(v - 10, u8) + (uppercase ? 'A' : 'a')
+}
+
+// The reported repro, reduced. Three distinct failure modes in one body, in declaration
+// order below. (Deliberately not quoting the lines themselves: the test finds them by
+// substring search, and a comment repeating one verbatim would be found first.)
+//
+//   n      initialized from a bare param typed 'T'. The placeholder fallback bound 'T' to
+//          u8 and confidently reported ': u8'.
+//   digit  initialized from two LOCALS, which that fallback never seeds into its scope - so
+//          it errored out and the hint degraded to nothing useful. Also covers the
+//          parameter name propagating through opaque_binary_op_result.
+//   i      a local with a CONCRETE type. Nothing about the answer is generic; it was wrong
+//          purely because the lookup never reached the template tables.
+pub fn write_int[T: type](value: T, base: u32, uppercase: bool) -> usize {
+    mut n := value
+    mut digits: [64]u8 = undefined
+    mut count: usize = 0
+
+    const base_t := cast(base, T)
+    while n != default {
+        mut digit := n % base_t
+        if digit < default {
+            digit = -digit
+        }
+        digits[count] = digit_to_char(cast(digit, u32), uppercase)
+        count = count + 1
+        n = n / base_t
+    }
+
+    mut i := count
+    return i
+}
+
+// Two type parameters, so a wrong answer cannot accidentally look right: 'V' is not the
+// first parameter, and the old shadow fallback bound both to the same placeholder.
+pub fn pair_first[K: type, V: type](k: K, v: V) -> V {
+    mut paired := v
+    return paired
+}
+
+pub type Ring[T: type] = struct {
+    items: *T = nil
+    head: usize = 0
+    length: usize = 0
+}
+
+// The same three shapes again, reached through a generic METHOD - a different lookup key
+// (Program::template_method_instance_for_decl) filled in by a different sema pass
+// (check_generic_type_method_bodies).
+impl Ring[T: type] {
+    pub fn peek(self) -> T {
+        mut slot := self.items[self.head]
+        mut span := self.length
+        mut doubled := span * 2
+        return slot
+    }
+}
+
+// The control: an ordinary non-generic body, whose types have always come from the module's
+// tables. Pinned so the template lookup cannot start leaking into ordinary code.
+pub fn plain() -> i32 {
+    mut z := 1 + 2
+    return z
+}
+
+pub fn main() -> i32 {
+    return plain()
+}

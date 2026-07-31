@@ -129,9 +129,8 @@ namespace lsp::handlers {
                 // also means bitset flags are covered as soon as LSPH-2 taught that function
                 // about TypeKind::Bitset.
                 if (const auto *dot = std::get_if<ast::DotIdentExpr>(&expr)) {
-                    if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(expr));
-                        ty_it != ctx.sema_module.exprs.expr_types.end()) {
-                        if (auto res = match_enum_or_variant(ty_it->second, dot->name, program);
+                    if (const auto *type = find_expr_type(ctx, expr)) {
+                        if (auto res = match_enum_or_variant(*type, dot->name, program);
                             res.kind != Resolution::Kind::None && same_declaration(res, target, program)) {
                             out.push_back(location_json(dot->location));
                         }
@@ -145,10 +144,10 @@ namespace lsp::handlers {
                 if (const auto *braced_ptr = std::get_if<std::unique_ptr<ast::BracedInitializerExpr>>(&expr)) {
                     const auto *bitset = std::get_if<ast::BitsetExpr>(braced_ptr->get());
                     if (!bitset) return;
-                    const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(expr));
-                    if (ty_it == ctx.sema_module.exprs.expr_types.end()) return;
+                    const auto *type = find_expr_type(ctx, expr);
+                    if (!type) return;
                     for (const auto &member : bitset->members) {
-                        if (auto res = match_enum_or_variant(ty_it->second, member.name, program);
+                        if (auto res = match_enum_or_variant(*type, member.name, program);
                             res.kind != Resolution::Kind::None && same_declaration(res, target, program)) {
                             out.push_back(location_json(member.location));
                         }
@@ -160,9 +159,8 @@ namespace lsp::handlers {
                 // same thing.
                 if (const auto *tagged_ptr = std::get_if<std::unique_ptr<ast::TaggedVariantExpr>>(&expr)) {
                     const auto &tagged = **tagged_ptr;
-                    if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(expr));
-                        ty_it != ctx.sema_module.exprs.expr_types.end()) {
-                        if (auto res = match_enum_or_variant(ty_it->second, tagged.variant_name, program);
+                    if (const auto *type = find_expr_type(ctx, expr)) {
+                        if (auto res = match_enum_or_variant(*type, tagged.variant_name, program);
                             res.kind != Resolution::Kind::None && same_declaration(res, target, program)) {
                             out.push_back(location_json(tagged.location));
                         }
@@ -174,9 +172,8 @@ namespace lsp::handlers {
                 if (!member_ptr) return;
                 const auto &member = **member_ptr;
 
-                if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(member.object));
-                    ty_it != ctx.sema_module.exprs.expr_types.end()) {
-                    if (auto res = resolve_member(ty_it->second, member.member, program); res.kind != Resolution::Kind::None) {
+                if (const auto *object_type = find_expr_type(ctx, member.object)) {
+                    if (auto res = resolve_member(*object_type, member.member, program); res.kind != Resolution::Kind::None) {
                         if (same_declaration(res, target, program)) out.push_back(location_json(member.location));
                     }
                     return;
@@ -202,18 +199,18 @@ namespace lsp::handlers {
             // expressions, so on_expr never sees them -- and arms are where variants are most
             // used, so without this a references request on a variant found close to nothing.
             visitor.on_pattern = [&](const ast::MatchExpr::VariantPattern &pattern, const ast::Expr &operand) {
-                const auto key = sema::get_expr_key(operand);
-                const auto ty_it = ctx.sema_module.exprs.expr_types.find(key);
-                if (ty_it == ctx.sema_module.exprs.expr_types.end()) return;
+                const auto *recorded = find_expr_type(ctx, operand);
+                if (!recorded) return;
 
                 // 'match err { ... }' dispatches on the INNER representation, not on the
                 // Ok/Failed wrapper the operand's recorded type describes -- so the arms name
                 // variants of the effective type. sema records that rewrite; use it when
                 // present, exactly as codegen does.
-                auto operand_type = ty_it->second;
-                if (const auto unwrap_it = ctx.sema_module.exprs.expr_error_match_unwrap.find(key);
-                    unwrap_it != ctx.sema_module.exprs.expr_error_match_unwrap.end()) {
-                    operand_type = unwrap_it->second.effective_type;
+                auto operand_type = *recorded;
+                if (const auto *unwrap = sema::find_expr_record_in(ctx.template_exprs, ctx.sema_program, ctx.module_path,
+                                                                    &sema::ExprSideTables::expr_error_match_unwrap,
+                                                                    sema::get_expr_key(operand))) {
+                    operand_type = unwrap->effective_type;
                 }
 
                 if (auto res = match_enum_or_variant(operand_type, pattern.name, program);
@@ -265,12 +262,24 @@ namespace lsp::handlers {
                 .diag = throwaway_diag,
             };
 
+            // The module-level context above is right for module-scope initializers and macro
+            // templates, but not for a function/method BODY: a generic declaration's expression
+            // records live in its own eagerly-checked template instance rather than the
+            // module's tables (see LocalLookupContext::template_exprs), so which tables to
+            // consult changes per declaration. Non-generic declarations get a null lookup and
+            // behave exactly as before.
+            auto scoped_ctx = [&](const ast::FunctionDecl *fn, const ast::ImplDecl::Function *method) {
+                LocalLookupContext scoped = ctx;
+                scoped.template_exprs = template_exprs_for({.fn_decl = fn, .method_decl = method}, result.sema_program);
+                return scoped;
+            };
+
             for (const auto &decl : decls) {
                 if (const auto *fn = std::get_if<ast::FunctionDecl>(&decl)) {
                     std::vector<ParamInfo> params;
                     for (const auto &p : fn->params) params.push_back({p.name, {}, p.location});
-                    collect_references_in_scope({.params = std::move(params), .body = &fn->body}, ctx, mod_path,
-                                                 result.sema_program, target, out);
+                    collect_references_in_scope({.params = std::move(params), .body = &fn->body}, scoped_ctx(fn, nullptr),
+                                                 mod_path, result.sema_program, target, out);
                     if (include_declaration && target.kind == Resolution::Kind::Symbol) {
                         if (const auto *fn_sym = std::get_if<sema::FunctionSymbol>(target.symbol);
                             fn_sym && fn_sym->decl == fn) {
@@ -327,8 +336,8 @@ namespace lsp::handlers {
                         std::vector<ParamInfo> params;
                         params.push_back({"self", sym ? sym->self_type : sema::ResolvedType{}, fn.self_location});
                         for (const auto &p : fn.params) params.push_back({p.name, {}, p.location});
-                        collect_references_in_scope({.params = std::move(params), .body = &fn.body}, ctx, mod_path,
-                                                     result.sema_program, target, out);
+                        collect_references_in_scope({.params = std::move(params), .body = &fn.body}, scoped_ctx(nullptr, &fn),
+                                                     mod_path, result.sema_program, target, out);
                         if (include_declaration && target.kind == Resolution::Kind::Method && target.method == sym) {
                             out.push_back(location_json(fn.location));
                         }
@@ -359,8 +368,8 @@ namespace lsp::handlers {
                         std::vector<ParamInfo> params;
                         params.push_back({"self", sym ? sym->self_type : sema::ResolvedType{}, fn.self_location});
                         for (const auto &p : fn.params) params.push_back({p.name, {}, p.location});
-                        collect_references_in_scope({.params = std::move(params), .body = &fn.body}, ctx, mod_path,
-                                                     result.sema_program, target, out);
+                        collect_references_in_scope({.params = std::move(params), .body = &fn.body}, scoped_ctx(nullptr, &fn),
+                                                     mod_path, result.sema_program, target, out);
                         if (include_declaration && target.kind == Resolution::Kind::Method && target.method == sym) {
                             out.push_back(location_json(fn.location));
                         }

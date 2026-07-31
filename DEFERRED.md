@@ -171,7 +171,45 @@ scrutinee is a field) before being trusted.
 
 ---
 
-## 7. Smaller notes
+## 7. Generic trait-impl bodies are never eagerly checked
+
+`check_generic_type_method_bodies` (`sema_check.cpp`) finds the methods to check by walking
+`ProgramModule::methods`, which is populated for `impl TYPE { ... }` blocks. `impl TRAIT for
+TYPE { ... }` methods are registered only into `Program::trait_impls_by_type`
+(`sema_declare.cpp`), so a *generic* trait impl — `examples/example_generics_orphan_impl` has
+one — has no eagerly-checked template instance at all.
+
+Two consequences, both pre-existing and neither a regression:
+
+- Type errors in such a body go unreported until something instantiates it, unlike every
+  other generic declaration.
+- The LSP has no template `ExprSideTables` to read for it, so hover/inlay hints there fall
+  back to `shadow_instantiate_and_resolve`'s `u8` placeholder — the behaviour every other
+  generic body was just moved off. That fallback's doc comment names this as its remaining
+  reason to exist.
+
+Extending the eager pass to cover trait impls is a handful of lines, but it starts reporting
+diagnostics in bodies that have never been checked, in this repository and in user code
+alike. That is the reason it is here rather than done: it wants its own pass over the corpus,
+not a ride along with an LSP fix.
+
+---
+
+## 8. Compiler diagnostics still say `<generic>` where the LSP says `T`
+
+`ResolvedType::opaque_param_index` now carries a generic parameter's spelling for display,
+and `type_to_string` (`src/lsp/type_printer.cpp`) uses it — so an editor reports `mut n :=
+value` inside `fn write_int[T: type]` as `: T`. `describe_type` (`sema.cpp`), which formats
+the same types for compiler diagnostics, still prints `<generic>` / `<generic: Trait>`.
+
+Wiring it up is three lines and would make several eager-check messages considerably clearer.
+It changes diagnostic *text*, though, so it needs `tests/generics_test.py` and
+`tests/examples_expected.json` re-baselined in the same commit — kept separate from the LSP
+change so that neither obscures the other.
+
+---
+
+## 9. Smaller notes
 
 - **`compute_condition_narrowing` still does not descend into `||`.** Widened to narrow
   every operand of an `&&` chain; `||` deliberately unchanged, since an operand being true

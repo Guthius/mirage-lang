@@ -151,15 +151,22 @@ namespace lsp::handlers {
     void walk_module_bodies(const ast::Module &module, const AstVisitor &visitor) {
         for (const auto &decl : module) {
             if (const auto *fn = std::get_if<ast::FunctionDecl>(&decl)) {
+                visitor.on_body_begin(fn, nullptr);
                 walk_stmt(fn->body, visitor);
             } else if (const auto *var = std::get_if<ast::VarDecl>(&decl)) {
                 if (var->init) walk_expr(*var->init, visitor);
             } else if (const auto *macro = std::get_if<ast::MacroDecl>(&decl)) {
                 walk_expr(macro->expr_template, visitor);
             } else if (const auto *impl = std::get_if<ast::ImplDecl>(&decl)) {
-                for (const auto &fn : impl->functions) walk_stmt(fn.body, visitor);
+                for (const auto &fn : impl->functions) {
+                    visitor.on_body_begin(nullptr, &fn);
+                    walk_stmt(fn.body, visitor);
+                }
             } else if (const auto *trait_impl = std::get_if<ast::TraitImplDecl>(&decl)) {
-                for (const auto &fn : trait_impl->functions) walk_stmt(fn.body, visitor);
+                for (const auto &fn : trait_impl->functions) {
+                    visitor.on_body_begin(nullptr, &fn);
+                    walk_stmt(fn.body, visitor);
+                }
             }
             // ExtFunctionDecl, TypeDecl have no expression content to walk.
         }

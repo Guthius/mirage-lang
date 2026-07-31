@@ -22,6 +22,20 @@ namespace lsp::handlers {
         // carries no back-pointer to it.
         std::function<void(const ast::MatchExpr::VariantPattern &, const ast::Expr &operand)> on_pattern =
             [](const ast::MatchExpr::VariantPattern &, const ast::Expr &) {};
+
+        // Invoked by walk_module_bodies immediately before each function/method BODY, naming
+        // the declaration that body belongs to (exactly one pointer is non-null). Not invoked
+        // by walk_expr/walk_stmt, which start from a node whose owner the caller already knows,
+        // nor for a module-scope VarDecl initializer or a macro template - neither is a
+        // function body.
+        //
+        // Exists because a whole-module walk otherwise has no idea which declaration any given
+        // statement came from, and for a generic declaration that is precisely what selects the
+        // ExprSideTables its expression types live in (see LocalLookupContext::template_exprs).
+        // The alternative - re-deriving the enclosing decl per statement from the token stream
+        // via find_enclosing_function - rebuilds a bracket index every time.
+        std::function<void(const ast::FunctionDecl *, const ast::ImplDecl::Function *)> on_body_begin =
+            [](const ast::FunctionDecl *, const ast::ImplDecl::Function *) {};
     };
 
     // Generic traversal over every Expr/Stmt node reachable from `expr`/`stmt`/a whole

@@ -286,16 +286,20 @@ namespace lsp::handlers {
         return {};
     }
 
-    // A ':='-inferred local's initializer never got a real expr_types entry at all - meaning
-    // sema never type-checked it, which happens for a call sitting inside an UNINSTANTIATED
-    // generic function/method template body (nothing anywhere has instantiated the enclosing
-    // decl, so check_generic_function_instance_body never ran over it - see
-    // VarDeclTypeResult's doc comment). Only handles the shape that actually needs it: an
-    // explicit generic instantiation call ('make_list[T](allocator)') to a SAME-MODULE free
-    // function, found via a plain bare-identifier callee (mirrors sema_check.cpp's own
-    // 'index_callee'/'op_ident' free-function lookup for the same call shape). A concrete
-    // (non-generic) callee, or one already reached by some other instantiation, would have
-    // hit the expr_types cache above and never reach here at all.
+    // Renders a ':='-inferred local's type as the SOURCE SPELLING of the called generic
+    // function's return type, substituting the args written at the call site - "List[T]" for
+    // 'mut l := make_list[T](allocator)'.
+    //
+    // Preferred over the template-instance lookup for this one shape purely for fidelity, not
+    // coverage: the template tables do have a real type for such a call, but it is
+    // 'List[Opaque]', which renders the parameter's name only when the callee has a single
+    // type parameter (see type_to_string's Opaque case) and "<generic>" otherwise. The source
+    // spelling is exact in every case.
+    //
+    // Only handles the shape that actually needs it: an explicit generic instantiation call to
+    // a SAME-MODULE free function, found via a plain bare-identifier callee (mirrors
+    // sema_check.cpp's own 'index_callee'/'op_ident' free-function lookup for the same call
+    // shape).
     auto describe_generic_call_return_type(const ast::Expr &init, const LocalLookupContext &ctx) -> std::optional<std::string> {
         const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&init);
         if (!call) return std::nullopt;
@@ -325,31 +329,68 @@ namespace lsp::handlers {
         return ast_type_to_string(decl->return_types[0], subst);
     }
 
-    // RAII push/pop for Program::active_generic_env_stack (see shadow_instantiate_and_resolve).
+    // RAII push/pop for the three pieces of ambient Program state a shadow instantiation needs
+    // (see shadow_instantiate_and_resolve). The sema-side equivalent is ScopedGenericScope
+    // (sema_check.cpp), which is deliberately NOT reused: it is private to that translation
+    // unit, and it additionally shadows the module's symbol table - mutating program.modules is
+    // not something an editor hover request should be doing.
+    //
+    // 'throwaway_exprs' is the load-bearing part. Without it active_expr_tables stays empty,
+    // so expr_tables_for_write (sema.hpp) routes the shadow's check_expr records into the
+    // MODULE's tables - for AST nodes belonging to a generic body, whose types were computed
+    // against the placeholder u8 binding rather than any real instantiation. That both breaks
+    // the "writes never reach the module's tables while a scope is active" invariant
+    // find_expr_record's doc comment relies on, and permanently poisons every later lookup of
+    // those nodes: one hover would leave 'u8' behind where the eager pass's Opaque belongs.
+    // The records are wanted nowhere, so they go somewhere that dies with the guard.
+    //
+    // 'template_check_depth' for the same class of reason, one level out: the shadow's
+    // check_expr on a call like 'make_list[T](a)' resolves - with T bound to u8 - to a REAL
+    // 'make_list[u8]' instantiation, which instantiate_generic_function would otherwise cache
+    // and mark as needing emission. A hover must not decide what the program emits; the depth
+    // counter is the existing switch for "this instantiation isn't real".
     struct GenericEnvGuard {
         sema::Program &program;
-        GenericEnvGuard(sema::Program &p, const sema::GenericBindingEnv &env) : program(p) { program.active_generic_env_stack.push_back(&env); }
+        sema::ExprSideTables throwaway_exprs;
+
+        GenericEnvGuard(sema::Program &p, const sema::GenericBindingEnv &env) : program(p) {
+            program.active_generic_env_stack.push_back(&env);
+            program.active_expr_tables.push_back(&throwaway_exprs);
+            ++program.template_check_depth;
+        }
         GenericEnvGuard(const GenericEnvGuard &) = delete;
         auto operator=(const GenericEnvGuard &) -> GenericEnvGuard & = delete;
-        ~GenericEnvGuard() { program.active_generic_env_stack.pop_back(); }
+        ~GenericEnvGuard() {
+            --program.template_check_depth;
+            program.active_expr_tables.pop_back();
+            program.active_generic_env_stack.pop_back();
+        }
     };
 
-    // General fallback for the same "sema never actually checked this expression" problem
-    // describe_generic_call_return_type above targets, but for everything ELSE that can show
-    // up in a never-instantiated generic decl's body - arithmetic, comparisons, ternaries,
-    // size_of/align_of/len, try-unwrapped calls, field access through 'self', method calls on
-    // non-generic fields, and any composition of these. Rather than hand-writing a parallel,
-    // ever-growing AST-only inferencer for each shape, this builds a throwaway ("shadow")
-    // instantiation of the enclosing generic decl - each 'T: type' param bound to a
-    // placeholder concrete type (u8), each value param to a placeholder constant (1) - purely
-    // so REAL sema::check_expr can run. This is correct for anything whose resulting type
-    // doesn't itself depend on WHICH concrete args were chosen (the overwhelming majority of
-    // real generic-body code: 'self.length - 1', 'a * size_of(T)', a ternary between two
-    // usize fields, 'try self.allocator.realloc(...)' ...) - it degrades to a technically-true
-    // but unhelpful concrete answer (e.g. "u8" instead of "T") only for an expression whose
-    // type genuinely IS built from an unbound generic param, which is exactly the shape
-    // describe_generic_call_return_type already handles symbolically and correctly - callers
-    // must try that one FIRST and only reach this as the second, broader fallback.
+    // LAST-RESORT fallback for an expression sema really never checked, reached only after
+    // find_expr_type has missed in both the enclosing declaration's template instance and the
+    // module. Builds a throwaway ("shadow") instantiation of the enclosing generic decl - each
+    // 'T: type' param bound to a placeholder concrete type (u8), each value param to a
+    // placeholder constant (1) - purely so REAL sema::check_expr can run, rather than
+    // hand-writing a parallel AST-only inferencer.
+    //
+    // The placeholder is why this is last: for an expression whose type genuinely IS built
+    // from an unbound generic param it produces a technically-true but wrong-looking concrete
+    // answer ("u8" where the user wrote "T"). The template instance has the honest Opaque for
+    // exactly those, so this now only runs where there is no template instance at all:
+    //
+    //   - a generic method of an 'impl TRAIT for TYPE' block. check_generic_type_method_bodies
+    //     drives off ProgramModule::methods, but trait-impl methods are registered only into
+    //     Program::trait_impls_by_type (sema_declare.cpp's declare_trait_impl), so those bodies
+    //     are never eagerly checked. Recorded in DEFERRED.md.
+    //   - options.eager_generic_check off, which no LSP path sets today.
+    //   - a body the eager pass abandoned early (unsatisfied bounds - see instantiate_generic_
+    //     function's 'bounds_ok'), where the declaration is already reporting a real error.
+    //
+    // Note it seeds LocalScope with the enclosing decl's params only, never with locals
+    // declared earlier in the body, so an initializer referring to one of those resolves to
+    // Invalid and the caller reports nothing. Left as-is deliberately: the template-instance
+    // lookup covers that case properly, having tracked the real scope while checking the body.
     auto shadow_instantiate_and_resolve(const ast::VarDeclStmt &node, const LocalLookupContext &ctx) -> std::optional<sema::ResolvedType> {
         if (!ctx.tokens || !ctx.program_result) return std::nullopt;
         const auto mod_it = ctx.program_result->ast_program.modules.find(ctx.module_path);
@@ -407,19 +448,33 @@ namespace lsp::handlers {
         return sema::check_expr(*node.init, locals, ctx.module_path, ctx.sema_program, ctx.diag, std::nullopt, 0, -1, fn_error_type);
     }
 
+    auto template_exprs_for(const EnclosingFunction &enclosing, const sema::Program &program)
+        -> const sema::ExprSideTables * {
+        if (enclosing.fn_decl) return program.find_template_exprs_for_fn(enclosing.fn_decl);
+        if (enclosing.method_decl) return program.find_template_exprs_for_method(enclosing.method_decl);
+        return nullptr;
+    }
+
+    auto find_expr_type(const LocalLookupContext &ctx, const ast::Expr &expr) -> const sema::ResolvedType * {
+        return sema::find_expr_record_in(ctx.template_exprs, ctx.sema_program, ctx.module_path,
+                                          &sema::ExprSideTables::expr_types, sema::get_expr_key(expr));
+    }
+
     // Mirrors sema_check.cpp's own VarDeclStmt handling: when a declared type annotation
     // is present, it - not the initializer's own natural type - is the variable's actual
     // type (`locals[v.name] = LocalBinding{.type = has_declared_ty ? declared_ty : init_ty,
     // ...}`). Without this, hovering a var like `mut p: *T = try alloc(...)` would show
     // `alloc`'s raw return type (e.g. `anyptr`) instead of the declared/coerced-to type.
+    //
+    // Everything below the annotation is initializer-driven, because sema records no type on
+    // the VarDeclStmt node itself - only on its initializer expression.
     auto resolve_var_decl_type(const ast::VarDeclStmt &node, const LocalLookupContext &ctx) -> VarDeclTypeResult {
         if (const auto declared = sema::resolve_declared_type(node.type, node.init, ctx.module_path, ctx.sema_program, ctx.diag, node.location)) {
             return {.type = *declared};
         }
         if (node.init) {
-            if (const auto it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(*node.init));
-                it != ctx.sema_module.exprs.expr_types.end()) {
-                return {.type = it->second};
+            if (const auto *recorded = find_expr_type(ctx, *node.init)) {
+                return {.type = *recorded};
             }
             if (const auto display = describe_generic_call_return_type(*node.init, ctx)) {
                 return {.type = {}, .display_override = display};
@@ -617,7 +672,8 @@ namespace lsp::handlers {
 
         auto consider = [&](const SourceLocation &decl_location, std::vector<ParamInfo> params, const ast::Stmt *body,
                             const std::vector<ast::GenericParam> *generic_params = nullptr, const ast::NamedType *self_target = nullptr,
-                            const std::vector<ast::Type> *return_types = nullptr) {
+                            const std::vector<ast::Type> *return_types = nullptr, const ast::FunctionDecl *fn_decl = nullptr,
+                            const ast::ImplDecl::Function *method_decl = nullptr) {
             const auto start_line = decl_location.line;
             if (start_line > line) return;
             if (line > end_line_for(decl_location, body)) return;
@@ -629,7 +685,8 @@ namespace lsp::handlers {
                 best_start_line = start_line;
                 found = true;
                 best = EnclosingFunction{.params = std::move(params), .body = body, .generic_params = generic_params,
-                                          .self_target = self_target, .return_types = return_types};
+                                          .self_target = self_target, .return_types = return_types,
+                                          .fn_decl = fn_decl, .method_decl = method_decl};
             }
         };
 
@@ -650,7 +707,8 @@ namespace lsp::handlers {
                     }
                     params.push_back({fn->params[i].name, type, fn->params[i].location, display_override});
                 }
-                consider(fn->location, std::move(params), &fn->body, is_generic ? &fn->generic_params : nullptr, nullptr, &fn->return_types);
+                consider(fn->location, std::move(params), &fn->body, is_generic ? &fn->generic_params : nullptr, nullptr,
+                         &fn->return_types, fn);
             } else if (const auto *ext = std::get_if<ast::ExtFunctionDecl>(&decl)) {
                 const auto sym_it = sema_module.symbols.find(ext->name);
                 const auto *sym = sym_it != sema_module.symbols.end() ? std::get_if<sema::ExtFunctionSymbol>(&sym_it->second) : nullptr;
@@ -701,7 +759,7 @@ namespace lsp::handlers {
                         params.push_back({fn.params[i].name, type, fn.params[i].location, display_override});
                     }
                     consider(fn.location, std::move(params), &fn.body, is_generic ? &impl->generic_params : nullptr,
-                             is_generic ? &impl->target : nullptr, &fn.return_types);
+                             is_generic ? &impl->target : nullptr, &fn.return_types, nullptr, &fn);
                 }
             } else if (const auto *trait_impl = std::get_if<ast::TraitImplDecl>(&decl)) {
                 // 'impl TRAIT for TYPE { ... }' is a distinct AST node from a bare
@@ -754,7 +812,7 @@ namespace lsp::handlers {
                     }
                     consider(fn.location, std::move(params), &fn.body,
                              is_generic ? &trait_impl->generic_params : nullptr,
-                             is_generic ? &trait_impl->type_name : nullptr, &fn.return_types);
+                             is_generic ? &trait_impl->type_name : nullptr, &fn.return_types, nullptr, &fn);
                 }
             } else if (const auto *type_decl = std::get_if<ast::TypeDecl>(&decl)) {
                 // A trait method ('type T = trait { fn foo(self, ...) -> ... }') has no body
@@ -1254,7 +1312,8 @@ namespace lsp::handlers {
     // pointer/array/slice/fn-ptr/builtin spellings that can't be written as an IdentExpr) was
     // already resolved and cached into expr_types by the whole-program check.
     auto sizeof_align_operand_type(const ast::Expr &operand, const std::string &module_path,
-                                    const sema::Program &program) -> sema::ResolvedType {
+                                    const sema::Program &program, const sema::ExprSideTables *template_exprs)
+        -> sema::ResolvedType {
         if (const auto *ident = std::get_if<ast::IdentExpr>(&operand)) {
             if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
                 if (const auto sym_it = mod_it->second.symbols.find(ident->name); sym_it != mod_it->second.symbols.end()) {
@@ -1282,10 +1341,9 @@ namespace lsp::handlers {
             }
         }
 
-        if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
-            if (const auto ty_it = mod_it->second.exprs.expr_types.find(sema::get_expr_key(operand)); ty_it != mod_it->second.exprs.expr_types.end()) {
-                return ty_it->second;
-            }
+        if (const auto *recorded = sema::find_expr_record_in(template_exprs, program, module_path,
+                                                              &sema::ExprSideTables::expr_types, sema::get_expr_key(operand))) {
+            return *recorded;
         }
         return {};
     }
@@ -1298,7 +1356,7 @@ namespace lsp::handlers {
     // a best-effort UI utility, not a parser, so this degrades to the bare "builtin, type
     // usize" answer rather than crashing).
     auto resolve_builtin_at(const ast::Expr *found, const TokenKind keyword, const std::string &module_path,
-                            const sema::Program &program) -> Resolution {
+                            const sema::Program &program, const sema::ExprSideTables *template_exprs) -> Resolution {
         Resolution res{
             .kind = Resolution::Kind::Builtin,
             .name = keyword == TokenKind::KwSizeOf ? "size_of" : keyword == TokenKind::KwAlignOf ? "align_of" : "len",
@@ -1307,26 +1365,25 @@ namespace lsp::handlers {
         if (!found) return res;
 
         if (const auto *size_of_expr = std::get_if<std::unique_ptr<ast::SizeOfExpr>>(found)) {
-            res.builtin_operand_type = sizeof_align_operand_type((*size_of_expr)->operand, module_path, program);
+            res.builtin_operand_type = sizeof_align_operand_type((*size_of_expr)->operand, module_path, program, template_exprs);
             if (res.builtin_operand_type.kind != sema::TypeKind::Invalid) {
                 res.builtin_const_value = sema::resolved_type_size(res.builtin_operand_type, program);
             }
         } else if (const auto *align_of_expr = std::get_if<std::unique_ptr<ast::AlignOfExpr>>(found)) {
-            res.builtin_operand_type = sizeof_align_operand_type((*align_of_expr)->operand, module_path, program);
+            res.builtin_operand_type = sizeof_align_operand_type((*align_of_expr)->operand, module_path, program, template_exprs);
             if (res.builtin_operand_type.kind != sema::TypeKind::Invalid) {
                 res.builtin_const_value = sema::resolved_type_align(res.builtin_operand_type, program);
             }
         } else if (const auto *len_expr = std::get_if<std::unique_ptr<ast::LenExpr>>(found)) {
-            if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
-                if (const auto ty_it = mod_it->second.exprs.expr_types.find(sema::get_expr_key((*len_expr)->operand));
-                    ty_it != mod_it->second.exprs.expr_types.end()) {
-                    res.builtin_operand_type = ty_it->second;
-                    // Only a fixed-size array's length is a compile-time constant; a slice's is
-                    // a runtime field (see sema_check.cpp's LenExpr case).
-                    if (res.builtin_operand_type.kind == sema::TypeKind::Array) {
-                        if (const auto *arr = program.array_at(res.builtin_operand_type.array_index)) {
-                            res.builtin_const_value = arr->count;
-                        }
+            if (const auto *recorded = sema::find_expr_record_in(template_exprs, program, module_path,
+                                                                  &sema::ExprSideTables::expr_types,
+                                                                  sema::get_expr_key((*len_expr)->operand))) {
+                res.builtin_operand_type = *recorded;
+                // Only a fixed-size array's length is a compile-time constant; a slice's is
+                // a runtime field (see sema_check.cpp's LenExpr case).
+                if (res.builtin_operand_type.kind == sema::TypeKind::Array) {
+                    if (const auto *arr = program.array_at(res.builtin_operand_type.array_index)) {
+                        res.builtin_const_value = arr->count;
                     }
                 }
             }
@@ -1399,6 +1456,10 @@ namespace lsp::handlers {
         }
 
         DiagnosticEngine throwaway_diag(*result.source_manager);
+        // Resolved before the context is built: which declaration the cursor sits in is what
+        // selects the ExprSideTables every lookup through 'ctx' must consult first.
+        const auto enclosing = find_enclosing_function(mod_it->second, sema_mod_it->second, result.sema_program, module_path, throwaway_diag, tokens, line);
+
         const LocalLookupContext ctx{
             .sema_module = sema_mod_it->second,
             .sema_program = result.sema_program,
@@ -1406,9 +1467,8 @@ namespace lsp::handlers {
             .diag = throwaway_diag,
             .tokens = &tokens,
             .program_result = &result,
+            .template_exprs = template_exprs_for(enclosing, result.sema_program),
         };
-
-        const auto enclosing = find_enclosing_function(mod_it->second, sema_mod_it->second, result.sema_program, module_path, throwaway_diag, tokens, line);
 
         auto resolve_base_name = [&](const std::string &name) -> std::optional<Resolution> {
             for (const auto &p : enclosing.params) {
@@ -1464,7 +1524,7 @@ namespace lsp::handlers {
         if (tokens[idx].kind == TokenKind::KwSizeOf || tokens[idx].kind == TokenKind::KwAlignOf || tokens[idx].kind == TokenKind::KwLen) {
             const ast::Expr *found = enclosing.body ? find_expr_by_location(*enclosing.body, tokens[idx].location) : nullptr;
             if (!found) found = find_expr_by_location_in_module(mod_it->second, tokens[idx].location);
-            return resolve_builtin_at(found, tokens[idx].kind, module_path, result.sema_program);
+            return resolve_builtin_at(found, tokens[idx].kind, module_path, result.sema_program, ctx.template_exprs);
         }
         if (tokens[idx].kind != TokenKind::Identifier) return {};
 
@@ -1483,16 +1543,14 @@ namespace lsp::handlers {
         if (enclosing.body && idx >= 1 && tokens[idx - 1].kind == TokenKind::Dot) {
             if (const auto *found = find_expr_by_location(*enclosing.body, tokens[idx - 1].location)) {
                 if (const auto *member_expr = std::get_if<std::unique_ptr<ast::MemberExpr>>(found)) {
-                    if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key((*member_expr)->object));
-                        ty_it != ctx.sema_module.exprs.expr_types.end()) {
-                        if (auto res = resolve_member(ty_it->second, tokens[idx].lexeme, result.sema_program);
+                    if (const auto *object_type = find_expr_type(ctx, (*member_expr)->object)) {
+                        if (auto res = resolve_member(*object_type, tokens[idx].lexeme, result.sema_program);
                             res.kind != Resolution::Kind::None) {
                             return res;
                         }
                     }
-                } else if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(*found));
-                           ty_it != ctx.sema_module.exprs.expr_types.end()) {
-                    if (auto res = match_enum_or_variant(ty_it->second, tokens[idx].lexeme, result.sema_program);
+                } else if (const auto *found_type = find_expr_type(ctx, *found)) {
+                    if (auto res = match_enum_or_variant(*found_type, tokens[idx].lexeme, result.sema_program);
                         res.kind != Resolution::Kind::None) {
                         return res;
                     }
@@ -1509,9 +1567,8 @@ namespace lsp::handlers {
             if (enclosing.body) {
                 if (const auto brace_loc = enclosing_struct_literal_brace(tokens, idx)) {
                     if (const auto *literal_expr = find_expr_by_location(*enclosing.body, *brace_loc)) {
-                        if (const auto ty_it = ctx.sema_module.exprs.expr_types.find(sema::get_expr_key(*literal_expr));
-                            ty_it != ctx.sema_module.exprs.expr_types.end()) {
-                            if (auto field_res = match_struct_or_union_field(ty_it->second, tokens[idx].lexeme, result.sema_program);
+                        if (const auto *literal_type = find_expr_type(ctx, *literal_expr)) {
+                            if (auto field_res = match_struct_or_union_field(*literal_type, tokens[idx].lexeme, result.sema_program);
                                 field_res.kind != Resolution::Kind::None) {
                                 return field_res;
                             }

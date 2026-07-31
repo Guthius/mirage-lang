@@ -667,6 +667,22 @@ namespace sema {
         std::vector<ResolvedType> pointer_pointees; // global; pointee_index is unique across all modules
         std::vector<ArrayInfo> arrays;             // global; array_index is unique across all modules
         std::vector<SliceInfo> slices;             // global; slice_index is unique across all modules
+        // Generic-parameter spellings ('T', 'K', 'N'), indexed by
+        // ResolvedType::opaque_param_index. Purely a display-name table: nothing in type
+        // checking reads it, and two Opaques naming different entries still compare equal.
+        // Deduped rather than appended blindly, since the same handful of names recurs across
+        // every generic declaration in a program.
+        std::vector<std::string> opaque_param_names;
+        auto intern_opaque_param_name(const std::string &name) -> int {
+            for (size_t i = 0; i < opaque_param_names.size(); ++i) {
+                if (opaque_param_names[i] == name) return static_cast<int>(i);
+            }
+            opaque_param_names.push_back(name);
+            return static_cast<int>(opaque_param_names.size() - 1);
+        }
+        [[nodiscard]] auto opaque_param_name_at(int index) const -> const std::string * {
+            return index >= 0 && static_cast<size_t>(index) < opaque_param_names.size() ? &opaque_param_names[index] : nullptr;
+        }
         // Interning cache for synthesized 'error(...)' union types: (sorted member-type
         // list, is_optional) — the canonical identity, order-independent in the member
         // list (see intern_error_union) -> the union_index of the synthesized Ok/Failed
@@ -810,6 +826,39 @@ namespace sema {
             return it == generic_type_instance_exprs.end() ? nullptr : it->second.get();
         }
 
+        // A generic DECLARATION -> the index of the instance the eager template pass created
+        // for it (parameters bound to Opaque, body actually checked - see
+        // check_generic_templates_for_program). Written by that pass only; empty when
+        // options.eager_generic_check is off.
+        //
+        // The point of this is to make an uninstantiated generic body's types reachable from
+        // the outside. Everything sema learned about such a body lives in that one instance's
+        // ExprSideTables and nowhere else, and the LSP - which must answer hover/inlay-hint/
+        // go-to-definition inside declarations nothing has ever instantiated - has no other
+        // way in.
+        //
+        // RECORDED rather than derived, because "the instance whose decl is D and whose args
+        // are all Opaque" is not unique: a nested 'g[T](...)' inside another template's body
+        // instantiates 'g' with Opaque-flavoured args too (instantiate_generic_function's
+        // 'suppressed' path), producing a second instance for the same decl that holds only
+        // signature records and whose body was never checked. Since the pass visits
+        // declarations in sorted order, that empty one frequently has the LOWER index, so a
+        // scan would reliably pick the wrong one.
+        std::unordered_map<const ast::FunctionDecl *, size_t> template_fn_instance_for_decl;
+        std::unordered_map<const ast::ImplDecl::Function *, size_t> template_method_instance_for_decl;
+
+        // The two above, resolved straight to the records. Null means "this declaration has no
+        // eagerly-checked template instance" - a non-generic decl, eager checking disabled, or
+        // one of the shapes the eager pass does not reach (see check_generic_type_method_bodies).
+        auto find_template_exprs_for_fn(const ast::FunctionDecl *decl) const -> const ExprSideTables * {
+            const auto it = template_fn_instance_for_decl.find(decl);
+            return it == template_fn_instance_for_decl.end() ? nullptr : find_fn_instance_exprs(it->second);
+        }
+        auto find_template_exprs_for_method(const ast::ImplDecl::Function *decl) const -> const ExprSideTables * {
+            const auto it = template_method_instance_for_decl.find(decl);
+            return it == template_method_instance_for_decl.end() ? nullptr : find_fn_instance_exprs(it->second);
+        }
+
         // Selects which ExprSideTables the node currently being checked/emitted belongs to.
         // Pushed by ScopedGenericScope (sema) and ScopedEmitExprs (codegen); empty means
         // "ordinary module-level code".
@@ -921,11 +970,18 @@ namespace sema {
     // tables while a scope is active — the two sets are disjoint by construction. Keep that
     // invariant if you add a write site.
     // Returns a pointer to the record, or nullptr if neither scope has one.
+    //
+    // 'preferred' spells out the table to consult ahead of the module. Callers checking or
+    // emitting a body pass the innermost active scope, which is what find_expr_record below
+    // does. A reader that is not inside any scope - the LSP, answering a query about a
+    // declaration nothing has instantiated - passes that declaration's template instance
+    // tables instead (Program::find_template_exprs_for_fn); null means "module only".
     template <typename Map, typename Key>
-    auto find_expr_record(const Program &program, const std::string &module_path,
-                           Map ExprSideTables::*member, const Key &key) -> const typename Map::mapped_type * {
-        if (!program.active_expr_tables.empty()) {
-            const auto &active = (*program.active_expr_tables.back()).*member;
+    auto find_expr_record_in(const ExprSideTables *preferred, const Program &program,
+                              const std::string &module_path, Map ExprSideTables::*member,
+                              const Key &key) -> const typename Map::mapped_type * {
+        if (preferred) {
+            const auto &active = (*preferred).*member;
             if (const auto it = active.find(key); it != active.end()) return &it->second;
         }
         const auto mod_it = program.modules.find(module_path);
@@ -933,6 +989,13 @@ namespace sema {
         const auto &fallback = mod_it->second.exprs.*member;
         if (const auto it = fallback.find(key); it != fallback.end()) return &it->second;
         return nullptr;
+    }
+
+    template <typename Map, typename Key>
+    auto find_expr_record(const Program &program, const std::string &module_path,
+                           Map ExprSideTables::*member, const Key &key) -> const typename Map::mapped_type * {
+        return find_expr_record_in(program.active_expr_tables.empty() ? nullptr : program.active_expr_tables.back(),
+                                    program, module_path, member, key);
     }
 
     // Expr alternatives are a mix of by-value nodes ('.location'), boxed 'unique_ptr<T>' nodes

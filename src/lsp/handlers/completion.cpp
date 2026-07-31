@@ -286,6 +286,12 @@ namespace lsp::handlers {
             return json::array();
         }
 
+        // Resolved up here, ahead of the cursor analysis that used to precede it, only so the
+        // context below can carry this declaration's template ExprSideTables - see
+        // LocalLookupContext::template_exprs. Nothing between here and its old position
+        // depends on it.
+        const auto enclosing = find_enclosing_function(mod_it->second, sema_mod_it->second, result.sema_program, module_path, throwaway_diag, tokens, line);
+
         const LocalLookupContext ctx{
             .sema_module = sema_mod_it->second,
             .sema_program = result.sema_program,
@@ -293,6 +299,7 @@ namespace lsp::handlers {
             .diag = throwaway_diag,
             .tokens = &tokens,
             .program_result = &result,
+            .template_exprs = template_exprs_for(enclosing, result.sema_program),
         };
 
         // Find whatever's immediately before the cursor: either a partially-typed identifier
@@ -332,8 +339,6 @@ namespace lsp::handlers {
                 return json::array();
             }
         }
-
-        const auto enclosing = find_enclosing_function(mod_it->second, sema_mod_it->second, result.sema_program, module_path, throwaway_diag, tokens, line);
 
         auto resolve_base_name = [&](const std::string &name) -> std::optional<Resolution> {
             for (const auto &p : enclosing.params) {

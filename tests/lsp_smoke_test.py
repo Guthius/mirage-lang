@@ -847,6 +847,114 @@ def main() -> int:
     client.notify("textDocument/didClose", {"textDocument": {"uri": sym_uri}})
     client.read_with_timeout(5)
 
+    # --- inlay hints (and hover) inside uninstantiated generic bodies ---
+    #
+    # Sema type-checks every generic declaration's body once with its parameters bound to
+    # Opaque, but records the results in that declaration's own template instance rather than
+    # in the module's tables. The LSP read only the module's tables, so every expression in
+    # every generic body missed and fell through to a fallback that binds each 'T' to a
+    # placeholder 'u8'. The observable result was a hint that confidently lied (': u8' for a
+    # value of type 'T') or, where the fallback also failed, no useful hint at all.
+    gen_main = FIXTURES / "generic_body_fixture" / "main.mir"
+    gen_uri = uri_for(gen_main)
+    gen_text = gen_main.read_text()
+    gen_lines = gen_text.splitlines()
+    client.notify("textDocument/didOpen", {
+        "textDocument": {"uri": gen_uri, "languageId": "mirage", "version": 1, "text": gen_text},
+    })
+    gen_diag = client.read()
+    check(gen_diag["params"]["diagnostics"] == [], "generic-body fixture compiles with no diagnostics")
+
+    def gen_line(anchor: str) -> int:
+        """0-based line containing 'anchor'. Comment lines are skipped deliberately: the
+        fixture documents the shapes it pins, and a comment quoting one verbatim would
+        otherwise be matched instead of the code, silently turning every assertion below
+        into 'no hint on a comment line'."""
+        return next(i for i, line in enumerate(gen_lines)
+                    if anchor in line and not line.lstrip().startswith("//"))
+
+    def gen_hints() -> dict[int, list[str]]:
+        """0-based line -> every inlay-hint label on it, for the whole file."""
+        resp = client.request("textDocument/inlayHint", {
+            "textDocument": {"uri": gen_uri},
+            "range": {"start": {"line": 0, "character": 0},
+                      "end": {"line": len(gen_lines), "character": 0}},
+        })
+        by_line: dict[int, list[str]] = {}
+        for hint in resp["result"] or []:
+            by_line.setdefault(hint["position"]["line"], []).append(hint["label"])
+        return by_line
+
+    def check_hint(hints: dict[int, list[str]], anchor: str, expected: str) -> None:
+        got = hints.get(gen_line(anchor), [])
+        check(expected in got, f"inlay hint on '{anchor}' is '{expected}', got {got}")
+
+    hints = gen_hints()
+
+    # A bare parameter typed 'T'. This is the one that used to read ': u8'.
+    check_hint(hints, "mut n := value", ": T")
+    # Both operands are locals the placeholder fallback never had in scope, and '%' routes
+    # through opaque_binary_op_result - so this also pins the name propagating through an
+    # operator rather than being dropped.
+    check_hint(hints, "mut digit := n % base_t", ": T")
+    check_hint(hints, "const base_t := cast(base, T)", ": T")
+    # Concrete type, generic body: nothing here depends on 'T' at all, and the hint was
+    # missing purely because the lookup never reached the template tables.
+    check_hint(hints, "mut i := count", ": usize")
+
+    # A generic METHOD: a different lookup key, filled in by a different sema pass.
+    check_hint(hints, "mut span := self.length", ": usize")
+    check_hint(hints, "mut doubled := span * 2", ": usize")
+    check_hint(hints, "mut slot := self.items[self.head]", ": T")
+
+    # The second of two type parameters, so a wrong answer cannot coincidentally match.
+    check_hint(hints, "mut paired := v", ": V")
+
+    # The control: ordinary non-generic code must be untouched by any of this.
+    check_hint(hints, "mut z := 1 + 2", ": i32")
+
+    # The ordering pin. The placeholder fallback used to run without pushing an
+    # ExprSideTables of its own, so its 'u8'-flavoured results were written into the MODULE's
+    # tables - permanently, for AST nodes shared by every instantiation. A hover was enough to
+    # do it, and every later request for those nodes then read the poisoned entry back. Only
+    # meaningful in this order: hover FIRST, then ask for the hints again.
+    n_line = gen_line("mut n := value")
+    hover_n = client.request("textDocument/hover", {
+        "textDocument": {"uri": gen_uri},
+        "position": {"line": n_line, "character": gen_lines[n_line].index("n :=")},
+    })
+    hover_text = (hover_n["result"] or {}).get("contents", {}).get("value", "")
+    check(": T" in hover_text, f"hover on a 'T'-typed generic local reports 'T', got {hover_text!r}")
+
+    check_hint(gen_hints(), "mut n := value", ": T")
+
+    hover_i_line = gen_line("mut i := count")
+    hover_i = client.request("textDocument/hover", {
+        "textDocument": {"uri": gen_uri},
+        "position": {"line": hover_i_line, "character": gen_lines[hover_i_line].index("i :=")},
+    })
+    hover_i_text = (hover_i["result"] or {}).get("contents", {}).get("value", "")
+    check(": usize" in hover_i_text,
+          f"hover on a concretely-typed local in a generic body reports 'usize', got {hover_i_text!r}")
+
+    # Go-to-definition on a field access through 'self' inside a generic method - the same
+    # module-tables-only lookup powered this, so it was broken in exactly the same way.
+    head_line = gen_line("mut slot := self.items[self.head]")
+    head_def = client.request("textDocument/definition", {
+        "textDocument": {"uri": gen_uri},
+        "position": {"line": head_line, "character": gen_lines[head_line].index("head]")},
+    })
+    head_result = head_def.get("result")
+    check(bool(head_result),
+          f"go-to-definition on 'self.head' inside a generic method resolves, got {head_result}")
+    if head_result:
+        target = head_result[0] if isinstance(head_result, list) else head_result
+        check(target["range"]["start"]["line"] == gen_line("    head: usize = 0"),
+              f"'self.head' resolves to the field declaration, got line {target['range']['start']['line'] + 1}")
+
+    client.notify("textDocument/didClose", {"textDocument": {"uri": gen_uri}})
+    client.read_with_timeout(5)
+
     # --- shutdown / exit ---
     client.notify("textDocument/didClose", {"textDocument": {"uri": multi_uri}})
     close_notification = client.read()

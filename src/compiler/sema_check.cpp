@@ -248,7 +248,9 @@ namespace sema {
                     "cannot {} a value of a generic parameter bound by '{}'; the bound grants only its own "
                     "methods plus assignment, '==' and '!='", what, bound));
             }
-            return ResolvedType{.kind = TypeKind::Opaque};
+            // '-n' is still n's parameter, so the display name rides along (see
+            // ResolvedType::opaque_param_index).
+            return ResolvedType{.kind = TypeKind::Opaque, .opaque_param_index = operand.opaque_param_index};
         }
 
         // Result of a binary operator with at least one unbound-generic-parameter operand.
@@ -294,8 +296,13 @@ namespace sema {
                         "own methods plus assignment, '==' and '!='", bound));
                 }
                 // Deliberately propagates Opaque rather than picking the concrete operand's
-                // type: 'n * 2' where 'n' is generic is only as known as 'n' is.
-                return ResolvedType{.kind = TypeKind::Opaque};
+                // type: 'n * 2' where 'n' is generic is only as known as 'n' is. The display
+                // name propagates with it, taken from whichever operand has one — for the
+                // mixed 'n * 2' shape that is the generic side, and for 'n % base_t' (both
+                // Opaque, both 'T') either answers the same.
+                return ResolvedType{.kind = TypeKind::Opaque,
+                                     .opaque_param_index = lhs.opaque_param_index >= 0 ? lhs.opaque_param_index
+                                                                                        : rhs.opaque_param_index};
             }
         }
 
@@ -1744,11 +1751,17 @@ namespace sema {
         std::vector<GenericArgValue> args;
         args.reserve(params.size());
         for (const auto &param : params) {
+            // The parameter's own spelling, carried along for display only (see
+            // ResolvedType::opaque_param_index). This is the ONE place a name enters the type
+            // system; everywhere else either propagates it through an operator or leaves it
+            // at -1.
+            const int name_index = program.intern_opaque_param_name(param.name);
             if (is_generic_type_param(param.type)) {
                 args.push_back(GenericArgValue{
                     .is_type = true,
                     .type_arg = ResolvedType{.kind = TypeKind::Opaque,
-                                              .trait_index = generic_param_bound_trait_index(param, module_path, program, diag, report_bad_bounds)},
+                                              .trait_index = generic_param_bound_trait_index(param, module_path, program, diag, report_bad_bounds),
+                                              .opaque_param_index = name_index},
                 });
             } else {
                 // The folded value is unused (a suppressed instantiation is never mangled or
@@ -1757,7 +1770,7 @@ namespace sema {
                 args.push_back(GenericArgValue{
                     .is_type = false,
                     .value_arg = int64_t{0},
-                    .value_arg_scalar_type = ResolvedType{.kind = TypeKind::Opaque},
+                    .value_arg_scalar_type = ResolvedType{.kind = TypeKind::Opaque, .opaque_param_index = name_index},
                 });
             }
         }
@@ -2069,6 +2082,12 @@ namespace sema {
 
         for (const auto &method_name : method_names) {
             if (const auto idx = instantiate_generic_method(program, diag, receiver, method_name, ts->decl->location)) {
+                // Recorded before the body is checked, so it is the instance this pass drives
+                // that gets registered — see Program::template_method_instance_for_decl for why
+                // this cannot be recovered by scanning afterwards.
+                if (const auto *impl_decl = program.generic_fn_instances[*idx]->impl_decl) {
+                    program.template_method_instance_for_decl[impl_decl] = *idx;
+                }
                 check_generic_function_instance_body(*idx, program, diag);
             }
         }
@@ -2144,6 +2163,11 @@ namespace sema {
 
             auto args = opaque_args_for(decl.generic_params, program, path, diag, /*report_bad_bounds=*/true);
             const size_t idx = instantiate_generic_function(program, diag, path, name, std::move(args), decl.location);
+            // Recorded before the body is checked, so it is THIS instance — the one whose body
+            // this pass is about to fill in — that gets registered, not whichever suppressed
+            // instance a nested 'g[T](...)' elsewhere may have created for the same decl. See
+            // Program::template_fn_instance_for_decl.
+            program.template_fn_instance_for_decl[&decl] = idx;
             check_generic_function_instance_body(idx, program, diag);
         }
         --program.template_check_depth;

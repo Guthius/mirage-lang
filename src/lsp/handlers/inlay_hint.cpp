@@ -153,13 +153,25 @@ namespace lsp::handlers {
             return hints;
         }
 
-        const LocalLookupContext ctx{
+        const LocalLookupContext base_ctx{
             .sema_module = sema_mod_it->second,
             .sema_program = result.sema_program,
             .module_path = module_path,
             .diag = throwaway_diag,
             .tokens = &tokens,
             .program_result = &result,
+        };
+
+        // Which declaration's body the walk is currently inside, and therefore which
+        // ExprSideTables its expression types live in: for a generic declaration they are in
+        // its own eagerly-checked template instance, not the module's (see
+        // LocalLookupContext::template_exprs). Null for ordinary code, which is what makes the
+        // per-statement context below identical to 'base_ctx' outside generics.
+        const sema::ExprSideTables *body_template_exprs = nullptr;
+        const auto ctx_here = [&] {
+            LocalLookupContext scoped = base_ctx;
+            scoped.template_exprs = body_template_exprs;
+            return scoped;
         };
 
         // A directory-module merges every '.mir' file in it into one ast::Module, so
@@ -178,6 +190,10 @@ namespace lsp::handlers {
 
         AstVisitor visitor;
 
+        visitor.on_body_begin = [&](const ast::FunctionDecl *fn, const ast::ImplDecl::Function *method) {
+            body_template_exprs = template_exprs_for({.fn_decl = fn, .method_decl = method}, result.sema_program);
+        };
+
         // Type hints: after a ':='-inferred VarDeclStmt's name, and after each name in a
         // multi-return VarDeclGroupStmt ('const a, b := f()') - the latter's per-name type
         // isn't recorded anywhere by sema (only computed into a local, per-statement, by
@@ -190,7 +206,7 @@ namespace lsp::handlers {
                 const auto *name_tok = name_token_after(tokens, var->location);
                 if (!name_tok) return;
 
-                const auto resolved = resolve_var_decl_type(*var, ctx);
+                const auto resolved = resolve_var_decl_type(*var, ctx_here());
                 if (resolved.type.kind == sema::TypeKind::Invalid && !resolved.display_override) return;
 
                 const auto hint_column = name_tok->location.column + name_tok->lexeme.size();
@@ -208,7 +224,7 @@ namespace lsp::handlers {
                 for (size_t i = 0; i < group->names.size() && i < name_tokens.size(); ++i) {
                     if (group->names[i].empty() || group->names[i] == "_") continue;
 
-                    const auto type = resolve_group_decl_name_type(*group, i, ctx);
+                    const auto type = resolve_group_decl_name_type(*group, i, ctx_here());
                     if (type.kind == sema::TypeKind::Void) continue; // resolution failed - see its own doc comment
 
                     const auto *name_tok = name_tokens[i];

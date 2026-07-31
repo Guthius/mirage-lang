@@ -52,6 +52,13 @@ namespace sema {
         return ast::Type{std::move(result)};
     }
 
+    // Dedupes on ResolvedType::operator==, which ignores opaque_param_index. So in a
+    // multi-parameter generic ('fn f[K: type, V: type]'), '*K' and '*V' land on the same
+    // interned pointee slot and both print under whichever name was interned first. Known and
+    // deliberate: keying interning on the display name instead would make '*K' and '*V'
+    // distinct types, which is precisely the strict-vs-permissive change the eager generic
+    // check must not make (see TypeKind::Opaque). intern_slice and array interning below share
+    // this behaviour for the same reason.
     auto intern_pointer(Program &program, const ResolvedType &pointee) -> ResolvedType {
         for (size_t i = 0; i < program.pointer_pointees.size(); ++i) {
             if (program.pointer_pointees[i] == pointee) {

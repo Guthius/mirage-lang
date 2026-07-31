@@ -44,6 +44,14 @@ namespace sema {
         // ('[T: Hashable]'), which flips the behavior from permissive to strict — only the
         // trait's flattened method set plus a small universal core is allowed.
         //
+        // 'opaque_param_index' names the parameter for display purposes only; two Opaques
+        // still compare equal regardless of it, which is what keeps the permissiveness above
+        // from turning into a strict 'T vs U' distinction. One consequence worth knowing: a
+        // pointer/slice/array whose element is Opaque is interned by that same equality, so
+        // '*K' and '*V' in a two-parameter generic share one interned slot and print under
+        // whichever name got there first (see intern_pointer). Narrow, and the alternative —
+        // keying interning on the name — is exactly the strictness change this avoids.
+        //
         // Never reaches codegen: an instantiation whose arguments contain an Opaque is never
         // registered (see instantiate_generic_function). Every codegen switch treats it as an
         // internal error.
@@ -61,6 +69,24 @@ namespace sema {
         int fn_index = -1;      // global index into Program::fn_signatures
         int trait_index = -1;   // global index into Program::traits
         int bitset_index = -1;  // global index into Program::bitsets
+
+        // DISPLAY ONLY. Index into Program::opaque_param_names, or -1. Meaningful only when
+        // 'kind' is Opaque, and set only for an Opaque that IS a named generic parameter (the
+        // bindings opaque_args_for creates, and results propagated straight through an
+        // operator by opaque_unary_result/opaque_binary_op_result). An Opaque merely DERIVED
+        // from a parameter — the type of a member access on an Opaque receiver, of indexing
+        // one, and so on — deliberately keeps -1, because "T" would be a lie there.
+        //
+        // Exists because a ResolvedType otherwise carries no trace of which parameter it came
+        // from, so 'mut n := value' inside 'fn f[T: type](value: T)' could not be reported as
+        // ': T' by anything downstream. Diagnostics (describe_type) and the LSP's type printer
+        // fall back to "<generic>"/"<generic: Trait>" when it is -1.
+        //
+        // DELIBERATELY ABSENT FROM operator== AND std::hash BELOW — see the note on each, and
+        // TypeKind::Opaque's own doc comment. Comparing it would make 'T' and 'U' distinct
+        // types, which flips the eager generic checker from permissive to strict and invents
+        // diagnostics on correct code.
+        int opaque_param_index = -1;
 
         auto is_integer() const -> bool {
             switch (kind) {
@@ -111,7 +137,14 @@ namespace sema {
                    kind == TypeKind::Pointer;
         }
 
-        auto operator==(const ResolvedType &other) const -> bool {
+        // 'opaque_param_index' is intentionally NOT compared: it is a display label, not part
+        // of a type's identity. Two unbound generic parameters must stay interchangeable here
+        // so the eager template check keeps reporting only what is independent of the
+        // parameters — see the field's own comment above.
+        // constexpr only so the static_assert below this struct can run: it is the guard that
+        // makes an accidental "consistency fix" here fail the build instead of silently
+        // changing the language.
+        constexpr auto operator==(const ResolvedType &other) const -> bool {
             return other.kind == kind &&
                    other.pointee_index == pointee_index &&
                    other.struct_index == struct_index &&
@@ -124,10 +157,27 @@ namespace sema {
                    other.bitset_index == bitset_index;
         }
 
-        auto operator!=(const ResolvedType &other) const -> bool {
+        constexpr auto operator!=(const ResolvedType &other) const -> bool {
             return !(*this == other);
         }
     };
+
+    // Two unbound generic parameters are the SAME type as far as type checking is concerned,
+    // and differ only in how they are spelled back to the reader.
+    //
+    // This is load-bearing, not a curiosity. TypeKind::Opaque is deliberately permissive so
+    // that eagerly checking a generic declaration's body reports only what is independent of
+    // its parameters; making 'T' and 'U' distinct would turn 'mut x: T = u' — correct or not
+    // depending entirely on the instantiation — into a declaration-time error, across the
+    // whole language. It would also silently split the pointer/slice/array interning tables.
+    //
+    // Asserted here rather than in a test file because the mistake it guards against is a
+    // plausible tidy-up of the two comments above ("operator== forgot a field"), and this
+    // fails that edit at the point of making it.
+    static_assert(ResolvedType{.kind = TypeKind::Opaque, .opaque_param_index = 0} ==
+                      ResolvedType{.kind = TypeKind::Opaque, .opaque_param_index = 1},
+                  "ResolvedType::opaque_param_index must stay out of operator== (and std::hash) - "
+                  "see TypeKind::Opaque");
 
     // Bit width of a scalar TypeKind — used by sema's inline-asm width-mismatch check (comparing
     // a Mirage variable operand's type against the asm register it's paired with). Returns 0 for
@@ -159,9 +209,14 @@ namespace sema {
     }
 }
 
-// Hashes every field operator== compares (kind + all 9 *_index fields), so two
-// ResolvedTypes that compare equal always hash equal - required for
+// Hashes exactly the fields operator== compares (kind + the 9 identity *_index fields), so
+// two ResolvedTypes that compare equal always hash equal - required for
 // std::unordered_map<ResolvedType, uint64_t> (sema::Program::type_ids).
+//
+// 'opaque_param_index' is excluded here for the same reason operator== excludes it, and the
+// two exclusions must stay in step: adding it to only one of them breaks the equal-implies-
+// equal-hash contract, and adding it to BOTH silently changes the language (see the field's
+// own comment in ResolvedType).
 template <>
 struct std::hash<sema::ResolvedType> {
     auto operator()(const sema::ResolvedType &t) const noexcept -> size_t {

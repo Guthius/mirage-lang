@@ -100,10 +100,10 @@ namespace lsp::handlers {
         // Non-null only when the enclosing decl (or, for a method, its enclosing 'impl'
         // block) is itself generic - the fn's own generic_params, or the impl's own
         // generic_params for a method. Together with 'self_target' below, lets
-        // resolve_var_decl_type's shadow-instantiation fallback (see its own doc comment)
-        // build a synthetic instantiation for real sema type-checking of an expression that
-        // was never actually checked because nothing has ever concretely instantiated this
-        // generic decl.
+        // resolve_var_decl_type's last-resort shadow-instantiation fallback (see its own doc
+        // comment) build a synthetic instantiation for real sema type-checking. Only reached
+        // for the few shapes the eager template pass does not cover; everything else answers
+        // from 'fn_decl'/'method_decl' below.
         const std::vector<ast::GenericParam> *generic_params = nullptr;
         // Set only for a method belonging to a generic 'impl' block - the impl's own
         // 'target' NamedType (e.g. 'List' in 'impl List[T: type] {...}'), used to build a
@@ -114,6 +114,17 @@ namespace lsp::handlers {
         // needs the last one to reconstruct 'fn_error_type' for a 'try' expression inside a
         // generic template body (check_expr errors out immediately without it).
         const std::vector<ast::Type> *return_types = nullptr;
+
+        // The declaration itself - exactly one of the two is set for anything with a body.
+        // One field covers 'impl TYPE' and 'impl TRAIT for TYPE' alike, since
+        // TraitImplDecl::functions is a vector<ImplDecl::Function> too.
+        //
+        // Set unconditionally, generic or not: they are the key into
+        // Program::template_fn_instance_for_decl / template_method_instance_for_decl, which
+        // simply misses for a non-generic decl (whose types are in the module's tables where
+        // they belong). See template_exprs_for() in common.cpp.
+        const ast::FunctionDecl *fn_decl = nullptr;
+        const ast::ImplDecl::Function *method_decl = nullptr;
     };
 
     struct LocalInfo {
@@ -125,16 +136,15 @@ namespace lsp::handlers {
         std::optional<std::string> display_override;
     };
 
-    // resolve_var_decl_type's result: 'type' is the ordinary sema-resolved answer. When even
-    // the initializer's own expr_types entry is missing - meaning sema never actually
-    // type-checked this VarDeclStmt at all, which happens when it sits inside an
-    // UNINSTANTIATED generic function/method template body calling another generic
-    // function/method (e.g. 'mut list := make_list[T](allocator)' inside 'impl List[T:
-    // type] { ... }', where nothing anywhere has ever instantiated the enclosing method) -
-    // 'type' falls back to its TypeKind::Invalid default and 'display_override' carries a
-    // best-effort AST-rendered string instead (e.g. "List[T]"), built by rendering the
-    // called generic function's own declared return type with its generic_params
-    // substituted for the literal args written at the call site.
+    // resolve_var_decl_type's result: 'type' is the ordinary sema-resolved answer, found via
+    // find_expr_type (so it covers generic bodies, whose records live in the enclosing
+    // declaration's template instance rather than the module's tables).
+    //
+    // 'display_override' is the escape hatch for the one shape a ResolvedType renders less
+    // faithfully than the source does: an explicit generic call ('mut list := make_list[T](a)'),
+    // whose recorded type is 'List[Opaque]' and therefore prints the parameter's name only
+    // when the callee has a single type parameter. When set, 'type' stays at its default and
+    // this AST-rendered string ("List[T]") is what display code must use.
     struct VarDeclTypeResult {
         sema::ResolvedType type;
         std::optional<std::string> display_override;
@@ -153,6 +163,14 @@ namespace lsp::handlers {
     // get them back is to re-resolve the initializer call's callee - see
     // resolve_group_decl_name_type). Without them, a VarDeclGroupStmt local's type degrades to
     // the void default, same as before this pair of fields existed.
+    //
+    // 'template_exprs' is the ExprSideTables of the eagerly-checked template instance of the
+    // generic declaration the query lands in, or null everywhere else (ordinary code, or a
+    // shape the eager pass doesn't reach). It exists because a generic body's types are
+    // recorded ONLY in that instance's tables and never in the module's - see
+    // Program::template_fn_instance_for_decl. Every expr_types-style lookup in the LSP must go
+    // through find_expr_type()/find_expr_record_in() with this, or it silently misses for every
+    // expression inside every generic declaration.
     struct LocalLookupContext {
         const sema::ProgramModule &sema_module;
         sema::Program &sema_program;
@@ -160,6 +178,7 @@ namespace lsp::handlers {
         DiagnosticEngine &diag;
         const std::vector<Token> *tokens = nullptr;
         analysis::ProgramResult *program_result = nullptr;
+        const sema::ExprSideTables *template_exprs = nullptr;
     };
 
     // Maps a resolved sema::Symbol to the Container it becomes when a dotted chain steps
@@ -208,6 +227,24 @@ namespace lsp::handlers {
     auto find_enclosing_function(const ast::Module &module, const sema::ProgramModule &sema_module,
                                  sema::Program &program, const std::string &module_path, DiagnosticEngine &diag,
                                  const std::vector<Token> &tokens, size_t line) -> EnclosingFunction;
+
+    // The eagerly-checked template instance's records for whichever declaration 'enclosing'
+    // names, or null - the value LocalLookupContext::template_exprs wants. Null for a
+    // non-generic decl and for a decl the eager pass doesn't reach; both degrade to a plain
+    // module lookup, which is the right answer in the first case and the pre-existing
+    // behaviour in the second.
+    auto template_exprs_for(const EnclosingFunction &enclosing, const sema::Program &program)
+        -> const sema::ExprSideTables *;
+
+    // The type sema recorded for 'expr' - THE expression-type lookup for LSP handlers, and the
+    // only one that works inside a generic declaration's body.
+    //
+    // A plain 'sema_module.exprs.expr_types' lookup misses every node in every generic body:
+    // the eager template pass records those in the declaration's own template instance instead
+    // (see Program::template_fn_instance_for_decl). This consults ctx.template_exprs first and
+    // falls back to the module, exactly mirroring sema's own find_expr_record asymmetry.
+    // Returns null when neither has a record.
+    auto find_expr_type(const LocalLookupContext &ctx, const ast::Expr &expr) -> const sema::ResolvedType *;
 
     // Mirrors sema_check.cpp's own VarDeclStmt handling: when a declared type annotation is
     // present, it - not the initializer's own natural type - is the variable's actual type.
