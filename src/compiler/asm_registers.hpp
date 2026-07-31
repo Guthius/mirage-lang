@@ -1,7 +1,9 @@
 #pragma once
 
 #include <array>
+#include <cctype>
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 // Static x86_64 general-purpose register data, shared by asm_lexer (tokenizing register names),
@@ -102,5 +104,15 @@ namespace asm_registers {
             }
         }
         return nullptr;
+    }
+
+    // ASCII lowercase, for normalizing register/mnemonic spellings ('MOV RAX' / 'asm -> RAX')
+    // before consulting the tables above, whose names are always lowercase. Lives next to the
+    // tables so every consumer normalizes the same way (asm_lexer, asm_parser, ast).
+    [[nodiscard]] inline auto to_lower(std::string s) -> std::string {
+        for (auto &ch : s) {
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        }
+        return s;
     }
 }

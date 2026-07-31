@@ -66,6 +66,10 @@
     "diag": "examples/example_asm_expr_unknown_register/main.mir:10:25: error: expected a register name after 'asm ->'",
     "exit": 1
   },
+  "example_asm_expr_uppercase_register": {
+    "action": "run",
+    "exit": 42
+  },
   "example_asm_expr_width_mismatch": {
     "action": "run",
     "exit": 1

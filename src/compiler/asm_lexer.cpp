@@ -16,12 +16,7 @@ namespace asm_lexer {
             return std::isalnum(static_cast<unsigned char>(ch)) != 0 || ch == '_';
         }
 
-        auto to_lower(std::string s) -> std::string {
-            for (auto &ch : s) {
-                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            }
-            return s;
-        }
+        using asm_registers::to_lower;
 
         struct Lexer {
             std::string_view text_;

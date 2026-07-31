@@ -13,12 +13,7 @@ namespace asm_parser {
         using asm_lexer::AsmToken;
         using asm_lexer::AsmTokenKind;
 
-        auto to_lower(std::string s) -> std::string {
-            for (auto &ch : s) {
-                ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            }
-            return s;
-        }
+        using asm_registers::to_lower;
 
         struct Cursor {
             std::span<const AsmToken> tokens;

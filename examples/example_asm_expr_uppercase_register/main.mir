@@ -1,0 +1,13 @@
+// example_asm_expr_uppercase_register — register-name case must be handled the same way
+// in asm bodies and asm-expression headers. The body lexer lowercased ('MOV RAX' worked)
+// while the header looked its register up verbatim, so 'asm -> RAX' was rejected with
+// "expected a register name after 'asm ->'" (CODE_REVIEW.md FE-8).
+//
+// Expected: exit code 42.
+
+pub fn main() -> i32 {
+    const x := asm -> RAX: i64 {
+        MOV RAX, 42
+    }
+    return cast(x, i32)
+}

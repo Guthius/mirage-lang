@@ -1338,7 +1338,9 @@ namespace ast {
                 parser.expect(TokenKind::Arrow, "'->'");
 
                 const auto reg_location = parser.current_location();
-                const auto reg_name = parser.expect_identifier();
+                // Normalized like asm bodies are ('MOV RAX' works), and stored normalized,
+                // as AsmRegisterOperand::name documents.
+                const auto reg_name = asm_registers::to_lower(parser.expect_identifier());
                 const auto *reg_info = asm_registers::lookup_register(reg_name);
                 if (!reg_info) {
                     if (asm_registers::is_unsupported_register(reg_name)) {
