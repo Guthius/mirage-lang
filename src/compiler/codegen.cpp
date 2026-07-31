@@ -336,6 +336,9 @@ namespace codegen {
             // 'impl ComponentTrait for TYPE' — see declare_vtables().
             std::map<std::tuple<std::string, std::string, std::string, std::string, std::string, std::string>, llvm::GlobalVariable *> component_vtables_;
             size_t string_counter_ = 0;
+            // Content-interned string literals: one global per distinct string (see
+            // emit_string_literal). Values are the {ptr, len} slice constants.
+            std::unordered_map<std::string, llvm::Constant *> string_literals_;
             size_t vtable_counter_ = 0;
 
             // 'type_info_of' support (Part 4/5): every distinct ResolvedType a '*Type_Info'
@@ -5072,25 +5075,27 @@ namespace codegen {
                     expr);
             }
 
+            // Interned by content: repeated literals (including the panic path's fixed
+            // prefixes) share one private global. unnamed_addr because only the contents
+            // are ever observable, which also lets the linker merge equal constants.
             auto emit_string_literal(const std::string &value) -> llvm::Constant * {
-                std::vector<uint8_t> bytes(value.begin(), value.end());
-                bytes.push_back(0);
-                auto *array_ty = llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), bytes.size());
-                std::vector<llvm::Constant *> chars;
-                for (uint8_t byte : bytes) {
-                    chars.push_back(builder_.getInt8(byte));
+                if (const auto it = string_literals_.find(value); it != string_literals_.end()) {
+                    return it->second;
                 }
-                auto *init = llvm::ConstantArray::get(array_ty, chars);
+                auto *init = llvm::ConstantDataArray::getString(*context_, llvm::StringRef(value.data(), value.size()), /*AddNull=*/true);
                 auto *global = new llvm::GlobalVariable(
-                    *module_, array_ty, true, llvm::GlobalValue::PrivateLinkage, init,
+                    *module_, init->getType(), true, llvm::GlobalValue::PrivateLinkage, init,
                     std::format(".str.{}", string_counter_++));
+                global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
                 llvm::Constant *indices[] = {builder_.getInt32(0), builder_.getInt32(0)};
                 auto *ptr = llvm::ConstantExpr::getInBoundsGetElementPtr(
-                    array_ty, global, llvm::ArrayRef(indices));
+                    init->getType(), global, llvm::ArrayRef(indices));
                 auto *len = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), value.size());
                 auto *slice_ty = llvm::StructType::get(*context_,
                     {llvm::PointerType::getUnqual(*context_), llvm::Type::getInt64Ty(*context_)});
-                return llvm::ConstantStruct::get(slice_ty, {ptr, len});
+                auto *slice = llvm::ConstantStruct::get(slice_ty, {ptr, len});
+                string_literals_.emplace(value, slice);
+                return slice;
             }
 
             auto build_slice_value(llvm::Value *ptr, llvm::Value *count, const sema::ResolvedType &slice_type, const std::string &type_module) -> llvm::Value * {
