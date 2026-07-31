@@ -2067,6 +2067,43 @@ namespace sema {
     // reads the arguments back off the receiver, resolves each signature, and — being
     // suppressed for unbound arguments — skips caching and emission, leaving the body for
     // this pass to drive.
+    // Checks one just-instantiated method of a generic type against the trait it implements,
+    // if it implements one.
+    //
+    // resolve_trait_impl_signatures_for_program does this for every non-generic target, but
+    // cannot for a generic one: comparing 'fn draw(self) -> T' against the trait's
+    // 'fn draw(self) -> i32' needs T bound to something. The template instance built by the
+    // eager pass is exactly that binding, so the comparison happens here instead — same rule,
+    // later moment. The structural halves (missing method, extra method, defaults) stay in
+    // that pass, since they need no types at all.
+    void check_generic_trait_impl_conformance(const std::string &module_path, const std::string &type_name,
+                                               const std::string &method_name, const size_t instance_idx,
+                                               Program &program, DiagnosticEngine &diag) {
+        const auto trait_impls_it = program.trait_impls_by_type.find({module_path, type_name});
+        if (trait_impls_it == program.trait_impls_by_type.end()) return;
+
+        for (const auto &impl_info : trait_impls_it->second) {
+            const auto method_it = impl_info.methods.find(method_name);
+            if (method_it == impl_info.methods.end()) continue;
+
+            const auto *trait_info = program.trait_at(impl_info.trait_index);
+            if (!trait_info) return;
+            const auto trait_method = std::ranges::find(trait_info->methods, method_name, &TraitMethodInfo::name);
+            if (trait_method == trait_info->methods.end()) return; // "extra method" — already reported
+
+            // The instance carries the substituted signature; the MethodInfo itself is still
+            // unresolved for a generic target and would compare as empty.
+            const auto &instance = *program.generic_fn_instances[instance_idx];
+            MethodInfo substituted = method_it->second;
+            substituted.param_types = instance.param_types;
+            substituted.return_types = instance.return_types;
+            substituted.is_variadic = instance.is_variadic;
+
+            report_trait_conformance_mismatch(substituted, *trait_method, impl_info.trait_name, program, diag);
+            return;
+        }
+    }
+
     void check_generic_type_method_bodies(const std::string &module_path, const std::string &type_name,
                                            Program &program, DiagnosticEngine &diag) {
         const auto mod_it = program.modules.find(module_path);
@@ -2075,21 +2112,40 @@ namespace sema {
         if (sym_it == mod_it->second.symbols.end()) return;
         const auto *ts = std::get_if<TypeSymbol>(&sym_it->second);
         if (!ts || !ts->decl) return;
-        const auto methods_it = mod_it->second.methods.find(type_name);
-        if (methods_it == mod_it->second.methods.end()) return;
+
+        // Both method tables for this type. A bare 'impl TYPE' block hangs off the module;
+        // 'impl TRAIT for TYPE' blocks off the Program-level registry. Trait-impl methods used
+        // to be skipped entirely here, which meant a generic trait impl had no eagerly-checked
+        // instance at all — and, since resolve_trait_impl_signatures_for_program cannot resolve
+        // a generic target's signatures either, no checking of ANY kind.
+        const auto bare_methods_it = mod_it->second.methods.find(type_name);
+        const auto *bare_methods = bare_methods_it != mod_it->second.methods.end() ? &bare_methods_it->second : nullptr;
+        const auto trait_impls_it = program.trait_impls_by_type.find({module_path, type_name});
+        const auto *trait_impls = trait_impls_it != program.trait_impls_by_type.end() ? &trait_impls_it->second : nullptr;
+        if (!bare_methods && !trait_impls) return;
 
         // Names collected first, and sorted: checking one body can declare a module on demand
-        // and rehash Program::modules, invalidating the iterators above, and 'methods' is
+        // and rehash Program::modules, invalidating the iterators above, and both tables are
         // unordered so diagnostic order would otherwise vary between runs.
         std::vector<std::string> method_names;
-        for (const auto &mname : methods_it->second | std::views::keys) method_names.push_back(mname);
+        if (bare_methods) {
+            for (const auto &mname : *bare_methods | std::views::keys) method_names.push_back(mname);
+        }
+        if (trait_impls) {
+            for (const auto &impl_info : *trait_impls) {
+                for (const auto &mname : impl_info.methods | std::views::keys) method_names.push_back(mname);
+            }
+        }
         std::ranges::sort(method_names);
+        method_names.erase(std::ranges::unique(method_names).begin(), method_names.end());
 
         // The impl block's own parameter list, not the type declaration's: the two must match
         // in arity, but the impl chooses the names its method bodies actually use.
         const std::vector<ast::GenericParam> *impl_params = &ts->decl->generic_params;
-        for (const auto &mname : method_names) {
-            if (const auto *p = methods_it->second.at(mname).impl_generic_params) { impl_params = p; break; }
+        if (bare_methods) {
+            for (const auto &[mname, info] : *bare_methods) {
+                if (info.impl_generic_params) { impl_params = info.impl_generic_params; break; }
+            }
         }
 
         auto args = opaque_args_for(*impl_params, program, module_path, diag);
@@ -2097,15 +2153,21 @@ namespace sema {
         if (receiver.kind == TypeKind::Invalid || receiver.kind == TypeKind::Opaque) return;
 
         for (const auto &method_name : method_names) {
-            if (const auto idx = instantiate_generic_method(program, diag, receiver, method_name, ts->decl->location)) {
-                // Recorded before the body is checked, so it is the instance this pass drives
-                // that gets registered — see Program::template_method_instance_for_decl for why
-                // this cannot be recovered by scanning afterwards.
-                if (const auto *impl_decl = program.generic_fn_instances[*idx]->impl_decl) {
-                    program.template_method_instance_for_decl[impl_decl] = *idx;
-                }
-                check_generic_function_instance_body(*idx, program, diag);
+            const auto idx = instantiate_generic_method(program, diag, receiver, method_name, ts->decl->location);
+            if (!idx) continue;
+
+            // Recorded before the body is checked, so it is the instance this pass drives
+            // that gets registered — see Program::template_method_instance_for_decl for why
+            // this cannot be recovered by scanning afterwards.
+            if (const auto *impl_decl = program.generic_fn_instances[*idx]->impl_decl) {
+                program.template_method_instance_for_decl[impl_decl] = *idx;
             }
+            check_generic_function_instance_body(*idx, program, diag);
+
+            // Trait conformance for a generic target, which resolve_trait_impl_signatures_for_program
+            // had to defer: it needs resolved param/return types, and those only exist once the
+            // type's parameters are bound — which the instance above has just done.
+            check_generic_trait_impl_conformance(module_path, type_name, method_name, *idx, program, diag);
         }
     }
 

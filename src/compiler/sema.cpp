@@ -248,6 +248,37 @@ namespace sema {
             }
         }
 
+        // Whether '(module, name)' names a type declared with generic parameters — one whose
+        // methods have no resolvable signature until an instantiation binds them.
+        auto is_generic_type_decl(const std::string &module_path, const std::string &name, const Program &program) -> bool {
+            const auto mod_it = program.modules.find(module_path);
+            if (mod_it == program.modules.end()) return false;
+            const auto sym_it = mod_it->second.symbols.find(name);
+            if (sym_it == mod_it->second.symbols.end()) return false;
+            const auto *ts = std::get_if<TypeSymbol>(&sym_it->second);
+            return ts && ts->decl && !ts->decl->generic_params.empty();
+        }
+
+    }
+
+    // Declared in sema.hpp — shared with sema_check.cpp's eager template pass, which performs
+    // this same check for a generic target once its parameters are bound.
+    void report_trait_conformance_mismatch(const MethodInfo &impl_method, const TraitMethodInfo &trait_method,
+                                            const std::string &trait_name, const Program &program, DiagnosticEngine &diag) {
+            const bool mismatch = impl_method.is_mut_self != trait_method.is_mut_self ||
+                                   impl_method.is_variadic ||
+                                   impl_method.param_types != trait_method.params ||
+                                   impl_method.return_types != trait_method.return_types;
+            if (!mismatch) return;
+            diag.report_error(DiagnosticStage::Sema, impl_method.decl->location,
+                std::format(
+                    "method '{}' does not match trait '{}': expected {}, found {}",
+                    trait_method.name, trait_name,
+                    describe_signature(trait_method.is_mut_self, trait_method.params, trait_method.return_types, program),
+                    describe_signature(impl_method.is_mut_self, impl_method.param_types, impl_method.return_types, program)));
+    }
+
+    namespace {
         // Resolves one method's self, parameter and return types into 'info'.
         //
         // Stops deliberately short of the DEFAULTS policy, which is the one place the two
@@ -321,21 +352,36 @@ namespace sema {
         void resolve_trait_impl_signatures_for_program(Program &program, DiagnosticEngine &diag) {
             for (auto &impls : program.trait_impls_by_type | std::views::values) {
                 for (auto &impl_info : impls) {
-                    const auto self_type = resolve_type_symbol(impl_info.type_module, impl_info.type_name, program, diag, impl_info.location);
+                    // A GENERIC target's methods have no single "the" signature to resolve
+                    // here: 'fn draw(self) -> T' only means something once T is bound. Resolving
+                    // the bare name 'Box' with no arguments would force its right-hand side to
+                    // be laid out with nothing bound, reporting "unknown type 'T'" against the
+                    // type DECLARATION. Mirrors resolve_impl_signatures_for_module's identical
+                    // guard for bare 'impl' blocks.
+                    //
+                    // Signatures and bodies for these are resolved by
+                    // check_generic_type_method_bodies instead, against a template receiver with
+                    // the parameters unbound — which is also where their trait conformance is
+                    // checked, since that comparison needs resolved types.
+                    const bool target_is_generic = is_generic_type_decl(impl_info.type_module, impl_info.type_name, program);
 
-                    for (auto &info : impl_info.methods | std::views::values) {
-                        if (info.is_resolved) continue;
+                    if (!target_is_generic) {
+                        const auto self_type = resolve_type_symbol(impl_info.type_module, impl_info.type_name, program, diag, impl_info.location);
 
-                        resolve_method_signature(info, self_type, impl_info.impl_module, program, diag);
+                        for (auto &info : impl_info.methods | std::views::values) {
+                            if (info.is_resolved) continue;
 
-                        // A trait-impl method must never declare its own defaults — see the
-                        // redeclare/add-without-trait validation below, matched against the
-                        // trait's own defaults. required_params is always the full count here;
-                        // all defaulting for a trait-backed method flows from TraitMethodInfo.
-                        info.required_params = info.param_types.size();
-                        info.param_default_is_const.assign(info.param_types.size(), false);
+                            resolve_method_signature(info, self_type, impl_info.impl_module, program, diag);
 
-                        info.is_resolved = true;
+                            // A trait-impl method must never declare its own defaults — see the
+                            // redeclare/add-without-trait validation below, matched against the
+                            // trait's own defaults. required_params is always the full count here;
+                            // all defaulting for a trait-backed method flows from TraitMethodInfo.
+                            info.required_params = info.param_types.size();
+                            info.param_default_is_const.assign(info.param_types.size(), false);
+
+                            info.is_resolved = true;
+                        }
                     }
 
                     const auto *trait_info = program.trait_at(impl_info.trait_index);
@@ -355,17 +401,12 @@ namespace sema {
                         impl_method.trait_index = impl_info.trait_index;
                         impl_method.trait_method_index = static_cast<int>(trait_method_index);
 
-                        const bool mismatch = impl_method.is_mut_self != trait_method.is_mut_self ||
-                                               impl_method.is_variadic ||
-                                               impl_method.param_types != trait_method.params ||
-                                               impl_method.return_types != trait_method.return_types;
-                        if (mismatch) {
-                            diag.report_error(DiagnosticStage::Sema, impl_method.decl->location,
-                                std::format(
-                                    "method '{}' does not match trait '{}': expected {}, found {}",
-                                    trait_method.name, impl_info.trait_name,
-                                    describe_signature(trait_method.is_mut_self, trait_method.params, trait_method.return_types, program),
-                                    describe_signature(impl_method.is_mut_self, impl_method.param_types, impl_method.return_types, program)));
+                        // The signature comparison needs RESOLVED types, which a generic
+                        // target's methods do not have yet. Deferred to
+                        // check_generic_type_method_bodies, which has the template receiver;
+                        // everything else in this loop is structural and applies to both.
+                        if (!target_is_generic) {
+                            report_trait_conformance_mismatch(impl_method, trait_method, impl_info.trait_name, program, diag);
                         }
 
                         for (size_t i = 0; i < impl_method.decl->params.size() && i < trait_method.params.size(); ++i) {

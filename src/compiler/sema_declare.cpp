@@ -1064,6 +1064,7 @@ namespace sema {
                         .decl = &fn,
                         .impl_module = module_path,
                         .type_name = type_ref->name,
+                        .impl_generic_params = timpl->generic_params.empty() ? nullptr : &timpl->generic_params,
                         .is_mut_self = fn.is_mut_self,
                         .is_pub = fn.is_pub,
                         .is_resolved = false,

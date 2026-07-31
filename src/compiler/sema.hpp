@@ -1406,4 +1406,14 @@ namespace sema {
 
     // Look up a method on a type. Searches the type's defining module's method table.
     auto find_method(const ResolvedType &ty, const std::string &method_name, const Program &program) -> const MethodInfo *;
+
+    // Does an implementing method's RESOLVED signature match the trait method it claims to
+    // implement? Reports if not. Defined in sema.cpp.
+    //
+    // Called from two moments, meaning the same thing in both: at signature-resolution time
+    // for a non-generic target, and from the eager template pass for a generic one, whose
+    // signatures do not exist until its parameters have been bound (see
+    // check_generic_trait_impl_conformance). Shared so the rule cannot differ between them.
+    void report_trait_conformance_mismatch(const MethodInfo &impl_method, const TraitMethodInfo &trait_method,
+                                            const std::string &trait_name, const Program &program, DiagnosticEngine &diag);
 }

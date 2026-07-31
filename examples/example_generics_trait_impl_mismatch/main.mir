@@ -1,0 +1,33 @@
+// example_generics_trait_impl_mismatch/main.mir — REJECTION CASE. Trait conformance is
+// enforced for a GENERIC target, not just a concrete one.
+//
+// This is the half of DEFERRED §7 that is easy to lose. A generic target's method signatures
+// cannot be resolved at signature-resolution time — 'fn draw(self) -> T' means nothing until
+// T is bound — so the conformance comparison has to be deferred to the eager template pass,
+// which binds the type's parameters to Opaque and so has real types to compare.
+//
+// Deferring it is not the same as dropping it. An earlier, smaller fix for §7 made generic
+// trait impls merely COMPILE, and this file compiled clean: the wrong return type below was
+// accepted, and so was omitting the method entirely. Both are errors again.
+//
+// Expected: rejected with "method 'draw' does not match trait 'Drawable': expected
+// (self) -> i32, found (self) -> f64".
+
+pub type Drawable = trait {
+    fn draw(self) -> i32
+}
+
+pub type Box[T: type] = struct {
+    value: T
+}
+
+impl Drawable for Box[T: type] {
+    fn draw(self) -> f64 {
+        return 1.0
+    }
+}
+
+pub fn main() -> i32 {
+    mut b: Box[i32] = { .value = 1 }
+    return 0
+}

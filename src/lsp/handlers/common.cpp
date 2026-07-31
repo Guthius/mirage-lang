@@ -379,10 +379,6 @@ namespace lsp::handlers {
     // answer ("u8" where the user wrote "T"). The template instance has the honest Opaque for
     // exactly those, so this now only runs where there is no template instance at all:
     //
-    //   - a generic method of an 'impl TRAIT for TYPE' block. check_generic_type_method_bodies
-    //     drives off ProgramModule::methods, but trait-impl methods are registered only into
-    //     Program::trait_impls_by_type (sema_declare.cpp's declare_trait_impl), so those bodies
-    //     are never eagerly checked. Recorded in DEFERRED.md.
     //   - options.eager_generic_check off, which no LSP path sets today.
     //   - a body the eager pass abandoned early (unsatisfied bounds - see instantiate_generic_
     //     function's 'bounds_ok'), where the declaration is already reporting a real error.

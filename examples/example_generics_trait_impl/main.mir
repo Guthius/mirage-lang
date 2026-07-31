@@ -1,0 +1,67 @@
+// example_generics_trait_impl/main.mir — 'impl TRAIT for GENERIC_TYPE[T]' works, and its
+// methods are callable.
+//
+// This did not compile at all before DEFERRED §7 was addressed. Two separate gaps:
+//
+//   1. resolve_trait_impl_signatures_for_program resolved the target's bare name to get a
+//      self type. For a generic target that forces the type's right-hand side to be laid out
+//      with nothing bound to its parameters, so merely DECLARING a generic trait impl made
+//      the target type report "unknown type 'T'" against its own declaration.
+//   2. Trait-impl MethodInfo never recorded the impl block's generic_params, so
+//      instantiate_generic_method compared arity 0 against the receiver's 1 and reported an
+//      internal error. Calling such a method was impossible.
+//
+// §7 described only the consequence that the BODY went unchecked. In fact nothing about
+// these worked; the body being unchecked was downstream of that.
+//
+// Expected: compiles and runs, exit code 21.
+
+pub type Drawable = trait {
+    fn draw(self) -> i32
+}
+
+pub type Sized = trait {
+    fn size(self) -> i32
+}
+
+pub type Box[T: type] = struct {
+    value: T
+    count: i32
+}
+
+// A generic trait impl whose body reaches through 'self' into fields that are only PARTLY
+// parameter-dependent — 'count' is a concrete i32 regardless of T, so the body is fully
+// checkable at the declaration.
+impl Drawable for Box[T: type] {
+    fn draw(self) -> i32 {
+        return self.count * 2
+    }
+}
+
+// A second trait on the same generic type: the method tables are merged by name, and each
+// method still resolves to the trait that declares it.
+impl Sized for Box[T: type] {
+    fn size(self) -> i32 {
+        return self.count + 1
+    }
+}
+
+// A bare impl alongside the trait impls, to check the two method sources coexist.
+impl Box[T: type] {
+    pub fn bump(self) {
+        self.count += 1
+    }
+}
+
+pub fn main() -> i32 {
+    mut a: Box[i32] = { .value = 1, .count = 5 }
+    // A second instantiation, to check the two get separate method instances rather than
+    // sharing whichever was built first.
+    mut b: Box[u8] = { .value = 2, .count = 1 }
+
+    a.bump() // count = 6
+
+    // a: draw = 6*2 = 12, size = 6+1 = 7
+    // b: draw = 1*2 = 2
+    return a.draw() + a.size() + b.draw() // 12 + 7 + 2 = 21
+}

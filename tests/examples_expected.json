@@ -513,6 +513,15 @@
     "action": "run",
     "exit": 12
   },
+  "example_generics_trait_impl": {
+    "action": "run",
+    "exit": 21
+  },
+  "example_generics_trait_impl_mismatch": {
+    "action": "build",
+    "diag": "examples/example_generics_trait_impl_mismatch/main.mir:25:5: error: method 'draw' does not match trait 'Drawable': expected (self) -> i32, found (self) -> f64",
+    "exit": 1
+  },
   "example_generics_two_instances": {
     "action": "run",
     "exit": 30
