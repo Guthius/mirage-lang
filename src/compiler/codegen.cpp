@@ -6202,9 +6202,30 @@ namespace codegen {
             // the constraint string, which likewise lists every "=*m" output before every "r"
             // input. The '$N' placeholders written into the asm string use that same
             // outputs-first-then-inputs numbering.
-            void emit_asm_stmt(const ast::AsmStmt &stmt) {
-                const auto &info = current_exprs_->asm_stmt_info.at(&stmt);
-
+            // Lowers a resolved inline-asm block — statement or expression form — to a single
+            // LLVM InlineAsm call.
+            //
+            // The two forms differ in exactly one thing, and it is 'leading_output_constraint':
+            // the EXPRESSION form pins its result to a named register with a "={reg}" output
+            // constraint, the statement form has no such constraint. Everything else — operand
+            // rendering, '$N' numbering, constraint assembly, the elementtype attributes — is
+            // identical, and used to be written twice.
+            //
+            // Why that one parameter is enough, and why it is the delicate part:
+            //
+            // LLVM numbers '$N' template placeholders by CONSTRAINT-LIST position, outputs
+            // before inputs, whether or not the template text references a given operand. A
+            // "={reg}" output is a DIRECT-VALUE output: it contributes no call argument at all
+            // (its value is realized through the call's return type), but it does occupy
+            // constraint index 0. So prepending it shifts every '&var' output's '$N' to
+            // '1 + index' and every input's to '1 + outputs + index' — while leaving
+            // call-ARGUMENT indices, and therefore the elementtype loop, completely unaffected.
+            // That offset is the whole of the difference the previous in-code comment described
+            // as the reason not to share this code.
+            auto emit_inline_asm(const std::vector<ast::AsmInstruction> &instructions,
+                                  const std::set<std::string> &clobbered_families, const bool clobbers_memory,
+                                  const std::optional<std::string> &leading_output_constraint,
+                                  llvm::Type *return_type) -> llvm::CallInst * {
                 enum class RenderKind : uint8_t { Literal, Output, Input };
                 struct RenderedOperand {
                     RenderKind kind;
@@ -6219,10 +6240,10 @@ namespace codegen {
                                                               // indirect ("=*m") call argument
                                                               // now that pointers are opaque
                 std::vector<llvm::Value *> input_args;
-                std::vector<std::vector<RenderedOperand>> rendered(stmt.instructions.size());
+                std::vector<std::vector<RenderedOperand>> rendered(instructions.size());
 
-                for (size_t ii = 0; ii < stmt.instructions.size(); ++ii) {
-                    const auto &instr = stmt.instructions[ii];
+                for (size_t ii = 0; ii < instructions.size(); ++ii) {
+                    const auto &instr = instructions[ii];
                     auto &row = rendered[ii];
                     row.reserve(instr.operands.size());
 
@@ -6263,12 +6284,15 @@ namespace codegen {
                     }
                 }
 
+                // See the doc comment: a leading direct-value output occupies constraint index 0.
+                const size_t template_offset = leading_output_constraint ? 1 : 0;
+
                 std::string asm_string;
-                for (size_t ii = 0; ii < stmt.instructions.size(); ++ii) {
+                for (size_t ii = 0; ii < instructions.size(); ++ii) {
                     if (ii > 0) {
                         asm_string += "\n\t";
                     }
-                    asm_string += stmt.instructions[ii].mnemonic;
+                    asm_string += instructions[ii].mnemonic;
                     const auto &row = rendered[ii];
                     for (size_t oi = 0; oi < row.size(); ++oi) {
                         asm_string += (oi == 0) ? " " : ", ";
@@ -6276,19 +6300,20 @@ namespace codegen {
                         if (r.kind == RenderKind::Literal) {
                             asm_string += r.literal_text;
                         } else if (r.kind == RenderKind::Output) {
-                            asm_string += "$" + std::to_string(r.index);
+                            asm_string += "$" + std::to_string(template_offset + r.index);
                         } else { // Input — numbered after every output
-                            asm_string += "$" + std::to_string(output_args.size() + r.index);
+                            asm_string += "$" + std::to_string(template_offset + output_args.size() + r.index);
                         }
                     }
                 }
 
                 std::vector<std::string> constraints;
-                constraints.reserve(output_args.size() + input_args.size() + info.clobbered_families.size() + 2);
+                constraints.reserve(template_offset + output_args.size() + input_args.size() + clobbered_families.size() + 2);
+                if (leading_output_constraint) constraints.push_back(*leading_output_constraint);
                 for (size_t i = 0; i < output_args.size(); ++i) constraints.emplace_back("=*m");
                 for (size_t i = 0; i < input_args.size(); ++i) constraints.emplace_back("r");
-                for (const auto &family : info.clobbered_families) constraints.push_back("~{" + family + "}");
-                if (info.clobbers_memory) constraints.emplace_back("~{memory}");
+                for (const auto &family : clobbered_families) constraints.push_back("~{" + family + "}");
+                if (clobbers_memory) constraints.emplace_back("~{memory}");
                 constraints.emplace_back("~{dirflag}");
 
                 std::string constraint_string;
@@ -6303,7 +6328,7 @@ namespace codegen {
                     param_types.push_back(value->getType());
                 }
 
-                auto *fn_type = llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), param_types, false);
+                auto *fn_type = llvm::FunctionType::get(return_type, param_types, false);
                 auto *inline_asm = llvm::InlineAsm::get(fn_type, asm_string, constraint_string,
                     /*hasSideEffects=*/true, /*isAlignStack=*/false, llvm::InlineAsm::AD_Intel);
 
@@ -6314,142 +6339,28 @@ namespace codegen {
                 // Every indirect ("=*m") argument needs an explicit 'elementtype' attribute —
                 // opaque pointers no longer carry a pointee type, and LLVM's verifier rejects
                 // an indirect inline-asm operand without one ("Operand for indirect constraint
-                // must have elementtype attribute").
+                // must have elementtype attribute"). Argument indices are unshifted: a leading
+                // direct-value output contributes no argument.
                 for (size_t i = 0; i < output_elem_types.size(); ++i) {
                     call->addParamAttr(static_cast<unsigned>(i), llvm::Attribute::get(*context_, llvm::Attribute::ElementType, output_elem_types[i]));
                 }
+                return call;
             }
 
-            // Lowers a resolved 'asm -> reg [: type] { ... }' EXPRESSION to a single LLVM
-            // InlineAsm call, structurally parallel to emit_asm_stmt above but NOT sharing code
-            // with it: emit_asm_stmt's '$N' template numbering assumes every output starts at
-            // index 0, which no longer holds once a fixed-register output constraint is
-            // prepended here, so this is a deliberate, small (~60 line) duplication rather than
-            // touching emit_asm_stmt (which must remain byte-for-byte behaviorally unchanged).
-            //
-            // The result register's output constraint ("={regname}") is a DIRECT-VALUE output —
-            // unlike '&var' outputs (indirect "=*m", realized as a pointer call-argument), this
-            // one contributes NO call argument at all; its value is realized purely via the
-            // call's return type. LLVM numbers '$N' template placeholders by constraint-list
-            // position, output constraints before input constraints, regardless of whether the
-            // template text references a given operand — so prepending "={reg}" (constraint
-            // index 0, no '$N' reference needed since the register is already pinned by name)
-            // shifts every '&var' output's '$N' to '1 + index' and every input's to
-            // '1 + output_args.size() + index'. Call-ARGUMENT indices (and thus the
-            // 'elementtype' attribute loop below) are completely unaffected by this shift, since
-            // the fixed-register output contributes no argument — the first '&var' output
-            // pointer is still argument index 0, exactly as in emit_asm_stmt.
+            void emit_asm_stmt(const ast::AsmStmt &stmt) {
+                const auto &info = current_exprs_->asm_stmt_info.at(&stmt);
+                emit_inline_asm(stmt.instructions, info.clobbered_families, info.clobbers_memory,
+                                 /*leading_output_constraint=*/std::nullopt, llvm::Type::getVoidTy(*context_));
+            }
+
+            // 'asm -> reg [: type] { ... }' — the expression form. Its result is pinned to a
+            // named register by a leading "={reg}" output constraint, which is the only thing
+            // that differs from the statement form; see emit_inline_asm.
             auto emit_asm_expr(const ast::AsmExpr &expr, const sema::ResolvedType &result_ty) -> llvm::Value * {
                 const auto &info = current_exprs_->asm_expr_info.at(&expr);
-
-                enum class RenderKind : uint8_t { Literal, Output, Input };
-                struct RenderedOperand {
-                    RenderKind kind;
-                    std::string literal_text;
-                    size_t index = 0;
-                };
-
-                std::vector<llvm::Value *> output_args;
-                std::vector<llvm::Type *> output_elem_types;
-                std::vector<llvm::Value *> input_args;
-                std::vector<std::vector<RenderedOperand>> rendered(expr.instructions.size());
-
-                for (size_t ii = 0; ii < expr.instructions.size(); ++ii) {
-                    const auto &instr = expr.instructions[ii];
-                    auto &row = rendered[ii];
-                    row.reserve(instr.operands.size());
-
-                    for (const auto &operand : instr.operands) {
-                        std::visit(
-                            [&]<typename T>(const T &op) {
-                                using OpT = std::decay_t<T>;
-                                if constexpr (std::is_same_v<OpT, ast::AsmRegisterOperand>) {
-                                    row.push_back(RenderedOperand{.kind = RenderKind::Literal, .literal_text = op.name});
-                                } else if constexpr (std::is_same_v<OpT, ast::AsmImmediateOperand>) {
-                                    row.push_back(RenderedOperand{.kind = RenderKind::Literal, .literal_text = std::to_string(op.value)});
-                                } else { // ast::AsmVariableOperand
-                                    const auto ref = resolve_asm_variable(op.name);
-                                    if (ref.ptr == nullptr || ref.storage_type == nullptr) {
-                                        // sema resolves and validates every asm operand name
-                                        // before codegen runs, so a miss here is an internal
-                                        // inconsistency. Report it: the alternative was passing a
-                                        // null pointer and null element type straight into
-                                        // CreateLoad / the inline-asm argument list, which either
-                                        // crashes LLVM or, for a raw memory operand, silently
-                                        // encodes a wrong address.
-                                        report_codegen_error(diag_, op.location, std::format(
-                                            "internal error: inline asm operand '{}' did not resolve to a variable", op.name));
-                                        return;
-                                    }
-                                    if (op.is_address) {
-                                        output_args.push_back(ref.ptr);
-                                        output_elem_types.push_back(ref.storage_type);
-                                        row.push_back(RenderedOperand{.kind = RenderKind::Output, .index = output_args.size() - 1});
-                                    } else {
-                                        auto *value = builder_.CreateLoad(ref.storage_type, ref.ptr);
-                                        input_args.push_back(value);
-                                        row.push_back(RenderedOperand{.kind = RenderKind::Input, .index = input_args.size() - 1});
-                                    }
-                                }
-                            },
-                            operand);
-                    }
-                }
-
-                std::string asm_string;
-                for (size_t ii = 0; ii < expr.instructions.size(); ++ii) {
-                    if (ii > 0) {
-                        asm_string += "\n\t";
-                    }
-                    asm_string += expr.instructions[ii].mnemonic;
-                    const auto &row = rendered[ii];
-                    for (size_t oi = 0; oi < row.size(); ++oi) {
-                        asm_string += (oi == 0) ? " " : ", ";
-                        const auto &r = row[oi];
-                        if (r.kind == RenderKind::Literal) {
-                            asm_string += r.literal_text;
-                        } else if (r.kind == RenderKind::Output) {
-                            asm_string += "$" + std::to_string(1 + r.index);
-                        } else { // Input — numbered after the fixed-register output and every '&var' output
-                            asm_string += "$" + std::to_string(1 + output_args.size() + r.index);
-                        }
-                    }
-                }
-
-                std::vector<std::string> constraints;
-                constraints.reserve(1 + output_args.size() + input_args.size() + info.clobbered_families.size() + 2);
-                constraints.push_back("={" + expr.result_register.name + "}");
-                for (size_t i = 0; i < output_args.size(); ++i) constraints.emplace_back("=*m");
-                for (size_t i = 0; i < input_args.size(); ++i) constraints.emplace_back("r");
-                for (const auto &family : info.clobbered_families) constraints.push_back("~{" + family + "}");
-                if (info.clobbers_memory) constraints.emplace_back("~{memory}");
-                constraints.emplace_back("~{dirflag}");
-
-                std::string constraint_string;
-                for (size_t i = 0; i < constraints.size(); ++i) {
-                    if (i > 0) constraint_string += ",";
-                    constraint_string += constraints[i];
-                }
-
-                auto *ptr_type = llvm::PointerType::getUnqual(*context_);
-                std::vector<llvm::Type *> param_types(output_args.size(), ptr_type);
-                for (auto *value : input_args) {
-                    param_types.push_back(value->getType());
-                }
-
-                auto *fn_type = llvm::FunctionType::get(llvm_type(*current_module_path_, result_ty), param_types, false);
-                auto *inline_asm = llvm::InlineAsm::get(fn_type, asm_string, constraint_string,
-                    /*hasSideEffects=*/true, /*isAlignStack=*/false, llvm::InlineAsm::AD_Intel);
-
-                std::vector<llvm::Value *> call_args = output_args;
-                call_args.insert(call_args.end(), input_args.begin(), input_args.end());
-                auto *call = builder_.CreateCall(inline_asm, call_args);
-
-                for (size_t i = 0; i < output_elem_types.size(); ++i) {
-                    call->addParamAttr(static_cast<unsigned>(i), llvm::Attribute::get(*context_, llvm::Attribute::ElementType, output_elem_types[i]));
-                }
-
-                return call;
+                return emit_inline_asm(expr.instructions, info.clobbered_families, info.clobbers_memory,
+                                        "={" + expr.result_register.name + "}",
+                                        llvm_type(*current_module_path_, result_ty));
             }
 
             void emit_if(const ast::IfStmt &stmt) {
