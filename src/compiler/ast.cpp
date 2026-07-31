@@ -1941,7 +1941,7 @@ namespace ast {
         auto parse_bitwise_and(Parser &parser) -> Expr {
             auto lhs = parse_equality(parser);
 
-            while (parser.check(TokenKind::Ampersand) && !parser.check(TokenKind::AmpAmp)) {
+            while (parser.check(TokenKind::Ampersand)) {
                 const auto location = parser.current_location();
 
                 parser.advance();
@@ -1984,7 +1984,7 @@ namespace ast {
         auto parse_bitwise_or(Parser &parser) -> Expr {
             auto lhs = parse_bitwise_xor(parser);
 
-            while (parser.check(TokenKind::Pipe) && !parser.check(TokenKind::PipePipe)) {
+            while (parser.check(TokenKind::Pipe)) {
                 const auto location = parser.current_location();
 
                 parser.advance();
