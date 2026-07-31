@@ -869,6 +869,11 @@
     "action": "run",
     "exit": 0
   },
+  "example_trait_impl_pointer_alias": {
+    "action": "build",
+    "diag": "examples/example_trait_impl_pointer_alias/main.mir:14:15: error: 'P' is not a struct, enum, or union type",
+    "exit": 1
+  },
   "example_traits": {
     "action": "run",
     "exit": 0

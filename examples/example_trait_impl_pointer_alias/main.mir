@@ -1,0 +1,22 @@
+// example_trait_impl_pointer_alias — 'impl TRAIT for T' must only accept struct, enum, and
+// union targets. The check only rejected traits themselves, so a pointer alias was
+// silently accepted as an impl target even though vtables and method dispatch were never
+// designed for a pointee-less receiver (CODE_REVIEW.md SEMA-6).
+//
+// Expected: compile error "'P' is not a struct, enum, or union type".
+
+type Show = trait {
+    fn show(self) -> i32
+}
+
+type P = *i32
+
+impl Show for P {
+    fn show(self) -> i32 {
+        return 1
+    }
+}
+
+pub fn main() -> i32 {
+    return 0
+}

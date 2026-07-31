@@ -977,9 +977,17 @@ namespace sema {
                 // legal 'impl TRAIT for List[T: type] { ... }' target, parametrizing the
                 // TYPE side only (traits themselves are not made generic).
                 const bool type_is_generic_decl = type_ref->symbol->decl && !type_ref->symbol->decl->generic_params.empty();
-                if (!type_is_generic_decl && (!type_ref->symbol->resolved || type_ref->symbol->resolved->kind == TypeKind::Trait)) {
-                    diag.report_error(DiagnosticStage::Sema, timpl->type_name.location, std::format("'{}' is not a struct, enum, or union type", type_ref->name));
-                    continue;
+                if (!type_is_generic_decl) {
+                    // Whitelist rather than blacklist: only Trait used to be rejected, so a
+                    // pointer/function/slice alias ('type P = *i32') was silently accepted as
+                    // an impl target — machinery downstream (vtables for a pointee-less
+                    // receiver, find_method's full-scan fallback) was never designed for it.
+                    const auto kind = type_ref->symbol->resolved ? type_ref->symbol->resolved->kind : TypeKind::Invalid;
+                    const bool valid_target = kind == TypeKind::Struct || kind == TypeKind::Enum || kind == TypeKind::Union;
+                    if (!valid_target) {
+                        diag.report_error(DiagnosticStage::Sema, timpl->type_name.location, std::format("'{}' is not a struct, enum, or union type", type_ref->name));
+                        continue;
+                    }
                 }
 
                 validate_generic_param_types(timpl->generic_params, diag);
