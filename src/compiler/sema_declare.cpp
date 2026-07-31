@@ -562,10 +562,8 @@ namespace sema {
                             }
                         }, *v);
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TaggedVariantExpr>>) {
-                        if (v->payload) {
-                            for (const auto &f : v->payload->fields) {
-                                ensure_condition_modules_declared(f.expr, program, module_path, module, sema_program, diag);
-                            }
+                        for (const auto &f : v->payload.fields) {
+                            ensure_condition_modules_declared(f.expr, program, module_path, module, sema_program, diag);
                         }
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TryExpr>>) {
                         ensure_condition_modules_declared(v->call, program, module_path, module, sema_program, diag);

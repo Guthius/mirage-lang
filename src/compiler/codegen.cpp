@@ -1454,12 +1454,12 @@ namespace codegen {
                 builder_.CreateStore(tag_val, slot);
 
                 // Store payload at payload_offset if present
-                if (variant_it->payload_struct_index >= 0 && expr.payload.has_value()) {
+                if (variant_it->payload_struct_index >= 0) {
                     const sema::ResolvedType payload_ty{.kind = sema::TypeKind::Struct, .struct_index = variant_it->payload_struct_index};
                     const auto &payload_struct = sema_program_.structs.at(variant_it->payload_struct_index);
                     const auto &struct_module = payload_struct.module_path;
 
-                    auto *struct_val = emit_struct_expr_value(*expr.payload, payload_ty);
+                    auto *struct_val = emit_struct_expr_value(expr.payload, payload_ty);
 
                     // GEP to payload_offset
                     auto *payload_ptr = builder_.CreateConstInBoundsGEP1_64(

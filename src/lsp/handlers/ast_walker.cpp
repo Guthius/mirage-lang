@@ -153,9 +153,7 @@ namespace lsp::handlers {
                         },
                         *node);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TaggedVariantExpr>>) {
-                    if (node->payload) {
-                        for (const auto &field : node->payload->fields) walk_expr(field.expr, visitor);
-                    }
+                    for (const auto &field : node->payload.fields) walk_expr(field.expr, visitor);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TryExpr>>) {
                     walk_expr(node->call, visitor);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::RangeExpr>>) {

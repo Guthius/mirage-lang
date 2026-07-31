@@ -3879,15 +3879,11 @@ namespace sema {
             return error_as(diag, v->location,
                 std::format("no variant '{}' on {}", v->variant_name, union_info.is_error_union ? "error" : "tagged union"), union_ty);
         }
-        const bool has_payload = variant_it->payload_struct_index >= 0;
-        if (!has_payload && v->payload.has_value()) {
+        if (variant_it->payload_struct_index < 0) {
             return error_as(diag, v->location, std::format("variant '{}' has no payload; use '.{}' without braces", v->variant_name, v->variant_name), union_ty);
         }
-        if (has_payload) {
-            if (!v->payload.has_value()) {
-                return error_as(diag, v->location, std::format("variant '{}' requires a payload initializer; use '.{}{{field = val}}'", v->variant_name, v->variant_name), union_ty);
-            }
-            const auto &bv = *v->payload;
+        {
+            const auto &bv = v->payload;
             const auto *struct_info_ptr = program.struct_at(variant_it->payload_struct_index);
             if (!struct_info_ptr) {
                 return error(diag, v->location, "internal error: invalid payload struct index");
@@ -5174,13 +5170,11 @@ namespace sema {
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TaggedVariantExpr>>) {
                 // Constructing a variant whose payload holds the pointer carries it out
                 // exactly as a struct literal field does — this arm was simply missing.
-                if (node->payload) {
-                    for (const auto &field : node->payload->fields) {
-                        if (yields_capture_pointer(field.expr, aliases)) {
-                            report_capture_escape(aliases, field.location, "a variant payload", diag);
-                        }
-                        check_payload_capture_escape_expr(field.expr, aliases, diag);
+                for (const auto &field : node->payload.fields) {
+                    if (yields_capture_pointer(field.expr, aliases)) {
+                        report_capture_escape(aliases, field.location, "a variant payload", diag);
                     }
+                    check_payload_capture_escape_expr(field.expr, aliases, diag);
                 }
             } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::MatchExpr>>) {
                 // A nested match shadowing the same capture name rebinds it; the outer

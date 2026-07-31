@@ -408,9 +408,7 @@ namespace sema {
                         // EmptyExpr, BitsetExpr: leaves, nothing further to recurse into.
                     }, *v);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TaggedVariantExpr>>) {
-                    if (v->payload) {
-                        for (const auto &field : v->payload->fields) walk_expr_for_foreign_refs(field.expr, locals, module_path, program, on_foreign_ref);
-                    }
+                    for (const auto &field : v->payload.fields) walk_expr_for_foreign_refs(field.expr, locals, module_path, program, on_foreign_ref);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TryExpr>>) {
                     walk_expr_for_foreign_refs(v->call, locals, module_path, program, on_foreign_ref);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::RangeExpr>>) {
