@@ -902,6 +902,7 @@ namespace sema {
                                     Program &sema_program, DiagnosticEngine &diag) -> std::optional<std::pair<std::string, std::string>> {
             std::string current_module = start_module;
             const ast::NamedType *current = &named;
+            bool crossed = false;
 
             while (current->member != nullptr) {
                 const auto mod_it = sema_program.modules.find(current_module);
@@ -919,8 +920,17 @@ namespace sema {
                     diag.report_error(DiagnosticStage::Sema, current->location, std::format("'{}' is not a namespace", current->name));
                     return std::nullopt;
                 }
+                // Mirrors walk_namespace_chain's visibility rule: once the walk has crossed
+                // into another module, only pub re-exports may be traversed. This copy
+                // omitted the check, so 'impl a.b.Trait for a.b.Type' could traverse a
+                // non-pub namespace re-export that ordinary type resolution rejects.
+                if (crossed && !imp->is_pub) {
+                    diag.report_error(DiagnosticStage::Sema, current->location, std::format("'{}' is not pub", current->name));
+                    return std::nullopt;
+                }
                 current_module = imp->module_path;
                 current = current->member.get();
+                crossed = true;
             }
 
             return std::make_pair(current_module, current->name);
