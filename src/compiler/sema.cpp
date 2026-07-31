@@ -523,6 +523,40 @@ namespace sema {
                       std::format("{} '{}' may fall through without returning a value", kind, name));
         }
 
+        // Every body in a module starts with that module's globals in scope.
+        auto globals_in_scope(const ProgramModule &module) -> LocalScope {
+            LocalScope locals;
+            for (const auto &[name, sym] : module.symbols) {
+                if (const auto *g = std::get_if<GlobalSymbol>(&sym)) {
+                    locals[name] = LocalBinding{.type = g->type, .is_mut = g->is_mut};
+                }
+            }
+            return locals;
+        }
+
+        // Type-checks one method body: globals in scope, 'self' bound as a POINTER to the
+        // receiver, then the declared parameters.
+        //
+        // Shared by check_bodies_for_module (for 'impl TYPE') and
+        // check_trait_impl_bodies_for_program (for 'impl TRAIT for TYPE'). Those two differ
+        // only in where the method table lives and which module supplies the globals — not in
+        // what checking a method body means, which is what this being one function asserts.
+        void check_method_body(MethodInfo &info, const std::string &module_path, const ProgramModule &module,
+                                Program &program, DiagnosticEngine &diag) {
+            LocalScope locals = globals_in_scope(module);
+            locals["self"] = LocalBinding{.type = intern_pointer(program, info.self_type), .is_mut = info.is_mut_self};
+
+            for (size_t i = 0; i < info.decl->params.size(); ++i) {
+                locals[info.decl->params[i].name] = LocalBinding{
+                    .type = info.param_types[i],
+                    .is_mut = info.decl->params[i].is_mut,
+                };
+            }
+
+            check_stmt(info.decl->body, locals, module_path, program, diag, info.return_types, 0);
+            warn_if_may_fall_through("method", info.decl->name, info.decl->body, info.return_types, info.decl->location, diag);
+        }
+
         void check_bodies_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
             for (auto &[name, sym] : module.symbols) {
                 // A bare-import alias shares its 'decl' AST pointer with the origin — the
@@ -544,13 +578,7 @@ namespace sema {
                 // separate pass, and this loop is only about concrete code.
                 if (fn->decl && !fn->decl->generic_params.empty()) continue;
 
-                LocalScope locals;
-                for (auto &[gname, gsym] : module.symbols) {
-                    if (auto *g = std::get_if<GlobalSymbol>(&gsym)) {
-                        locals[gname] = LocalBinding{.type = g->type, .is_mut = g->is_mut};
-                    }
-                }
-
+                LocalScope locals = globals_in_scope(module);
                 for (size_t i = 0; i < fn->decl->params.size(); ++i) {
                     locals[fn->decl->params[i].name] = LocalBinding{.type = fn->params[i], .is_mut = fn->decl->params[i].is_mut};
                 }
@@ -563,27 +591,7 @@ namespace sema {
             for (auto &method_map : module.methods | std::views::values) {
                 for (auto &info : method_map | std::views::values) {
                     if (!info.is_resolved) continue;
-
-                    LocalScope locals;
-                    for (auto &[gname, gsym] : module.symbols) {
-                        if (auto *g = std::get_if<GlobalSymbol>(&gsym)) {
-                            locals[gname] = LocalBinding{.type = g->type, .is_mut = g->is_mut};
-                        }
-                    }
-
-                    // Bind 'self' as a pointer to the type
-                    const auto self_ptr = intern_pointer(program, info.self_type);
-                    locals["self"] = LocalBinding{.type = self_ptr, .is_mut = info.is_mut_self};
-
-                    for (size_t i = 0; i < info.decl->params.size(); ++i) {
-                        locals[info.decl->params[i].name] = LocalBinding{
-                            .type = info.param_types[i],
-                            .is_mut = info.decl->params[i].is_mut,
-                        };
-                    }
-
-                    check_stmt(info.decl->body, locals, module_path, program, diag, info.return_types, 0);
-                    warn_if_may_fall_through("method", info.decl->name, info.decl->body, info.return_types, info.decl->location, diag);
+                    check_method_body(info, module_path, module, program, diag);
                 }
             }
         }
@@ -600,26 +608,7 @@ namespace sema {
 
                     for (auto &info : impl_info.methods | std::views::values) {
                         if (!info.is_resolved) continue;
-
-                        LocalScope locals;
-                        for (auto &[gname, gsym] : mod_it->second.symbols) {
-                            if (auto *g = std::get_if<GlobalSymbol>(&gsym)) {
-                                locals[gname] = LocalBinding{.type = g->type, .is_mut = g->is_mut};
-                            }
-                        }
-
-                        const auto self_ptr = intern_pointer(program, info.self_type);
-                        locals["self"] = LocalBinding{.type = self_ptr, .is_mut = info.is_mut_self};
-
-                        for (size_t i = 0; i < info.decl->params.size(); ++i) {
-                            locals[info.decl->params[i].name] = LocalBinding{
-                                .type = info.param_types[i],
-                                .is_mut = info.decl->params[i].is_mut,
-                            };
-                        }
-
-                        check_stmt(info.decl->body, locals, impl_info.impl_module, program, diag, info.return_types, 0);
-                        warn_if_may_fall_through("method", info.decl->name, info.decl->body, info.return_types, info.decl->location, diag);
+                        check_method_body(info, impl_info.impl_module, mod_it->second, program, diag);
                     }
                 }
             }
