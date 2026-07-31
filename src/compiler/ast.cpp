@@ -655,8 +655,10 @@ namespace ast {
             auto &token = parser.expect(TokenKind::StringLiteral, "string literal");
 
             if (token.lexeme.size() < 2) {
-                parser.report_error(location, "malformed string literal");
-
+                // Every token this short already carries a diagnostic: the lexer only
+                // produces a StringLiteral without its closing quote after reporting it
+                // unterminated, and a non-StringLiteral here means expect() just
+                // reported the mismatch. A second "malformed" report would be noise.
                 return LiteralStringExpr{
                     .value = {},
                     .location = location,
@@ -696,7 +698,9 @@ namespace ast {
 
             std::string_view str = token.lexeme;
             if (str.size() < 3) {
-                parser.report_error(location, "malformed character literal");
+                // As in parse_string_literal: a CharLiteral this short is exactly the
+                // shape the lexer reported as empty/unterminated, and expect() reported
+                // any non-CharLiteral. Stay silent instead of stacking a second error.
                 return LiteralCharExpr{.value = 0, .location = location};
             }
             str.remove_prefix(1);
