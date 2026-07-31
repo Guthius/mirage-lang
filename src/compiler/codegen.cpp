@@ -3366,10 +3366,7 @@ namespace codegen {
                         // fixed sentinel exit code 1 — not the raw error value, since
                         // error(T) has no defined integer representation outside the
                         // function's own context.
-                        auto *slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), call_result->getType());
-                        builder_.CreateStore(call_result, slot);
-                        auto *tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), slot);
-                        auto *is_failed = builder_.CreateICmpNE(tag, builder_.getInt32(0));
+                        auto *is_failed = builder_.CreateICmpNE(extract_error_tag(call_result), builder_.getInt32(0));
 
                         auto *fail_block = llvm::BasicBlock::Create(*context_, "init_failed", init_fn);
                         auto *ok_block = llvm::BasicBlock::Create(*context_, "init_ok", init_fn);
@@ -3419,10 +3416,7 @@ namespace codegen {
                     // returned tagged-union value. Exit 0 on Ok, 1 on Failed — a single
                     // process exit code can't meaningfully recover which variant failed.
                     auto *result_val = builder_.CreateCall(main);
-                    auto *slot = create_entry_alloca(builder_.GetInsertBlock()->getParent(), result_val->getType());
-                    builder_.CreateStore(result_val, slot);
-                    auto *tag = builder_.CreateLoad(llvm::Type::getInt32Ty(*context_), slot);
-                    auto *is_failed = builder_.CreateICmpNE(tag, builder_.getInt32(0));
+                    auto *is_failed = builder_.CreateICmpNE(extract_error_tag(result_val), builder_.getInt32(0));
                     exit_code_i32 = builder_.CreateZExt(is_failed, llvm::Type::getInt32Ty(*context_));
                 } else {
                     exit_code_i32 = builder_.CreateCall(main);
