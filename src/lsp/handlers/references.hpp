@@ -4,7 +4,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include <atomic>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -20,6 +22,12 @@ namespace lsp::handlers {
         // this must not go through the LRU document cache, or a single search could evict
         // every bundle the user actually has open (see DocumentStore::analyse_uncached).
         std::function<analysis::ProgramResult(const std::string &)> analyse;
+        // The request's cancellation flag. The sweep re-analyses one module per entry in
+        // module_dirs, serially, on the single worker thread — checked between modules so a
+        // superseded request stops burning the worker instead of finishing a whole
+        // workspace walk whose result the client will discard anyway. May be null (never
+        // checked then).
+        std::shared_ptr<std::atomic<bool>> cancelled;
     };
 
     // Computes textDocument/references for 1-based (line, column) in `path`: resolves the

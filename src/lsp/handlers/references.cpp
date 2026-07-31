@@ -551,6 +551,10 @@ namespace lsp::handlers {
 
         const auto key = declaration_key(target, result.sema_program);
         for (const auto &dir : workspace->module_dirs) {
+            // A cancelled request's result is discarded by the client; abort the sweep with
+            // whatever was found rather than re-analysing the rest of the workspace for it.
+            if (workspace->cancelled && workspace->cancelled->load()) return out;
+
             // Already covered by the analysis above.
             if (result.ast_program.modules.contains(dir)) continue;
 

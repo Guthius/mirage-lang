@@ -751,7 +751,7 @@ namespace lsp {
                     });
             } else if (method == "textDocument/references") {
                 enqueue_cancellable_request(message, method, queue, channel, completed, in_flight_,
-                    [&](const std::string &path, const std::shared_ptr<std::atomic<bool>> &) -> std::function<json()> {
+                    [&](const std::string &path, const std::shared_ptr<std::atomic<bool>> &cancelled) -> std::function<json()> {
                         const auto line = message["params"]["position"]["line"].get<size_t>() + 1;
                         const auto character = message["params"]["position"]["character"].get<size_t>() + 1;
                         // 'context' is required by the spec, but tolerate its absence rather than
@@ -760,7 +760,7 @@ namespace lsp {
                         const auto include_declaration = message["params"].contains("context")
                             ? message["params"]["context"].value("includeDeclaration", true)
                             : true;
-                        return [&worker, path, line, character, include_declaration]() -> json {
+                        return [&worker, path, line, character, include_declaration, cancelled]() -> json {
                             const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
                             auto &result = worker.documents.ensure_analysed(path);
                             const auto column = worker.utf16_positions
@@ -772,6 +772,7 @@ namespace lsp {
                             handlers::WorkspaceSearch workspace{
                                 .module_dirs = analysis::discover_module_dirs(worker.workspace_root),
                                 .analyse = [&worker](const std::string &dir) { return worker.documents.analyse_uncached(dir); },
+                                .cancelled = cancelled,
                             };
                             const auto *search = workspace.module_dirs.empty() ? nullptr : &workspace;
                             auto response = handlers::handle_references(result, module_path, path, line, column, include_declaration, search);
