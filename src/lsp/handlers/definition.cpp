@@ -2,6 +2,7 @@
 
 #include "../uri.hpp"
 #include "common.hpp"
+#include "locations.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -9,21 +10,14 @@
 
 namespace lsp::handlers {
     namespace {
+        // A synthesized target with no token behind it (an import's module file);
+        // width 1, there being nothing to highlight.
         auto location_at(const std::string &filename, const size_t line, const size_t column) -> nlohmann::json {
             if (filename.empty()) return nullptr;
-            const auto zero_line = line == 0 ? 0 : line - 1;
-            const auto zero_column = column == 0 ? 0 : column - 1;
             return {
                 {"uri", path_to_uri(filename)},
-                {"range", {
-                    {"start", {{"line", zero_line}, {"character", zero_column}}},
-                    {"end", {{"line", zero_line}, {"character", zero_column}}},
-                }},
+                {"range", range_json(line, column, 1)},
             };
-        }
-
-        auto location_json(const SourceLocation &loc) -> nlohmann::json {
-            return location_at(std::string(loc.filename), loc.line, loc.column);
         }
 
         // Best-effort target for jumping to an import: the module directory

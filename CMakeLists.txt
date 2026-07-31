@@ -182,6 +182,7 @@ add_executable(mirage-lsp
         src/lsp/analysis.cpp
         src/lsp/handlers/diagnostics.hpp
         src/lsp/handlers/diagnostics.cpp
+        src/lsp/handlers/locations.hpp
         src/lsp/type_printer.hpp
         src/lsp/type_printer.cpp
         src/lsp/handlers/common.hpp

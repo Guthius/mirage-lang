@@ -1,27 +1,14 @@
 #include "references.hpp"
 
-#include "../uri.hpp"
 #include "ast_walker.hpp"
 #include "common.hpp"
+#include "locations.hpp"
 
 #include <type_traits>
 
 namespace lsp::handlers {
     namespace {
         using json = nlohmann::json;
-
-        auto location_json(const SourceLocation &loc) -> json {
-            if (loc.filename.empty()) return nullptr;
-            const auto zero_line = loc.line == 0 ? 0 : loc.line - 1;
-            const auto zero_column = loc.column == 0 ? 0 : loc.column - 1;
-            return {
-                {"uri", path_to_uri(std::string(loc.filename))},
-                {"range", {
-                    {"start", {{"line", zero_line}, {"character", zero_column}}},
-                    {"end", {{"line", zero_line}, {"character", zero_column}}},
-                }},
-            };
-        }
 
         // Which enum an EnumField resolution ultimately belongs to.
         //

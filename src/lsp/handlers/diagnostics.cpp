@@ -1,14 +1,8 @@
 #include "diagnostics.hpp"
 
-#include <algorithm>
+#include "locations.hpp"
 
 namespace lsp::handlers {
-    namespace {
-        auto to_zero_based(const size_t one_based) -> size_t {
-            return one_based == 0 ? 0 : one_based - 1;
-        }
-    }
-
     namespace {
         auto stage_name(const DiagnosticStage stage) -> const char * {
             switch (stage) {
@@ -22,15 +16,8 @@ namespace lsp::handlers {
     }
 
     auto to_lsp_diagnostic(const Diagnostic &diagnostic) -> nlohmann::json {
-        const auto line = to_zero_based(diagnostic.location.line);
-        const auto character = to_zero_based(diagnostic.location.column);
-        const auto length = std::max<size_t>(diagnostic.location.length, 1);
-
         return {
-            {"range", {
-                {"start", {{"line", line}, {"character", character}}},
-                {"end", {{"line", line}, {"character", character + length}}},
-            }},
+            {"range", range_json(diagnostic.location.line, diagnostic.location.column, diagnostic.location.length)},
             {"severity", diagnostic.level == DiagnosticLevel::Error ? 1 : 2},
             {"source", "mirage"},
             // The producing stage, surfaced as the LSP 'code'. 'source' stays "mirage" (the

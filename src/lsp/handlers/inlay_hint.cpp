@@ -1,5 +1,7 @@
 #include "inlay_hint.hpp"
 
+#include "locations.hpp"
+
 #include "../type_printer.hpp"
 #include "ast_walker.hpp"
 #include "common.hpp"
@@ -15,10 +17,6 @@ namespace lsp::handlers {
 
         // LSP InlayHintKind protocol constants.
         enum class HintKind : int { Type = 1, Parameter = 2 };
-
-        auto position_json(const size_t line, const size_t column) -> json {
-            return {{"line", line == 0 ? 0 : line - 1}, {"character", column == 0 ? 0 : column - 1}};
-        }
 
         auto hint_json(const size_t line, const size_t column, std::string label, const HintKind kind,
                        const bool pad_left, const bool pad_right) -> json {
