@@ -709,6 +709,10 @@
     "action": "run",
     "exit": 0
   },
+  "example_return_forward_coercion": {
+    "action": "run",
+    "exit": 49
+  },
   "example_return_ok_err": {
     "action": "run",
     "exit": 0

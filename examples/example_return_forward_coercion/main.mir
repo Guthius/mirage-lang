@@ -1,0 +1,42 @@
+// example_return_forward_coercion — 'return f()' forwarding multiple return slots must
+// behave exactly like destructuring and returning each value:
+//
+//  1. per-slot coercions sema permits (here slice -> pointer) must be emitted — the old
+//     fast path returned the callee's aggregate verbatim and failed LLVM verification
+//     (CODE_REVIEW.md CG-2);
+//  2. a trailing '?error(...)' slot can be dropped by the forward, with the same recorded
+//     runtime check as 'const a, b := f()' — the old path reported an arity mismatch
+//     (CODE_REVIEW.md CHECK-7).
+//
+// Expected: exit code 49 — g()'s pointer reads S[0] (7) + h()'s forwarded pair (30 + 12).
+
+type E = enum(i32) {
+    Bad = 1
+}
+
+const S: [3]i32 = {7, 8, 9}
+
+fn f() -> ([]i32, error(E)) {
+    return_ok S
+}
+
+fn g() -> (*i32, error(E)) {
+    return f()
+}
+
+fn parts() -> (i32, i32, ?error(E)) {
+    return_ok 30, 12
+}
+
+fn h() -> (i32, i32) {
+    return parts()
+}
+
+pub fn main() -> i32 {
+    const p, err := g()
+    if err {
+        return 100
+    }
+    const a, b := h()
+    return p.* + a + b
+}

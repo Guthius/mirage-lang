@@ -5629,7 +5629,17 @@ namespace sema {
         }
         if (v.return_values.size() == 1 && expected_returns.size() > 1) {
             if (const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&v.return_values[0])) {
-                const auto returns = check_group_call_returns(**call, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
+                auto returns = check_group_call_returns(**call, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
+                // One slot over the arity with a trailing '?error(...)': the forward drops
+                // the ignorable error, recorded for codegen's failure check — the same rule
+                // group declarations and single-value contexts already apply. This path
+                // used to compare exact arity only, so 'return f()' was rejected where
+                // 'const a, b := f()' was accepted for the same callee.
+                if (returns.size() == expected_returns.size() + 1 && is_optional_error_union(returns.back(), program)) {
+                    expr_tables_for_write(program, module_path).call_dropped_optional_error[call->get()] =
+                        DroppedOptionalError{.error_type = returns.back(), .slot_index = returns.size() - 1};
+                    returns.pop_back();
+                }
                 if (returns.size() != expected_returns.size()) {
                     diag.report_error(DiagnosticStage::Sema, v.location,
                                       std::format("expected {} return value(s), got {}", expected_returns.size(), returns.size()));

@@ -6670,8 +6670,49 @@ namespace codegen {
                 if (stmt.return_values.size() == 1 && current_returns_.size() > 1) {
                     if (const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&stmt.return_values[0])) {
                         auto *result = emit_call(**call);
+                        const auto [callee_module, callee_returns] = call_return_types(**call);
+
+                        // The forward may drop a trailing '?error(...)' (sema recorded it —
+                        // same rule as group declarations): check it before returning the
+                        // surviving slots. This path calls emit_call directly, so it never
+                        // passes through emit_expr's apply_dropped_optional_error.
+                        if (const auto dropped = current_exprs_->call_dropped_optional_error.find(call->get());
+                            dropped != current_exprs_->call_dropped_optional_error.end()) {
+                            auto *err_val = builder_.CreateExtractValue(result, {static_cast<unsigned>(dropped->second.slot_index)});
+                            emit_unhandled_error_check(err_val, dropped->second.error_type, (*call)->location);
+                        }
+
+                        const size_t n = current_returns_.size();
+                        bool exact = callee_returns.size() == n;
+                        for (size_t i = 0; exact && i < n; ++i) {
+                            exact = callee_returns[i] == current_returns_[i];
+                        }
+                        if (exact) {
+                            emit_defers_for_return();
+                            builder_.CreateRet(result);
+                            return;
+                        }
+                        if (callee_returns.size() < n) {
+                            report_codegen_error(diag_, (*call)->location, "internal error: forwarded return arity below the function's in codegen");
+                            emit_defers_for_return();
+                            builder_.CreateRet(llvm::UndefValue::get(return_type(*current_module_path_, current_returns_)));
+                            return;
+                        }
+
+                        // sema validated each slot with assignable_in_module, which permits
+                        // representation-changing coercions (array->slice/pointer, ...);
+                        // rebuild the aggregate slot by slot instead of returning the
+                        // callee's verbatim — which failed LLVM verification.
+                        auto *agg_ty = llvm::cast<llvm::StructType>(return_type(*current_module_path_, current_returns_));
+                        llvm::Value *agg = llvm::UndefValue::get(agg_ty);
+                        for (size_t i = 0; i < n; ++i) {
+                            auto *value = builder_.CreateExtractValue(result, {static_cast<unsigned>(i)});
+                            agg = builder_.CreateInsertValue(
+                                agg, coerce_return_slot(value, callee_returns[i], current_returns_[i], (*call)->location),
+                                {static_cast<unsigned>(i)});
+                        }
                         emit_defers_for_return();
-                        builder_.CreateRet(result);
+                        builder_.CreateRet(agg);
                         return;
                     }
                 }
@@ -6714,6 +6755,46 @@ namespace codegen {
                     agg = builder_.CreateInsertValue(agg, ret_vals[i], {static_cast<unsigned>(i)});
                 }
                 builder_.CreateRet(agg);
+            }
+
+            // Per-slot value coercion for forwarded multi-returns ('return f()'), covering
+            // the representation changes assignable_in_module permits between a callee's
+            // return slot and the forwarding function's. Lifetime semantics deliberately
+            // match the explicit destructure-then-return form: an array spilled here lives
+            // in the RETURNING function's frame, exactly as 'const a := ...; return a' would.
+            auto coerce_return_slot(llvm::Value *value, const sema::ResolvedType &from, const sema::ResolvedType &to, const SourceLocation &loc) -> llvm::Value * {
+                auto *to_ty = llvm_type_for(to, *current_module_path_);
+                // Same lowered representation (bitset->storage, ?error<->error with equal
+                // members, pointer-kind relabels): pass through.
+                if (value->getType() == to_ty) return value;
+
+                if (from.kind == sema::TypeKind::Array) {
+                    auto *slot = create_entry_alloca(current_function_, value->getType(), "ret.coerce");
+                    builder_.CreateStore(value, slot);
+                    if (to.kind == sema::TypeKind::Slice) {
+                        const auto *info = sema_program_.array_at(from.array_index);
+                        llvm::Value *fat = llvm::UndefValue::get(to_ty);
+                        fat = builder_.CreateInsertValue(fat, slot, {0});
+                        fat = builder_.CreateInsertValue(fat, builder_.getInt64(info ? info->count : 0), {1});
+                        return fat;
+                    }
+                    return slot; // array -> pointer/anyptr
+                }
+                if (from.kind == sema::TypeKind::Slice) {
+                    if (to.kind == sema::TypeKind::Array) {
+                        return builder_.CreateLoad(to_ty, builder_.CreateExtractValue(value, {0}));
+                    }
+                    return builder_.CreateExtractValue(value, {0}); // slice -> pointer/anyptr
+                }
+                if (to.kind == sema::TypeKind::Slice) { // anyptr -> slice
+                    llvm::Value *fat = llvm::UndefValue::get(to_ty);
+                    fat = builder_.CreateInsertValue(fat, value, {0});
+                    fat = builder_.CreateInsertValue(fat, builder_.getInt64(0), {1});
+                    return fat;
+                }
+
+                report_codegen_error(diag_, loc, "unsupported forwarded return value coercion in codegen");
+                return llvm::UndefValue::get(to_ty);
             }
 
             // For '.Variant' / '.Variant(payload)' sugar (and any other bare error-member
