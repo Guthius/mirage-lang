@@ -2627,6 +2627,750 @@ namespace sema {
         return result;
     }
 
+    // ---- check_expr / check_stmt per-node helpers (CHECK-9) --------------------
+    //
+    // Bodies moved verbatim out of the two std::visit dispatchers, which had grown to
+    // 1683 and 684 lines — an order of magnitude over this project's own ~150-line
+    // guideline, and long enough that finding the arm you wanted meant scrolling past
+    // a dozen others.
+    //
+    // Signatures are explicit rather than bundled into a context struct on purpose: it
+    // keeps every body byte-identical to what it was inline, so this is a move, not a
+    // rewrite. The parameter lists are long because the dispatchers' always were.
+
+    auto check_braced_initializer_expr(const ast::Expr &expr, const std::unique_ptr<ast::BracedInitializerExpr> & v, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
+        // 'return { .a = p, .n = 1 }' where the return type is a generic
+        // instantiation ('Tb[T, T]') has no concrete struct to match field names
+        // and types against — that aggregate does not exist until 'T' does. Still
+        // walk every element expression so mistakes INSIDE the initializer (an
+        // unknown name, a bad call) are reported; just don't judge the shape.
+        if (expected && expected->kind == TypeKind::Opaque) {
+            check_braced_initializer_elements(*v, locals, module_path, program, diag,
+                                               loop_depth, defer_loop_base, fn_error_type);
+            return ResolvedType{.kind = TypeKind::Opaque};
+        }
+        return std::visit(
+            [&]<typename BV>(const BV &bv) -> ResolvedType {
+                using BVT = std::decay_t<BV>;
+
+                if constexpr (std::is_same_v<BVT, ast::EmptyExpr>) {
+                    if (!expected || (expected->kind != TypeKind::Struct && expected->kind != TypeKind::Array)) {
+                        if (expected && expected->kind == TypeKind::Union) {
+                            return error(diag, bv.location, "a union initializer must set exactly one member");
+                        }
+                        return error(diag, bv.location, "braced initializer '{}' requires a struct or array type");
+                    }
+                    return *expected;
+
+                } else if constexpr (std::is_same_v<BVT, ast::StructExpr>) {
+                    if (!expected) {
+                        return error(diag, bv.location, "struct initializer requires an expected type");
+                    }
+                    if (expected->kind == TypeKind::Array) {
+                        return error(diag, bv.location, "struct initializer used where array type is expected");
+                    }
+                    if (expected->kind == TypeKind::Union) {
+                        const auto *union_info_ptr = program.union_at(expected->union_index);
+                        if (!union_info_ptr) {
+                            return error(diag, bv.location, "internal error: invalid union index");
+                        }
+                        const auto &union_info = *union_info_ptr;
+                        if (bv.fields.size() != 1) {
+                            return error(diag, bv.location, std::format("a union initializer must set exactly one member, got {}", bv.fields.size()));
+                        }
+                        const auto &sf = bv.fields[0];
+                        const auto it = std::ranges::find(union_info.members, sf.name, &sema::UnionMember::name);
+                        if (it == union_info.members.end()) {
+                            error(diag, sf.location, std::format("no member '{}' on union", sf.name));
+                            return *expected;
+                        }
+                        const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth, defer_loop_base, fn_error_type);
+                        if (!assignable_in_module(val_ty, it->type, module_path, program)) {
+                            error(diag, sf.location, std::format("type mismatch for union member '{}'", sf.name));
+                        }
+                        return *expected;
+                    }
+                    if (expected->kind != TypeKind::Struct) {
+                        return error(diag, bv.location, "struct initializer requires a struct type");
+                    }
+                    const auto *info_ptr = program.struct_at(expected->struct_index);
+                    if (!info_ptr) {
+                        return error(diag, bv.location, "internal error: invalid struct index");
+                    }
+                    const auto &info = *info_ptr;
+                    // Check for unknown and duplicate field names
+                    std::unordered_set<std::string> seen;
+                    for (const auto &sf : bv.fields) {
+                        if (!seen.insert(sf.name).second) {
+                            error(diag, sf.location, std::format("duplicate field '{}' in struct initializer", sf.name));
+                        }
+                        const auto it = std::ranges::find(info.fields, sf.name, &sema::StructField::name);
+                        if (it == info.fields.end()) {
+                            error(diag, sf.location, std::format("no field '{}' on struct", sf.name));
+                            continue;
+                        }
+                        const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth, defer_loop_base, fn_error_type);
+                        if (!assignable_in_module(val_ty, it->type, module_path, program)) {
+                            error(diag, sf.location, std::format("type mismatch for field '{}'", sf.name));
+                        }
+                    }
+                    // Check that all fields without a default are provided
+                    for (const auto &f : info.fields) {
+                        if (f.init_expr != nullptr) continue;
+                        const bool provided = std::ranges::any_of(bv.fields, [&](const auto &sf) { return sf.name == f.name; });
+                        if (!provided) {
+                            error(diag, bv.location, std::format("missing field '{}' in struct initializer", f.name));
+                        }
+                    }
+                    return *expected;
+
+                } else if constexpr (std::is_same_v<BVT, ast::BitsetExpr>) {
+                    if (!expected || expected->kind != TypeKind::Bitset) {
+                        return error(diag, bv.location, "bitset initializer requires an expected bitset type");
+                    }
+                    const auto *bitset_info = program.bitset_at(expected->bitset_index);
+                    if (!bitset_info) {
+                        return error(diag, bv.location, "internal error: invalid bitset index");
+                    }
+                    const auto *enum_info = program.enum_at(bitset_info->member_enum_type.enum_index);
+                    if (!enum_info) {
+                        return error(diag, bv.location, "internal error: invalid bitset member enum index");
+                    }
+                    // Both diagnostics point at the offending flag rather than at
+                    // the whole '{.A, .B}' literal, which is why Member carries a
+                    // location.
+                    std::unordered_set<std::string> seen;
+                    for (const auto &member : bv.members) {
+                        if (!seen.insert(member.name).second) {
+                            error(diag, member.location, std::format("duplicate member '{}' in bitset initializer", member.name));
+                            continue;
+                        }
+                        const auto it = std::ranges::find(enum_info->fields, member.name, &sema::EnumFieldInfo::name);
+                        if (it == enum_info->fields.end()) {
+                            error(diag, member.location, std::format("no bitset member named '{}'", member.name));
+                        }
+                    }
+                    return *expected;
+
+                } else { // ast::ArrayExpr
+                    if (!expected) {
+                        return error(diag, bv.location, "array initializer requires an expected type");
+                    }
+                    if (expected->kind == TypeKind::Struct) {
+                        if (bv.has_fill) {
+                            return error(diag, bv.location, "fill '...' is not allowed in a positional struct initializer");
+                        }
+                        const auto *info_ptr = program.struct_at(expected->struct_index);
+                        if (!info_ptr) {
+                            return error(diag, bv.location, "internal error: invalid struct index");
+                        }
+                        const auto &info = *info_ptr;
+                        if (bv.values.size() > info.fields.size()) {
+                            return error(diag, bv.location, std::format("too many values in struct initializer: struct has {} field(s), got {}", info.fields.size(), bv.values.size()));
+                        }
+                        for (size_t i = 0; i < bv.values.size(); ++i) {
+                            const auto &field = info.fields[i];
+                            const auto val_ty = check_expr(bv.values[i], locals, module_path, program, diag, field.type, loop_depth, defer_loop_base, fn_error_type);
+                            if (!assignable_in_module(val_ty, field.type, module_path, program)) {
+                                error(diag, bv.location, std::format("type mismatch for field '{}'", field.name));
+                            }
+                        }
+                        for (size_t i = bv.values.size(); i < info.fields.size(); ++i) {
+                            if (info.fields[i].init_expr == nullptr) {
+                                error(diag, bv.location, std::format("missing field '{}' in struct initializer", info.fields[i].name));
+                            }
+                        }
+                        return *expected;
+                    }
+                    if (expected->kind != TypeKind::Array) {
+                        return error(diag, bv.location, "array initializer requires an array type");
+                    }
+                    const auto *array_info_ptr = program.array_at(expected->array_index);
+                    if (!array_info_ptr) {
+                        return error(diag, bv.location, "internal error: invalid array index");
+                    }
+                    const auto &array_info = *array_info_ptr;
+                    if (bv.values.size() > array_info.count) {
+                        return error(diag, bv.location, std::format("too many elements in array initializer: array has {} element(s), got {}", array_info.count, bv.values.size()));
+                    }
+                    for (const auto &val : bv.values) {
+                        const auto val_ty = check_expr(val, locals, module_path, program, diag, array_info.element_type, loop_depth, defer_loop_base, fn_error_type);
+                        if (!assignable_in_module(val_ty, array_info.element_type, module_path, program)) {
+                            error(diag, bv.location, "type mismatch in array initializer element");
+                        }
+                    }
+                    return *expected;
+                }
+            },
+            *v);
+    }
+
+    auto check_ident_expr(const ast::Expr &expr, const ast::IdentExpr & v, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
+        if (auto it = locals.find(v.name); it != locals.end()) return it->second.type;
+
+        const auto mod_it = program.modules.find(module_path);
+        if (mod_it == program.modules.end()) {
+            return error(diag, v.location, std::format("internal error: module '{}' not found", module_path));
+        }
+
+        auto sym_it = mod_it->second.symbols.find(v.name);
+        if (sym_it == mod_it->second.symbols.end()) {
+            return error(diag, v.location, std::format("unknown identifier '{}'", v.name));
+        }
+
+        return std::visit(
+            [&]<typename T1>(const T1 &sym) -> ResolvedType {
+                using S = std::decay_t<T1>;
+                if constexpr (std::is_same_v<S, GlobalSymbol>) {
+                    return resolve_global_symbol(module_path, v.name, program, diag, v.location);
+                } else if constexpr (std::is_same_v<S, ImportSymbol>) {
+                    return ResolvedType{.kind = TypeKind::Namespace};
+                } else if constexpr (std::is_same_v<S, FunctionSymbol>) {
+                    // A generic TEMPLATE has no signature to take the address of —
+                    // only a concrete instantiation does. Reject here rather than
+                    // letting it reach ensure_function_signature_resolved, which
+                    // would leave 'params' empty and produce a confusing
+                    // signature-mismatch error against the empty list.
+                    if (is_generic_function(sym)) {
+                        return error(diag, v.location, std::format(
+                            "'{}' is a generic function; supply its generic arguments to name a "
+                            "specific instantiation (e.g. '{}[i32]')", v.name, v.name));
+                    }
+                    auto &resolved_fn = ensure_function_signature_resolved(module_path, v.name, program, diag);
+                    if (resolved_fn.is_variadic) {
+                        return error(diag, v.location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v.name));
+                    }
+                    if (resolved_fn.decl && find_attribute(resolved_fn.decl->attributes, "always_inline")) {
+                        diag.warn(DiagnosticStage::Sema, v.location, std::format(
+                            "taking the address of '@always_inline' function '{}'. Calls through a "
+                            "function pointer cannot be inlined. The function will still exist as a "
+                            "symbol but the '@always_inline' attribute has no effect on indirect calls.",
+                            v.name));
+                    }
+                    // With a function-typed expectation, honour it exactly (so a
+                    // signature mismatch names the expectation rather than yielding a
+                    // second, vaguer error downstream).
+                    if (expected && expected->kind == TypeKind::Function) {
+                        const auto &exp_sig = fn_sig(*expected, program);
+                        if (function_params_compatible(resolved_fn.params, exp_sig.param_types) &&
+                            resolved_fn.return_types == exp_sig.return_types &&
+                            !exp_sig.is_variadic) {
+                            return *expected;
+                        }
+                        return error(diag, v.location, std::format("'{}' has a different signature from the expected function type", v.name));
+                    }
+                    // No expectation (or a non-function one): a bare function name in
+                    // value position decays to its own function-pointer type, so
+                    // 'const g := f' and a ':='-inferred default parameter value work
+                    // without the type having to be written out. A non-function
+                    // expectation still fails, just via the ordinary assignability
+                    // check at the use site instead of a special case here.
+                    return function_pointer_type_of(resolved_fn, program);
+                } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
+                    if (sym.is_variadic && !(expected && expected->kind == TypeKind::Function)) {
+                        return error(diag, v.location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v.name));
+                    }
+                    // Allow taking address when expected type is a matching function type
+                    if (expected && expected->kind == TypeKind::Function) {
+                        const auto &exp_sig = fn_sig(*expected, program);
+                        std::vector<ResolvedType> ext_returns;
+                        if (sym.return_type) ext_returns.push_back(*sym.return_type);
+                        if (function_params_compatible(sym.params, exp_sig.param_types) &&
+                            ext_returns == exp_sig.return_types &&
+                            sym.is_variadic == exp_sig.is_variadic) {
+                            return *expected;
+                        }
+                        return error(diag, v.location, std::format("'{}' has a different signature from the expected function type", v.name));
+                    }
+                    // Same decay as an ordinary function above.
+                    return ext_function_pointer_type_of(sym, program);
+                } else if constexpr (std::is_same_v<S, MacroSymbol>) {
+                    if (expected && expected->kind == TypeKind::Function) {
+                        return error(diag, v.location, std::format("cannot take the address of macro '{}'", v.name));
+                    }
+                    return error(diag, v.location, std::format("'{}' is a macro; did you mean to call it?", v.name));
+                } else {
+                    return error(diag, v.location, std::format("'{}' is a type, not a value", v.name));
+                }
+            },
+            sym_it->second);
+
+    }
+
+    auto check_unary_expr(const ast::Expr &expr, const std::unique_ptr<ast::UnaryExpr> & v, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
+        switch (v->op) {
+        case ast::UnaryOp::Negate:
+            {
+                // A negated integer literal is range-checked here, as a whole,
+                // rather than letting the literal case check its magnitude alone:
+                // '-128' is representable in i8 while '128' is not, and '-1' must be
+                // rejected for an unsigned target even though '1' fits.
+                if (const auto *lit = std::get_if<ast::LiteralIntegerExpr>(&v->operand);
+                    lit && expected && expected->is_integer()) {
+                    if (!integer_literal_fits(lit->value, /*negative=*/true, *expected)) {
+                        diag.report_error(DiagnosticStage::Sema, v->location, std::format(
+                            "integer literal -{} is out of range for '{}' ({}); use 'cast(...)' if truncation is intended",
+                            lit->value, describe_type(*expected, program), describe_integer_range(*expected)));
+                    }
+                    // Returning without recursing skips the expr_types entry
+                    // check_expr's wrapper would have recorded for the operand, and
+                    // codegen's UnaryExpr case reads exactly that to type the
+                    // CreateNeg. Record it here instead of re-checking the literal,
+                    // which would range-check its magnitude as a positive value and
+                    // reject '-128' for i8.
+                    expr_tables_for_write(program, module_path).expr_types[get_expr_key(v->operand)] = *expected;
+                    return *expected;
+                }
+                const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+                if (operand.kind == TypeKind::Opaque) {
+                    return opaque_unary_result("negate", operand, diag, v->location, program);
+                }
+                if (!operand.is_integer() && !operand.is_float()) {
+                    return error(diag, v->location, "unary '-' requires a numeric operand");
+                }
+                return operand;
+            }
+        case ast::UnaryOp::LogicalNot:
+            check_expr(v->operand, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
+            return ResolvedType{.kind = TypeKind::Bool};
+        case ast::UnaryOp::BitwiseNot:
+            {
+                const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                if (operand.kind == TypeKind::Opaque) {
+                    return opaque_unary_result("apply '~' to", operand, diag, v->location, program);
+                }
+                if (!operand.is_integer() && operand.kind != TypeKind::Bitset) {
+                    return error(diag, v->location, "unary '~' requires an integer or bitset operand");
+                }
+                return operand;
+            }
+        case ast::UnaryOp::AddressOf:
+            {
+                const LvalueInfo lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
+                // Taking the address of an error-tracked local invalidates its
+                // typestate to Unknown — spec only requires this when the pointer
+                // then feeds a call argument, but unconditional invalidation on any
+                // address-of is a safe, simpler over-approximation.
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&v->operand)) {
+                    if (const auto it = locals.find(ident->name); it != locals.end() && it->second.err_state != ErrorState::NotApplicable) {
+                        it->second.err_state = ErrorState::Unknown;
+                        it->second.err_unknown_reason = ErrorUnknownReason::AddressTaken;
+                    }
+                }
+                return intern_pointer(program, lv.type);
+            }
+        case ast::UnaryOp::Deref:
+            {
+                const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                if (operand.kind == TypeKind::Opaque) {
+                    return opaque_unary_result("dereference", operand, diag, v->location, program);
+                }
+                if (operand.kind == TypeKind::Trait) return error(diag, v->location, "cannot dereference a trait handle");
+                if (operand.kind != TypeKind::Pointer) return error(diag, v->location, "cannot dereference a non-pointer value");
+                const auto *pointee = program.pointee_at(operand.pointee_index);
+                if (!pointee) return error(diag, v->location, "internal error: invalid pointer index");
+                return *pointee;
+            }
+        }
+        return ResolvedType{.kind = TypeKind::Invalid};
+
+    }
+
+    auto check_assign_expr(const ast::Expr &expr, const std::unique_ptr<ast::AssignExpr> & v, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
+        auto target = resolve_lvalue(v->target, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
+        if (target.type.kind != TypeKind::Invalid && !target.writable) {
+            error(diag, v->location, "left-hand side of assignment is not mutable");
+        }
+        // Reassigning an error-tracked local invalidates its typestate to Unknown,
+        // regardless of assignment operator.
+        if (const auto *ident = std::get_if<ast::IdentExpr>(&v->target)) {
+            if (const auto it = locals.find(ident->name); it != locals.end() && it->second.err_state != ErrorState::NotApplicable) {
+                it->second.err_state = ErrorState::Unknown;
+            }
+        }
+
+        const auto value_ty = check_expr(v->value, locals, module_path, program, diag, target.type, loop_depth, defer_loop_base, fn_error_type);
+        if (v->op == ast::AssignOp::Assign) {
+            if (!assignable_in_module(value_ty, target.type, module_path, program)) {
+                error(diag, v->location, "type mismatch in assignment");
+            }
+            return target.type;
+        }
+
+        if (v->op == ast::AssignOp::ToggleAssign && target.type.kind != TypeKind::Bitset) {
+            error(diag, v->location, "'~=' is only valid on bitset types; use '^=' for integer XOR-assign");
+            return target.type;
+        }
+        if (target.type.kind == TypeKind::Bitset) {
+            if (v->op != ast::AssignOp::AddAssign && v->op != ast::AssignOp::SubAssign && v->op != ast::AssignOp::ToggleAssign) {
+                error(diag, v->location, "bitset types only support '+=', '-=', and '~=' compound assignment");
+                return target.type;
+            }
+            // value_ty was already checked above with expected = target.type, so a
+            // bare '.Member' RHS already resolved to this bitset type; this also
+            // naturally rejects a raw-integer RHS (e.g. 'modes += 5').
+            if (value_ty.kind != TypeKind::Bitset || value_ty.bitset_index != target.type.bitset_index) {
+                error(diag, v->location, "right-hand side of bitset compound assignment must be a member of "
+                                          "the bitset's enum or a value of the same bitset type");
+            }
+            return target.type;
+        }
+
+        // 'total += v' where 'total: T': whether 'T' is scalar is exactly what
+        // isn't known yet. Permissive for an unconstrained parameter; a bounded one
+        // is rejected by binary_op_result below, which owns that message.
+        if (!target.type.is_scalar() && target.type.kind != TypeKind::Opaque) {
+            error(diag, v->location, "compound assignment requires a scalar left-hand side");
+            return target.type;
+        }
+
+        auto equivalent_op = ast::BinaryOp::Add;
+
+        switch (v->op) {
+        case ast::AssignOp::AddAssign: equivalent_op = ast::BinaryOp::Add; break;
+        case ast::AssignOp::SubAssign: equivalent_op = ast::BinaryOp::Sub; break;
+        case ast::AssignOp::MulAssign: equivalent_op = ast::BinaryOp::Mul; break;
+        case ast::AssignOp::DivAssign: equivalent_op = ast::BinaryOp::Div; break;
+        case ast::AssignOp::AndAssign: equivalent_op = ast::BinaryOp::BitwiseAnd; break;
+        case ast::AssignOp::OrAssign:  equivalent_op = ast::BinaryOp::BitwiseOr; break;
+        case ast::AssignOp::XorAssign: equivalent_op = ast::BinaryOp::BitwiseXor; break;
+        case ast::AssignOp::ShlAssign: equivalent_op = ast::BinaryOp::ShiftLeft; break;
+        case ast::AssignOp::ShrAssign: equivalent_op = ast::BinaryOp::ShiftRight; break;
+        case ast::AssignOp::ToggleAssign: equivalent_op = ast::BinaryOp::BitwiseXor; break; // unreachable: bitset targets return above, non-bitset targets error above
+        case ast::AssignOp::Assign:    break;
+        }
+
+        if (auto op_result_ty = binary_op_result(equivalent_op, target.type, value_ty, diag, v->location, program); op_result_ty.kind != TypeKind::Invalid && !assignable_in_module(op_result_ty, target.type, module_path, program)) {
+            error(diag, v->location, "compound assignment result type does not match the left-hand side's type");
+        }
+
+        return target.type;
+
+    }
+
+    auto check_type_of_expr(const ast::Expr &expr, const std::unique_ptr<ast::TypeOfExpr> & v, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
+        // Same ident/qualified-type-name special lookup as SizeOfExpr above, so
+        // 'type_of(TypeName)'/'type_of(module.TypeName)' resolve the NAMED type
+        // directly rather than mis-evaluating it as a value expression. Every
+        // resolved operand type gets registered into Program::type_ids right here
+        // (not lazily at codegen time) — codegen only ever reads that map.
+        ResolvedType operand_type;
+        bool resolved_as_type_name = false;
+        if (auto *ident = std::get_if<ast::IdentExpr>(&v->operand)) {
+            const auto mod_it = program.modules.find(module_path);
+            if (mod_it != program.modules.end()) {
+                if (auto sym_it = mod_it->second.symbols.find(ident->name); sym_it != mod_it->second.symbols.end() && std::holds_alternative<TypeSymbol>(sym_it->second)) {
+                    operand_type = resolve_type_symbol(module_path, ident->name, program, diag, v->location);
+                    resolved_as_type_name = true;
+                }
+            }
+        } else if (auto *mem = std::get_if<std::unique_ptr<ast::MemberExpr>>(&v->operand)) {
+            if (auto target_module = try_resolve_namespace_chain((*mem)->object, module_path, locals, program)) {
+                auto mod_it = program.modules.find(*target_module);
+                if (mod_it != program.modules.end()) {
+                    if (auto sym_it = mod_it->second.symbols.find((*mem)->member); sym_it != mod_it->second.symbols.end() && std::holds_alternative<TypeSymbol>(sym_it->second)) {
+                        operand_type = resolve_type_symbol(*target_module, (*mem)->member, program, diag, v->location);
+                        resolved_as_type_name = true;
+                    }
+                }
+            }
+        }
+        if (!resolved_as_type_name) {
+            if (const auto *inst = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&v->operand)) {
+                if (const auto instantiated = try_resolve_generic_type_instantiation(**inst, module_path, program, diag)) {
+                    operand_type = *instantiated;
+                    resolved_as_type_name = true;
+                    // As in size_of/align_of above: codegen's type_of_operand falls
+                    // back to expr_types for operand shapes its own fast paths do
+                    // not recognize, and cannot instantiate one itself.
+                    expr_tables_for_write(program, module_path).expr_types[get_expr_key(v->operand)] = operand_type;
+                }
+            }
+        }
+        if (!resolved_as_type_name) {
+            operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+        }
+        if (operand_type.kind == TypeKind::Namespace) {
+            // Same gap as size_of/align_of: a bare imported-module identifier is not
+            // a value and has no type, but used to intern a meaningless type id.
+            return error(diag, get_expr_location(v->operand),
+                "'type_of' requires a type or a value; this names an imported module");
+        }
+        // 'contains_opaque': inside a generic DECLARATION 'type_of(x)' names a type
+        // that does not exist yet, and registering it would make codegen emit a
+        // '__type_info_<id>' global for it. Each real instantiation registers its
+        // own concrete type when it is checked.
+        if (operand_type.kind != TypeKind::Invalid && !contains_opaque(operand_type, program)) {
+            const auto id = intern_type_id(program, operand_type);
+            // Register for possible reflection unconditionally, not just when this
+            // TypeOfExpr is the direct syntactic argument of type_info_of — the
+            // resulting 'type' value can just as easily be stored in a variable and
+            // handed to type_info_of indirectly (or reach it via any other runtime
+            // control flow), and the runtime binary-search table has no other way to
+            // learn about this type. See declare_type_info_globals in codegen.cpp.
+            program.types_needing_info.insert(id);
+            program.types_needing_info_types[id] = operand_type;
+        }
+        expr_tables_for_write(program, module_path).expr_type_of_operand_type[get_expr_key(expr)] = operand_type;
+        return ResolvedType{.kind = TypeKind::Type};
+
+    }
+
+    auto check_member_expr(const ast::Expr &expr, const std::unique_ptr<ast::MemberExpr> & v, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
+        // Cross-module function pointer taking: 'mod.fn_name' in value position.
+        // Mirrors the same-module IdentExpr arms above, including the decay when
+        // there is no function-typed expectation — try_resolve_namespace_chain
+        // already guarantees the object is a module here, so a FunctionSymbol/
+        // ExtFunctionSymbol member can only mean "name this function as a value";
+        // anything else falls through to ordinary member resolution below.
+        if (const auto target_mod = try_resolve_namespace_chain(v->object, module_path, locals, program)) {
+            const auto mod_it = program.modules.find(*target_mod);
+            if (mod_it != program.modules.end()) {
+                const auto sym_it = mod_it->second.symbols.find(v->member);
+                if (sym_it != mod_it->second.symbols.end()) {
+                    const auto *exp_sig = expected && expected->kind == TypeKind::Function
+                        ? &fn_sig(*expected, program) : nullptr;
+                    if (const auto *generic_fs = std::get_if<FunctionSymbol>(&sym_it->second);
+                        generic_fs && is_generic_function(*generic_fs)) {
+                        return error(diag, v->location, std::format(
+                            "'{}' is a generic function; supply its generic arguments to name a "
+                            "specific instantiation (e.g. '{}[i32]')", v->member, v->member));
+                    }
+                    if (std::holds_alternative<FunctionSymbol>(sym_it->second)) {
+                        auto &fn = ensure_function_signature_resolved(*target_mod, v->member, program, diag);
+                        if (!fn.is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
+                        if (fn.is_variadic) {
+                            return error(diag, v->location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v->member));
+                        }
+                        if (fn.decl && find_attribute(fn.decl->attributes, "always_inline")) {
+                            diag.warn(DiagnosticStage::Sema, v->location, std::format(
+                                "taking the address of '@always_inline' function '{}'. Calls through a "
+                                "function pointer cannot be inlined. The function will still exist as a "
+                                "symbol but the '@always_inline' attribute has no effect on indirect calls.",
+                                v->member));
+                        }
+                        if (!exp_sig) return function_pointer_type_of(fn, program);
+                        if (function_params_compatible(fn.params, exp_sig->param_types) &&
+                            fn.return_types == exp_sig->return_types &&
+                            !exp_sig->is_variadic) {
+                            return *expected;
+                        }
+                        return error(diag, v->location, std::format("'{}' has a different signature from the expected function type", v->member));
+                    }
+                    if (const auto *ef = std::get_if<ExtFunctionSymbol>(&sym_it->second)) {
+                        if (!ef->is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
+                        if (!exp_sig) {
+                            if (ef->is_variadic) {
+                                return error(diag, v->location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v->member));
+                            }
+                            return ext_function_pointer_type_of(*ef, program);
+                        }
+                        std::vector<ResolvedType> ext_returns;
+                        if (ef->return_type) ext_returns.push_back(*ef->return_type);
+                        if (function_params_compatible(ef->params, exp_sig->param_types) &&
+                            ext_returns == exp_sig->return_types &&
+                            ef->is_variadic == exp_sig->is_variadic) {
+                            return *expected;
+                        }
+                        return error(diag, v->location, std::format("'{}' has a different signature from the expected function type", v->member));
+                    }
+                }
+            }
+        }
+        return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type, /*need_writable=*/false).type;
+
+    }
+
+    auto check_tagged_variant_expr(const ast::Expr &expr, const std::unique_ptr<ast::TaggedVariantExpr> & v, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
+        // Resolve the tagged union type
+        ResolvedType union_ty;
+        if (v->type_path) {
+            union_ty = resolve_type(ast::Type{clone_named_type(*v->type_path)}, module_path, program, diag);
+        } else if (expected && expected->kind == TypeKind::Union) {
+            union_ty = *expected;
+        } else {
+            return error(diag, v->location, "cannot infer tagged union type; provide an explicit type name (e.g. 'TypeName.variant{...}')");
+        }
+        if (union_ty.kind != TypeKind::Union) {
+            return error(diag, v->location, std::format("'{}' is not a union type", format_named_type(*v->type_path)));
+        }
+        const auto *union_info_ptr = program.union_at(union_ty.union_index);
+        if (!union_info_ptr) {
+            return error(diag, v->location, "internal error: invalid union index");
+        }
+        const auto &union_info = *union_info_ptr;
+        if (!union_info.is_tagged) {
+            return error(diag, v->location, "use '{member = val}' syntax for untagged unions");
+        }
+        const auto variant_it = std::ranges::find(union_info.variants, v->variant_name, &TaggedUnionVariant::name);
+        if (variant_it == union_info.variants.end()) {
+            return error_as(diag, v->location,
+                std::format("no variant '{}' on {}", v->variant_name, union_info.is_error_union ? "error" : "tagged union"), union_ty);
+        }
+        const bool has_payload = variant_it->payload_struct_index >= 0;
+        if (!has_payload && v->payload.has_value()) {
+            return error_as(diag, v->location, std::format("variant '{}' has no payload; use '.{}' without braces", v->variant_name, v->variant_name), union_ty);
+        }
+        if (has_payload) {
+            if (!v->payload.has_value()) {
+                return error_as(diag, v->location, std::format("variant '{}' requires a payload initializer; use '.{}{{field = val}}'", v->variant_name, v->variant_name), union_ty);
+            }
+            const auto &bv = *v->payload;
+            const auto *struct_info_ptr = program.struct_at(variant_it->payload_struct_index);
+            if (!struct_info_ptr) {
+                return error(diag, v->location, "internal error: invalid payload struct index");
+            }
+            const auto &struct_info = *struct_info_ptr;
+            std::unordered_set<std::string> seen;
+            for (const auto &sf : bv.fields) {
+                if (!seen.insert(sf.name).second) {
+                    error(diag, sf.location, std::format("duplicate field '{}' in variant initializer", sf.name));
+                }
+                const auto it = std::ranges::find(struct_info.fields, sf.name, &StructField::name);
+                if (it == struct_info.fields.end()) {
+                    error(diag, sf.location, std::format("no field '{}' in variant '{}'", sf.name, v->variant_name));
+                    continue;
+                }
+                const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth, defer_loop_base, fn_error_type);
+                if (!assignable_in_module(val_ty, it->type, module_path, program)) {
+                    error(diag, sf.location, std::format("type mismatch for field '{}'", sf.name));
+                }
+            }
+            for (const auto &f : struct_info.fields) {
+                if (f.init_expr != nullptr) continue;
+                if (!std::ranges::any_of(bv.fields, [&](const auto &sf) { return sf.name == f.name; })) {
+                    error(diag, v->location, std::format("missing field '{}' in variant '{}'", f.name, v->variant_name));
+                }
+            }
+        }
+        return union_ty;
+    }
+
+    auto check_dot_ident_expr(const ast::Expr &expr, const ast::DotIdentExpr & v, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
+        // Dot-prefixed enum field literal: .field_name
+        // Requires an expected enum or tagged union type
+        if (expected && expected->kind == TypeKind::Enum) {
+            const auto *enum_info = program.enum_at(expected->enum_index);
+            if (!enum_info) return error(diag, v.location, "internal error: invalid enum index");
+            for (const auto &field : enum_info->fields) {
+                if (field.name == v.name) {
+                    return *expected;
+                }
+            }
+            return error_as(diag, v.location, std::format("no enum field named '{}'", v.name), *expected);
+        }
+        if (expected && expected->kind == TypeKind::Bitset) {
+            // A bare '.Member' resolved against a bitset-expected type resolves
+            // directly to the BITSET type (not the underlying enum) — this is what
+            // makes '.Close' usable as a compound-assign RHS or 'in' operand with no
+            // separate coercion step. Members ARE the underlying enum's variants;
+            // bitset has no field list of its own.
+            const auto *bitset_info = program.bitset_at(expected->bitset_index);
+            if (!bitset_info) return error(diag, v.location, "internal error: invalid bitset index");
+            const auto *enum_info = program.enum_at(bitset_info->member_enum_type.enum_index);
+            if (!enum_info) return error(diag, v.location, "internal error: invalid bitset member enum index");
+            for (const auto &field : enum_info->fields) {
+                if (field.name == v.name) {
+                    return *expected;
+                }
+            }
+            return error_as(diag, v.location, std::format("no bitset member named '{}'", v.name), *expected);
+        }
+        if (expected && expected->kind == TypeKind::Union) {
+            const auto *union_info = program.union_at(expected->union_index);
+            if (union_info && union_info->is_tagged) {
+                const auto it = std::ranges::find(union_info->variants, v.name, &TaggedUnionVariant::name);
+                if (it == union_info->variants.end()) {
+                    return error_as(diag, v.location,
+                        std::format("no variant '{}' on {}", v.name, union_info->is_error_union ? "error" : "tagged union"), *expected);
+                }
+                if (it->payload_struct_index >= 0) {
+                    return error_as(diag, v.location, std::format("variant '{}' has a payload; use '.{}{{...}}' syntax", v.name, v.name), *expected);
+                }
+                return *expected;
+            }
+        }
+        // '.Empty' compared against a field whose type is an unbound generic
+        // parameter (or a member of a generic aggregate, which is equally opaque):
+        // there is no enum to resolve the name against yet. Accept and let the
+        // real instantiation resolve it.
+        if (expected && expected->kind == TypeKind::Opaque) {
+            return ResolvedType{.kind = TypeKind::Opaque};
+        }
+        return error(diag, v.location, std::format("cannot resolve '.{}' without an expected enum or tagged union type", v.name));
+
+    }
+
+    void check_for_in_stmt(const std::unique_ptr<ast::ForInStmt> &v, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) {
+        if (const auto *rp = std::get_if<std::unique_ptr<ast::RangeExpr>>(&v->iterable)) {
+            const auto &range = **rp;
+            if (v->element_by_ref) {
+                diag.report_error(DiagnosticStage::Sema, v->location, "range 'for-in' does not support '&' element binding");
+                return;
+            }
+            const auto upper_type = check_expr(range.upper, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+            // 'for i in 0..N' inside 'fn f[N: usize]()': the bound is a generic
+            // value parameter, so it has no integer type yet. Accept and check the
+            // body — the loop is perfectly well-formed once 'N' is known.
+            const bool upper_opaque = upper_type.kind == TypeKind::Opaque;
+            if (!upper_type.is_integer() && !upper_opaque) {
+                diag.report_error(DiagnosticStage::Sema, v->location, "range upper bound must be an integer type");
+                return;
+            }
+            if (range.lower) {
+                const auto lower_type = check_expr(*range.lower, locals, module_path, program, diag, upper_type, loop_depth, defer_loop_base, fn_error_type);
+                if (lower_type != upper_type && !upper_opaque && lower_type.kind != TypeKind::Opaque) {
+                    diag.report_error(DiagnosticStage::Sema, v->location, "range lower and upper bounds must have the same type");
+                    return;
+                }
+            }
+            auto inner = locals;
+            if (v->index_name != "_") {
+                inner[v->index_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::USize}, .is_mut = false};
+            }
+            if (v->element_name != "_") {
+                inner[v->element_name] = LocalBinding{.type = upper_type, .is_mut = false};
+            }
+            check_stmt(v->body, inner, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
+            return;
+        }
+        const auto iterable_type = check_expr(v->iterable, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+        // Iterating a generic aggregate ('for v in self.data' where the field is
+        // '[N]T'): the element type is unknowable, but the loop is still checkable.
+        if (iterable_type.kind == TypeKind::Opaque) {
+            auto inner = locals;
+            if (v->index_name != "_") {
+                inner[v->index_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::USize}, .is_mut = false};
+            }
+            if (v->element_name != "_") {
+                inner[v->element_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::Opaque}, .is_mut = false};
+            }
+            check_stmt(v->body, inner, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
+            return;
+        }
+        if (iterable_type.kind != TypeKind::Slice && iterable_type.kind != TypeKind::Array) {
+            diag.report_error(DiagnosticStage::Sema, v->location, "'for-in' requires a slice or array operand");
+            return;
+        }
+        const auto elem_type = iterable_type.kind == TypeKind::Array
+            ? array_element_type(iterable_type, module_path, program)
+            : slice_element_type(iterable_type, module_path, program);
+        auto inner = locals;
+        if (v->index_name != "_") {
+            inner[v->index_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::USize}, .is_mut = false};
+        }
+        if (v->element_name != "_") {
+            if (v->element_by_ref) {
+                auto ptr_type = intern_pointer(program, elem_type);
+                inner[v->element_name] = LocalBinding{.type = ptr_type, .is_mut = false};
+            } else {
+                inner[v->element_name] = LocalBinding{.type = elem_type, .is_mut = false};
+            }
+        }
+        check_stmt(v->body, inner, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
+
+    }
+
     auto check_expr(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
         const auto ty = std::visit(
             [&]<typename T0>(const T0 &v) -> ResolvedType {
@@ -2673,172 +3417,9 @@ namespace sema {
                     return ResolvedType{.kind = TypeKind::Anyptr};
 
                 } else if constexpr (std::is_same_v<V, ast::IdentExpr>) {
-                    if (auto it = locals.find(v.name); it != locals.end()) return it->second.type;
-
-                    const auto mod_it = program.modules.find(module_path);
-                    if (mod_it == program.modules.end()) {
-                        return error(diag, v.location, std::format("internal error: module '{}' not found", module_path));
-                    }
-
-                    auto sym_it = mod_it->second.symbols.find(v.name);
-                    if (sym_it == mod_it->second.symbols.end()) {
-                        return error(diag, v.location, std::format("unknown identifier '{}'", v.name));
-                    }
-
-                    return std::visit(
-                        [&]<typename T1>(const T1 &sym) -> ResolvedType {
-                            using S = std::decay_t<T1>;
-                            if constexpr (std::is_same_v<S, GlobalSymbol>) {
-                                return resolve_global_symbol(module_path, v.name, program, diag, v.location);
-                            } else if constexpr (std::is_same_v<S, ImportSymbol>) {
-                                return ResolvedType{.kind = TypeKind::Namespace};
-                            } else if constexpr (std::is_same_v<S, FunctionSymbol>) {
-                                // A generic TEMPLATE has no signature to take the address of —
-                                // only a concrete instantiation does. Reject here rather than
-                                // letting it reach ensure_function_signature_resolved, which
-                                // would leave 'params' empty and produce a confusing
-                                // signature-mismatch error against the empty list.
-                                if (is_generic_function(sym)) {
-                                    return error(diag, v.location, std::format(
-                                        "'{}' is a generic function; supply its generic arguments to name a "
-                                        "specific instantiation (e.g. '{}[i32]')", v.name, v.name));
-                                }
-                                auto &resolved_fn = ensure_function_signature_resolved(module_path, v.name, program, diag);
-                                if (resolved_fn.is_variadic) {
-                                    return error(diag, v.location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v.name));
-                                }
-                                if (resolved_fn.decl && find_attribute(resolved_fn.decl->attributes, "always_inline")) {
-                                    diag.warn(DiagnosticStage::Sema, v.location, std::format(
-                                        "taking the address of '@always_inline' function '{}'. Calls through a "
-                                        "function pointer cannot be inlined. The function will still exist as a "
-                                        "symbol but the '@always_inline' attribute has no effect on indirect calls.",
-                                        v.name));
-                                }
-                                // With a function-typed expectation, honour it exactly (so a
-                                // signature mismatch names the expectation rather than yielding a
-                                // second, vaguer error downstream).
-                                if (expected && expected->kind == TypeKind::Function) {
-                                    const auto &exp_sig = fn_sig(*expected, program);
-                                    if (function_params_compatible(resolved_fn.params, exp_sig.param_types) &&
-                                        resolved_fn.return_types == exp_sig.return_types &&
-                                        !exp_sig.is_variadic) {
-                                        return *expected;
-                                    }
-                                    return error(diag, v.location, std::format("'{}' has a different signature from the expected function type", v.name));
-                                }
-                                // No expectation (or a non-function one): a bare function name in
-                                // value position decays to its own function-pointer type, so
-                                // 'const g := f' and a ':='-inferred default parameter value work
-                                // without the type having to be written out. A non-function
-                                // expectation still fails, just via the ordinary assignability
-                                // check at the use site instead of a special case here.
-                                return function_pointer_type_of(resolved_fn, program);
-                            } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
-                                if (sym.is_variadic && !(expected && expected->kind == TypeKind::Function)) {
-                                    return error(diag, v.location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v.name));
-                                }
-                                // Allow taking address when expected type is a matching function type
-                                if (expected && expected->kind == TypeKind::Function) {
-                                    const auto &exp_sig = fn_sig(*expected, program);
-                                    std::vector<ResolvedType> ext_returns;
-                                    if (sym.return_type) ext_returns.push_back(*sym.return_type);
-                                    if (function_params_compatible(sym.params, exp_sig.param_types) &&
-                                        ext_returns == exp_sig.return_types &&
-                                        sym.is_variadic == exp_sig.is_variadic) {
-                                        return *expected;
-                                    }
-                                    return error(diag, v.location, std::format("'{}' has a different signature from the expected function type", v.name));
-                                }
-                                // Same decay as an ordinary function above.
-                                return ext_function_pointer_type_of(sym, program);
-                            } else if constexpr (std::is_same_v<S, MacroSymbol>) {
-                                if (expected && expected->kind == TypeKind::Function) {
-                                    return error(diag, v.location, std::format("cannot take the address of macro '{}'", v.name));
-                                }
-                                return error(diag, v.location, std::format("'{}' is a macro; did you mean to call it?", v.name));
-                            } else {
-                                return error(diag, v.location, std::format("'{}' is a type, not a value", v.name));
-                            }
-                        },
-                        sym_it->second);
-
+                    return check_ident_expr(expr, v, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
-                    switch (v->op) {
-                    case ast::UnaryOp::Negate:
-                        {
-                            // A negated integer literal is range-checked here, as a whole,
-                            // rather than letting the literal case check its magnitude alone:
-                            // '-128' is representable in i8 while '128' is not, and '-1' must be
-                            // rejected for an unsigned target even though '1' fits.
-                            if (const auto *lit = std::get_if<ast::LiteralIntegerExpr>(&v->operand);
-                                lit && expected && expected->is_integer()) {
-                                if (!integer_literal_fits(lit->value, /*negative=*/true, *expected)) {
-                                    diag.report_error(DiagnosticStage::Sema, v->location, std::format(
-                                        "integer literal -{} is out of range for '{}' ({}); use 'cast(...)' if truncation is intended",
-                                        lit->value, describe_type(*expected, program), describe_integer_range(*expected)));
-                                }
-                                // Returning without recursing skips the expr_types entry
-                                // check_expr's wrapper would have recorded for the operand, and
-                                // codegen's UnaryExpr case reads exactly that to type the
-                                // CreateNeg. Record it here instead of re-checking the literal,
-                                // which would range-check its magnitude as a positive value and
-                                // reject '-128' for i8.
-                                expr_tables_for_write(program, module_path).expr_types[get_expr_key(v->operand)] = *expected;
-                                return *expected;
-                            }
-                            const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
-                            if (operand.kind == TypeKind::Opaque) {
-                                return opaque_unary_result("negate", operand, diag, v->location, program);
-                            }
-                            if (!operand.is_integer() && !operand.is_float()) {
-                                return error(diag, v->location, "unary '-' requires a numeric operand");
-                            }
-                            return operand;
-                        }
-                    case ast::UnaryOp::LogicalNot:
-                        check_expr(v->operand, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
-                        return ResolvedType{.kind = TypeKind::Bool};
-                    case ast::UnaryOp::BitwiseNot:
-                        {
-                            const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                            if (operand.kind == TypeKind::Opaque) {
-                                return opaque_unary_result("apply '~' to", operand, diag, v->location, program);
-                            }
-                            if (!operand.is_integer() && operand.kind != TypeKind::Bitset) {
-                                return error(diag, v->location, "unary '~' requires an integer or bitset operand");
-                            }
-                            return operand;
-                        }
-                    case ast::UnaryOp::AddressOf:
-                        {
-                            const LvalueInfo lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
-                            // Taking the address of an error-tracked local invalidates its
-                            // typestate to Unknown — spec only requires this when the pointer
-                            // then feeds a call argument, but unconditional invalidation on any
-                            // address-of is a safe, simpler over-approximation.
-                            if (const auto *ident = std::get_if<ast::IdentExpr>(&v->operand)) {
-                                if (const auto it = locals.find(ident->name); it != locals.end() && it->second.err_state != ErrorState::NotApplicable) {
-                                    it->second.err_state = ErrorState::Unknown;
-                                    it->second.err_unknown_reason = ErrorUnknownReason::AddressTaken;
-                                }
-                            }
-                            return intern_pointer(program, lv.type);
-                        }
-                    case ast::UnaryOp::Deref:
-                        {
-                            const ResolvedType operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                            if (operand.kind == TypeKind::Opaque) {
-                                return opaque_unary_result("dereference", operand, diag, v->location, program);
-                            }
-                            if (operand.kind == TypeKind::Trait) return error(diag, v->location, "cannot dereference a trait handle");
-                            if (operand.kind != TypeKind::Pointer) return error(diag, v->location, "cannot dereference a non-pointer value");
-                            const auto *pointee = program.pointee_at(operand.pointee_index);
-                            if (!pointee) return error(diag, v->location, "internal error: invalid pointer index");
-                            return *pointee;
-                        }
-                    }
-                    return ResolvedType{.kind = TypeKind::Invalid};
-
+                    return check_unary_expr(expr, v, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
                     if (v->op == ast::BinaryOp::In) {
                         // RHS checked FIRST (no expected type), then its resolved type is used
@@ -2979,75 +3560,7 @@ namespace sema {
                     return then_ty;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AssignExpr>>) {
-                    auto target = resolve_lvalue(v->target, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
-                    if (target.type.kind != TypeKind::Invalid && !target.writable) {
-                        error(diag, v->location, "left-hand side of assignment is not mutable");
-                    }
-                    // Reassigning an error-tracked local invalidates its typestate to Unknown,
-                    // regardless of assignment operator.
-                    if (const auto *ident = std::get_if<ast::IdentExpr>(&v->target)) {
-                        if (const auto it = locals.find(ident->name); it != locals.end() && it->second.err_state != ErrorState::NotApplicable) {
-                            it->second.err_state = ErrorState::Unknown;
-                        }
-                    }
-
-                    const auto value_ty = check_expr(v->value, locals, module_path, program, diag, target.type, loop_depth, defer_loop_base, fn_error_type);
-                    if (v->op == ast::AssignOp::Assign) {
-                        if (!assignable_in_module(value_ty, target.type, module_path, program)) {
-                            error(diag, v->location, "type mismatch in assignment");
-                        }
-                        return target.type;
-                    }
-
-                    if (v->op == ast::AssignOp::ToggleAssign && target.type.kind != TypeKind::Bitset) {
-                        error(diag, v->location, "'~=' is only valid on bitset types; use '^=' for integer XOR-assign");
-                        return target.type;
-                    }
-                    if (target.type.kind == TypeKind::Bitset) {
-                        if (v->op != ast::AssignOp::AddAssign && v->op != ast::AssignOp::SubAssign && v->op != ast::AssignOp::ToggleAssign) {
-                            error(diag, v->location, "bitset types only support '+=', '-=', and '~=' compound assignment");
-                            return target.type;
-                        }
-                        // value_ty was already checked above with expected = target.type, so a
-                        // bare '.Member' RHS already resolved to this bitset type; this also
-                        // naturally rejects a raw-integer RHS (e.g. 'modes += 5').
-                        if (value_ty.kind != TypeKind::Bitset || value_ty.bitset_index != target.type.bitset_index) {
-                            error(diag, v->location, "right-hand side of bitset compound assignment must be a member of "
-                                                      "the bitset's enum or a value of the same bitset type");
-                        }
-                        return target.type;
-                    }
-
-                    // 'total += v' where 'total: T': whether 'T' is scalar is exactly what
-                    // isn't known yet. Permissive for an unconstrained parameter; a bounded one
-                    // is rejected by binary_op_result below, which owns that message.
-                    if (!target.type.is_scalar() && target.type.kind != TypeKind::Opaque) {
-                        error(diag, v->location, "compound assignment requires a scalar left-hand side");
-                        return target.type;
-                    }
-
-                    auto equivalent_op = ast::BinaryOp::Add;
-
-                    switch (v->op) {
-                    case ast::AssignOp::AddAssign: equivalent_op = ast::BinaryOp::Add; break;
-                    case ast::AssignOp::SubAssign: equivalent_op = ast::BinaryOp::Sub; break;
-                    case ast::AssignOp::MulAssign: equivalent_op = ast::BinaryOp::Mul; break;
-                    case ast::AssignOp::DivAssign: equivalent_op = ast::BinaryOp::Div; break;
-                    case ast::AssignOp::AndAssign: equivalent_op = ast::BinaryOp::BitwiseAnd; break;
-                    case ast::AssignOp::OrAssign:  equivalent_op = ast::BinaryOp::BitwiseOr; break;
-                    case ast::AssignOp::XorAssign: equivalent_op = ast::BinaryOp::BitwiseXor; break;
-                    case ast::AssignOp::ShlAssign: equivalent_op = ast::BinaryOp::ShiftLeft; break;
-                    case ast::AssignOp::ShrAssign: equivalent_op = ast::BinaryOp::ShiftRight; break;
-                    case ast::AssignOp::ToggleAssign: equivalent_op = ast::BinaryOp::BitwiseXor; break; // unreachable: bitset targets return above, non-bitset targets error above
-                    case ast::AssignOp::Assign:    break;
-                    }
-
-                    if (auto op_result_ty = binary_op_result(equivalent_op, target.type, value_ty, diag, v->location, program); op_result_ty.kind != TypeKind::Invalid && !assignable_in_module(op_result_ty, target.type, module_path, program)) {
-                        error(diag, v->location, "compound assignment result type does not match the left-hand side's type");
-                    }
-
-                    return target.type;
-
+                    return check_assign_expr(expr, v, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
                     // The single choke point every callee shape below funnels its resolved
                     // return list through, so the "one value expected here" rule is stated
@@ -3185,71 +3698,7 @@ namespace sema {
                     return ResolvedType{.kind = TypeKind::USize};
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
-                    // Same ident/qualified-type-name special lookup as SizeOfExpr above, so
-                    // 'type_of(TypeName)'/'type_of(module.TypeName)' resolve the NAMED type
-                    // directly rather than mis-evaluating it as a value expression. Every
-                    // resolved operand type gets registered into Program::type_ids right here
-                    // (not lazily at codegen time) — codegen only ever reads that map.
-                    ResolvedType operand_type;
-                    bool resolved_as_type_name = false;
-                    if (auto *ident = std::get_if<ast::IdentExpr>(&v->operand)) {
-                        const auto mod_it = program.modules.find(module_path);
-                        if (mod_it != program.modules.end()) {
-                            if (auto sym_it = mod_it->second.symbols.find(ident->name); sym_it != mod_it->second.symbols.end() && std::holds_alternative<TypeSymbol>(sym_it->second)) {
-                                operand_type = resolve_type_symbol(module_path, ident->name, program, diag, v->location);
-                                resolved_as_type_name = true;
-                            }
-                        }
-                    } else if (auto *mem = std::get_if<std::unique_ptr<ast::MemberExpr>>(&v->operand)) {
-                        if (auto target_module = try_resolve_namespace_chain((*mem)->object, module_path, locals, program)) {
-                            auto mod_it = program.modules.find(*target_module);
-                            if (mod_it != program.modules.end()) {
-                                if (auto sym_it = mod_it->second.symbols.find((*mem)->member); sym_it != mod_it->second.symbols.end() && std::holds_alternative<TypeSymbol>(sym_it->second)) {
-                                    operand_type = resolve_type_symbol(*target_module, (*mem)->member, program, diag, v->location);
-                                    resolved_as_type_name = true;
-                                }
-                            }
-                        }
-                    }
-                    if (!resolved_as_type_name) {
-                        if (const auto *inst = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&v->operand)) {
-                            if (const auto instantiated = try_resolve_generic_type_instantiation(**inst, module_path, program, diag)) {
-                                operand_type = *instantiated;
-                                resolved_as_type_name = true;
-                                // As in size_of/align_of above: codegen's type_of_operand falls
-                                // back to expr_types for operand shapes its own fast paths do
-                                // not recognize, and cannot instantiate one itself.
-                                expr_tables_for_write(program, module_path).expr_types[get_expr_key(v->operand)] = operand_type;
-                            }
-                        }
-                    }
-                    if (!resolved_as_type_name) {
-                        operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                    }
-                    if (operand_type.kind == TypeKind::Namespace) {
-                        // Same gap as size_of/align_of: a bare imported-module identifier is not
-                        // a value and has no type, but used to intern a meaningless type id.
-                        return error(diag, get_expr_location(v->operand),
-                            "'type_of' requires a type or a value; this names an imported module");
-                    }
-                    // 'contains_opaque': inside a generic DECLARATION 'type_of(x)' names a type
-                    // that does not exist yet, and registering it would make codegen emit a
-                    // '__type_info_<id>' global for it. Each real instantiation registers its
-                    // own concrete type when it is checked.
-                    if (operand_type.kind != TypeKind::Invalid && !contains_opaque(operand_type, program)) {
-                        const auto id = intern_type_id(program, operand_type);
-                        // Register for possible reflection unconditionally, not just when this
-                        // TypeOfExpr is the direct syntactic argument of type_info_of — the
-                        // resulting 'type' value can just as easily be stored in a variable and
-                        // handed to type_info_of indirectly (or reach it via any other runtime
-                        // control flow), and the runtime binary-search table has no other way to
-                        // learn about this type. See declare_type_info_globals in codegen.cpp.
-                        program.types_needing_info.insert(id);
-                        program.types_needing_info_types[id] = operand_type;
-                    }
-                    expr_tables_for_write(program, module_path).expr_type_of_operand_type[get_expr_key(expr)] = operand_type;
-                    return ResolvedType{.kind = TypeKind::Type};
-
+                    return check_type_of_expr(expr, v, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeInfoOfExpr>>) {
                     const auto operand_ty = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     if (operand_ty.kind != TypeKind::Type && operand_ty.kind != TypeKind::Any) {
@@ -3336,68 +3785,7 @@ namespace sema {
                     return to;
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
-                    // Cross-module function pointer taking: 'mod.fn_name' in value position.
-                    // Mirrors the same-module IdentExpr arms above, including the decay when
-                    // there is no function-typed expectation — try_resolve_namespace_chain
-                    // already guarantees the object is a module here, so a FunctionSymbol/
-                    // ExtFunctionSymbol member can only mean "name this function as a value";
-                    // anything else falls through to ordinary member resolution below.
-                    if (const auto target_mod = try_resolve_namespace_chain(v->object, module_path, locals, program)) {
-                        const auto mod_it = program.modules.find(*target_mod);
-                        if (mod_it != program.modules.end()) {
-                            const auto sym_it = mod_it->second.symbols.find(v->member);
-                            if (sym_it != mod_it->second.symbols.end()) {
-                                const auto *exp_sig = expected && expected->kind == TypeKind::Function
-                                    ? &fn_sig(*expected, program) : nullptr;
-                                if (const auto *generic_fs = std::get_if<FunctionSymbol>(&sym_it->second);
-                                    generic_fs && is_generic_function(*generic_fs)) {
-                                    return error(diag, v->location, std::format(
-                                        "'{}' is a generic function; supply its generic arguments to name a "
-                                        "specific instantiation (e.g. '{}[i32]')", v->member, v->member));
-                                }
-                                if (std::holds_alternative<FunctionSymbol>(sym_it->second)) {
-                                    auto &fn = ensure_function_signature_resolved(*target_mod, v->member, program, diag);
-                                    if (!fn.is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
-                                    if (fn.is_variadic) {
-                                        return error(diag, v->location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v->member));
-                                    }
-                                    if (fn.decl && find_attribute(fn.decl->attributes, "always_inline")) {
-                                        diag.warn(DiagnosticStage::Sema, v->location, std::format(
-                                            "taking the address of '@always_inline' function '{}'. Calls through a "
-                                            "function pointer cannot be inlined. The function will still exist as a "
-                                            "symbol but the '@always_inline' attribute has no effect on indirect calls.",
-                                            v->member));
-                                    }
-                                    if (!exp_sig) return function_pointer_type_of(fn, program);
-                                    if (function_params_compatible(fn.params, exp_sig->param_types) &&
-                                        fn.return_types == exp_sig->return_types &&
-                                        !exp_sig->is_variadic) {
-                                        return *expected;
-                                    }
-                                    return error(diag, v->location, std::format("'{}' has a different signature from the expected function type", v->member));
-                                }
-                                if (const auto *ef = std::get_if<ExtFunctionSymbol>(&sym_it->second)) {
-                                    if (!ef->is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
-                                    if (!exp_sig) {
-                                        if (ef->is_variadic) {
-                                            return error(diag, v->location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v->member));
-                                        }
-                                        return ext_function_pointer_type_of(*ef, program);
-                                    }
-                                    std::vector<ResolvedType> ext_returns;
-                                    if (ef->return_type) ext_returns.push_back(*ef->return_type);
-                                    if (function_params_compatible(ef->params, exp_sig->param_types) &&
-                                        ext_returns == exp_sig->return_types &&
-                                        ef->is_variadic == exp_sig->is_variadic) {
-                                        return *expected;
-                                    }
-                                    return error(diag, v->location, std::format("'{}' has a different signature from the expected function type", v->member));
-                                }
-                            }
-                        }
-                    }
-                    return resolve_member(*v, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type, /*need_writable=*/false).type;
-
+                    return check_member_expr(expr, v, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
                     // Value position: either an ordinary index ('a[i]') or a generic FUNCTION
                     // instantiation naming a monomorphized instance as a function-pointer value
@@ -3452,58 +3840,7 @@ namespace sema {
                     return error(diag, v.location, "'iota' is only valid inside enum field initializers");
 
                 } else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
-                    // Dot-prefixed enum field literal: .field_name
-                    // Requires an expected enum or tagged union type
-                    if (expected && expected->kind == TypeKind::Enum) {
-                        const auto *enum_info = program.enum_at(expected->enum_index);
-                        if (!enum_info) return error(diag, v.location, "internal error: invalid enum index");
-                        for (const auto &field : enum_info->fields) {
-                            if (field.name == v.name) {
-                                return *expected;
-                            }
-                        }
-                        return error_as(diag, v.location, std::format("no enum field named '{}'", v.name), *expected);
-                    }
-                    if (expected && expected->kind == TypeKind::Bitset) {
-                        // A bare '.Member' resolved against a bitset-expected type resolves
-                        // directly to the BITSET type (not the underlying enum) — this is what
-                        // makes '.Close' usable as a compound-assign RHS or 'in' operand with no
-                        // separate coercion step. Members ARE the underlying enum's variants;
-                        // bitset has no field list of its own.
-                        const auto *bitset_info = program.bitset_at(expected->bitset_index);
-                        if (!bitset_info) return error(diag, v.location, "internal error: invalid bitset index");
-                        const auto *enum_info = program.enum_at(bitset_info->member_enum_type.enum_index);
-                        if (!enum_info) return error(diag, v.location, "internal error: invalid bitset member enum index");
-                        for (const auto &field : enum_info->fields) {
-                            if (field.name == v.name) {
-                                return *expected;
-                            }
-                        }
-                        return error_as(diag, v.location, std::format("no bitset member named '{}'", v.name), *expected);
-                    }
-                    if (expected && expected->kind == TypeKind::Union) {
-                        const auto *union_info = program.union_at(expected->union_index);
-                        if (union_info && union_info->is_tagged) {
-                            const auto it = std::ranges::find(union_info->variants, v.name, &TaggedUnionVariant::name);
-                            if (it == union_info->variants.end()) {
-                                return error_as(diag, v.location,
-                                    std::format("no variant '{}' on {}", v.name, union_info->is_error_union ? "error" : "tagged union"), *expected);
-                            }
-                            if (it->payload_struct_index >= 0) {
-                                return error_as(diag, v.location, std::format("variant '{}' has a payload; use '.{}{{...}}' syntax", v.name, v.name), *expected);
-                            }
-                            return *expected;
-                        }
-                    }
-                    // '.Empty' compared against a field whose type is an unbound generic
-                    // parameter (or a member of a generic aggregate, which is equally opaque):
-                    // there is no enum to resolve the name against yet. Accept and let the
-                    // real instantiation resolve it.
-                    if (expected && expected->kind == TypeKind::Opaque) {
-                        return ResolvedType{.kind = TypeKind::Opaque};
-                    }
-                    return error(diag, v.location, std::format("cannot resolve '.{}' without an expected enum or tagged union type", v.name));
-
+                    return check_dot_ident_expr(expr, v, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) {
                     auto operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
 
@@ -3913,233 +4250,9 @@ namespace sema {
                     // f() -> T1, T2, ..., error: multi-value; cannot be used in expression position
                     return error(diag, v->location, "multi-value 'try' cannot be used in expression position; use group declaration");
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TaggedVariantExpr>>) {
-                    // Resolve the tagged union type
-                    ResolvedType union_ty;
-                    if (v->type_path) {
-                        union_ty = resolve_type(ast::Type{clone_named_type(*v->type_path)}, module_path, program, diag);
-                    } else if (expected && expected->kind == TypeKind::Union) {
-                        union_ty = *expected;
-                    } else {
-                        return error(diag, v->location, "cannot infer tagged union type; provide an explicit type name (e.g. 'TypeName.variant{...}')");
-                    }
-                    if (union_ty.kind != TypeKind::Union) {
-                        return error(diag, v->location, std::format("'{}' is not a union type", format_named_type(*v->type_path)));
-                    }
-                    const auto *union_info_ptr = program.union_at(union_ty.union_index);
-                    if (!union_info_ptr) {
-                        return error(diag, v->location, "internal error: invalid union index");
-                    }
-                    const auto &union_info = *union_info_ptr;
-                    if (!union_info.is_tagged) {
-                        return error(diag, v->location, "use '{member = val}' syntax for untagged unions");
-                    }
-                    const auto variant_it = std::ranges::find(union_info.variants, v->variant_name, &TaggedUnionVariant::name);
-                    if (variant_it == union_info.variants.end()) {
-                        return error_as(diag, v->location,
-                            std::format("no variant '{}' on {}", v->variant_name, union_info.is_error_union ? "error" : "tagged union"), union_ty);
-                    }
-                    const bool has_payload = variant_it->payload_struct_index >= 0;
-                    if (!has_payload && v->payload.has_value()) {
-                        return error_as(diag, v->location, std::format("variant '{}' has no payload; use '.{}' without braces", v->variant_name, v->variant_name), union_ty);
-                    }
-                    if (has_payload) {
-                        if (!v->payload.has_value()) {
-                            return error_as(diag, v->location, std::format("variant '{}' requires a payload initializer; use '.{}{{field = val}}'", v->variant_name, v->variant_name), union_ty);
-                        }
-                        const auto &bv = *v->payload;
-                        const auto *struct_info_ptr = program.struct_at(variant_it->payload_struct_index);
-                        if (!struct_info_ptr) {
-                            return error(diag, v->location, "internal error: invalid payload struct index");
-                        }
-                        const auto &struct_info = *struct_info_ptr;
-                        std::unordered_set<std::string> seen;
-                        for (const auto &sf : bv.fields) {
-                            if (!seen.insert(sf.name).second) {
-                                error(diag, sf.location, std::format("duplicate field '{}' in variant initializer", sf.name));
-                            }
-                            const auto it = std::ranges::find(struct_info.fields, sf.name, &StructField::name);
-                            if (it == struct_info.fields.end()) {
-                                error(diag, sf.location, std::format("no field '{}' in variant '{}'", sf.name, v->variant_name));
-                                continue;
-                            }
-                            const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth, defer_loop_base, fn_error_type);
-                            if (!assignable_in_module(val_ty, it->type, module_path, program)) {
-                                error(diag, sf.location, std::format("type mismatch for field '{}'", sf.name));
-                            }
-                        }
-                        for (const auto &f : struct_info.fields) {
-                            if (f.init_expr != nullptr) continue;
-                            if (!std::ranges::any_of(bv.fields, [&](const auto &sf) { return sf.name == f.name; })) {
-                                error(diag, v->location, std::format("missing field '{}' in variant '{}'", f.name, v->variant_name));
-                            }
-                        }
-                    }
-                    return union_ty;
+                    return check_tagged_variant_expr(expr, v, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
-                    // 'return { .a = p, .n = 1 }' where the return type is a generic
-                    // instantiation ('Tb[T, T]') has no concrete struct to match field names
-                    // and types against — that aggregate does not exist until 'T' does. Still
-                    // walk every element expression so mistakes INSIDE the initializer (an
-                    // unknown name, a bad call) are reported; just don't judge the shape.
-                    if (expected && expected->kind == TypeKind::Opaque) {
-                        check_braced_initializer_elements(*v, locals, module_path, program, diag,
-                                                           loop_depth, defer_loop_base, fn_error_type);
-                        return ResolvedType{.kind = TypeKind::Opaque};
-                    }
-                    return std::visit(
-                        [&]<typename BV>(const BV &bv) -> ResolvedType {
-                            using BVT = std::decay_t<BV>;
-
-                            if constexpr (std::is_same_v<BVT, ast::EmptyExpr>) {
-                                if (!expected || (expected->kind != TypeKind::Struct && expected->kind != TypeKind::Array)) {
-                                    if (expected && expected->kind == TypeKind::Union) {
-                                        return error(diag, bv.location, "a union initializer must set exactly one member");
-                                    }
-                                    return error(diag, bv.location, "braced initializer '{}' requires a struct or array type");
-                                }
-                                return *expected;
-
-                            } else if constexpr (std::is_same_v<BVT, ast::StructExpr>) {
-                                if (!expected) {
-                                    return error(diag, bv.location, "struct initializer requires an expected type");
-                                }
-                                if (expected->kind == TypeKind::Array) {
-                                    return error(diag, bv.location, "struct initializer used where array type is expected");
-                                }
-                                if (expected->kind == TypeKind::Union) {
-                                    const auto *union_info_ptr = program.union_at(expected->union_index);
-                                    if (!union_info_ptr) {
-                                        return error(diag, bv.location, "internal error: invalid union index");
-                                    }
-                                    const auto &union_info = *union_info_ptr;
-                                    if (bv.fields.size() != 1) {
-                                        return error(diag, bv.location, std::format("a union initializer must set exactly one member, got {}", bv.fields.size()));
-                                    }
-                                    const auto &sf = bv.fields[0];
-                                    const auto it = std::ranges::find(union_info.members, sf.name, &sema::UnionMember::name);
-                                    if (it == union_info.members.end()) {
-                                        error(diag, sf.location, std::format("no member '{}' on union", sf.name));
-                                        return *expected;
-                                    }
-                                    const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth, defer_loop_base, fn_error_type);
-                                    if (!assignable_in_module(val_ty, it->type, module_path, program)) {
-                                        error(diag, sf.location, std::format("type mismatch for union member '{}'", sf.name));
-                                    }
-                                    return *expected;
-                                }
-                                if (expected->kind != TypeKind::Struct) {
-                                    return error(diag, bv.location, "struct initializer requires a struct type");
-                                }
-                                const auto *info_ptr = program.struct_at(expected->struct_index);
-                                if (!info_ptr) {
-                                    return error(diag, bv.location, "internal error: invalid struct index");
-                                }
-                                const auto &info = *info_ptr;
-                                // Check for unknown and duplicate field names
-                                std::unordered_set<std::string> seen;
-                                for (const auto &sf : bv.fields) {
-                                    if (!seen.insert(sf.name).second) {
-                                        error(diag, sf.location, std::format("duplicate field '{}' in struct initializer", sf.name));
-                                    }
-                                    const auto it = std::ranges::find(info.fields, sf.name, &sema::StructField::name);
-                                    if (it == info.fields.end()) {
-                                        error(diag, sf.location, std::format("no field '{}' on struct", sf.name));
-                                        continue;
-                                    }
-                                    const auto val_ty = check_expr(sf.expr, locals, module_path, program, diag, it->type, loop_depth, defer_loop_base, fn_error_type);
-                                    if (!assignable_in_module(val_ty, it->type, module_path, program)) {
-                                        error(diag, sf.location, std::format("type mismatch for field '{}'", sf.name));
-                                    }
-                                }
-                                // Check that all fields without a default are provided
-                                for (const auto &f : info.fields) {
-                                    if (f.init_expr != nullptr) continue;
-                                    const bool provided = std::ranges::any_of(bv.fields, [&](const auto &sf) { return sf.name == f.name; });
-                                    if (!provided) {
-                                        error(diag, bv.location, std::format("missing field '{}' in struct initializer", f.name));
-                                    }
-                                }
-                                return *expected;
-
-                            } else if constexpr (std::is_same_v<BVT, ast::BitsetExpr>) {
-                                if (!expected || expected->kind != TypeKind::Bitset) {
-                                    return error(diag, bv.location, "bitset initializer requires an expected bitset type");
-                                }
-                                const auto *bitset_info = program.bitset_at(expected->bitset_index);
-                                if (!bitset_info) {
-                                    return error(diag, bv.location, "internal error: invalid bitset index");
-                                }
-                                const auto *enum_info = program.enum_at(bitset_info->member_enum_type.enum_index);
-                                if (!enum_info) {
-                                    return error(diag, bv.location, "internal error: invalid bitset member enum index");
-                                }
-                                // Both diagnostics point at the offending flag rather than at
-                                // the whole '{.A, .B}' literal, which is why Member carries a
-                                // location.
-                                std::unordered_set<std::string> seen;
-                                for (const auto &member : bv.members) {
-                                    if (!seen.insert(member.name).second) {
-                                        error(diag, member.location, std::format("duplicate member '{}' in bitset initializer", member.name));
-                                        continue;
-                                    }
-                                    const auto it = std::ranges::find(enum_info->fields, member.name, &sema::EnumFieldInfo::name);
-                                    if (it == enum_info->fields.end()) {
-                                        error(diag, member.location, std::format("no bitset member named '{}'", member.name));
-                                    }
-                                }
-                                return *expected;
-
-                            } else { // ast::ArrayExpr
-                                if (!expected) {
-                                    return error(diag, bv.location, "array initializer requires an expected type");
-                                }
-                                if (expected->kind == TypeKind::Struct) {
-                                    if (bv.has_fill) {
-                                        return error(diag, bv.location, "fill '...' is not allowed in a positional struct initializer");
-                                    }
-                                    const auto *info_ptr = program.struct_at(expected->struct_index);
-                                    if (!info_ptr) {
-                                        return error(diag, bv.location, "internal error: invalid struct index");
-                                    }
-                                    const auto &info = *info_ptr;
-                                    if (bv.values.size() > info.fields.size()) {
-                                        return error(diag, bv.location, std::format("too many values in struct initializer: struct has {} field(s), got {}", info.fields.size(), bv.values.size()));
-                                    }
-                                    for (size_t i = 0; i < bv.values.size(); ++i) {
-                                        const auto &field = info.fields[i];
-                                        const auto val_ty = check_expr(bv.values[i], locals, module_path, program, diag, field.type, loop_depth, defer_loop_base, fn_error_type);
-                                        if (!assignable_in_module(val_ty, field.type, module_path, program)) {
-                                            error(diag, bv.location, std::format("type mismatch for field '{}'", field.name));
-                                        }
-                                    }
-                                    for (size_t i = bv.values.size(); i < info.fields.size(); ++i) {
-                                        if (info.fields[i].init_expr == nullptr) {
-                                            error(diag, bv.location, std::format("missing field '{}' in struct initializer", info.fields[i].name));
-                                        }
-                                    }
-                                    return *expected;
-                                }
-                                if (expected->kind != TypeKind::Array) {
-                                    return error(diag, bv.location, "array initializer requires an array type");
-                                }
-                                const auto *array_info_ptr = program.array_at(expected->array_index);
-                                if (!array_info_ptr) {
-                                    return error(diag, bv.location, "internal error: invalid array index");
-                                }
-                                const auto &array_info = *array_info_ptr;
-                                if (bv.values.size() > array_info.count) {
-                                    return error(diag, bv.location, std::format("too many elements in array initializer: array has {} element(s), got {}", array_info.count, bv.values.size()));
-                                }
-                                for (const auto &val : bv.values) {
-                                    const auto val_ty = check_expr(val, locals, module_path, program, diag, array_info.element_type, loop_depth, defer_loop_base, fn_error_type);
-                                    if (!assignable_in_module(val_ty, array_info.element_type, module_path, program)) {
-                                        error(diag, bv.location, "type mismatch in array initializer element");
-                                    }
-                                }
-                                return *expected;
-                            }
-                        },
-                        *v);
+                    return check_braced_initializer_expr(expr, v, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::RangeExpr>>) {
                     // Range expressions are only valid as for-in operands; type-check bounds
                     // so expr_types is populated for codegen, then report the contextual error.
@@ -5090,6 +5203,202 @@ namespace sema {
         return result_ty;
     }
 
+    void check_var_decl_group_stmt(const ast::VarDeclGroupStmt &v, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) {
+        const ast::CallExpr *call = nullptr;
+        bool is_try = false;
+
+        if (const auto *c = std::get_if<std::unique_ptr<ast::CallExpr>>(&v.init)) {
+            call = c->get();
+        } else if (const auto *t = std::get_if<std::unique_ptr<ast::TryExpr>>(&v.init)) {
+            is_try = true;
+            const auto *inner_call = std::get_if<std::unique_ptr<ast::CallExpr>>(&(*t)->call);
+            if (!inner_call) {
+                diag.report_error(DiagnosticStage::Sema, v.location, "'try' operand must be a direct function call");
+                return;
+            }
+            call = inner_call->get();
+        }
+
+        if (!call) {
+            diag.report_error(DiagnosticStage::Sema, v.location, "group declaration initializer must be a function call or 'try' expression");
+            check_expr(v.init, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+            return;
+        }
+
+        auto returns = check_group_call_returns(*call, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
+        if (returns.empty()) {
+            return;
+        }
+
+        if (is_try) {
+            // Check enclosing function is fallible
+            if (!fn_error_type) {
+                diag.report_error(DiagnosticStage::Sema, v.location,
+                    "enclosing function must return 'error(...)' to use 'try'");
+            }
+            // Strip the error slot from returns
+            if (is_error_union_type(returns.back(), program)) {
+                if (fn_error_type && !error_union_is_subset(returns.back(), *fn_error_type, program)) {
+                    diag.report_error(DiagnosticStage::Sema, v.location,
+                        "callee's error type is not a subset of the enclosing function's error type; "
+                        "widen the enclosing function's 'error(...)' return type or handle the error explicitly");
+                }
+                returns.pop_back();
+            } else {
+                diag.report_error(DiagnosticStage::Sema, v.location,
+                    "'try' can only be used on a function that returns 'error(...)' as its last return value");
+                return;
+            }
+            // Check that we are not inside a defer body
+            if (defer_loop_base >= 0) {
+                diag.report_error(DiagnosticStage::Sema, v.location,
+                    "'try' cannot propagate errors out of a 'defer' body");
+            }
+        }
+
+        // One name short of the arity, with a '?error(...)' in the trailing slot:
+        // the caller is dropping the ignorable error, so record it for codegen
+        // rather than reporting an arity mismatch. Naming it — including naming
+        // it '_' — takes this branch's 'else' and stays a silent discard, which
+        // is the documented opt-out. 'try' already consumed the slot above.
+        if (!is_try && returns.size() == v.names.size() + 1 && is_optional_error_union(returns.back(), program)) {
+            expr_tables_for_write(program, module_path).call_dropped_optional_error[call] =
+                DroppedOptionalError{.error_type = returns.back(), .slot_index = returns.size() - 1};
+            returns.pop_back();
+        }
+
+        if (returns.size() != v.names.size()) {
+            diag.report_error(DiagnosticStage::Sema, v.location, std::format("group declaration expects {} return value(s), got {}", v.names.size(), returns.size()));
+        }
+
+        for (size_t i = 0; i < v.names.size() && i < returns.size(); ++i) {
+            if (!v.names[i].empty() && v.names[i] != "_") {
+                locals[v.names[i]] = LocalBinding{.type = returns[i], .is_mut = v.is_mut,
+                    .err_state = is_error_union_type(returns[i], program) ? ErrorState::Unknown : ErrorState::NotApplicable};
+            }
+        }
+
+    }
+
+    void check_return_stmt(const ast::ReturnStmt &v, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) {
+        if (defer_loop_base >= 0) {
+            diag.report_error(DiagnosticStage::Sema, v.location, "'return' cannot escape a 'defer' body");
+            return;
+        }
+        if (v.return_values.size() == 1 && expected_returns.size() > 1) {
+            if (const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&v.return_values[0])) {
+                const auto returns = check_group_call_returns(**call, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
+                if (returns.size() != expected_returns.size()) {
+                    diag.report_error(DiagnosticStage::Sema, v.location,
+                                      std::format("expected {} return value(s), got {}", expected_returns.size(), returns.size()));
+                    return;
+                }
+                for (size_t i = 0; i < returns.size(); ++i) {
+                    if (!assignable_in_module(returns[i], expected_returns[i], module_path, program)) {
+                        diag.report_error(DiagnosticStage::Sema, v.location, std::format("return value {} type mismatch", i + 1));
+                    }
+                }
+                return;
+            }
+        }
+        if (v.return_values.size() != expected_returns.size()) {
+            diag.report_error(DiagnosticStage::Sema, v.location,
+                              std::format("expected {} return value(s), got {}{}", expected_returns.size(), v.return_values.size(),
+                                          v.possible_asi_gotcha
+                                              ? " (note: 'return' on its own line ends the statement immediately; move the value onto the same line as 'return')"
+                                              : ""));
+            for (auto &val : v.return_values)
+                check_expr(val, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+            return;
+        }
+        for (size_t i = 0; i < v.return_values.size(); ++i) {
+            // Last return slot of a function returning 'error(...)': a bare
+            // '.Variant' / '.Variant(payload)' (or one reachable through
+            // 'match'/'when'/ternary) needs the same unwrap 'return_err' does,
+            // since 'expected_returns[i]' here is the outer Ok/Failed wrapper,
+            // whose own variants are always just "Ok"/"Failed" — never the
+            // wrapped enum/union's names. A value that's already fully typed as
+            // the wrapper (e.g. forwarding another call's error(...) result)
+            // falls through to the ordinary path below unchanged.
+            if (fn_error_type && i == v.return_values.size() - 1) {
+                if (const auto member_type = resolve_return_err_member_type(
+                        v.return_values[i], *fn_error_type, module_path, program, diag, v.location)) {
+                    auto ty = check_expr(v.return_values[i], locals, module_path, program, diag,
+                                          *member_type, loop_depth, defer_loop_base, fn_error_type);
+                    if (!assignable_in_module(ty, *member_type, module_path, program)) {
+                        diag.report_error(DiagnosticStage::Sema, v.location, std::format("return value {} type mismatch", i + 1));
+                    }
+                    continue;
+                }
+                if (find_bare_return_err_variant_name(v.return_values[i])) {
+                    // resolve_return_err_member_type already reported a diagnostic
+                    // for this sugar form (unknown/ambiguous variant, etc).
+                    check_expr(v.return_values[i], locals, module_path, program, diag,
+                               std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    continue;
+                }
+            }
+            auto ty = check_expr(v.return_values[i], locals, module_path, program, diag, expected_returns[i], loop_depth, defer_loop_base, fn_error_type);
+            if (!assignable_in_module(ty, expected_returns[i], module_path, program)) {
+                diag.report_error(DiagnosticStage::Sema, v.location, std::format("return value {} type mismatch", i + 1));
+            }
+        }
+
+    }
+
+    void check_return_err_stmt(const ast::ReturnErrStmt &v, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) {
+        if (defer_loop_base >= 0) {
+            diag.report_error(DiagnosticStage::Sema, v.location, "'return_err' cannot escape a 'defer' body");
+            return;
+        }
+        if (!fn_error_type) {
+            diag.report_error(DiagnosticStage::Sema, v.location,
+                              "enclosing function must return 'error(...)' to use 'return_err'");
+            check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+            return;
+        }
+        // '.Variant' / '.Variant(payload)' — bare, or reachable through 'match'/
+        // 'when'/ternary wrapping — need the expected member type fed in to resolve
+        // at all (see resolve_return_err_member_type / find_bare_return_err_variant_name);
+        // anything else is an ordinary expression that already carries its own type,
+        // so check it with no expected type and classify what came back.
+        if (const auto member_type = resolve_return_err_member_type(v.error_value, *fn_error_type, module_path, program, diag, v.location)) {
+            auto ty = check_expr(v.error_value, locals, module_path, program, diag, *member_type, loop_depth, defer_loop_base, fn_error_type);
+            if (!assignable_in_module(ty, *member_type, module_path, program)) {
+                diag.report_error(DiagnosticStage::Sema, v.location, "'return_err' operand does not match the resolved error member type");
+            }
+        } else if (find_bare_return_err_variant_name(v.error_value)) {
+            // resolve_return_err_member_type already reported a diagnostic for this
+            // sugar form (unknown/ambiguous variant, etc), whether bare at the top
+            // level or nested inside e.g. a 'match' arm.
+            check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+        } else {
+            auto ty = check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+            if (ty.kind == TypeKind::Invalid) {
+                // check_expr already reported a diagnostic.
+            } else if (is_error_union_type(ty, program)) {
+                // Already a full error(...) value — this function's own, or (like
+                // 'try') a subset of it; propagated as-is by codegen, translating
+                // tags if the two unions differ.
+                if (!error_union_is_subset(ty, *fn_error_type, program)) {
+                    diag.report_error(DiagnosticStage::Sema, v.location,
+                        "'return_err' operand's error type is not a subset of the enclosing function's error type; "
+                        "widen the enclosing function's 'error(...)' return type or handle the error explicitly");
+                }
+            } else {
+                const auto *wrapper = program.union_at(fn_error_type->union_index);
+                const bool is_member = wrapper && std::ranges::any_of(
+                    wrapper->error_member_types, [&](const auto &m) { return m == ty; });
+                if (!is_member) {
+                    diag.report_error(DiagnosticStage::Sema, v.location,
+                        "'return_err' operand must be a '.Variant', '.Variant(payload)', a value of one of the "
+                        "enclosing function's error member types, or a compatible 'error(...)' value");
+                }
+            }
+        }
+
+    }
+
     auto check_stmt(const ast::Stmt &stmt, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::vector<ResolvedType> &expected_returns, int loop_depth, int defer_loop_base) -> void {
         const ResolvedType *fn_error_type = (!expected_returns.empty() && is_error_union_type(expected_returns.back(), program))
             ? &expected_returns.back() : nullptr;
@@ -5159,73 +5468,7 @@ namespace sema {
                     merge_error_states(locals, locals, body_locals);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ForInStmt>>) {
-                    if (const auto *rp = std::get_if<std::unique_ptr<ast::RangeExpr>>(&v->iterable)) {
-                        const auto &range = **rp;
-                        if (v->element_by_ref) {
-                            diag.report_error(DiagnosticStage::Sema, v->location, "range 'for-in' does not support '&' element binding");
-                            return;
-                        }
-                        const auto upper_type = check_expr(range.upper, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                        // 'for i in 0..N' inside 'fn f[N: usize]()': the bound is a generic
-                        // value parameter, so it has no integer type yet. Accept and check the
-                        // body — the loop is perfectly well-formed once 'N' is known.
-                        const bool upper_opaque = upper_type.kind == TypeKind::Opaque;
-                        if (!upper_type.is_integer() && !upper_opaque) {
-                            diag.report_error(DiagnosticStage::Sema, v->location, "range upper bound must be an integer type");
-                            return;
-                        }
-                        if (range.lower) {
-                            const auto lower_type = check_expr(*range.lower, locals, module_path, program, diag, upper_type, loop_depth, defer_loop_base, fn_error_type);
-                            if (lower_type != upper_type && !upper_opaque && lower_type.kind != TypeKind::Opaque) {
-                                diag.report_error(DiagnosticStage::Sema, v->location, "range lower and upper bounds must have the same type");
-                                return;
-                            }
-                        }
-                        auto inner = locals;
-                        if (v->index_name != "_") {
-                            inner[v->index_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::USize}, .is_mut = false};
-                        }
-                        if (v->element_name != "_") {
-                            inner[v->element_name] = LocalBinding{.type = upper_type, .is_mut = false};
-                        }
-                        check_stmt(v->body, inner, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
-                        return;
-                    }
-                    const auto iterable_type = check_expr(v->iterable, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                    // Iterating a generic aggregate ('for v in self.data' where the field is
-                    // '[N]T'): the element type is unknowable, but the loop is still checkable.
-                    if (iterable_type.kind == TypeKind::Opaque) {
-                        auto inner = locals;
-                        if (v->index_name != "_") {
-                            inner[v->index_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::USize}, .is_mut = false};
-                        }
-                        if (v->element_name != "_") {
-                            inner[v->element_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::Opaque}, .is_mut = false};
-                        }
-                        check_stmt(v->body, inner, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
-                        return;
-                    }
-                    if (iterable_type.kind != TypeKind::Slice && iterable_type.kind != TypeKind::Array) {
-                        diag.report_error(DiagnosticStage::Sema, v->location, "'for-in' requires a slice or array operand");
-                        return;
-                    }
-                    const auto elem_type = iterable_type.kind == TypeKind::Array
-                        ? array_element_type(iterable_type, module_path, program)
-                        : slice_element_type(iterable_type, module_path, program);
-                    auto inner = locals;
-                    if (v->index_name != "_") {
-                        inner[v->index_name] = LocalBinding{.type = ResolvedType{.kind = TypeKind::USize}, .is_mut = false};
-                    }
-                    if (v->element_name != "_") {
-                        if (v->element_by_ref) {
-                            auto ptr_type = intern_pointer(program, elem_type);
-                            inner[v->element_name] = LocalBinding{.type = ptr_type, .is_mut = false};
-                        } else {
-                            inner[v->element_name] = LocalBinding{.type = elem_type, .is_mut = false};
-                        }
-                    }
-                    check_stmt(v->body, inner, module_path, program, diag, expected_returns, loop_depth + 1, defer_loop_base);
-
+                    check_for_in_stmt(v, locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base, fn_error_type);
                 } else if constexpr (std::is_same_v<V, ast::ExprStmt>) {
                     const auto expr_ty = check_expr(v.expr, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     // Detect ignored errors from fallible calls
@@ -5276,80 +5519,7 @@ namespace sema {
                     }
 
                 } else if constexpr (std::is_same_v<V, ast::VarDeclGroupStmt>) {
-                    const ast::CallExpr *call = nullptr;
-                    bool is_try = false;
-
-                    if (const auto *c = std::get_if<std::unique_ptr<ast::CallExpr>>(&v.init)) {
-                        call = c->get();
-                    } else if (const auto *t = std::get_if<std::unique_ptr<ast::TryExpr>>(&v.init)) {
-                        is_try = true;
-                        const auto *inner_call = std::get_if<std::unique_ptr<ast::CallExpr>>(&(*t)->call);
-                        if (!inner_call) {
-                            diag.report_error(DiagnosticStage::Sema, v.location, "'try' operand must be a direct function call");
-                            return;
-                        }
-                        call = inner_call->get();
-                    }
-
-                    if (!call) {
-                        diag.report_error(DiagnosticStage::Sema, v.location, "group declaration initializer must be a function call or 'try' expression");
-                        check_expr(v.init, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                        return;
-                    }
-
-                    auto returns = check_group_call_returns(*call, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
-                    if (returns.empty()) {
-                        return;
-                    }
-
-                    if (is_try) {
-                        // Check enclosing function is fallible
-                        if (!fn_error_type) {
-                            diag.report_error(DiagnosticStage::Sema, v.location,
-                                "enclosing function must return 'error(...)' to use 'try'");
-                        }
-                        // Strip the error slot from returns
-                        if (is_error_union_type(returns.back(), program)) {
-                            if (fn_error_type && !error_union_is_subset(returns.back(), *fn_error_type, program)) {
-                                diag.report_error(DiagnosticStage::Sema, v.location,
-                                    "callee's error type is not a subset of the enclosing function's error type; "
-                                    "widen the enclosing function's 'error(...)' return type or handle the error explicitly");
-                            }
-                            returns.pop_back();
-                        } else {
-                            diag.report_error(DiagnosticStage::Sema, v.location,
-                                "'try' can only be used on a function that returns 'error(...)' as its last return value");
-                            return;
-                        }
-                        // Check that we are not inside a defer body
-                        if (defer_loop_base >= 0) {
-                            diag.report_error(DiagnosticStage::Sema, v.location,
-                                "'try' cannot propagate errors out of a 'defer' body");
-                        }
-                    }
-
-                    // One name short of the arity, with a '?error(...)' in the trailing slot:
-                    // the caller is dropping the ignorable error, so record it for codegen
-                    // rather than reporting an arity mismatch. Naming it — including naming
-                    // it '_' — takes this branch's 'else' and stays a silent discard, which
-                    // is the documented opt-out. 'try' already consumed the slot above.
-                    if (!is_try && returns.size() == v.names.size() + 1 && is_optional_error_union(returns.back(), program)) {
-                        expr_tables_for_write(program, module_path).call_dropped_optional_error[call] =
-                            DroppedOptionalError{.error_type = returns.back(), .slot_index = returns.size() - 1};
-                        returns.pop_back();
-                    }
-
-                    if (returns.size() != v.names.size()) {
-                        diag.report_error(DiagnosticStage::Sema, v.location, std::format("group declaration expects {} return value(s), got {}", v.names.size(), returns.size()));
-                    }
-
-                    for (size_t i = 0; i < v.names.size() && i < returns.size(); ++i) {
-                        if (!v.names[i].empty() && v.names[i] != "_") {
-                            locals[v.names[i]] = LocalBinding{.type = returns[i], .is_mut = v.is_mut,
-                                .err_state = is_error_union_type(returns[i], program) ? ErrorState::Unknown : ErrorState::NotApplicable};
-                        }
-                    }
-
+                    check_var_decl_group_stmt(v, locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base, fn_error_type);
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SwitchStmt>>) {
                     // Exhaustiveness note: unlike 'match', 'switch' does NOT require an enum or
                     // tagged-union operand to cover every variant, and a switch with no '_' arm
@@ -5600,120 +5770,9 @@ namespace sema {
                     }
 
                 } else if constexpr (std::is_same_v<V, ast::ReturnStmt>) {
-                    if (defer_loop_base >= 0) {
-                        diag.report_error(DiagnosticStage::Sema, v.location, "'return' cannot escape a 'defer' body");
-                        return;
-                    }
-                    if (v.return_values.size() == 1 && expected_returns.size() > 1) {
-                        if (const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&v.return_values[0])) {
-                            const auto returns = check_group_call_returns(**call, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
-                            if (returns.size() != expected_returns.size()) {
-                                diag.report_error(DiagnosticStage::Sema, v.location,
-                                                  std::format("expected {} return value(s), got {}", expected_returns.size(), returns.size()));
-                                return;
-                            }
-                            for (size_t i = 0; i < returns.size(); ++i) {
-                                if (!assignable_in_module(returns[i], expected_returns[i], module_path, program)) {
-                                    diag.report_error(DiagnosticStage::Sema, v.location, std::format("return value {} type mismatch", i + 1));
-                                }
-                            }
-                            return;
-                        }
-                    }
-                    if (v.return_values.size() != expected_returns.size()) {
-                        diag.report_error(DiagnosticStage::Sema, v.location,
-                                          std::format("expected {} return value(s), got {}{}", expected_returns.size(), v.return_values.size(),
-                                                      v.possible_asi_gotcha
-                                                          ? " (note: 'return' on its own line ends the statement immediately; move the value onto the same line as 'return')"
-                                                          : ""));
-                        for (auto &val : v.return_values)
-                            check_expr(val, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                        return;
-                    }
-                    for (size_t i = 0; i < v.return_values.size(); ++i) {
-                        // Last return slot of a function returning 'error(...)': a bare
-                        // '.Variant' / '.Variant(payload)' (or one reachable through
-                        // 'match'/'when'/ternary) needs the same unwrap 'return_err' does,
-                        // since 'expected_returns[i]' here is the outer Ok/Failed wrapper,
-                        // whose own variants are always just "Ok"/"Failed" — never the
-                        // wrapped enum/union's names. A value that's already fully typed as
-                        // the wrapper (e.g. forwarding another call's error(...) result)
-                        // falls through to the ordinary path below unchanged.
-                        if (fn_error_type && i == v.return_values.size() - 1) {
-                            if (const auto member_type = resolve_return_err_member_type(
-                                    v.return_values[i], *fn_error_type, module_path, program, diag, v.location)) {
-                                auto ty = check_expr(v.return_values[i], locals, module_path, program, diag,
-                                                      *member_type, loop_depth, defer_loop_base, fn_error_type);
-                                if (!assignable_in_module(ty, *member_type, module_path, program)) {
-                                    diag.report_error(DiagnosticStage::Sema, v.location, std::format("return value {} type mismatch", i + 1));
-                                }
-                                continue;
-                            }
-                            if (find_bare_return_err_variant_name(v.return_values[i])) {
-                                // resolve_return_err_member_type already reported a diagnostic
-                                // for this sugar form (unknown/ambiguous variant, etc).
-                                check_expr(v.return_values[i], locals, module_path, program, diag,
-                                           std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                                continue;
-                            }
-                        }
-                        auto ty = check_expr(v.return_values[i], locals, module_path, program, diag, expected_returns[i], loop_depth, defer_loop_base, fn_error_type);
-                        if (!assignable_in_module(ty, expected_returns[i], module_path, program)) {
-                            diag.report_error(DiagnosticStage::Sema, v.location, std::format("return value {} type mismatch", i + 1));
-                        }
-                    }
-
+                    check_return_stmt(v, locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base, fn_error_type);
                 } else if constexpr (std::is_same_v<V, ast::ReturnErrStmt>) {
-                    if (defer_loop_base >= 0) {
-                        diag.report_error(DiagnosticStage::Sema, v.location, "'return_err' cannot escape a 'defer' body");
-                        return;
-                    }
-                    if (!fn_error_type) {
-                        diag.report_error(DiagnosticStage::Sema, v.location,
-                                          "enclosing function must return 'error(...)' to use 'return_err'");
-                        check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                        return;
-                    }
-                    // '.Variant' / '.Variant(payload)' — bare, or reachable through 'match'/
-                    // 'when'/ternary wrapping — need the expected member type fed in to resolve
-                    // at all (see resolve_return_err_member_type / find_bare_return_err_variant_name);
-                    // anything else is an ordinary expression that already carries its own type,
-                    // so check it with no expected type and classify what came back.
-                    if (const auto member_type = resolve_return_err_member_type(v.error_value, *fn_error_type, module_path, program, diag, v.location)) {
-                        auto ty = check_expr(v.error_value, locals, module_path, program, diag, *member_type, loop_depth, defer_loop_base, fn_error_type);
-                        if (!assignable_in_module(ty, *member_type, module_path, program)) {
-                            diag.report_error(DiagnosticStage::Sema, v.location, "'return_err' operand does not match the resolved error member type");
-                        }
-                    } else if (find_bare_return_err_variant_name(v.error_value)) {
-                        // resolve_return_err_member_type already reported a diagnostic for this
-                        // sugar form (unknown/ambiguous variant, etc), whether bare at the top
-                        // level or nested inside e.g. a 'match' arm.
-                        check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                    } else {
-                        auto ty = check_expr(v.error_value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                        if (ty.kind == TypeKind::Invalid) {
-                            // check_expr already reported a diagnostic.
-                        } else if (is_error_union_type(ty, program)) {
-                            // Already a full error(...) value — this function's own, or (like
-                            // 'try') a subset of it; propagated as-is by codegen, translating
-                            // tags if the two unions differ.
-                            if (!error_union_is_subset(ty, *fn_error_type, program)) {
-                                diag.report_error(DiagnosticStage::Sema, v.location,
-                                    "'return_err' operand's error type is not a subset of the enclosing function's error type; "
-                                    "widen the enclosing function's 'error(...)' return type or handle the error explicitly");
-                            }
-                        } else {
-                            const auto *wrapper = program.union_at(fn_error_type->union_index);
-                            const bool is_member = wrapper && std::ranges::any_of(
-                                wrapper->error_member_types, [&](const auto &m) { return m == ty; });
-                            if (!is_member) {
-                                diag.report_error(DiagnosticStage::Sema, v.location,
-                                    "'return_err' operand must be a '.Variant', '.Variant(payload)', a value of one of the "
-                                    "enclosing function's error member types, or a compatible 'error(...)' value");
-                            }
-                        }
-                    }
-
+                    check_return_err_stmt(v, locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base, fn_error_type);
                 } else if constexpr (std::is_same_v<V, ast::ReturnOkStmt>) {
                     if (defer_loop_base >= 0) {
                         diag.report_error(DiagnosticStage::Sema, v.location, "'return_ok' cannot escape a 'defer' body");
