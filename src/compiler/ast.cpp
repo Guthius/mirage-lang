@@ -696,6 +696,46 @@ namespace ast {
             return LiteralCharExpr{.value = val, .location = location};
         }
 
+        // Parses one match/switch arm pattern, up to but not including the ':' that follows it.
+        //
+        //   .name            variant, no capture
+        //   .name(capture)   variant, capture by value
+        //   .name(&capture)  variant, capture by reference
+        //   _                default
+        //   <expr>           literal — any compile-time constant expression
+        //
+        // 'match' and 'switch' share the pattern grammar exactly; they differ only in the arm
+        // BODY (an expression vs a statement). Keeping one parser is what stops that from
+        // quietly stopping being true — sema and codegen both switch over a single
+        // MatchExpr::ArmPattern for either construct.
+        auto parse_match_arm_pattern(Parser &parser) -> MatchExpr::ArmPattern {
+            if (parser.check(TokenKind::Dot)) {
+                parser.advance();
+                const auto name_location = parser.current_location();
+                auto vname = parser.expect_identifier();
+                std::optional<std::string> capture_name;
+                bool capture_by_ref = false;
+                if (parser.match(TokenKind::LParen)) {
+                    if (parser.match(TokenKind::Ampersand)) {
+                        capture_by_ref = true;
+                    }
+                    capture_name = parser.expect_identifier();
+                    parser.expect(TokenKind::RParen, "')'");
+                }
+                return MatchExpr::VariantPattern{
+                    .name = std::move(vname),
+                    .capture_name = std::move(capture_name),
+                    .capture_by_ref = capture_by_ref,
+                    .name_location = name_location,
+                };
+            }
+            if (parser.check(TokenKind::Identifier) && parser.current_lexeme() == "_") {
+                parser.advance();
+                return MatchExpr::DefaultPattern{};
+            }
+            return MatchExpr::LiteralPattern{std::make_unique<Expr>(parse_expr(parser))};
+        }
+
         // Parses a '.field = expr, ...' list and its closing '}', starting from just after the
         // opening '{'. The caller consumes the '{' itself, because the three constructs that
         // use this reach it differently: a braced initializer expects one, while both tagged-
@@ -1411,38 +1451,7 @@ namespace ast {
                     const LoopProgressGuard progress_guard(parser);
                     const auto arm_location = parser.current_location();
 
-                    // Parse arm pattern
-                    auto pattern = [&]() -> MatchExpr::ArmPattern {
-                        if (parser.check(TokenKind::Dot)) {
-                            // VariantPattern: .name or .name(capture) or .name(&capture)
-                            parser.advance();
-                            const auto name_location = parser.current_location();
-                            auto vname = parser.expect_identifier();
-                            std::optional<std::string> capture_name;
-                            bool capture_by_ref = false;
-                            if (parser.match(TokenKind::LParen)) {
-                                if (parser.match(TokenKind::Ampersand)) {
-                                    capture_by_ref = true;
-                                }
-                                capture_name = parser.expect_identifier();
-                                parser.expect(TokenKind::RParen, "')'");
-                            }
-                            return MatchExpr::VariantPattern{
-                                .name = std::move(vname),
-                                .capture_name = std::move(capture_name),
-                                .capture_by_ref = capture_by_ref,
-                                .name_location = name_location,
-                            };
-                        }
-                        if (parser.check(TokenKind::Identifier) && parser.current_lexeme() == "_") {
-                            // DefaultPattern: _
-                            parser.advance();
-                            return MatchExpr::DefaultPattern{};
-                        }
-                        // LiteralPattern: constant expression
-                        auto lp_expr = std::make_unique<Expr>(parse_expr(parser));
-                        return MatchExpr::LiteralPattern{std::move(lp_expr)};
-                    }();
+                    auto pattern = parse_match_arm_pattern(parser);
 
                     parser.expect(TokenKind::Colon, "':'");
                     auto arm_value = parse_expr(parser);
@@ -3137,34 +3146,7 @@ namespace ast {
             const LoopProgressGuard progress_guard(parser);
             const auto arm_location = parser.current_location();
 
-            auto arm_pattern = [&]() -> MatchExpr::ArmPattern {
-                if (parser.check(TokenKind::Dot)) {
-                    parser.advance();
-                    const auto name_location = parser.current_location();
-                    auto vname = parser.expect_identifier();
-                    std::optional<std::string> capture_name;
-                    bool capture_by_ref = false;
-                    if (parser.match(TokenKind::LParen)) {
-                        if (parser.match(TokenKind::Ampersand)) {
-                            capture_by_ref = true;
-                        }
-                        capture_name = parser.expect_identifier();
-                        parser.expect(TokenKind::RParen, "')'");
-                    }
-                    return MatchExpr::VariantPattern{
-                        .name = std::move(vname),
-                        .capture_name = std::move(capture_name),
-                        .capture_by_ref = capture_by_ref,
-                        .name_location = name_location,
-                    };
-                }
-                if (parser.check(TokenKind::Identifier) && parser.current_lexeme() == "_") {
-                    parser.advance();
-                    return MatchExpr::DefaultPattern{};
-                }
-                auto lp_expr = std::make_unique<Expr>(parse_expr(parser));
-                return MatchExpr::LiteralPattern{std::move(lp_expr)};
-            }();
+            auto arm_pattern = parse_match_arm_pattern(parser);
 
             parser.expect(TokenKind::Colon, "':'");
             auto body = parse_stmt(parser);
