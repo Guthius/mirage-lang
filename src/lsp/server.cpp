@@ -223,7 +223,20 @@ namespace lsp {
             std::unordered_map<std::string, std::chrono::steady_clock::time_point> pending_diag_deadlines_;
         };
 
-        void run_worker_loop(std::stop_token stop, TaskQueue &queue, Worker &worker, CompletedRequests &completed) {
+        // Recovers the JSON-RPC id from a Task's id_key (which is id.dump() — see
+        // id_key_of) and answers the client with an error. Without this, a request whose
+        // task threw was logged and marked done but never answered, leaving the editor's
+        // hover/definition/references promise pending forever.
+        void answer_failed_task(transport::OutputChannel &out, const std::string &id_key, const int code, const std::string &message_text) {
+            const auto id = json::parse(id_key, nullptr, /*allow_exceptions=*/false);
+            if (id.is_discarded()) {
+                std::cerr << "mirage-lsp: cannot answer failed task; unparsable id " << id_key << "\n";
+                return;
+            }
+            send_error(out, id, code, message_text);
+        }
+
+        void run_worker_loop(std::stop_token stop, TaskQueue &queue, Worker &worker, CompletedRequests &completed, transport::OutputChannel &out) {
             while (!stop.stop_requested()) {
                 worker.sweep_due_diagnostics();
 
@@ -256,11 +269,13 @@ namespace lsp {
                 } catch (const std::exception &e) {
                     std::cerr << "mirage-lsp: worker task failed: " << e.what() << "\n";
                     if (!task->id_key.empty()) {
+                        answer_failed_task(out, task->id_key, INTERNAL_ERROR, std::string("internal error: ") + e.what());
                         completed.mark_done(task->id_key);
                     }
                 } catch (...) {
                     std::cerr << "mirage-lsp: worker task failed with a non-standard exception\n";
                     if (!task->id_key.empty()) {
+                        answer_failed_task(out, task->id_key, INTERNAL_ERROR, "internal error handling request");
                         completed.mark_done(task->id_key);
                     }
                 }
@@ -301,7 +316,7 @@ namespace lsp {
         Worker worker(channel);
         CompletedRequests completed;
 
-        std::jthread worker_thread([&](const std::stop_token stop) { run_worker_loop(stop, queue, worker, completed); });
+        std::jthread worker_thread([&](const std::stop_token stop) { run_worker_loop(stop, queue, worker, completed, channel); });
 
         auto state = LifecycleState::Uninitialized;
         bool shutdown_received = false;
