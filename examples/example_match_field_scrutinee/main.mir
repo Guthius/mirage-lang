@@ -1,0 +1,95 @@
+// example_match_field_scrutinee/main.mir — 'match' and 'switch' accept a field access as
+// their scrutinee.
+//
+// 'switch h.kind { .is_type: ... }' used to fail with "expected '=', got ':'". It was an
+// ambiguity with qualified tagged-variant construction, not a restriction on scrutinees:
+// both open '{' '.' IDENT, and parse_postfix committed to a constructor on that two-token
+// lookahead alone. The token AFTER the identifier is what separates them — '=' means a
+// payload field, ':' or '(' means a match arm — and it sits one position further than the
+// parser could see.
+//
+// Only member access was affected. An identifier, a deref, a call, an index and a
+// parenthesised expression all worked already, purely because named_type_from_expr rejects
+// them as type paths. That was an accident of the implementation, not a rule, which is why
+// this fixture covers the shapes that used to work as well as the one that did not.
+//
+// The other side of the same rule is example_tagged_union_variant_named_field.
+//
+// Expected: compiles and runs, exit code 0.
+
+type Kind = union(enum) {
+    is_type
+    is_scalar: i64
+}
+
+type Holder = struct {
+    kind: Kind
+}
+
+type Outer = struct {
+    inner: Holder
+}
+
+fn describe(k: Kind) -> i32 {
+    return match k {
+        .is_type: 1,
+        .is_scalar(v): cast(v, i32),
+    }
+}
+
+fn holder_of(v: i64) -> Holder {
+    mut h: Holder = { .kind = .is_scalar(v) }
+    return h
+}
+
+pub fn main() -> i32 {
+    mut h: Holder = { .kind = .is_scalar(7) }
+    mut o: Outer = { .inner = h }
+    mut arr: [2]Holder = default
+    arr[0] = h
+    mut p := &h
+
+    // THE case this fixture exists for: a member access as scrutinee, in both constructs
+    // and with both arm shapes (bare, and with a capture).
+    mut total: i32 = 0
+    switch h.kind {
+        .is_type: { total += 100 },
+        .is_scalar(v): { total += cast(v, i32) },
+    }
+    if total != 7 { return 1 }
+
+    if describe(h.kind) != 7 { return 2 }
+
+    // A nested member chain is the same shape, one level deeper.
+    switch o.inner.kind {
+        .is_type: { return 3 },
+        .is_scalar(v): { if v != 7 { return 4 } },
+    }
+
+    // Shapes that already worked, kept so a future change to the disambiguation cannot
+    // quietly break them instead.
+    switch arr[0].kind {              // index, then member
+        .is_type: { return 5 },
+        .is_scalar(_): {},
+    }
+    switch p.*.kind {                 // deref, then member
+        .is_type: { return 6 },
+        .is_scalar(_): {},
+    }
+    switch holder_of(9).kind {        // call, then member
+        .is_type: { return 7 },
+        .is_scalar(v): { if v != 9 { return 8 } },
+    }
+    switch (h.kind) {                 // parenthesised
+        .is_type: { return 9 },
+        .is_scalar(_): {},
+    }
+
+    const k := h.kind                 // the old workaround: bind to a local first
+    switch k {
+        .is_type: { return 10 },
+        .is_scalar(_): {},
+    }
+
+    return 0
+}

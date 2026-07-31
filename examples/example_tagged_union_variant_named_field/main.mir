@@ -1,0 +1,41 @@
+// example_tagged_union_variant_named_field/main.mir — the constructor side of the
+// disambiguation that example_match_field_scrutinee tests the other side of.
+//
+// 'Type.variant{...}' and 'match/switch EXPR { ... }' both open with '{' '.' IDENT, so the
+// parser separates them on the token that follows: '=' means a payload field, ':' or '('
+// means a match arm.
+//
+// This fixture is adversarial on purpose. Its payload's FIRST FIELD is named 'point',
+// which is also the name of one of the type's own variants — so a predicate that tried to
+// decide by looking at the identifier's spelling (is this a known variant name?) rather
+// than at the token after it would mis-parse this file. The corpus's other qualified-form
+// fixture, example_tagged_union, starts its payload with 'radius', which no variant is
+// called, and so would not catch that mistake.
+//
+// Expected: compiles and runs, exit code 7.
+
+type Shape = union(enum) {
+    circle: struct {
+        point: f64
+        radius: f64
+    }
+    point
+}
+
+pub fn main() -> i32 {
+    // Qualified construction whose first payload field shadows a variant name.
+    const c: Shape = Shape.circle{.point = 1.0, .radius = 3.0}
+    const p: Shape = .point
+
+    mut r: i32 = 0
+    switch c {
+        .circle(v): { r = cast(v.radius, i32) },
+        .point: { r = 99 },
+    }
+    switch p {
+        .circle(_): { r += 50 },
+        .point: { r += 4 },
+    }
+
+    return r
+}

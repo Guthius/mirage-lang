@@ -736,6 +736,28 @@ namespace ast {
             return MatchExpr::LiteralPattern{std::make_unique<Expr>(parse_expr(parser))};
         }
 
+        // With the cursor ON the '{' that follows a variant name, is this a tagged-variant
+        // constructor's payload ('Shape.circle{.radius = 3.0}') rather than the body of a
+        // 'match'/'switch' whose scrutinee happens to end in that name ('switch h.kind { ... }')?
+        //
+        // Both open '{' '.' IDENT. The token AFTER that identifier is what separates them:
+        //
+        //     {  .radius  =  3.0     '=' -> a payload field, so a constructor
+        //     {  .is_type :  {}      ':' -> a match arm
+        //     {  .is_scalar( v )     '(' -> a match arm with a capture
+        //
+        // Two tokens of lookahead is one short, which is why 'switch h.kind { ... }' used to be
+        // parsed as a constructor and rejected with "expected '=', got ':'". Identifiers, derefs,
+        // calls, indexes and parenthesised expressions escaped only because named_type_from_expr
+        // rejects them as type paths — an accident, not a rule.
+        //
+        // Note the decision is made BEFORE consuming anything: the parser has no backtracking,
+        // so committing to a constructor and discovering an arm is unrecoverable.
+        auto looks_like_variant_payload(Parser &parser) -> bool {
+            return parser.check(TokenKind::LBrace) && parser.check_at(1, TokenKind::Dot) &&
+                   parser.check_at(2, TokenKind::Identifier) && parser.check_at(3, TokenKind::Equal);
+        }
+
         // Parses a '.field = expr, ...' list and its closing '}', starting from just after the
         // opening '{'. The caller consumes the '{' itself, because the three constructs that
         // use this reach it differently: a braced initializer expects one, while both tagged-
@@ -1382,9 +1404,10 @@ namespace ast {
                 auto span = location;
                 span.length = name_location.offset + name_location.length - location.offset;
 
-                // If followed by '{.' this is a contextual tagged variant: .variant{.field = val}
-                // The leading '.' inside the braces disambiguates payload from block statements.
-                if (parser.check(TokenKind::LBrace) && parser.peek().kind == TokenKind::Dot) {
+                // A contextual tagged variant with a braced payload: .variant{.field = val}.
+                // Same predicate as the qualified form in parse_postfix, deliberately: they are
+                // one disambiguation rule and must not drift apart.
+                if (looks_like_variant_payload(parser)) {
                     const auto brace_loc = parser.current_location();
                     parser.advance(); // consume '{'
                     return std::make_unique<TaggedVariantExpr>(TaggedVariantExpr{
@@ -1639,10 +1662,11 @@ namespace ast {
                     parser.advance();
                     const auto member_name = parser.expect_identifier();
 
-                    // If followed by '{.' and base is a dotted-identifier chain (e.g. `Type` or
-                    // `mod.Type`), parse as a (possibly qualified) tagged variant constructor.
-                    // The leading '.' inside braces disambiguates payload from block statements.
-                    if (parser.check(TokenKind::LBrace) && parser.peek().kind == TokenKind::Dot) {
+                    // A '{.field = ...' payload and a dotted-identifier base (e.g. `Type` or
+                    // `mod.Type`) together mean a qualified tagged-variant constructor. Anything
+                    // else — notably 'switch h.kind { .arm: ... }' — is an ordinary member
+                    // access, and the '{' belongs to whatever encloses it.
+                    if (looks_like_variant_payload(parser)) {
                         if (auto type_path = named_type_from_expr(expr)) {
                             const auto brace_loc = parser.current_location();
                             parser.advance(); // consume '{'

@@ -47,9 +47,7 @@ pub fn main() -> i32 {
             // describes the argument.
             if !str_eq(s.generic_args[0].name, "T") { result = 10 }
             if !is_kind(s.generic_args[0].type_info, rt.Type_Kind.I32) { result = 11 }
-            // 'match' can't take a field access as its scrutinee, so bind it first.
-            const t_kind := s.generic_args[0].kind
-            switch t_kind {
+            switch s.generic_args[0].kind {
                 .is_type: {},
                 .is_scalar(_): { result = 12 },
             }
@@ -58,8 +56,7 @@ pub fn main() -> i32 {
             // itself rides in the 'kind' union.
             if !str_eq(s.generic_args[1].name, "N") { result = 13 }
             if !is_kind(s.generic_args[1].type_info, rt.Type_Kind.USize) { result = 14 }
-            const n_kind := s.generic_args[1].kind
-            switch n_kind {
+            switch s.generic_args[1].kind {
                 .is_scalar(v): { if v != 4 { result = 15 } },
                 .is_type: { result = 16 },
             }

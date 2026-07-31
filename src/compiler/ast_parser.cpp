@@ -37,18 +37,19 @@ namespace ast {
                 return current().kind == TokenKind::Eof;
             }
 
-            [[nodiscard]] auto peek() const -> const Token & override {
-                if (pos_ + 1 < tokens_.size()) {
-                    return tokens_[pos_ + 1];
+            [[nodiscard]] auto peek_at(const size_t offset) const -> const Token & override {
+                if (pos_ + offset < tokens_.size()) {
+                    return tokens_[pos_ + offset];
                 }
                 return tokens_.back();
             }
 
+            [[nodiscard]] auto peek() const -> const Token & override {
+                return peek_at(1);
+            }
+
             [[nodiscard]] auto peek_next() const -> const Token & override {
-                if (pos_ + 2 < tokens_.size()) {
-                    return tokens_[pos_ + 2];
-                }
-                return tokens_.back();
+                return peek_at(2);
             }
 
             auto advance() -> const Token & override {
@@ -63,11 +64,15 @@ namespace ast {
                 return current().kind == kind;
             }
 
+            // Unlike peek_at, an offset past the end answers false rather than reporting the
+            // Eof token's kind — "is the token at N a '='" should be no when there is no such
+            // token, not accidentally yes for a query about Eof.
+            [[nodiscard]] auto check_at(const size_t offset, const TokenKind kind) const -> bool override {
+                return pos_ + offset < tokens_.size() && tokens_[pos_ + offset].kind == kind;
+            }
+
             [[nodiscard]] auto check_next(const TokenKind kind) const -> bool override {
-                if (pos_ + 1 < tokens_.size()) {
-                    return tokens_[pos_ + 1].kind == kind;
-                }
-                return false;
+                return check_at(1, kind);
             }
 
             auto match(const TokenKind kind) -> bool override {

@@ -554,6 +554,10 @@
     "action": "run",
     "exit": 6
   },
+  "example_match_field_scrutinee": {
+    "action": "run",
+    "exit": 0
+  },
   "example_option_in_mut": {
     "action": "run",
     "exit": 0
@@ -682,6 +686,10 @@
   "example_tagged_union_scalar_payload": {
     "action": "run",
     "exit": 0
+  },
+  "example_tagged_union_variant_named_field": {
+    "action": "run",
+    "exit": 7
   },
   "example_ternary_literal_coercion": {
     "action": "run",
