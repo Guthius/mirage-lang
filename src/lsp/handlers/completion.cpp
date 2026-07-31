@@ -53,7 +53,7 @@ namespace lsp::handlers {
         // 'match') are meaningless in a type position, and offering them there is noise.
         constexpr std::string_view BUILTIN_TYPE_NAMES[] = {
             "bool", "byte", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
-            "usize", "isize", "f32", "f64", "anyptr", "type",
+            "usize", "f32", "f64", "anyptr", "type",
         };
 
         // Type names only: what belongs in a generic argument list. The counterpart to
