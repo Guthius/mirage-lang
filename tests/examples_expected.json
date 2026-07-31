@@ -235,7 +235,7 @@
   },
   "example_const_fold_overflow": {
     "action": "build",
-    "diag": "examples/example_const_fold_overflow/main.mir:23:9: error: match arm pattern could not be folded to an integer constant (an overflowing division, a shift of 64 or more, or an expression this position cannot evaluate)",
+    "diag": "examples/example_const_fold_overflow/main.mir:26:9: error: match arm pattern could not be folded to an integer constant (an overflowing division, a shift of 64 or more, or a constant that is not an integer)",
     "exit": 1
   },
   "example_const_union_variant": {
@@ -540,6 +540,10 @@
     "action": "build",
     "diag": "examples/example_link_in_fn_body/main.mir:10:5: error: '#link' is a linker directive and may only appear at module scope or inside a module-scope 'when' block.",
     "exit": 1
+  },
+  "example_match_const_expr_pattern": {
+    "action": "run",
+    "exit": 6
   },
   "example_option_in_mut": {
     "action": "run",

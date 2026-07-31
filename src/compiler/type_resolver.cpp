@@ -943,39 +943,18 @@ namespace sema {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
                             const auto operand = eval_integer_const_expr(v->operand, module_path, macro_args);
                             if (!operand) return std::nullopt;
-                            switch (v->op) {
-                            case ast::UnaryOp::Negate:     return uint64_t{0} - *operand;
-                            case ast::UnaryOp::BitwiseNot: return ~*operand;
-                            case ast::UnaryOp::LogicalNot: return *operand == 0 ? 1 : 0;
-                            default:                       return std::nullopt;
-                            }
+                            return fold_unary_op(v->op, *operand, ConstFoldSign::Unsigned);
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
                             const auto lhs = eval_integer_const_expr(v->lhs, module_path, macro_args);
                             const auto rhs = eval_integer_const_expr(v->rhs, module_path, macro_args);
                             if (!lhs || !rhs) return std::nullopt;
-                            switch (v->op) {
-                            case ast::BinaryOp::Add:          return *lhs + *rhs;
-                            case ast::BinaryOp::Sub:          return *lhs - *rhs;
-                            case ast::BinaryOp::Mul:          return *lhs * *rhs;
-                            case ast::BinaryOp::Div:          return *rhs == 0 ? std::nullopt : std::optional<uint64_t>{*lhs / *rhs};
-                            case ast::BinaryOp::Mod:          return *rhs == 0 ? std::nullopt : std::optional<uint64_t>{*lhs % *rhs};
-                            case ast::BinaryOp::BitwiseAnd:   return *lhs & *rhs;
-                            case ast::BinaryOp::BitwiseOr:    return *lhs | *rhs;
-                            case ast::BinaryOp::BitwiseXor:   return *lhs ^ *rhs;
-                            case ast::BinaryOp::ShiftLeft:    return *rhs >= 64 ? std::nullopt : std::optional<uint64_t>{*lhs << *rhs};
-                            case ast::BinaryOp::ShiftRight:   return *rhs >= 64 ? std::nullopt : std::optional<uint64_t>{*lhs >> *rhs};
-                            case ast::BinaryOp::Equal:        return *lhs == *rhs ? 1 : 0;
-                            case ast::BinaryOp::NotEqual:     return *lhs != *rhs ? 1 : 0;
-                            case ast::BinaryOp::Less:         return *lhs < *rhs ? 1 : 0;
-                            case ast::BinaryOp::Greater:      return *lhs > *rhs ? 1 : 0;
-                            case ast::BinaryOp::LessEqual:    return *lhs <= *rhs ? 1 : 0;
-                            case ast::BinaryOp::GreaterEqual: return *lhs >= *rhs ? 1 : 0;
-                            case ast::BinaryOp::LogicalAnd:   return (*lhs != 0 && *rhs != 0) ? 1 : 0;
-                            case ast::BinaryOp::LogicalOr:    return (*lhs != 0 || *rhs != 0) ? 1 : 0;
-                            case ast::BinaryOp::In:           return std::nullopt; // not a compile-time-constant-foldable operator here
-                            }
-                            return std::nullopt;
+                            // UNSIGNED: this evaluator serves type contexts — array lengths,
+                            // enum values, generic value arguments — where '/', '%', '>>' and
+                            // the relational operators must read their operands as uint64.
+                            // The value-context evaluator (evaluate_const_value) folds the
+                            // same operators as signed int64; see ConstFoldSign.
+                            return fold_binary_op(v->op, *lhs, *rhs, ConstFoldSign::Unsigned);
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
                             const auto cond = eval_integer_const_expr(v->condition, module_path, macro_args);

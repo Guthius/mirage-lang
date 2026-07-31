@@ -1,0 +1,47 @@
+// example_match_const_expr_pattern/main.mir — a match/switch arm pattern may be any
+// compile-time constant EXPRESSION, not just a literal.
+//
+// This did not work before the three const-folders were consolidated (TYPE-11). Arm
+// patterns were folded by evaluate_integer_constant, which handled 8 AST shapes; the
+// evaluator used for array lengths and 'when' conditions handled 17. 'size_of(i64)' was
+// in the second set and not the first, so it was accepted as '[size_of(i64)]u8' but
+// rejected as a match arm with "could not be folded to an integer constant" — the same
+// class of gap that produced the 'when size_of(...)' wrong-branch bug.
+//
+// Both folders are now one, so any expression usable as a constant anywhere is usable
+// here. That equivalence is the property this fixture pins.
+//
+// Expected: compiles and runs, exit code 6.
+
+const BASE: i64 = 100
+
+pub fn classify(n: i64) -> i32 {
+    return match n {
+        size_of(i64): 1,            // 8
+        align_of(i64) + 2: 2,       // 10
+        BASE / 4: 3,                // 25  — a global const in an arithmetic expression
+        1 << 6: 4,                  // 64
+        'A': 5,                     // 65  — char literal
+        _: 0,
+    }
+}
+
+pub fn main() -> i32 {
+    // switch takes the same patterns, through the same folder.
+    mut total: i32 = 0
+    switch classify(8) {
+        1: { total += 1 },
+        _: { total += 100 },
+    }
+    switch classify(10) {
+        2: { total += 2 },
+        _: { total += 100 },
+    }
+
+    if classify(25) != 3 { return 90 }
+    if classify(64) != 4 { return 91 }
+    if classify(65) != 5 { return 92 }
+    if classify(7) != 0 { return 93 }
+
+    return total + 3
+}

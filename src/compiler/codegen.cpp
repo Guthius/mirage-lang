@@ -5164,8 +5164,13 @@ namespace codegen {
                 for (const auto &arm : expr.arms) {
                     if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) continue;
                     const auto &lp = std::get<ast::MatchExpr::LiteralPattern>(arm.pattern);
-                    // Evaluate the constant for the LLVM switch case
-                    const auto case_val = sema::evaluate_integer_constant(*lp.expr, *current_module_path_, sema_program_);
+                    // Evaluate the constant for the LLVM switch case. Must be the SAME folder
+                    // sema used to check this pattern for duplicates, or codegen would emit a
+                    // case label sema never validated. const_cast because the folder may force
+                    // resolution of a referenced global — a no-op by now, since sema already
+                    // folded this exact expression — matching apply_function_attributes above.
+                    const auto case_val = sema::evaluate_integer_constant(
+                        *lp.expr, *current_module_path_, const_cast<sema::Program &>(sema_program_), diag_);
                     if (!case_val) {
                         // sema rejects a non-evaluatable pattern before codegen runs, so this is
                         // an internal inconsistency rather than a user error -- but it used to be
@@ -5325,7 +5330,9 @@ namespace codegen {
                 for (const auto &arm : stmt.arms) {
                     if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) continue;
                     const auto &lp = std::get<ast::MatchExpr::LiteralPattern>(arm.pattern);
-                    const auto case_val = sema::evaluate_integer_constant(*lp.expr, *current_module_path_, sema_program_);
+                    // Same folder sema used; see emit_match above for the const_cast rationale.
+                    const auto case_val = sema::evaluate_integer_constant(
+                        *lp.expr, *current_module_path_, const_cast<sema::Program &>(sema_program_), diag_);
                     if (!case_val) {
                         // See the matching guard in emit_match above.
                         report_codegen_error(diag_, arm.location,

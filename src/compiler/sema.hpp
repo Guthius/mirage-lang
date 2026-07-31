@@ -1322,10 +1322,39 @@ namespace sema {
         }
     }
 
+    // How to interpret a folded constant's bits. Constant folding happens in two flavours
+    // here and they are NOT interchangeable: value and match contexts fold as signed int64,
+    // type contexts (array lengths, enum values, generic value arguments) as unsigned uint64.
+    //
+    // Add/Sub/Mul/And/Or/Xor/'<<'/Negate/'~' have one two's-complement answer either way.
+    // '/', '%', '>>' and the four relational operators do NOT — which is exactly why this is
+    // a parameter and not a single fixed width.
+    enum class ConstFoldSign : uint8_t { Signed, Unsigned };
+
+    // THE meaning of a constant unary/binary operator. Operands and result are raw
+    // two's-complement bits; the caller casts at its own boundary.
+    //
+    // nullopt means "not a constant expression", which every caller already reports. It
+    // covers division or modulo by zero; the INT64_MIN / -1 signed overflow (undefined, and
+    // SIGFPE on x86-64 — a compiler crash, not a diagnostic); and a shift by a negative
+    // amount or by at least the operand width (x86 masks the shift count, so '1 << 64' once
+    // folded silently to 1 and a case label written that way matched 1).
+    //
+    // Those guards are the reason this is shared. Three evaluators each carried their own
+    // copy of this switch, and the guards had already drifted between them.
+    auto fold_unary_op(ast::UnaryOp op, uint64_t operand, ConstFoldSign sign) -> std::optional<uint64_t>;
+    auto fold_binary_op(ast::BinaryOp op, uint64_t lhs, uint64_t rhs, ConstFoldSign sign) -> std::optional<uint64_t>;
+
     // Evaluate a compile-time integer or bool constant expression. Returns nullopt if the expression
     // cannot be statically evaluated (e.g. non-constant or unsupported form). Used by match/switch
     // for duplicate arm detection (sema) and case-value emission (codegen).
-    auto evaluate_integer_constant(const ast::Expr &expr, const std::string &module_path, const Program &program) -> std::optional<int64_t>;
+    //
+    // A narrowing view of evaluate_const_value below — same folder, same shapes, same
+    // arithmetic — that answers nullopt for a constant which is not an integer (a string).
+    // Keeping these as one evaluator is what stops a shape working as an array length but
+    // not as a match arm, which is precisely how 'size_of(i64)' used to behave.
+    auto evaluate_integer_constant(const ast::Expr &expr, const std::string &module_path, Program &program,
+                                    DiagnosticEngine &diag) -> std::optional<int64_t>;
 
     // A more general compile-time evaluator than evaluate_integer_constant above: also
     // folds string literals, cross-module qualified const access ('mod.NAME'), '$option'

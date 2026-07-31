@@ -2354,7 +2354,7 @@ namespace sema {
                     continue;
                 }
                 const auto scalar_ty = resolve_type(param.type, module_path, program, diag);
-                const auto value = evaluate_integer_constant(*expr_arg, module_path, program);
+                const auto value = evaluate_integer_constant(*expr_arg, module_path, program, diag);
                 if (!value) {
                     diag.report_error(DiagnosticStage::Sema, arg.location, std::format(
                         "generic argument {} for '{}' must be a compile-time constant expression of type '{}'",
@@ -3707,17 +3707,24 @@ namespace sema {
                             // Type-check the pattern against the operand type
                             check_expr(*lp.expr, arm_locals, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_error_type);
                             // Evaluate for duplicate detection
-                            const auto val = evaluate_integer_constant(*lp.expr, module_path, program);
+                            const auto val = evaluate_integer_constant(*lp.expr, module_path, program, diag);
                             if (!val && pattern_is_constant) {
                                 // Constant in shape but not evaluatable: a division that overflows
-                                // (INT64_MIN / -1) or a shift of 64 or more. Reported here because
+                                // (INT64_MIN / -1), a shift of 64 or more, or a constant that
+                                // isn't an integer at all (a string). Reported here because
                                 // codegen needs a concrete value for the LLVM switch case and has
                                 // nothing to fall back on. Floating-point operands are rejected
                                 // earlier, so every pattern reaching here should otherwise fold.
+                                //
+                                // "an expression this position cannot evaluate" used to be a
+                                // fourth cause: arm patterns went through a folder that knew
+                                // fewer AST shapes than the one array lengths used, so
+                                // 'size_of(i64)' failed here while working there. Both are one
+                                // folder now (TYPE-11), so that cause is gone.
                                 error(diag, arm_loc,
                                     "match arm pattern could not be folded to an integer constant "
-                                    "(an overflowing division, a shift of 64 or more, or an "
-                                    "expression this position cannot evaluate)");
+                                    "(an overflowing division, a shift of 64 or more, or a "
+                                    "constant that is not an integer)");
                             }
                             if (val) {
                                 if (seen_values.count(*val)) {
@@ -5511,13 +5518,13 @@ namespace sema {
                                 diag.report_error(DiagnosticStage::Sema, arm.location, "switch arm pattern must be a compile-time constant");
                             }
                             check_expr(*lp.expr, locals, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_error_type);
-                            const auto val = evaluate_integer_constant(*lp.expr, module_path, program);
+                            const auto val = evaluate_integer_constant(*lp.expr, module_path, program, diag);
                             if (!val && pattern_is_constant) {
                                 // See the matching comment in the match-expression path above.
                                 diag.report_error(DiagnosticStage::Sema, arm.location,
                                     "switch arm pattern could not be folded to an integer constant "
-                                    "(an overflowing division, a shift of 64 or more, or an "
-                                    "expression this position cannot evaluate)");
+                                    "(an overflowing division, a shift of 64 or more, or a "
+                                    "constant that is not an integer)");
                             }
                             if (val) {
                                 if (seen_values.count(*val)) {

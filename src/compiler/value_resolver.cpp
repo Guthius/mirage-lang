@@ -8,37 +8,94 @@
 #include <unordered_set>
 
 namespace sema {
-    namespace {
-        // Guarded signed-integer folding, shared by this file's two evaluators.
-        //
-        // Division and modulo overflow for INT64_MIN / -1, which is undefined behaviour and
-        // traps with SIGFPE on x86-64 -- a hard compiler crash, not a diagnostic. A shift by a
-        // negative amount, or by at least the operand width, is likewise undefined; in
-        // practice x86 masks the count, so '1 << 64' silently folded to 1 and a case label
-        // written that way matched 1.
-        //
-        // Returning nullopt makes the expression "not a constant expression", which callers
-        // already handle and report. The uint64_t sibling in type_resolver.cpp
-        // (eval_integer_const_expr) has always guarded its shifts this way; unsigned division
-        // cannot overflow, which is why only these two needed the division guard.
-        auto fold_div(const int64_t lhs, const int64_t rhs) -> std::optional<int64_t> {
-            if (rhs == 0 || (lhs == std::numeric_limits<int64_t>::min() && rhs == -1)) return std::nullopt;
+    // Declared in sema.hpp. Every constant-folding evaluator in the compiler routes its
+    // operators through these two, so a guard fixed here is fixed everywhere.
+    auto fold_unary_op(const ast::UnaryOp op, const uint64_t operand, ConstFoldSign) -> std::optional<uint64_t> {
+        switch (op) {
+        // Wrapping negation of the bit pattern: identical for both signednesses, and the
+        // only sane answer for the unsigned reading, which has no negative values to land on.
+        case ast::UnaryOp::Negate:     return uint64_t{0} - operand;
+        case ast::UnaryOp::BitwiseNot: return ~operand;
+        case ast::UnaryOp::LogicalNot: return operand == 0 ? uint64_t{1} : uint64_t{0};
+        // AddressOf/Deref have no constant value; everything else is not an operator on
+        // integers at all.
+        default:                       return std::nullopt;
+        }
+    }
+
+    auto fold_binary_op(const ast::BinaryOp op, const uint64_t lhs, const uint64_t rhs, const ConstFoldSign sign) -> std::optional<uint64_t> {
+        const bool is_signed = sign == ConstFoldSign::Signed;
+        const auto sl = static_cast<int64_t>(lhs);
+        const auto sr = static_cast<int64_t>(rhs);
+        const auto boolean = [](const bool b) { return std::optional<uint64_t>{b ? 1u : 0u}; };
+
+        switch (op) {
+        // Identical in both readings — two's complement makes these bit-pattern operations.
+        case ast::BinaryOp::Add:        return lhs + rhs;
+        case ast::BinaryOp::Sub:        return lhs - rhs;
+        case ast::BinaryOp::Mul:        return lhs * rhs;
+        case ast::BinaryOp::BitwiseAnd: return lhs & rhs;
+        case ast::BinaryOp::BitwiseOr:  return lhs | rhs;
+        case ast::BinaryOp::BitwiseXor: return lhs ^ rhs;
+        case ast::BinaryOp::Equal:      return boolean(lhs == rhs);
+        case ast::BinaryOp::NotEqual:   return boolean(lhs != rhs);
+        case ast::BinaryOp::LogicalAnd: return boolean(lhs != 0 && rhs != 0);
+        case ast::BinaryOp::LogicalOr:  return boolean(lhs != 0 || rhs != 0);
+
+        // Division: zero divisor is never constant. INT64_MIN / -1 additionally overflows in
+        // the SIGNED reading — undefined, and a SIGFPE crash of the compiler itself on
+        // x86-64, not a diagnostic. Unsigned division cannot overflow, which is why the
+        // unsigned evaluator never needed that half of the guard.
+        case ast::BinaryOp::Div:
+            if (rhs == 0) return std::nullopt;
+            if (is_signed) {
+                if (sl == std::numeric_limits<int64_t>::min() && sr == -1) return std::nullopt;
+                return static_cast<uint64_t>(sl / sr);
+            }
             return lhs / rhs;
-        }
-
-        auto fold_mod(const int64_t lhs, const int64_t rhs) -> std::optional<int64_t> {
-            if (rhs == 0 || (lhs == std::numeric_limits<int64_t>::min() && rhs == -1)) return std::nullopt;
+        case ast::BinaryOp::Mod:
+            if (rhs == 0) return std::nullopt;
+            if (is_signed) {
+                if (sl == std::numeric_limits<int64_t>::min() && sr == -1) return std::nullopt;
+                return static_cast<uint64_t>(sl % sr);
+            }
             return lhs % rhs;
+
+        // A shift of 64 or more is undefined; x86 masks the count, so '1 << 64' folded
+        // silently to 1. In the signed reading the count can also be negative, which the
+        // unsigned reading cannot express — hence the extra test.
+        case ast::BinaryOp::ShiftLeft:
+            if (rhs >= 64 || (is_signed && sr < 0)) return std::nullopt;
+            return lhs << rhs;
+        // The one shift that is NOT a shared bit operation: signed '>>' sign-extends,
+        // unsigned '>>' fills with zero.
+        case ast::BinaryOp::ShiftRight:
+            if (rhs >= 64 || (is_signed && sr < 0)) return std::nullopt;
+            return is_signed ? static_cast<uint64_t>(sl >> sr) : lhs >> rhs;
+
+        // Relational comparisons genuinely differ: -1 is less than 0 signed, and greater
+        // than 0 unsigned.
+        case ast::BinaryOp::Less:         return boolean(is_signed ? sl < sr : lhs < rhs);
+        case ast::BinaryOp::Greater:      return boolean(is_signed ? sl > sr : lhs > rhs);
+        case ast::BinaryOp::LessEqual:    return boolean(is_signed ? sl <= sr : lhs <= rhs);
+        case ast::BinaryOp::GreaterEqual: return boolean(is_signed ? sl >= sr : lhs >= rhs);
+
+        // 'in' is a range/bitset membership test, not constant-foldable here.
+        case ast::BinaryOp::In:           return std::nullopt;
+        }
+        return std::nullopt;
+    }
+
+    namespace {
+        // Signed-int64 views of the shared operators above, for this file's evaluator.
+        auto fold_signed_unary(const ast::UnaryOp op, const int64_t operand) -> std::optional<int64_t> {
+            const auto r = fold_unary_op(op, static_cast<uint64_t>(operand), ConstFoldSign::Signed);
+            return r ? std::optional{static_cast<int64_t>(*r)} : std::nullopt;
         }
 
-        auto fold_shift_left(const int64_t lhs, const int64_t rhs) -> std::optional<int64_t> {
-            if (rhs < 0 || rhs >= 64) return std::nullopt;
-            return static_cast<int64_t>(static_cast<uint64_t>(lhs) << static_cast<uint64_t>(rhs));
-        }
-
-        auto fold_shift_right(const int64_t lhs, const int64_t rhs) -> std::optional<int64_t> {
-            if (rhs < 0 || rhs >= 64) return std::nullopt;
-            return lhs >> rhs;
+        auto fold_signed_binary(const ast::BinaryOp op, const int64_t lhs, const int64_t rhs) -> std::optional<int64_t> {
+            const auto r = fold_binary_op(op, static_cast<uint64_t>(lhs), static_cast<uint64_t>(rhs), ConstFoldSign::Signed);
+            return r ? std::optional{static_cast<int64_t>(*r)} : std::nullopt;
         }
 
         // Resolves the module a MemberExpr's `object` refers to, for the two shapes cross-
@@ -559,91 +616,14 @@ namespace sema {
         return is_constant_expr_impl(expr, module_path, program, names);
     }
 
-    auto evaluate_integer_constant(const ast::Expr &expr, const std::string &module_path, const Program &program) -> std::optional<int64_t> {
-        return std::visit(
-            [&]<typename T>(const T &v) -> std::optional<int64_t> {
-                using V = std::decay_t<T>;
-
-                if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr>) {
-                    return static_cast<int64_t>(v.value);
-                }
-
-                if constexpr (std::is_same_v<V, ast::LiteralBoolExpr>) {
-                    return v.value ? int64_t{1} : int64_t{0};
-                }
-
-                if constexpr (std::is_same_v<V, ast::LiteralCharExpr>) {
-                    return static_cast<int64_t>(v.value);
-                }
-
-                if constexpr (std::is_same_v<V, ast::IdentExpr>) {
-                    const auto mod_it = program.modules.find(module_path);
-                    if (mod_it == program.modules.end()) return std::nullopt;
-                    const auto sym_it = mod_it->second.symbols.find(v.name);
-                    if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
-                    const auto *g = std::get_if<GlobalSymbol>(&sym_it->second);
-                    if (!g || g->is_mut || !g->decl->init) return std::nullopt;
-                    return evaluate_integer_constant(*g->decl->init, module_path, program);
-                }
-
-                if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
-                    // Cross-module qualified const access, e.g. 'linux.EINVAL' or
-                    // 'import("...").EINVAL' — mirrors evaluate_const_value's identically-
-                    // shaped MemberExpr case (this evaluator has no DiagnosticEngine to call
-                    // resolve_global_symbol with, but by the time a match/switch arm pattern
-                    // reaches here it's already been through check_expr, which resolves the
-                    // referenced const's value as an ordinary side effect of type-checking it —
-                    // same reasoning as the IdentExpr case above not calling it either).
-                    const auto other_module_path = resolve_member_object_import_path(v->object, module_path, program);
-                    if (!other_module_path) return std::nullopt;
-
-                    const auto other_mod_it = program.modules.find(*other_module_path);
-                    if (other_mod_it == program.modules.end()) return std::nullopt;
-                    const auto other_sym_it = other_mod_it->second.symbols.find(v->member);
-                    if (other_sym_it == other_mod_it->second.symbols.end()) return std::nullopt;
-                    const auto *g = std::get_if<GlobalSymbol>(&other_sym_it->second);
-                    if (!g || g->is_mut || !g->decl->init) return std::nullopt;
-                    return evaluate_integer_constant(*g->decl->init, *other_module_path, program);
-                }
-
-                if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
-                    if (v->op == ast::UnaryOp::Negate) {
-                        auto inner = evaluate_integer_constant(v->operand, module_path, program);
-                        if (inner) return -(*inner);
-                    }
-                    if (v->op == ast::UnaryOp::BitwiseNot) {
-                        auto inner = evaluate_integer_constant(v->operand, module_path, program);
-                        if (inner) return ~(*inner);
-                    }
-                    return std::nullopt;
-                }
-
-                if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
-                    auto lhs = evaluate_integer_constant(v->lhs, module_path, program);
-                    auto rhs = evaluate_integer_constant(v->rhs, module_path, program);
-                    if (!lhs || !rhs) return std::nullopt;
-                    switch (v->op) {
-                    case ast::BinaryOp::Add:        return *lhs + *rhs;
-                    case ast::BinaryOp::Sub:        return *lhs - *rhs;
-                    case ast::BinaryOp::Mul:        return *lhs * *rhs;
-                    case ast::BinaryOp::Div:        return fold_div(*lhs, *rhs);
-                    case ast::BinaryOp::Mod:        return fold_mod(*lhs, *rhs);
-                    case ast::BinaryOp::BitwiseAnd: return *lhs & *rhs;
-                    case ast::BinaryOp::BitwiseOr:  return *lhs | *rhs;
-                    case ast::BinaryOp::BitwiseXor: return *lhs ^ *rhs;
-                    case ast::BinaryOp::ShiftLeft:  return fold_shift_left(*lhs, *rhs);
-                    case ast::BinaryOp::ShiftRight: return fold_shift_right(*lhs, *rhs);
-                    default:                        return std::nullopt;
-                    }
-                }
-
-                if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
-                    return evaluate_integer_constant(v->value, module_path, program);
-                }
-
-                return std::nullopt;
-            },
-            expr);
+    auto evaluate_integer_constant(const ast::Expr &expr, const std::string &module_path, Program &program,
+                                    DiagnosticEngine &diag) -> std::optional<int64_t> {
+        const auto folded = evaluate_const_value(expr, module_path, program, diag);
+        if (!folded) return std::nullopt;
+        // A string constant is a perfectly good constant, just not an integer one — the
+        // caller (a match arm value, a generic value argument) wants a number.
+        const auto *iv = std::get_if<int64_t>(&folded.value());
+        return iv ? std::optional{*iv} : std::nullopt;
     }
 
     auto find_enum_field_by_name(const EnumInfo &info, const std::string_view name) -> const EnumFieldInfo * {
@@ -922,12 +902,9 @@ namespace sema {
                     const auto inner = evaluate_const_value(v->operand, module_path, program, diag);
                     const auto *iv = inner ? std::get_if<int64_t>(&*inner) : nullptr;
                     if (!iv) return std::nullopt;
-                    switch (v->op) {
-                    case ast::UnaryOp::LogicalNot: return int64_t{*iv == 0 ? 1 : 0};
-                    case ast::UnaryOp::Negate:     return int64_t{-*iv};
-                    case ast::UnaryOp::BitwiseNot: return int64_t{~*iv};
-                    default:                       return std::nullopt;
-                    }
+                    const auto folded = fold_signed_unary(v->op, *iv);
+                    if (!folded) return std::nullopt;
+                    return *folded;
                 }
 
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
@@ -972,36 +949,24 @@ namespace sema {
                     const auto *li = lhs ? std::get_if<int64_t>(&*lhs) : nullptr;
                     const auto *ri = rhs ? std::get_if<int64_t>(&*rhs) : nullptr;
                     if (!li || !ri) return std::nullopt;
-                    switch (v->op) {
-                    case ast::BinaryOp::Add:          return *li + *ri;
-                    case ast::BinaryOp::Sub:          return *li - *ri;
-                    case ast::BinaryOp::Mul:          return *li * *ri;
-                    case ast::BinaryOp::Div:          return fold_div(*li, *ri);
-                    case ast::BinaryOp::Mod:          return fold_mod(*li, *ri);
-                    case ast::BinaryOp::BitwiseAnd:   return *li & *ri;
-                    case ast::BinaryOp::BitwiseOr:    return *li | *ri;
-                    case ast::BinaryOp::BitwiseXor:   return *li ^ *ri;
-                    case ast::BinaryOp::ShiftLeft:    return fold_shift_left(*li, *ri);
-                    case ast::BinaryOp::ShiftRight:   return fold_shift_right(*li, *ri);
-                    case ast::BinaryOp::Less:         return int64_t{*li < *ri ? 1 : 0};
-                    case ast::BinaryOp::Greater:      return int64_t{*li > *ri ? 1 : 0};
-                    case ast::BinaryOp::LessEqual:    return int64_t{*li <= *ri ? 1 : 0};
-                    case ast::BinaryOp::GreaterEqual: return int64_t{*li >= *ri ? 1 : 0};
-                    default:                          return std::nullopt;
-                    }
+                    // Equal/NotEqual and the logical operators were intercepted above, so
+                    // everything reaching here is an ordinary signed operator.
+                    const auto folded = fold_signed_binary(v->op, *li, *ri);
+                    if (!folded) return std::nullopt;
+                    return *folded;
                 }
 
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                     return evaluate_const_value(v->value, module_path, program, diag);
                 }
 
-                // is_constant_expr_impl above reports both of these as constant, but this
-                // evaluator had no case for either -- so folding silently failed and every
-                // caller treated the result as "not constant". For a 'when' condition that
-                // meant the whole condition evaluated to false and the ELSE branch was
-                // compiled, with no diagnostic: 'when size_of(i64) > 4' took the else branch.
-                // eval_integer_const_expr in type_resolver.cpp has always handled these, which
-                // is why the same expression works as a 'const' initializer or array length.
+                // is_constant_expr_impl above reports both of these as constant, so this
+                // evaluator must fold them or every caller silently treats the result as "not
+                // constant". Two separate bugs came from exactly that: a 'when size_of(i64) > 4'
+                // condition evaluated to false and compiled the ELSE branch with no diagnostic,
+                // and 'size_of(i64)' as a match arm pattern was rejected outright — both while
+                // the same expression worked fine as an array length, whose evaluator did know
+                // these shapes. Any shape added to is_constant_expr_impl needs a case here.
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                     return static_cast<int64_t>(eval_size_of_operand(*v, module_path, program, diag));
                 }
