@@ -30,6 +30,11 @@
     "action": "run",
     "exit": 0
   },
+  "example_arith_non_numeric": {
+    "action": "build",
+    "diag": "examples/example_arith_non_numeric/main.mir:16:18: error: arithmetic operators require integer or float operands",
+    "exit": 1
+  },
   "example_array_init": {
     "action": "run",
     "exit": 40

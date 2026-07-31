@@ -1,0 +1,18 @@
+// example_arith_non_numeric — arithmetic/bitwise/shift operators require numeric operands.
+// The operator group only checked lhs == rhs, so struct + struct, bool * bool, pointer *
+// pointer and float << float all passed sema and reached LLVM's CreateAdd/CreateShl on
+// values it cannot operate on (CODE_REVIEW.md CHECK-1).
+//
+// Expected: compile error "arithmetic operators require integer or float operands".
+
+type Point = struct {
+    x: i32 = 0
+    y: i32 = 0
+}
+
+pub fn main() -> i32 {
+    mut a: Point = default
+    mut b: Point = default
+    const c := a + b
+    return 0
+}

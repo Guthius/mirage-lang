@@ -345,6 +345,19 @@ namespace sema {
             case ast::BinaryOp::Mul:
             case ast::BinaryOp::Div:
             case ast::BinaryOp::Mod:
+                if (lhs != rhs) {
+                    return error(diag, loc, "operand type mismatch in binary expression");
+                }
+                // Numeric operands only. Same-type aggregates, pointers, bools and enums
+                // used to slip through the mismatch check above straight into codegen's
+                // CreateAdd/CreateMul on values LLVM cannot add — the comparison group
+                // below was hardened for exactly this (is_aggregate_no_cmp), but the
+                // arithmetic group never was.
+                if (!lhs.is_integer() && !lhs.is_float()) {
+                    return error(diag, loc, "arithmetic operators require integer or float operands");
+                }
+                return lhs;
+
             case ast::BinaryOp::BitwiseAnd:
             case ast::BinaryOp::BitwiseOr:
             case ast::BinaryOp::BitwiseXor:
@@ -352,6 +365,9 @@ namespace sema {
             case ast::BinaryOp::ShiftRight:
                 if (lhs != rhs) {
                     return error(diag, loc, "operand type mismatch in binary expression");
+                }
+                if (!lhs.is_integer()) {
+                    return error(diag, loc, "bitwise and shift operators require integer operands");
                 }
                 return lhs;
 
