@@ -688,6 +688,10 @@
     "action": "run",
     "exit": 100
   },
+  "example_range_index_width": {
+    "action": "run",
+    "exit": 32
+  },
   "example_raylib_link": {
     "action": "link-directives",
     "exit": 0

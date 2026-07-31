@@ -1,0 +1,16 @@
+// example_range_index_width — the range-loop index is bound as 'usize' by sema, so codegen
+// must give it 8-byte storage. The slot used to be allocated with the upper bound's type
+// (i32 for '0..4'), and every body read of 'i' then loaded 4 bytes of adjacent stack
+// garbage into the high half (CODE_REVIEW.md CG-1).
+//
+// Expected: exit code 32 — sum of arr[i] (26) plus sum of i (6), minus 0-based drift.
+
+const arr: [4]i32 = {5, 6, 7, 8}
+
+pub fn main() -> i32 {
+    mut sum: usize = 0
+    for i, x in 0..4 {
+        sum = sum + cast(arr[i], usize) + i
+    }
+    return cast(sum, i32)
+}
