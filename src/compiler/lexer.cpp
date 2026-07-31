@@ -476,8 +476,15 @@ namespace lexer {
             auto lex_hex_number(const size_t start) -> Token {
                 advance();
 
+                bool saw_digit = false;
                 while (!at_end() && (is_hex_digit(peek()) || peek() == '_')) {
+                    saw_digit |= peek() != '_';
                     advance();
+                }
+                if (!saw_digit) {
+                    // '0x' with nothing after it decoded silently as 0 ('0xG' became 0
+                    // followed by identifier 'G'); the grammar requires at least one digit.
+                    diagnostics_.report_error(DiagnosticStage::Lexer, make_location(), "missing digits after integer base prefix");
                 }
 
                 return make_token(TokenKind::IntLiteral, start);
@@ -486,8 +493,13 @@ namespace lexer {
             auto lex_binary_number(const size_t start) -> Token {
                 advance();
 
+                bool saw_digit = false;
                 while (!at_end() && (peek() == '0' || peek() == '1' || peek() == '_')) {
+                    saw_digit |= peek() != '_';
                     advance();
+                }
+                if (!saw_digit) {
+                    diagnostics_.report_error(DiagnosticStage::Lexer, make_location(), "missing digits after integer base prefix");
                 }
 
                 return make_token(TokenKind::IntLiteral, start);
@@ -496,8 +508,13 @@ namespace lexer {
             auto lex_octal_number(const size_t start) -> Token {
                 advance();
 
+                bool saw_digit = false;
                 while (!at_end() && ((peek() >= '0' && peek() <= '7') || peek() == '_')) {
+                    saw_digit |= peek() != '_';
                     advance();
+                }
+                if (!saw_digit) {
+                    diagnostics_.report_error(DiagnosticStage::Lexer, make_location(), "missing digits after integer base prefix");
                 }
 
                 return make_token(TokenKind::IntLiteral, start);

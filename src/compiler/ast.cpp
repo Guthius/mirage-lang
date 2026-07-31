@@ -6,6 +6,7 @@
 
 #include <charconv>
 #include <format>
+#include <limits>
 #include <sstream>
 
 namespace ast {
@@ -521,41 +522,40 @@ namespace ast {
 
             const auto location = parser.current_location();
             auto &token = parser.advance();
+            const auto &lexeme = token.lexeme;
 
-            uint64_t value = 0;
-
-            if (const auto lexeme = token.lexeme; lexeme.starts_with("0x") || lexeme.starts_with("0X")) {
-                for (size_t i = 2; i < lexeme.size(); ++i) {
-                    if (lexeme[i] == '_') {
-                        continue;
-                    }
-
-                    value = value * 16 + ToInt(lexeme[i]);
-                }
+            uint64_t base = 10;
+            size_t digit_start = 0;
+            if (lexeme.starts_with("0x") || lexeme.starts_with("0X")) {
+                base = 16;
+                digit_start = 2;
             } else if (lexeme.starts_with("0b") || lexeme.starts_with("0B")) {
-                for (size_t i = 2; i < lexeme.size(); ++i) {
-                    if (lexeme[i] == '_') {
-                        continue;
-                    }
-
-                    value = value * 2 + (lexeme[i] - '0');
-                }
+                base = 2;
+                digit_start = 2;
             } else if (lexeme.starts_with("0o") || lexeme.starts_with("0O")) {
-                for (size_t i = 2; i < lexeme.size(); ++i) {
-                    if (lexeme[i] == '_') {
-                        continue;
-                    }
+                base = 8;
+                digit_start = 2;
+            }
 
-                    value = value * 8 + (lexeme[i] - '0');
+            // Accumulation is overflow-checked: a literal past 2^64-1 used to wrap silently
+            // BEFORE sema's fits-in-target check ever saw it, so
+            // '0x1_0000_0000_0000_0000' validated as 0.
+            uint64_t value = 0;
+            bool overflow = false;
+            for (size_t i = digit_start; i < lexeme.size(); ++i) {
+                if (lexeme[i] == '_') {
+                    continue;
                 }
-            } else {
-                for (const char c : lexeme) {
-                    if (c == '_') {
-                        continue;
-                    }
-
-                    value = value * 10 + (c - '0');
+                const auto digit = ToInt(lexeme[i]);
+                if (value > (std::numeric_limits<uint64_t>::max() - digit) / base) {
+                    overflow = true;
+                    break;
                 }
+                value = value * base + digit;
+            }
+            if (overflow) {
+                parser.report_error(location, std::format("integer literal '{}' does not fit in 64 bits", lexeme));
+                value = 0;
             }
 
             return LiteralIntegerExpr{

@@ -580,6 +580,11 @@
     "diag": "examples/example_import_absolute/main.mir:11:14: error: cannot resolve import path '/etc' from 'examples/example_import_absolute'",
     "exit": 1
   },
+  "example_integer_literal_overflow": {
+    "action": "build",
+    "diag": "examples/example_integer_literal_overflow/main.mir:9:18: error: integer literal '0x1_0000_0000_0000_0000' does not fit in 64 bits",
+    "exit": 1
+  },
   "example_integer_literal_range": {
     "action": "build",
     "diag": "examples/example_integer_literal_range/main.mir:24:9: error: integer literal 300 is out of range for 'u8' (0..255); use 'cast(...)' if truncation is intended",

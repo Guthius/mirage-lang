@@ -1,0 +1,11 @@
+// example_integer_literal_overflow — a literal past 2^64-1 must be rejected at parse time.
+// Accumulation used to wrap silently BEFORE sema's fits-in-target check saw the value, so
+// '0x1_0000_0000_0000_0000' validated as 0 (CODE_REVIEW.md FE-5). The u64 boundary value
+// itself must stay accepted (see example_integer_literal_range_ok).
+//
+// Expected: compile error "does not fit in 64 bits".
+
+pub fn main() -> i32 {
+    mut a: u64 = 0x1_0000_0000_0000_0000
+    return 0
+}
