@@ -1690,6 +1690,25 @@ namespace sema {
         std::vector<std::pair<std::string, std::optional<Symbol>>> shadowed_;
     };
 
+    // RAII for Program::template_check_depth, the last bare set/reset counter in this
+    // file — everything else scope-shaped here is ScopedGenericScope-style. A counter
+    // (not a flag) because checking one template can reach another.
+    class ScopedTemplateCheck {
+      public:
+        explicit ScopedTemplateCheck(Program &program) : program_(program) {
+            ++program_.template_check_depth;
+        }
+        ~ScopedTemplateCheck() {
+            --program_.template_check_depth;
+        }
+
+        ScopedTemplateCheck(const ScopedTemplateCheck &) = delete;
+        auto operator=(const ScopedTemplateCheck &) -> ScopedTemplateCheck & = delete;
+
+      private:
+        Program &program_;
+    };
+
     // One immutable LocalScope binding per VALUE generic-param — mirrors
     // Resolver::generic_env_locals (type_resolver.cpp), duplicated here since check_expr's
     // LocalScope isn't reachable from that file's Resolver.
@@ -2368,7 +2387,7 @@ namespace sema {
             check_generic_type_method_bodies(path, name, program, diag);
         }
 
-        ++program.template_check_depth;
+        const ScopedTemplateCheck template_check(program);
         for (const auto &[path, name] : targets) {
             // Re-looked-up rather than captured: the loop body can insert into
             // Program::modules and invalidate any held reference.
@@ -2389,7 +2408,6 @@ namespace sema {
             program.template_fn_instance_for_decl[&decl] = idx;
             check_generic_function_instance_body(idx, program, diag);
         }
-        --program.template_check_depth;
     }
 
     // Resolves an explicit generic_args list ('make_list[i32]', 'Fixed[u8, 16]') against
