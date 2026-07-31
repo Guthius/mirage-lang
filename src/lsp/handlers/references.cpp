@@ -184,10 +184,37 @@ namespace lsp::handlers {
             return std::nullopt;
         }
 
+        // Resolves a type-position NamedType (possibly a dotted 'mod.Type' chain) and
+        // reports every segment naming the target. Mirrors the expression side exactly:
+        // the base segment resolves through the module's own symbols, later segments step
+        // through containers the way module-qualified member access does, and identity is
+        // same_declaration — pointer identity in-bundle, module+name across bundles.
+        void match_named_type(const ast::NamedType &named, const LocalLookupContext &ctx, const std::string &module_path,
+                               const sema::Program &program, const MatchTarget &target, std::vector<json> &out) {
+            const auto sym_it = ctx.sema_module.symbols.find(named.name);
+            if (sym_it == ctx.sema_module.symbols.end()) return;
+
+            const Resolution base{.kind = Resolution::Kind::Symbol, .name = named.name,
+                                  .module_path = module_path, .symbol = &sym_it->second};
+            if (same_declaration(base, target, program)) out.push_back(location_json(named.location));
+
+            auto container = symbol_to_container(*base.symbol);
+            for (const auto *segment = named.member.get(); segment; segment = segment->member.get()) {
+                if (container.kind == Container::Kind::None) return;
+                auto [res, next] = step(container, segment->name, program);
+                if (res.kind == Resolution::Kind::None) return;
+                if (same_declaration(res, target, program)) out.push_back(location_json(segment->location));
+                container = next;
+            }
+        }
+
         // Walks one function/method body collecting every reference that resolves to `target`.
         void collect_references_in_scope(const Scope &scope, const LocalLookupContext &ctx, const std::string &module_path,
                                           const sema::Program &program, const MatchTarget &target, std::vector<json> &out) {
             AstVisitor visitor;
+            visitor.on_type = [&](const ast::NamedType &named) {
+                match_named_type(named, ctx, module_path, program, target, out);
+            };
             visitor.on_expr = [&](const ast::Expr &expr) {
                 if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
                     if (const auto res = resolve_bare_name(ident->name, ident->location.line, scope, ctx, module_path)) {
@@ -338,7 +365,51 @@ namespace lsp::handlers {
                 return scoped;
             };
 
+            // Type annotations on the declarations themselves: param/return/field types,
+            // impl targets, aliases, ext-fn signatures. Bodies are walked below with
+            // scope-aware visitors; annotations always resolve at module scope.
+            AstVisitor annotation_visitor;
+            annotation_visitor.on_type = [&](const ast::NamedType &named) {
+                match_named_type(named, ctx, mod_path, result.sema_program, target, out);
+            };
+            const auto walk_annotation_types = [&](const ast::Decl &d) {
+                if (const auto *fn = std::get_if<ast::FunctionDecl>(&d)) {
+                    for (const auto &p : fn->params) {
+                        if (p.type) walk_type(*p.type, annotation_visitor);
+                    }
+                    for (const auto &ret : fn->return_types) walk_type(ret, annotation_visitor);
+                } else if (const auto *ext = std::get_if<ast::ExtFunctionDecl>(&d)) {
+                    for (const auto &p : ext->params) walk_type(p.type, annotation_visitor);
+                    if (ext->return_type) walk_type(*ext->return_type, annotation_visitor);
+                } else if (const auto *var = std::get_if<ast::VarDecl>(&d)) {
+                    if (var->type) walk_type(*var->type, annotation_visitor);
+                } else if (const auto *macro = std::get_if<ast::MacroDecl>(&d)) {
+                    for (const auto &p : macro->params) walk_type(p.type, annotation_visitor);
+                    if (macro->result_type) walk_type(*macro->result_type, annotation_visitor);
+                } else if (const auto *type_decl = std::get_if<ast::TypeDecl>(&d)) {
+                    walk_type(type_decl->type, annotation_visitor);
+                } else if (const auto *impl = std::get_if<ast::ImplDecl>(&d)) {
+                    walk_named_type(impl->target, annotation_visitor);
+                    for (const auto &fn : impl->functions) {
+                        for (const auto &p : fn.params) {
+                            if (p.type) walk_type(*p.type, annotation_visitor);
+                        }
+                        for (const auto &ret : fn.return_types) walk_type(ret, annotation_visitor);
+                    }
+                } else if (const auto *trait_impl = std::get_if<ast::TraitImplDecl>(&d)) {
+                    walk_named_type(trait_impl->trait_name, annotation_visitor);
+                    walk_named_type(trait_impl->type_name, annotation_visitor);
+                    for (const auto &fn : trait_impl->functions) {
+                        for (const auto &p : fn.params) {
+                            if (p.type) walk_type(*p.type, annotation_visitor);
+                        }
+                        for (const auto &ret : fn.return_types) walk_type(ret, annotation_visitor);
+                    }
+                }
+            };
+
             for (const auto &decl : decls) {
+                walk_annotation_types(decl);
                 if (const auto *fn = std::get_if<ast::FunctionDecl>(&decl)) {
                     std::vector<ParamInfo> params;
                     for (const auto &p : fn->params) params.push_back({p.name, {}, p.location});

@@ -23,6 +23,15 @@ namespace lsp::handlers {
         std::function<void(const ast::MatchExpr::VariantPattern &, const ast::Expr &operand)> on_pattern =
             [](const ast::MatchExpr::VariantPattern &, const ast::Expr &) {};
 
+        // Named-type occurrences ('x: MyType', 'p: *mod.List[i32]', a cast's target, an
+        // impl's target...). A type annotation is neither an Expr nor a Stmt, so without
+        // this callback no type position is ever visited and Find References on a type
+        // misses every annotation. Receives the OUTERMOST segment of a dotted chain
+        // ('mod.Type' arrives once, as 'mod' with its member chain attached), letting the
+        // callback resolve the chain the same way the expression side resolves
+        // module-qualified members. Fired via walk_type/walk_named_type below.
+        std::function<void(const ast::NamedType &)> on_type = [](const ast::NamedType &) {};
+
         // Invoked by walk_module_bodies immediately before each function/method BODY, naming
         // the declaration that body belongs to (exactly one pointer is non-null). Not invoked
         // by walk_expr/walk_stmt, which start from a node whose owner the caller already knows,
@@ -46,6 +55,18 @@ namespace lsp::handlers {
     // narrower single-location search.
     void walk_expr(const ast::Expr &expr, const AstVisitor &visitor);
     void walk_stmt(const ast::Stmt &stmt, const AstVisitor &visitor);
+
+    // Structural traversal of a type annotation: fires on_type for every NamedType
+    // reachable from `type` (including generic args, function-type params/returns,
+    // array/slice/pointer bases, error members, a bitset's member enum, a trait's
+    // composed traits), walk_expr for every Expr embedded in it (array sizes, field
+    // defaults, generic value args). walk_named_type is the entry point for the
+    // NamedType-shaped fields that are not stored as an ast::Type (an impl's target,
+    // a trait-impl's names). Both are also invoked by walk_expr/walk_stmt for the
+    // type positions inside expressions and statements (casts, sizeof-style type
+    // operands, generic instantiation args, a var decl's annotation).
+    void walk_type(const ast::Type &type, const AstVisitor &visitor);
+    void walk_named_type(const ast::NamedType &named, const AstVisitor &visitor);
 
     // Walks every expression-bearing top-level decl in `module`: FunctionDecl and
     // ImplDecl::Function bodies (via both plain 'impl TYPE' and 'impl TRAIT for TYPE'

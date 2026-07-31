@@ -21,6 +21,72 @@ namespace lsp::handlers {
         }
     }
 
+    void walk_named_type(const ast::NamedType &named, const AstVisitor &visitor) {
+        visitor.on_type(named);
+        // Generic args live on the LEAF segment of a dotted chain (see ast::NamedType);
+        // the chain itself is the callback's to resolve, but the args are independent
+        // type/expr occurrences of their own.
+        for (const auto *segment = &named; segment; segment = segment->member.get()) {
+            for (const auto &arg : segment->generic_args) {
+                if (const auto *type_arg = std::get_if<ast::Type>(&arg->value)) {
+                    walk_type(*type_arg, visitor);
+                } else if (const auto *expr_arg = std::get_if<ast::Expr>(&arg->value)) {
+                    walk_expr(*expr_arg, visitor);
+                }
+            }
+        }
+    }
+
+    void walk_type(const ast::Type &type, const AstVisitor &visitor) {
+        std::visit(
+            [&]<typename T>(const T &node) {
+                using U = std::decay_t<T>;
+                if constexpr (std::is_same_v<U, ast::NamedType>) {
+                    walk_named_type(node, visitor);
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::PointerType>>) {
+                    walk_type(node->pointee, visitor);
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::StructType>>) {
+                    for (const auto &field : node->fields) {
+                        walk_type(field.type, visitor);
+                        if (field.init) walk_expr(*field.init, visitor);
+                    }
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::ArrayType>>) {
+                    walk_type(node->base_type, visitor);
+                    if (node->size) walk_expr(*node->size, visitor);
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SliceType>>) {
+                    walk_type(node->base_type, visitor);
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::EnumType>>) {
+                    if (node->underlying_type) walk_type(*node->underlying_type, visitor);
+                    for (const auto &field : node->fields) {
+                        if (field.init) walk_expr(*field.init, visitor);
+                    }
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::UnionType>>) {
+                    for (const auto &member : node->members) walk_type(member.type, visitor);
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::FunctionType>>) {
+                    for (const auto &param : node->param_types) walk_type(param, visitor);
+                    for (const auto &ret : node->return_types) walk_type(ret, visitor);
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TraitType>>) {
+                    for (const auto &composed : node->composed_traits) walk_named_type(composed, visitor);
+                    for (const auto &m : node->methods) {
+                        for (const auto &p : m.params) {
+                            if (p.type) walk_type(*p.type, visitor);
+                            if (p.default_value) walk_expr(*p.default_value, visitor);
+                        }
+                        for (const auto &ret : m.return_types) walk_type(ret, visitor);
+                    }
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::ErrorType>>) {
+                    for (const auto &member : node->members) walk_named_type(member, visitor);
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::OptionalErrorType>>) {
+                    walk_type(node->inner, visitor);
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::BitsetType>>) {
+                    walk_named_type(node->member_type, visitor);
+                    if (node->storage_type) walk_type(*node->storage_type, visitor);
+                }
+                // monostate, BuiltinType - nothing named to visit.
+            },
+            type);
+    }
+
     void walk_expr(const ast::Expr &expr, const AstVisitor &visitor) {
         visitor.on_expr(expr);
 
@@ -54,15 +120,15 @@ namespace lsp::handlers {
                     walk_expr(node->size, visitor);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::CastExpr>>) {
                     walk_expr(node->value, visitor);
+                    walk_type(node->as_type, visitor);
                     if (node->len_expr) walk_expr(*node->len_expr, visitor);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
                     walk_expr(node->operand, visitor);
-                    // Type-tagged args (e.g. 'List[SomeType]') aren't walked here, matching
-                    // this visitor's existing scope — it only ever walks Expr nodes (e.g.
-                    // CastExpr's 'as_type' isn't walked either).
                     for (const auto &arg : node->args) {
                         if (const auto *expr_arg = std::get_if<ast::Expr>(&arg.value)) {
                             walk_expr(*expr_arg, visitor);
+                        } else if (const auto *type_arg = std::get_if<ast::Type>(&arg.value)) {
+                            walk_type(*type_arg, visitor);
                         }
                     }
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SliceExpr>>) {
@@ -97,8 +163,10 @@ namespace lsp::handlers {
                     walk_expr(node->upper, visitor);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SpreadExpr>>) {
                     walk_expr(node->operand, visitor);
+                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::TypeExpr>>) {
+                    walk_type(node->type, visitor);
                 }
-                // Literals, IdentExpr, ImportExpr, ImportBinExpr, TypeExpr, IotaExpr,
+                // Literals, IdentExpr, ImportExpr, ImportBinExpr, IotaExpr,
                 // DotIdentExpr, DefaultExpr, UndefinedExpr - no nested Expr to recurse into.
             },
             expr);
@@ -133,6 +201,7 @@ namespace lsp::handlers {
                 } else if constexpr (std::is_same_v<U, ast::ExprStmt>) {
                     walk_expr(node.expr, visitor);
                 } else if constexpr (std::is_same_v<U, ast::VarDeclStmt>) {
+                    if (node.type) walk_type(*node.type, visitor);
                     if (node.init) walk_expr(*node.init, visitor);
                 } else if constexpr (std::is_same_v<U, ast::VarDeclGroupStmt>) {
                     walk_expr(node.init, visitor);
