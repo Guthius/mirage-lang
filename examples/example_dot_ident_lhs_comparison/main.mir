@@ -1,0 +1,35 @@
+// example_dot_ident_lhs_comparison — contextual operands must resolve against the other
+// side of a comparison regardless of which side they are on. The operand swap only fired
+// for int/float/nil literals, so 'color == .Red' worked while '.Red == color' failed with
+// "cannot resolve '.Red' without an expected enum or tagged union type" — and the same
+// for a braced bitset literal on the left (CODE_REVIEW.md CHECK-3).
+//
+// Expected: exit code 7 — one bit per comparison direction/shape that resolves.
+
+type Color = enum(u8) {
+    Red
+    Green
+}
+
+type Mode = enum(u8) {
+    A
+    B
+}
+
+type Modes = bitset(Mode, u8)
+
+pub fn main() -> i32 {
+    mut color := Color.Red
+    mut code: i32 = 0
+    if .Red == color {
+        code = code + 1
+    }
+    if color == .Red {
+        code = code + 2
+    }
+    mut modes: Modes = {.A}
+    if {.A} == modes {
+        code = code + 4
+    }
+    return code
+}

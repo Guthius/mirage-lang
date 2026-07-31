@@ -4036,12 +4036,28 @@ namespace sema {
                         return ResolvedType{.kind = TypeKind::Bool};
                     }
 
+                    // Contextual operands — literals, '.Variant', '{.A, .B}' — resolve
+                    // against the OTHER side's type, whichever side they're on. The swap
+                    // used to fire only for int/float/nil literals, so 'color == .Red'
+                    // worked while '.Red == color' failed with "cannot resolve '.Red'".
+                    const auto is_contextual = [](const ast::Expr &e) {
+                        return is_coercible_literal(e) ||
+                               std::holds_alternative<ast::DotIdentExpr>(e) ||
+                               std::holds_alternative<std::unique_ptr<ast::BracedInitializerExpr>>(e);
+                    };
+                    const bool operand_cmp = v->op == ast::BinaryOp::Equal || v->op == ast::BinaryOp::NotEqual ||
+                                             v->op == ast::BinaryOp::Less || v->op == ast::BinaryOp::Greater ||
+                                             v->op == ast::BinaryOp::LessEqual || v->op == ast::BinaryOp::GreaterEqual;
+
                     ResolvedType lhs, rhs;
-                    if (is_coercible_literal(v->lhs) && !is_coercible_literal(v->rhs)) {
+                    if (is_contextual(v->lhs) && !is_contextual(v->rhs)) {
                         rhs = check_expr(v->rhs, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                         lhs = check_expr(v->lhs, locals, module_path, program, diag, rhs, loop_depth, defer_loop_base, fn_error_type);
                     } else {
-                        lhs = check_expr(v->lhs, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+                        // A comparison's outer expected type describes its RESULT (Bool),
+                        // not its operands — forwarding it into the LHS biased contextual
+                        // operand resolution toward the wrong type.
+                        lhs = check_expr(v->lhs, locals, module_path, program, diag, operand_cmp ? std::nullopt : expected, loop_depth, defer_loop_base, fn_error_type);
                         rhs = check_expr(v->rhs, locals, module_path, program, diag, lhs, loop_depth, defer_loop_base, fn_error_type);
                     }
 

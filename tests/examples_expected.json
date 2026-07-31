@@ -324,6 +324,10 @@
     "action": "run",
     "exit": 0
   },
+  "example_dot_ident_lhs_comparison": {
+    "action": "run",
+    "exit": 7
+  },
   "example_enum": {
     "action": "run",
     "exit": 10
