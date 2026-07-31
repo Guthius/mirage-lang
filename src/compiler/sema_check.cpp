@@ -1023,7 +1023,7 @@ namespace sema {
                 bool ok = true;
                 for (size_t i = 0; i < fixed_count; ++i) {
                     if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, params[i], loop_depth, defer_loop_base, fn_error_type); !assignable_in_module(arg_ty, params[i], module_path, program)) {
-                        error(diag, loc, std::format("'{}' argument {} type mismatch", callee_desc, i + 1));
+                        error(diag, get_expr_location(args[i]), std::format("'{}' argument {} type mismatch", callee_desc, i + 1));
                         ok = false;
                     }
                 }
@@ -1036,7 +1036,7 @@ namespace sema {
                     if (const auto *spread = std::get_if<std::unique_ptr<ast::SpreadExpr>>(&args[fixed_count])) {
                         const auto spread_ty = check_expr((*spread)->operand, locals, module_path, program, diag, slice_ty, loop_depth, defer_loop_base, fn_error_type);
                         if (!assignable_in_module(spread_ty, slice_ty, module_path, program)) {
-                            error(diag, loc, std::format("'{}' spread argument type mismatch: expected a slice matching the variadic element type", callee_desc));
+                            error(diag, get_expr_location(args[fixed_count]), std::format("'{}' spread argument type mismatch: expected a slice matching the variadic element type", callee_desc));
                             ok = false;
                         }
                         return ok;
@@ -1050,7 +1050,7 @@ namespace sema {
                         continue;
                     }
                     if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, element_ty, loop_depth, defer_loop_base, fn_error_type); !assignable_in_module(arg_ty, element_ty, module_path, program)) {
-                        error(diag, loc, std::format("'{}' variadic argument {} type mismatch", callee_desc, i - fixed_count + 1));
+                        error(diag, get_expr_location(args[i]), std::format("'{}' variadic argument {} type mismatch", callee_desc, i - fixed_count + 1));
                         ok = false;
                     }
                 }
@@ -1087,7 +1087,7 @@ namespace sema {
             bool ok = true;
             for (size_t i = 0; i < std::min(args.size(), params.size()); ++i) {
                 if (auto arg_ty = check_expr(args[i], locals, module_path, program, diag, params[i], loop_depth, defer_loop_base, fn_error_type); !assignable_in_module(arg_ty, params[i], module_path, program)) {
-                    error(diag, loc, std::format("'{}' argument {} type mismatch", callee_desc, i + 1));
+                    error(diag, get_expr_location(args[i]), std::format("'{}' argument {} type mismatch", callee_desc, i + 1));
                     ok = false;
                 }
             }
@@ -1095,7 +1095,7 @@ namespace sema {
                 for (size_t i = params.size(); i < args.size(); ++i) {
                     const auto arg_ty = check_expr(args[i], locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     if (!is_valid_variadic_arg(arg_ty)) {
-                        error(diag, loc, std::format(
+                        error(diag, get_expr_location(args[i]), std::format(
                             "'{}' variadic argument {} has a type that violates C default argument promotions: "
                             "variadic arguments must be at least 32 bits wide and floats must be f64; use cast()",
                             callee_desc, i + 1));
