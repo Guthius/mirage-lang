@@ -372,27 +372,16 @@ namespace sema {
                                        Program &program, DiagnosticEngine &diag) {
             info.self_type = self_type;
 
-            for (auto &p : info.decl->params) {
-                ResolvedType pt;
-                if (p.type) {
-                    pt = resolve_type(*p.type, module_path, program, diag);
-                } else {
-                    // ':=' inferred-type param — infer from the (required) default expr.
+            resolve_signature_types(
+                info.decl->params, info.decl->return_types, program,
+                [&](const ast::Type &t) { return resolve_type(t, module_path, program, diag); },
+                [&](const ast::Expr &e) {
+                    // ':=' inferred-type param — infer from the default expr, checked in an
+                    // empty (module-scope) LocalScope, no caller in scope.
                     LocalScope empty;
-                    pt = check_expr(*p.default_value, empty, module_path, program, diag, std::nullopt, 0);
-                }
-                if (p.is_variadic) {
-                    info.is_variadic = true;
-                    info.variadic_element_type = pt;
-                    info.param_types.push_back(intern_slice(program, pt));
-                } else {
-                    info.param_types.push_back(pt);
-                }
-            }
-
-            for (auto &rt : info.decl->return_types) {
-                info.return_types.push_back(resolve_type(rt, module_path, program, diag));
-            }
+                    return check_expr(e, empty, module_path, program, diag, std::nullopt, 0);
+                },
+                info.param_types, info.return_types, info.is_variadic, info.variadic_element_type);
         }
 
         void resolve_impl_signatures_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {

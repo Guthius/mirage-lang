@@ -2005,28 +2005,13 @@ namespace sema {
         LocalScope default_scope;
         add_generic_value_param_locals(decl.generic_params, args, default_scope);
 
-        for (auto &p : decl.params) {
-            ResolvedType pt;
-            if (p.type) {
-                pt = resolve_type_with_generic_env(*p.type, module_path, program, diag, env, &decl.generic_params);
-            } else {
-                // ':=' inferred-type param — its type IS whatever its default expression checks
-                // to, so this is the one place a param type comes from check_expr rather than
-                // resolve_type. 'default_scope' carries the value generic-params as locals; the
-                // type ones are visible via generic_scope above.
-                pt = check_expr(*p.default_value, default_scope, module_path, program, diag, std::nullopt, 0);
-            }
-            if (p.is_variadic) {
-                instance->is_variadic = true;
-                instance->variadic_element_type = pt;
-                instance->param_types.push_back(intern_slice(program, pt));
-            } else {
-                instance->param_types.push_back(pt);
-            }
-        }
-        for (auto &rt : decl.return_types) {
-            instance->return_types.push_back(resolve_type_with_generic_env(rt, module_path, program, diag, env, &decl.generic_params));
-        }
+        resolve_signature_types(
+            decl.params, decl.return_types, program,
+            [&](const ast::Type &t) { return resolve_type_with_generic_env(t, module_path, program, diag, env, &decl.generic_params); },
+            // ':=' inferred-type param — 'default_scope' carries the value generic-params
+            // as locals; the type ones are visible via generic_scope above.
+            [&](const ast::Expr &e) { return check_expr(e, default_scope, module_path, program, diag, std::nullopt, 0); },
+            instance->param_types, instance->return_types, instance->is_variadic, instance->variadic_element_type);
 
         check_param_defaults(decl.params, instance->param_types, instance->required_params,
                               instance->param_default_is_const, module_path, program, diag, &default_scope);
@@ -2123,24 +2108,11 @@ namespace sema {
         LocalScope default_scope;
         add_generic_value_param_locals(impl_generic_params, args, default_scope);
 
-        for (auto &p : template_method->decl->params) {
-            ResolvedType pt;
-            if (p.type) {
-                pt = resolve_type_with_generic_env(*p.type, type_module, program, diag, env, &impl_generic_params);
-            } else {
-                pt = check_expr(*p.default_value, default_scope, type_module, program, diag, std::nullopt, 0);
-            }
-            if (p.is_variadic) {
-                instance->is_variadic = true;
-                instance->variadic_element_type = pt;
-                instance->param_types.push_back(intern_slice(program, pt));
-            } else {
-                instance->param_types.push_back(pt);
-            }
-        }
-        for (auto &rt : template_method->decl->return_types) {
-            instance->return_types.push_back(resolve_type_with_generic_env(rt, type_module, program, diag, env, &impl_generic_params));
-        }
+        resolve_signature_types(
+            template_method->decl->params, template_method->decl->return_types, program,
+            [&](const ast::Type &t) { return resolve_type_with_generic_env(t, type_module, program, diag, env, &impl_generic_params); },
+            [&](const ast::Expr &e) { return check_expr(e, default_scope, type_module, program, diag, std::nullopt, 0); },
+            instance->param_types, instance->return_types, instance->is_variadic, instance->variadic_element_type);
 
         check_param_defaults(template_method->decl->params, instance->param_types, instance->required_params,
                               instance->param_default_is_const, type_module, program, diag, &default_scope);

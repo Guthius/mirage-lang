@@ -521,27 +521,16 @@ namespace sema {
         }
         const ScopedResolveMark resolving_guard(program.resolve_state.fn_signature_resolving, key);
 
-        for (auto &p : sym.decl->params) {
-            ResolvedType pt;
-            if (p.type) {
-                pt = resolve_type(*p.type, module_path, program, diag);
-            } else {
-                // ':=' inferred-type param — infer from the (parser-guaranteed) default expr,
-                // checked in an empty (module-scope) LocalScope, no caller in scope.
+        resolve_signature_types(
+            sym.decl->params, sym.decl->return_types, program,
+            [&](const ast::Type &t) { return resolve_type(t, module_path, program, diag); },
+            [&](const ast::Expr &e) {
+                // ':=' inferred-type param — infer from the default expr, checked in an
+                // empty (module-scope) LocalScope, no caller in scope.
                 LocalScope empty;
-                pt = check_expr(*p.default_value, empty, module_path, program, diag, std::nullopt, 0);
-            }
-            if (p.is_variadic) {
-                sym.is_variadic = true;
-                sym.variadic_element_type = pt;
-                sym.params.push_back(intern_slice(program, pt));
-            } else {
-                sym.params.push_back(pt);
-            }
-        }
-        for (auto &rt : sym.decl->return_types) {
-            sym.return_types.push_back(resolve_type(rt, module_path, program, diag));
-        }
+                return check_expr(e, empty, module_path, program, diag, std::nullopt, 0);
+            },
+            sym.params, sym.return_types, sym.is_variadic, sym.variadic_element_type);
 
         check_param_defaults(sym.decl->params, sym.params, sym.required_params, sym.param_default_is_const, module_path, program, diag);
 

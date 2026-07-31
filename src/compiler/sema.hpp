@@ -1222,6 +1222,45 @@ namespace sema {
     auto ensure_function_signature_resolved(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag) -> FunctionSymbol &;
     auto resolve_macro_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag, const SourceLocation &loc) -> MacroSymbol &;
 
+    // Resolves a declaration's parameter list and return types into a signature:
+    // each ': type' param through 'resolve_type_fn', each ':=' inferred-type param
+    // through 'infer_default_fn' (its type IS whatever its parser-guaranteed default
+    // expression checks to — the one place a param type comes from check_expr rather
+    // than resolve_type), and a variadic '...T' param dissolving to '[]T' with the
+    // element type recorded. Shared by resolve_method_signature (sema.cpp),
+    // ensure_function_signature_resolved (value_resolver.cpp) and the generic
+    // fn/method instantiation paths (sema_check.cpp), so a new param modifier lands
+    // in one place; what genuinely differs per site — WHICH resolver (plain vs
+    // generic-env) and WHICH scope the default is checked in — stays there, in the
+    // callbacks. Templated on the param type only because FunctionDecl::Param and
+    // ImplDecl::Function::Param are distinct, identically-shaped structs.
+    template <typename ParamT>
+    void resolve_signature_types(const std::vector<ParamT> &params, const std::vector<ast::Type> &return_types,
+                                  Program &program,
+                                  const std::function<ResolvedType(const ast::Type &)> &resolve_type_fn,
+                                  const std::function<ResolvedType(const ast::Expr &)> &infer_default_fn,
+                                  std::vector<ResolvedType> &out_param_types, std::vector<ResolvedType> &out_return_types,
+                                  bool &out_is_variadic, ResolvedType &out_variadic_element_type) {
+        for (const auto &p : params) {
+            ResolvedType pt;
+            if (p.type) {
+                pt = resolve_type_fn(*p.type);
+            } else {
+                pt = infer_default_fn(*p.default_value);
+            }
+            if (p.is_variadic) {
+                out_is_variadic = true;
+                out_variadic_element_type = pt;
+                out_param_types.push_back(intern_slice(program, pt));
+            } else {
+                out_param_types.push_back(pt);
+            }
+        }
+        for (const auto &rt : return_types) {
+            out_return_types.push_back(resolve_type_fn(rt));
+        }
+    }
+
     // Whether 'type' (a generic_param's declared type) is the builtin 'type' keyword itself
     // — i.e. this is a TYPE parameter ('T: type') rather than a value parameter. Defined in
     // sema_declare.cpp; shared by declare_type, type_resolver.cpp's generic_args resolution,
