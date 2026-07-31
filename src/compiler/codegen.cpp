@@ -597,6 +597,39 @@ namespace codegen {
                 return uint64_t{1} << (it->value + 1);
             }
 
+            // Enum field literal -> its underlying-typed constant; reports "unknown enum
+            // field" and yields undef when absent. Shared by the qualified
+            // ('EnumType.field'), contextual ('.field') and constant-initializer paths.
+            auto emit_enum_field_constant(const sema::ResolvedType &ty, const std::string &name, const SourceLocation &loc) -> llvm::Value * {
+                const auto &enum_info = sema_program_.enums.at(ty.enum_index);
+                for (const auto &field : enum_info.fields) {
+                    if (field.name == name) {
+                        return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty),
+                                                      static_cast<uint64_t>(field.value),
+                                                      enum_info.underlying_type.is_signed());
+                    }
+                }
+                report_codegen_error(diag_, loc, std::format("unknown enum field '{}'", name));
+                return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
+            }
+
+            // The llvm function pointer for a module-level 'fn'/'ext fn' symbol taken as a
+            // value, or nullptr when 'name' is not a function symbol in that module.
+            auto fn_symbol_value(const std::string &module_path, const std::string &name) -> llvm::Value * {
+                const auto &symbols = module_for(module_path).symbols;
+                const auto sym_it = symbols.find(name);
+                if (sym_it == symbols.end()) {
+                    return nullptr;
+                }
+                if (std::holds_alternative<sema::FunctionSymbol>(sym_it->second)) {
+                    return functions_.at(FunctionKey{module_path, name});
+                }
+                if (std::holds_alternative<sema::ExtFunctionSymbol>(sym_it->second)) {
+                    return ext_functions_.at(global_key(module_path, name));
+                }
+                return nullptr;
+            }
+
             // Build an llvm::FunctionType for an indirect call through a sema function type.
             auto llvm_function_type(const sema::FunctionTypeInfo &sig) -> llvm::FunctionType * {
                 std::vector<llvm::Type *> params;
@@ -4799,14 +4832,8 @@ namespace codegen {
                             }
                             // Taking a named function as a value (fn-ptr)
                             if (ty.kind == sema::TypeKind::Function) {
-                                const auto sym_it = current_module_->symbols.find(v.name);
-                                if (sym_it != current_module_->symbols.end()) {
-                                    if (std::holds_alternative<sema::FunctionSymbol>(sym_it->second)) {
-                                        return functions_.at(FunctionKey{*current_module_path_, v.name});
-                                    }
-                                    if (std::holds_alternative<sema::ExtFunctionSymbol>(sym_it->second)) {
-                                        return ext_functions_.at(global_key(*current_module_path_, v.name));
-                                    }
+                                if (auto *fn_ptr = fn_symbol_value(*current_module_path_, v.name)) {
+                                    return fn_ptr;
                                 }
                             }
                             // The active generic instance's own VALUE parameter used as a
@@ -4954,30 +4981,14 @@ namespace codegen {
                             // Cross-module function pointer taking: mod.fn_name
                             if (ty.kind == sema::TypeKind::Function) {
                                 if (const auto target_mod = try_namespace_chain(v->object)) {
-                                    const auto &target = module_for(*target_mod);
-                                    const auto sym_it = target.symbols.find(v->member);
-                                    if (sym_it != target.symbols.end()) {
-                                        if (std::holds_alternative<sema::FunctionSymbol>(sym_it->second)) {
-                                            return functions_.at(FunctionKey{*target_mod, v->member});
-                                        }
-                                        if (std::holds_alternative<sema::ExtFunctionSymbol>(sym_it->second)) {
-                                            return ext_functions_.at(global_key(*target_mod, v->member));
-                                        }
+                                    if (auto *fn_ptr = fn_symbol_value(*target_mod, v->member)) {
+                                        return fn_ptr;
                                     }
                                 }
                             }
                             // Handle fully-qualified enum field: e.g. EnumType.field or module.EnumType.field
                             if (ty.kind == sema::TypeKind::Enum && try_type_chain(v->object)) {
-                                const auto &enum_info = sema_program_.enums.at(ty.enum_index);
-                                for (const auto &field : enum_info.fields) {
-                                    if (field.name == v->member) {
-                                        return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty),
-                                                                      static_cast<uint64_t>(field.value),
-                                                                      enum_info.underlying_type.is_signed());
-                                    }
-                                }
-                                report_codegen_error(diag_, v->location, std::format("unknown enum field '{}'", v->member));
-                                return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
+                                return emit_enum_field_constant(ty, v->member, v->location);
                             }
                             // Fully-qualified bitset member: e.g. BitsetType.field
                             if (ty.kind == sema::TypeKind::Bitset && try_type_chain(v->object)) {
@@ -5011,17 +5022,7 @@ namespace codegen {
                                 return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty), mask.value_or(0), false);
                             }
                             // Enum field literal: .field_name
-                            // ty is the enum type; look up the field value
-                            const auto &enum_info = sema_program_.enums.at(ty.enum_index);
-                            for (const auto &field : enum_info.fields) {
-                                if (field.name == v.name) {
-                                    return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty),
-                                                                  static_cast<uint64_t>(field.value),
-                                                                  enum_info.underlying_type.is_signed());
-                                }
-                            }
-                            report_codegen_error(diag_, v.location, std::format("unknown enum field '{}'", v.name));
-                            return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
+                            return emit_enum_field_constant(ty, v.name, v.location);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) {
                             return emit_match(*v, ty);
                         } else if constexpr (std::is_same_v<V, ast::IotaExpr>) {
@@ -5848,26 +5849,14 @@ namespace codegen {
                                 }
                                 // Function pointer constant initializer
                                 if (ty.kind == sema::TypeKind::Function) {
-                                    if (std::holds_alternative<sema::FunctionSymbol>(sym->second)) {
-                                        return functions_.at(FunctionKey{*current_module_path_, v.name});
-                                    }
-                                    if (std::holds_alternative<sema::ExtFunctionSymbol>(sym->second)) {
-                                        return ext_functions_.at(global_key(*current_module_path_, v.name));
+                                    if (auto *fn_ptr = fn_symbol_value(*current_module_path_, v.name)) {
+                                        return fn_ptr;
                                     }
                                 }
                             }
                         } else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
                             if (ty.kind == sema::TypeKind::Enum) {
-                                const auto &enum_info = sema_program_.enums.at(ty.enum_index);
-                                for (const auto &field : enum_info.fields) {
-                                    if (field.name == v.name) {
-                                        return llvm::ConstantInt::get(llvm_type(*current_module_path_, ty),
-                                                                      static_cast<uint64_t>(field.value),
-                                                                      enum_info.underlying_type.is_signed());
-                                    }
-                                }
-                                report_codegen_error(diag_, v.location, std::format("unknown enum field '{}'", v.name));
-                                return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
+                                return emit_enum_field_constant(ty, v.name, v.location);
                             }
                             if (ty.kind == sema::TypeKind::Bitset) {
                                 const auto &bitset_info = sema_program_.bitsets.at(ty.bitset_index);
