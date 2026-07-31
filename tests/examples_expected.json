@@ -57,6 +57,11 @@
     "action": "run",
     "exit": 0
   },
+  "example_asm_expr_nonscalar_result": {
+    "action": "build",
+    "diag": "examples/example_asm_expr_nonscalar_result/main.mir:16:21: error: asm result type must be a scalar or pointer type",
+    "exit": 1
+  },
   "example_asm_expr_open_forms": {
     "action": "run",
     "exit": 0

@@ -1,0 +1,20 @@
+// example_asm_expr_nonscalar_result — an 'asm -> reg' expression whose result type comes
+// from the SURROUNDING context (here the declared type of 's') used to skip the
+// scalar-or-pointer rejection the explicit ': type' path has, so a register-sized struct
+// result reached codegen (CODE_REVIEW.md CHECK-15).
+//
+// Verify with:
+//   ./build/mirage build examples/example_asm_expr_nonscalar_result
+// Expected: sema error "asm result type must be a scalar or pointer type".
+
+type Pair = struct {
+    a: i32 = 0
+    b: i32 = 0
+}
+
+pub fn main() -> i32 {
+    const s: Pair = asm -> rax {
+        mov rax, 1
+    }
+    return 0
+}

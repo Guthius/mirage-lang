@@ -5670,7 +5670,15 @@ namespace sema {
                 result_ty = ResolvedType{.kind = TypeKind::Invalid};
             }
         } else if (expected) {
+            // The context-inferred type gets the same rejection as the explicit ': type'
+            // path above: 'const s: SomeStruct = asm -> rax { ... }' must not hand a
+            // register-sized struct result to codegen.
             result_ty = *expected;
+            if (result_ty.kind != TypeKind::Invalid && !result_ty.is_scalar()) {
+                diag.report_error(DiagnosticStage::Sema, expr.location,
+                    "asm result type must be a scalar or pointer type");
+                result_ty = ResolvedType{.kind = TypeKind::Invalid};
+            }
         } else {
             diag.report_error(DiagnosticStage::Sema, expr.location,
                 std::format("cannot infer result type for 'asm -> {}'; add an explicit type "
