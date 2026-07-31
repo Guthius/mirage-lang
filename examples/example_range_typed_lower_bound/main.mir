@@ -1,0 +1,16 @@
+// example_range_typed_lower_bound — a literal range bound must adopt the other bound's
+// type on either side. The upper bound was checked first with no expected type, so
+// 'for i in start..10' with 'start: usize' resolved '10' to i32 and errored "range lower
+// and upper bounds must have the same type" — while 'for i in 0..len' compiled
+// (CODE_REVIEW.md CHECK-4).
+//
+// Expected: exit code 8 — the loop runs for i in 2..10.
+
+pub fn main() -> i32 {
+    mut start: usize = 2
+    mut count: i32 = 0
+    for i in start..10 {
+        count = count + 1
+    }
+    return count
+}

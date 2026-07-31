@@ -3892,7 +3892,21 @@ namespace sema {
                 diag.report_error(DiagnosticStage::Sema, v->location, "range 'for-in' does not support '&' element binding");
                 return;
             }
-            const auto upper_type = check_expr(range.upper, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+            // Non-literal side first, same trick BinaryExpr/Ternary use: a literal upper
+            // bound must adopt a typed lower bound's type, or 'for i in start..10' with
+            // 'start: usize' resolves '10' to i32 and then reports a bound mismatch —
+            // while 'for i in 0..len' compiled.
+            ResolvedType upper_type;
+            std::optional<ResolvedType> lower_type;
+            if (range.lower && is_coercible_literal(range.upper) && !is_coercible_literal(*range.lower)) {
+                lower_type = check_expr(*range.lower, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                upper_type = check_expr(range.upper, locals, module_path, program, diag, *lower_type, loop_depth, defer_loop_base, fn_error_type);
+            } else {
+                upper_type = check_expr(range.upper, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                if (range.lower) {
+                    lower_type = check_expr(*range.lower, locals, module_path, program, diag, upper_type, loop_depth, defer_loop_base, fn_error_type);
+                }
+            }
             // 'for i in 0..N' inside 'fn f[N: usize]()': the bound is a generic
             // value parameter, so it has no integer type yet. Accept and check the
             // body — the loop is perfectly well-formed once 'N' is known.
@@ -3901,12 +3915,9 @@ namespace sema {
                 diag.report_error(DiagnosticStage::Sema, v->location, "range upper bound must be an integer type");
                 return;
             }
-            if (range.lower) {
-                const auto lower_type = check_expr(*range.lower, locals, module_path, program, diag, upper_type, loop_depth, defer_loop_base, fn_error_type);
-                if (lower_type != upper_type && !upper_opaque && lower_type.kind != TypeKind::Opaque) {
-                    diag.report_error(DiagnosticStage::Sema, v->location, "range lower and upper bounds must have the same type");
-                    return;
-                }
+            if (lower_type && *lower_type != upper_type && !upper_opaque && lower_type->kind != TypeKind::Opaque) {
+                diag.report_error(DiagnosticStage::Sema, v->location, "range lower and upper bounds must have the same type");
+                return;
             }
             auto inner = locals;
             if (v->index_name != "_") {

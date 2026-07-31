@@ -723,6 +723,10 @@
     "action": "run",
     "exit": 32
   },
+  "example_range_typed_lower_bound": {
+    "action": "run",
+    "exit": 8
+  },
   "example_raylib_link": {
     "action": "link-directives",
     "exit": 0
