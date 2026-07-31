@@ -208,9 +208,15 @@ namespace lsp::handlers {
             }
         }
 
-        // Walks one function/method body collecting every reference that resolves to `target`.
-        void collect_references_in_scope(const Scope &scope, const LocalLookupContext &ctx, const std::string &module_path,
-                                          const sema::Program &program, const MatchTarget &target, std::vector<json> &out) {
+        // The one reference-matching walk, shared by function/method bodies, module-scope
+        // initializers, and macro templates — every spelling ('mod.symbol', '.Variant',
+        // bitset literals, member access, type annotations) must match identically in all
+        // three. `walk` receives the visitor and drives it over whatever node the caller
+        // owns (a body statement or a bare expression).
+        template <typename WalkFn>
+        void collect_references_with(const WalkFn &walk, const Scope &scope, const LocalLookupContext &ctx,
+                                      const std::string &module_path, const sema::Program &program,
+                                      const MatchTarget &target, std::vector<json> &out) {
             AstVisitor visitor;
             visitor.on_type = [&](const ast::NamedType &named) {
                 match_named_type(named, ctx, module_path, program, target, out);
@@ -323,14 +329,24 @@ namespace lsp::handlers {
                 }
             };
 
-            // Was 'walk_stmt(scope.body ? *scope.body : ast::Stmt{ast::ExprStmt{}}, visitor)',
-            // which does not compile: the ternary's operands are a const lvalue reference and a
-            // temporary, so it materializes a copy of ast::Stmt -- a variant of unique_ptrs,
-            // whose copy constructor is deleted. It went unnoticed because this file was never
-            // in the build.
-            if (scope.body) {
-                walk_stmt(*scope.body, visitor);
-            }
+            walk(visitor);
+        }
+
+        // Walks one function/method body collecting every reference that resolves to `target`.
+        void collect_references_in_scope(const Scope &scope, const LocalLookupContext &ctx, const std::string &module_path,
+                                          const sema::Program &program, const MatchTarget &target, std::vector<json> &out) {
+            if (!scope.body) return;
+            collect_references_with([&](const AstVisitor &visitor) { walk_stmt(*scope.body, visitor); },
+                                     scope, ctx, module_path, program, target, out);
+        }
+
+        // Walks a single expression owned by a declaration with no body — a module-scope
+        // initializer or a macro's expression template — with the same full visitor.
+        void collect_references_in_expr(const ast::Expr &expr, const Scope &scope, const LocalLookupContext &ctx,
+                                         const std::string &module_path, const sema::Program &program,
+                                         const MatchTarget &target, std::vector<json> &out) {
+            collect_references_with([&](const AstVisitor &visitor) { walk_expr(expr, visitor); },
+                                     scope, ctx, module_path, program, target, out);
         }
     }
 
@@ -423,18 +439,13 @@ namespace lsp::handlers {
                     }
                 } else if (const auto *var = std::get_if<ast::VarDecl>(&decl)) {
                     if (var->init) {
-                        collect_references_in_scope({.params = {}, .body = nullptr}, ctx, mod_path, result.sema_program,
-                                                     target, out);
-                        AstVisitor visitor;
-                        visitor.on_expr = [&](const ast::Expr &expr) {
-                            if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
-                                if (const auto res = resolve_bare_name(ident->name, ident->location.line,
-                                                                        Scope{}, ctx, mod_path)) {
-                                    if (same_declaration(*res, target, result.sema_program)) out.push_back(location_json(ident->location));
-                                }
-                            }
-                        };
-                        walk_expr(*var->init, visitor);
+                        // No params, no body: bare names resolve straight at module scope.
+                        // The full visitor matters here — an initializer can hold
+                        // 'mod.symbol', '.Variant' and bitset-literal references that an
+                        // IdentExpr-only walk silently missed.
+                        const Scope module_scope{};
+                        collect_references_in_expr(*var->init, module_scope, ctx, mod_path, result.sema_program,
+                                                    target, out);
                     }
                     if (include_declaration && target.resolution && target.resolution->kind == Resolution::Kind::Symbol) {
                         if (const auto *global_sym = std::get_if<sema::GlobalSymbol>(target.resolution->symbol);
@@ -459,16 +470,9 @@ namespace lsp::handlers {
                 } else if (const auto *macro = std::get_if<ast::MacroDecl>(&decl)) {
                     std::vector<ParamInfo> params;
                     for (const auto &p : macro->params) params.push_back({p.name, {}, p.location});
-                    AstVisitor visitor;
                     const Scope scope{.params = std::move(params), .body = nullptr};
-                    visitor.on_expr = [&](const ast::Expr &expr) {
-                        if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
-                            if (const auto res = resolve_bare_name(ident->name, ident->location.line, scope, ctx, mod_path)) {
-                                if (same_declaration(*res, target, result.sema_program)) out.push_back(location_json(ident->location));
-                            }
-                        }
-                    };
-                    walk_expr(macro->expr_template, visitor);
+                    collect_references_in_expr(macro->expr_template, scope, ctx, mod_path, result.sema_program,
+                                                target, out);
                     if (include_declaration && target.resolution && target.resolution->kind == Resolution::Kind::Symbol) {
                         if (const auto *macro_sym = std::get_if<sema::MacroSymbol>(target.resolution->symbol);
                             macro_sym && macro_sym->decl == macro) {
