@@ -137,6 +137,23 @@ add_executable(ast_parser_progress_test
         $<TARGET_OBJECTS:mirage_core>
 )
 
+# Pins lsp::type_to_string and sema::describe_type together on the subset of
+# ResolvedTypes both can render (see the test's own header comment) — the two
+# printers are deliberately separate functions and have drifted before.
+add_executable(type_printer_test
+        tests/type_printer_test.cpp
+        src/lsp/type_printer.cpp
+        src/lsp/type_printer.hpp
+        $<TARGET_OBJECTS:mirage_core>
+)
+
+target_include_directories(type_printer_test
+        PRIVATE src
+)
+
+add_test(NAME type_printer_test COMMAND type_printer_test)
+set_tests_properties(type_printer_test PROPERTIES TIMEOUT 10)
+
 target_include_directories(ast_parser_progress_test
         PRIVATE src
 )

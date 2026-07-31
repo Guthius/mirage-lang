@@ -34,6 +34,9 @@ namespace sema {
         case TypeKind::USize:    return "usize";
         case TypeKind::Bool:     return "bool";
         case TypeKind::Anyptr:   return "anyptr";
+        case TypeKind::Any:      return "any";
+        case TypeKind::Type:     return "type";
+        case TypeKind::Namespace: return "<namespace>";
         case TypeKind::Pointer: {
             const auto *pointee = program.pointee_at(t.pointee_index);
             return "*" + (pointee ? describe_type(*pointee, program) : std::string("?"));
