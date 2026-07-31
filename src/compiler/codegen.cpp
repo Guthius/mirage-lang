@@ -158,6 +158,34 @@ namespace codegen {
         // which must apply the fat-pointer overrides primitive_align does not know about.
         using sema::primitive_size;
 
+        // The two binary operators whose BITSET meaning differs from plain integer arithmetic.
+        // A bitset is its storage integer underneath, so most operators already mean the right
+        // thing; only set union and set difference need translating:
+        //
+        //   '+' / '|'   union       -> OR
+        //   '-'         difference  -> AND-NOT   (clear the bits named on the right)
+        //
+        // '&' (intersection), '^' and infix '~' (symmetric difference), and '=='/'!=' are left
+        // to each caller's ordinary integer path — nullopt says so.
+        //
+        // Three sites emit this: emit_binary_expr and emit_assign build llvm::Value* through
+        // IRBuilder, const_binary folds llvm::Constant*. Those cannot share emission without
+        // templating over two unrelated LLVM APIs, so what is shared is the RULE — which is
+        // the part that could silently drift, and the part a reader has to trust.
+        enum class BitsetSetOp : uint8_t { Union, Difference };
+
+        constexpr auto bitset_set_op(const ast::BinaryOp op) -> std::optional<BitsetSetOp> {
+            switch (op) {
+            case ast::BinaryOp::Add:
+            case ast::BinaryOp::BitwiseOr:
+                return BitsetSetOp::Union;
+            case ast::BinaryOp::Sub:
+                return BitsetSetOp::Difference;
+            default:
+                return std::nullopt;
+            }
+        }
+
         auto is_pointer_like(const sema::ResolvedType &type) -> bool {
             return type.kind == sema::TypeKind::Pointer || type.kind == sema::TypeKind::Anyptr;
         }
@@ -3481,12 +3509,12 @@ namespace codegen {
                 }
 
                 if (lhs_type.kind == sema::TypeKind::Bitset) {
+                    if (const auto set_op = bitset_set_op(expr.op)) {
+                        return *set_op == BitsetSetOp::Union
+                            ? builder_.CreateOr(lhs, rhs)
+                            : builder_.CreateAnd(lhs, builder_.CreateNot(rhs));
+                    }
                     switch (expr.op) {
-                    case ast::BinaryOp::Add:
-                    case ast::BinaryOp::BitwiseOr: // union synonym
-                        return builder_.CreateOr(lhs, rhs);
-                    case ast::BinaryOp::Sub:
-                        return builder_.CreateAnd(lhs, builder_.CreateNot(rhs));
                     case ast::BinaryOp::BitwiseAnd:
                     case ast::BinaryOp::BitwiseXor: // infix '~' desugars here, and raw '^' too
                         return emit_int_arith(expr.op, lhs, rhs, lhs_type);
@@ -5452,11 +5480,13 @@ namespace codegen {
                     auto *old = builder_.CreateLoad(lv.storage_type, lv.ptr);
                     const auto op = compound_op(expr.op);
                     if (lv.type.kind == sema::TypeKind::Bitset) {
-                        // '+=' (set) -> OR, '-=' (clear) -> AND-NOT; '~=' (toggle) already maps
-                        // to BitwiseXor via compound_op, which emit_int_arith lowers correctly.
-                        if (op == ast::BinaryOp::Add) {
+                        // '+=' (set) and '-=' (clear) are the set operations; '~=' (toggle)
+                        // already maps to BitwiseXor via compound_op, which emit_int_arith
+                        // lowers correctly, as does '&=' and '|='.
+                        const auto set_op = bitset_set_op(op);
+                        if (set_op == BitsetSetOp::Union) {
                             value = builder_.CreateOr(old, value);
-                        } else if (op == ast::BinaryOp::Sub) {
+                        } else if (set_op == BitsetSetOp::Difference) {
                             value = builder_.CreateAnd(old, builder_.CreateNot(value));
                         } else {
                             value = emit_int_arith(op, old, value, lv.type);
@@ -5947,11 +5977,10 @@ namespace codegen {
                     return llvm::ConstantFoldCompareInstruction(llvm::CmpInst::ICMP_EQ, anded, lhs);
                 }
                 if (lhs_type.kind == sema::TypeKind::Bitset) {
-                    if (expr.op == ast::BinaryOp::Add || expr.op == ast::BinaryOp::BitwiseOr) {
-                        return llvm::ConstantFoldBinaryInstruction(llvm::Instruction::Or, lhs, rhs);
-                    }
-                    if (expr.op == ast::BinaryOp::Sub) {
-                        return llvm::ConstantFoldBinaryInstruction(llvm::Instruction::And, lhs, llvm::ConstantExpr::getNot(rhs));
+                    if (const auto set_op = bitset_set_op(expr.op)) {
+                        return *set_op == BitsetSetOp::Union
+                            ? llvm::ConstantFoldBinaryInstruction(llvm::Instruction::Or, lhs, rhs)
+                            : llvm::ConstantFoldBinaryInstruction(llvm::Instruction::And, lhs, llvm::ConstantExpr::getNot(rhs));
                     }
                     // BitwiseAnd/BitwiseXor and Equal/NotEqual fall through to the generic
                     // paths below/above, which already lower them correctly.
