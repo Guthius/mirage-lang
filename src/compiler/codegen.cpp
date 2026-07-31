@@ -4051,120 +4051,186 @@ namespace codegen {
                 return builder_.CreateCall(llvm_fn, args);
             }
 
-            auto emit_call(const ast::CallExpr &call) -> llvm::Value * {
-                // A call resolved by sema to a specific generic function/method instantiation,
-                // reached here directly (bypassing emit_expr's own get_expr_key(expr)-keyed
-                // dispatch just below emit_call's other caller) via 'try'/a multi-return group
-                // declaration - check_group_call_returns keys its own expr_generic_fn_instance
-                // entries by '&call' (the CallExpr's own stable address, same convention
-                // expr_trait_dispatch already uses), since it only ever sees the unwrapped
-                // CallExpr, never the outer Expr variant get_expr_key needs.
-                if (const auto inst_it = current_exprs_->expr_generic_fn_instance.find(&call); inst_it != current_exprs_->expr_generic_fn_instance.end()) {
-                    return emit_generic_call(call, inst_it->second);
-                }
+            // What a call's callee resolves to, decided once for both consumers.
+            //
+            // emit_call and call_return_types each used to walk this tree independently, and
+            // the file's own comment on the latter warns that the generic-instance check "must
+            // be checked first or ... would compute the wrong return arity" — precisely the
+            // kind of ordering invariant that does not survive being written twice. The order
+            // below is that invariant, stated once.
+            struct CalleeTarget {
+                enum class Kind : uint8_t {
+                    Unresolved,       // already reported by resolve_callee
+                    GenericInstance,  // sema resolved this to a monomorphized instance
+                    LocalFnPtr,       // a local holding a function pointer
+                    TraitDispatch,    // dynamic dispatch through a trait handle
+                    Method,           // a concrete method on the receiver
+                    StructFieldFnPtr, // a struct field holding a function pointer
+                    ExprFnPtr,        // any other expression evaluating to a function pointer
+                    ModuleSymbol,     // a named function/ext function/macro, possibly cross-module
+                };
+                Kind kind = Kind::Unresolved;
+                size_t instance_index = 0;                     // GenericInstance
+                const sema::MethodInfo *method = nullptr;      // Method
+                sema::TraitDispatchInfo trait_dispatch{};      // TraitDispatch
+                sema::ResolvedType obj_type{};                 // Method: the receiver AS WRITTEN,
+                sema::ResolvedType receiver_type{};            //   and with one pointer stripped
+                int fn_index = -1;                             // LocalFnPtr/StructFieldFnPtr/ExprFnPtr
+                std::string module_path;                       // ModuleSymbol
+                std::string name;                              // ModuleSymbol
+            };
 
-                std::string target_module = *current_module_path_;
-                std::string name;
+            // 'report' distinguishes the two callers' error wording for an unusable callee;
+            // both otherwise make the identical decision.
+            auto resolve_callee(const ast::CallExpr &call, const std::string_view unsupported_msg) -> CalleeTarget {
+                CalleeTarget t;
+
+                // FIRST, always: a generic instantiation's TEMPLATE has empty param/return
+                // types, so any name-based lookup below would silently compute the wrong arity.
+                // Keyed by '&call' (the CallExpr's own stable address) because
+                // check_group_call_returns only ever sees the unwrapped CallExpr, never the
+                // outer Expr variant get_expr_key needs.
+                if (const auto it = current_exprs_->expr_generic_fn_instance.find(&call); it != current_exprs_->expr_generic_fn_instance.end()) {
+                    t.kind = CalleeTarget::Kind::GenericInstance;
+                    t.instance_index = it->second;
+                    return t;
+                }
 
                 if (const auto *ident = std::get_if<ast::IdentExpr>(&call.callee)) {
-                    // Local variable with function type → indirect call
                     if (const auto it = locals_.find(ident->name); it != locals_.end()) {
                         if (it->second.type.kind == sema::TypeKind::Function) {
-                            const auto &sig = sema_program_.fn_signatures.at(it->second.type.fn_index);
-                            auto *fn_ptr = builder_.CreateLoad(llvm::PointerType::getUnqual(*context_), it->second.alloca);
-                            return emit_indirect_call(call, fn_ptr, sig);
+                            t.kind = CalleeTarget::Kind::LocalFnPtr;
+                            t.fn_index = it->second.type.fn_index;
+                            t.name = ident->name;
+                            return t;
                         }
                     }
-                    name = ident->name;
-                } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
+                    t.kind = CalleeTarget::Kind::ModuleSymbol;
+                    t.module_path = *current_module_path_;
+                    t.name = ident->name;
+                    return t;
+                }
+
+                if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
                     if (auto ns = try_namespace_chain((*member)->object)) {
-                        target_module = *ns;
-                        name = (*member)->member;
-                    } else {
-                        // Method call on a value or pointer
-                        const auto obj_type = current_exprs_->expr_types.at(sema::get_expr_key((*member)->object));
-                        sema::ResolvedType receiver_type = obj_type;
-                        if (obj_type.kind == sema::TypeKind::Pointer) {
-                            receiver_type = sema_program_.pointer_pointees.at(obj_type.pointee_index);
-                        }
-                        if (const auto dispatch_it = current_exprs_->expr_trait_dispatch.find(&call); dispatch_it != current_exprs_->expr_trait_dispatch.end()) {
-                            return emit_trait_handle_dispatch(call, (*member)->object, dispatch_it->second);
-                        }
-                        const auto *method = sema::find_method(receiver_type, (*member)->member, sema_program_);
-                        if (!method) {
-                            // Struct field with function type → indirect call through field
-                            if (receiver_type.kind == sema::TypeKind::Struct) {
-                                for (const auto &field : sema_program_.structs.at(receiver_type.struct_index).fields) {
-                                    if (field.name == (*member)->member && field.type.kind == sema::TypeKind::Function) {
-                                        const auto &sig = sema_program_.fn_signatures.at(field.type.fn_index);
-                                        auto field_lv = emit_lvalue(call.callee);
-                                        auto *fn_ptr = builder_.CreateLoad(llvm::PointerType::getUnqual(*context_), field_lv.ptr);
-                                        return emit_indirect_call(call, fn_ptr, sig);
-                                    }
-                                }
-                            }
-                            report_codegen_error(diag_, call.location, std::format("no method '{}' on type", (*member)->member));
-                            return nullptr;
-                        }
-
-                        // Get self pointer
-                        llvm::Value *self_ptr;
-                        if (obj_type.kind == sema::TypeKind::Pointer) {
-                            self_ptr = emit_expr((*member)->object);
-                        } else {
-                            self_ptr = emit_lvalue((*member)->object).ptr;
-                        }
-
-                        std::vector<llvm::Value *> args;
-                        args.push_back(self_ptr);
-                        if (method->is_variadic) {
-                            const size_t fixed_count = method->param_types.size() - 1;
-                            for (size_t i = 0; i < fixed_count; ++i) {
-                                args.push_back(emit_value_as(call.args[i], method->param_types[i], method->impl_module));
-                            }
-                            const auto &slice_ty = method->param_types.back();
-                            if (call.args.size() == fixed_count + 1) {
-                                if (const auto *spread = std::get_if<std::unique_ptr<ast::SpreadExpr>>(&call.args[fixed_count])) {
-                                    args.push_back(emit_value_as((*spread)->operand, slice_ty, method->impl_module));
-                                    return builder_.CreateCall(
-                                        functions_.at(FunctionKey{method->impl_module, method_fn_key_for(*method)}),
-                                        args);
-                                }
-                            }
-                            args.push_back(emit_variadic_tail_slice(call.args, fixed_count, slice_ty, method->impl_module));
-                            return builder_.CreateCall(
-                                functions_.at(FunctionKey{method->impl_module, method_fn_key_for(*method)}),
-                                args);
-                        }
-                        for (size_t i = 0; i < method->param_types.size(); ++i) {
-                            args.push_back(i < call.args.size()
-                                ? emit_value_as(call.args[i], method->param_types[i], *current_module_path_)
-                                : emit_method_trailing_arg(*method, i));
-                        }
-                        return builder_.CreateCall(
-                            functions_.at(FunctionKey{method->impl_module, method_fn_key_for(*method)}),
-                            args);
+                        t.kind = CalleeTarget::Kind::ModuleSymbol;
+                        t.module_path = *ns;
+                        t.name = (*member)->member;
+                        return t;
                     }
-                } else {
-                    // General expression callee (e.g. indexed array of fn ptrs, dereferenced ptr-to-fn)
-                    const auto callee_ty = current_exprs_->expr_types.at(sema::get_expr_key(call.callee));
-                    if (callee_ty.kind == sema::TypeKind::Function) {
-                        const auto &sig = sema_program_.fn_signatures.at(callee_ty.fn_index);
-                        auto *fn_ptr = emit_expr(call.callee);
-                        return emit_indirect_call(call, fn_ptr, sig);
+
+                    if (const auto it = current_exprs_->expr_trait_dispatch.find(&call); it != current_exprs_->expr_trait_dispatch.end()) {
+                        t.kind = CalleeTarget::Kind::TraitDispatch;
+                        t.trait_dispatch = it->second;
+                        return t;
                     }
-                    report_codegen_error(diag_, call.location, "unsupported call target");
-                    return llvm::UndefValue::get(llvm::PointerType::getUnqual(*context_));
+
+                    t.obj_type = current_exprs_->expr_types.at(sema::get_expr_key((*member)->object));
+                    t.receiver_type = t.obj_type.kind == sema::TypeKind::Pointer
+                        ? sema_program_.pointer_pointees.at(t.obj_type.pointee_index)
+                        : t.obj_type;
+                    t.name = (*member)->member;
+
+                    if (const auto *method = sema::find_method(t.receiver_type, (*member)->member, sema_program_)) {
+                        t.kind = CalleeTarget::Kind::Method;
+                        t.method = method;
+                        return t;
+                    }
+                    if (t.receiver_type.kind == sema::TypeKind::Struct) {
+                        for (const auto &field : sema_program_.structs.at(t.receiver_type.struct_index).fields) {
+                            if (field.name == (*member)->member && field.type.kind == sema::TypeKind::Function) {
+                                t.kind = CalleeTarget::Kind::StructFieldFnPtr;
+                                t.fn_index = field.type.fn_index;
+                                return t;
+                            }
+                        }
+                    }
+                    report_codegen_error(diag_, call.location, std::format("no method '{}' on type", (*member)->member));
+                    return t;
                 }
 
-                if (name.empty()) {
-                    report_codegen_error(diag_, call.location, "unsupported call target");
-                    return llvm::UndefValue::get(llvm::PointerType::getUnqual(*context_));
+                const auto callee_ty = current_exprs_->expr_types.at(sema::get_expr_key(call.callee));
+                if (callee_ty.kind == sema::TypeKind::Function) {
+                    t.kind = CalleeTarget::Kind::ExprFnPtr;
+                    t.fn_index = callee_ty.fn_index;
+                    return t;
+                }
+                report_codegen_error(diag_, call.location, std::string(unsupported_msg));
+                return t;
+            }
+
+            auto emit_call(const ast::CallExpr &call) -> llvm::Value * {
+                const auto target = resolve_callee(call, "unsupported call target");
+                const auto undef = [&] { return llvm::UndefValue::get(llvm::PointerType::getUnqual(*context_)); };
+
+                switch (target.kind) {
+                case CalleeTarget::Kind::Unresolved:
+                    return undef();
+                case CalleeTarget::Kind::GenericInstance:
+                    return emit_generic_call(call, target.instance_index);
+                case CalleeTarget::Kind::LocalFnPtr: {
+                    const auto &sig = sema_program_.fn_signatures.at(target.fn_index);
+                    auto *fn_ptr = builder_.CreateLoad(llvm::PointerType::getUnqual(*context_), locals_.at(target.name).alloca);
+                    return emit_indirect_call(call, fn_ptr, sig);
+                }
+                case CalleeTarget::Kind::TraitDispatch:
+                    return emit_trait_handle_dispatch(call, std::get<std::unique_ptr<ast::MemberExpr>>(call.callee)->object, target.trait_dispatch);
+                case CalleeTarget::Kind::StructFieldFnPtr: {
+                    const auto &sig = sema_program_.fn_signatures.at(target.fn_index);
+                    auto field_lv = emit_lvalue(call.callee);
+                    auto *fn_ptr = builder_.CreateLoad(llvm::PointerType::getUnqual(*context_), field_lv.ptr);
+                    return emit_indirect_call(call, fn_ptr, sig);
+                }
+                case CalleeTarget::Kind::ExprFnPtr: {
+                    const auto &sig = sema_program_.fn_signatures.at(target.fn_index);
+                    auto *fn_ptr = emit_expr(call.callee);
+                    return emit_indirect_call(call, fn_ptr, sig);
+                }
+                case CalleeTarget::Kind::Method: {
+                    const auto *method = target.method;
+                    const auto &member = *std::get<std::unique_ptr<ast::MemberExpr>>(call.callee);
+
+                    // 'self' is always a pointer: take the receiver's address unless it already
+                    // is one.
+                    llvm::Value *self_ptr = target.obj_type.kind == sema::TypeKind::Pointer
+                        ? emit_expr(member.object)
+                        : emit_lvalue(member.object).ptr;
+
+                    std::vector<llvm::Value *> args;
+                    args.push_back(self_ptr);
+                    auto *callee_fn = functions_.at(FunctionKey{method->impl_module, method_fn_key_for(*method)});
+                    if (method->is_variadic) {
+                        const size_t fixed_count = method->param_types.size() - 1;
+                        for (size_t i = 0; i < fixed_count; ++i) {
+                            args.push_back(emit_value_as(call.args[i], method->param_types[i], method->impl_module));
+                        }
+                        const auto &slice_ty = method->param_types.back();
+                        // 'f(xs...)' forwards an existing slice rather than building a new one.
+                        if (call.args.size() == fixed_count + 1) {
+                            if (const auto *spread = std::get_if<std::unique_ptr<ast::SpreadExpr>>(&call.args[fixed_count])) {
+                                args.push_back(emit_value_as((*spread)->operand, slice_ty, method->impl_module));
+                                return builder_.CreateCall(callee_fn, args);
+                            }
+                        }
+                        args.push_back(emit_variadic_tail_slice(call.args, fixed_count, slice_ty, method->impl_module));
+                        return builder_.CreateCall(callee_fn, args);
+                    }
+                    for (size_t i = 0; i < method->param_types.size(); ++i) {
+                        args.push_back(i < call.args.size()
+                            ? emit_value_as(call.args[i], method->param_types[i], *current_module_path_)
+                            : emit_method_trailing_arg(*method, i));
+                    }
+                    return builder_.CreateCall(callee_fn, args);
+                }
+                case CalleeTarget::Kind::ModuleSymbol:
+                    break;
                 }
 
-                const auto &target = module_for(target_module);
-                const auto sym_it = target.symbols.find(name);
-                if (sym_it == target.symbols.end()) {
+                const auto target_module = target.module_path;
+                const auto name = target.name;
+                const auto &target_mod = module_for(target_module);
+                const auto sym_it = target_mod.symbols.find(name);
+                if (sym_it == target_mod.symbols.end()) {
                     report_codegen_error(diag_, call.location, std::format("unknown callable '{}'", name));
                     return nullptr;
                 }
@@ -4180,11 +4246,11 @@ namespace codegen {
                     // sema.cpp's resolve_values_for_module redirect-and-copy-back for
                     // MacroSymbol), not 'target_module' — which, for an unqualified bare-import
                     // call, defaults to the CALLING module, not the macro's declaring one.
-                    const auto origin = target.bare_import_origins.find(name);
-                    const bool via_origin = origin != target.bare_import_origins.end();
+                    const auto origin = target_mod.bare_import_origins.find(name);
+                    const bool via_origin = origin != target_mod.bare_import_origins.end();
                     const ScopedEmitModule module_scope(
                         *this, via_origin ? origin->second.module_path : target_module,
-                        via_origin ? sema_program_.modules.at(origin->second.module_path) : target);
+                        via_origin ? sema_program_.modules.at(origin->second.module_path) : target_mod);
                     auto *value = emit_expr(macro->decl->expr_template);
                     macro_args_ = std::move(saved);
                     return value;
@@ -4213,8 +4279,8 @@ namespace codegen {
                     // 'target_module' for an unqualified bare-import call is the CALLING module.
                     // Handing emit_default_arg the caller's module makes its expr_types lookups
                     // miss outright (an 'unordered_map::at' abort, not a diagnostic).
-                    const auto fn_origin = target.bare_import_origins.find(name);
-                    const auto &default_arg_module = fn_origin != target.bare_import_origins.end()
+                    const auto fn_origin = target_mod.bare_import_origins.find(name);
+                    const auto &default_arg_module = fn_origin != target_mod.bare_import_origins.end()
                         ? fn_origin->second.module_path
                         : target_module;
                     for (size_t i = 0; i < fn->params.size(); ++i) {
@@ -4284,94 +4350,54 @@ namespace codegen {
             }
 
             auto call_return_types(const ast::CallExpr &call) -> std::pair<std::string, std::vector<sema::ResolvedType>> {
-                // A call resolved by sema to a specific generic function/method instantiation
-                // (see emit_call's identical check and its own doc comment for why '&call' is
-                // the right key here) - the TEMPLATE's own return_types (found via the plain
-                // name/method lookups below) is always empty for a generic decl, so this must
-                // be checked first or a 'try'/multi-return grouped call on one would compute
-                // the wrong return arity (e.g. 0 instead of 1), corrupting emit_try_expr's own
-                // CreateExtractValue indexing downstream.
-                if (const auto inst_it = current_exprs_->expr_generic_fn_instance.find(&call); inst_it != current_exprs_->expr_generic_fn_instance.end()) {
-                    const auto &instance = *sema_program_.generic_fn_instances[inst_it->second];
+                const auto none = std::pair{*current_module_path_, std::vector<sema::ResolvedType>{}};
+                const auto sig_returns = [&](const int fn_index) {
+                    return std::pair{*current_module_path_, sema_program_.fn_signatures.at(fn_index).return_types};
+                };
+
+                const auto target = resolve_callee(call, "unsupported grouped declaration call target");
+                switch (target.kind) {
+                case CalleeTarget::Kind::Unresolved:
+                    return none;
+                case CalleeTarget::Kind::GenericInstance: {
+                    const auto &instance = *sema_program_.generic_fn_instances[target.instance_index];
                     return {instance.module_path, instance.return_types};
                 }
-
-                std::string target_module = *current_module_path_;
-                std::string name;
-
-                if (const auto *ident = std::get_if<ast::IdentExpr>(&call.callee)) {
-                    // Local fn-ptr
-                    if (const auto it = locals_.find(ident->name); it != locals_.end()) {
-                        if (it->second.type.kind == sema::TypeKind::Function) {
-                            return {*current_module_path_, sema_program_.fn_signatures.at(it->second.type.fn_index).return_types};
-                        }
+                case CalleeTarget::Kind::LocalFnPtr:
+                case CalleeTarget::Kind::StructFieldFnPtr:
+                case CalleeTarget::Kind::ExprFnPtr:
+                    return sig_returns(target.fn_index);
+                case CalleeTarget::Kind::TraitDispatch: {
+                    const auto *trait_info = sema_program_.trait_at(target.trait_dispatch.trait_index);
+                    if (trait_info && target.trait_dispatch.method_order_index >= 0 &&
+                        static_cast<size_t>(target.trait_dispatch.method_order_index) < trait_info->methods.size()) {
+                        return {*current_module_path_, trait_info->methods[target.trait_dispatch.method_order_index].return_types};
                     }
-                    name = ident->name;
-                } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
-                    if (auto ns = try_namespace_chain((*member)->object)) {
-                        target_module = *ns;
-                        name = (*member)->member;
-                    } else {
-                        // Method call or struct-field fn-ptr
-                        if (const auto dispatch_it = current_exprs_->expr_trait_dispatch.find(&call); dispatch_it != current_exprs_->expr_trait_dispatch.end()) {
-                            const auto *trait_info = sema_program_.trait_at(dispatch_it->second.trait_index);
-                            if (trait_info && dispatch_it->second.method_order_index >= 0 &&
-                                static_cast<size_t>(dispatch_it->second.method_order_index) < trait_info->methods.size()) {
-                                return {*current_module_path_, trait_info->methods[dispatch_it->second.method_order_index].return_types};
-                            }
-                        }
-                        const auto obj_type = current_exprs_->expr_types.at(sema::get_expr_key((*member)->object));
-                        sema::ResolvedType receiver_type = obj_type;
-                        if (obj_type.kind == sema::TypeKind::Pointer) {
-                            receiver_type = sema_program_.pointer_pointees.at(obj_type.pointee_index);
-                        }
-                        if (const auto *method = sema::find_method(receiver_type, (*member)->member, sema_program_)) {
-                            return {*current_module_path_, method->return_types};
-                        }
-                        // Struct field fn-ptr
-                        if (receiver_type.kind == sema::TypeKind::Struct) {
-                            for (const auto &field : sema_program_.structs.at(receiver_type.struct_index).fields) {
-                                if (field.name == (*member)->member && field.type.kind == sema::TypeKind::Function) {
-                                    return {*current_module_path_, sema_program_.fn_signatures.at(field.type.fn_index).return_types};
-                                }
-                            }
-                        }
-                        report_codegen_error(diag_, call.location, "unsupported grouped declaration call target");
-                        return {*current_module_path_, {}};
-                    }
-                } else {
-                    // General expression callee
-                    const auto callee_ty = current_exprs_->expr_types.at(sema::get_expr_key(call.callee));
-                    if (callee_ty.kind == sema::TypeKind::Function) {
-                        return {*current_module_path_, sema_program_.fn_signatures.at(callee_ty.fn_index).return_types};
-                    }
-                    report_codegen_error(diag_, call.location, "unsupported grouped declaration call target");
-                    return {*current_module_path_, {}};
+                    return none;
+                }
+                case CalleeTarget::Kind::Method:
+                    return {*current_module_path_, target.method->return_types};
+                case CalleeTarget::Kind::ModuleSymbol:
+                    break;
                 }
 
-                if (name.empty()) {
-                    report_codegen_error(diag_, call.location, "unsupported grouped declaration call target");
-                    return {*current_module_path_, {}};
+                const auto &target_module = module_for(target.module_path);
+                const auto sym_it = target_module.symbols.find(target.name);
+                if (sym_it == target_module.symbols.end()) {
+                    report_codegen_error(diag_, call.location, std::format("unknown callable '{}'", target.name));
+                    return {target.module_path, {}};
                 }
-
-                const auto &target = module_for(target_module);
-                const auto sym_it = target.symbols.find(name);
-                if (sym_it == target.symbols.end()) {
-                    report_codegen_error(diag_, call.location, std::format("unknown callable '{}'", name));
-                    return {target_module, {}};
-                }
-
                 if (const auto *fn = std::get_if<sema::FunctionSymbol>(&sym_it->second)) {
-                    return {target_module, fn->return_types};
+                    return {target.module_path, fn->return_types};
                 }
                 if (const auto *ef = std::get_if<sema::ExtFunctionSymbol>(&sym_it->second)) {
                     std::vector<sema::ResolvedType> returns;
                     if (ef->return_type) returns.push_back(*ef->return_type);
-                    return {target_module, std::move(returns)};
+                    return {target.module_path, std::move(returns)};
                 }
 
                 report_codegen_error(diag_, call.location, "grouped declaration initializer must be a function call");
-                return {target_module, {}};
+                return {target.module_path, {}};
             }
 
             // Reads the outer Ok(0)/Failed(1) tag (a u32 at byte offset 0) out of an
