@@ -92,6 +92,27 @@ namespace lsp::analysis {
         open_texts_.erase(canonical_path);
         invalidate(canonical_path);
         evict_unreferenced_bundles();
+
+        // Published-diagnostics tracking for an abandoned closure: an entry whose
+        // directory no cached bundle reaches and no open file's own directory matches can
+        // never appear in a later round's closure_dirs, so files_that_became_clean would
+        // never erase it and the set grew for the life of the session. Pruned here, after
+        // eviction, and nowhere hotter: a transient invalidate (didChange,
+        // didChangeWatchedFiles) also empties bundle_of_dir_ momentarily, but the closure
+        // is about to be re-created there and its entries are still needed to clear
+        // squiggles for files an external change just fixed.
+        std::set<std::string> open_dirs;
+        for (const auto &path : open_texts_ | std::views::keys) {
+            open_dirs.insert(std::filesystem::path(path).parent_path().string());
+        }
+        for (auto it = last_published_nonempty_diag_files_.begin(); it != last_published_nonempty_diag_files_.end();) {
+            const auto dir = std::filesystem::path(*it).parent_path().string();
+            if (bundle_of_dir_.contains(dir) || open_dirs.contains(dir)) {
+                ++it;
+            } else {
+                it = last_published_nonempty_diag_files_.erase(it);
+            }
+        }
     }
 
     void DocumentStore::invalidate_external(const std::string &canonical_path) {
