@@ -559,6 +559,11 @@
     "diag": "examples/example_link_in_fn_body/main.mir:10:5: error: '#link' is a linker directive and may only appear at module scope or inside a module-scope 'when' block.",
     "exit": 1
   },
+  "example_macro_group_arity": {
+    "action": "build",
+    "diag": "examples/example_macro_group_arity/main.mir:18:5: error: group declaration expects 2 return value(s), got 1",
+    "exit": 1
+  },
   "example_match_const_expr_pattern": {
     "action": "run",
     "exit": 6

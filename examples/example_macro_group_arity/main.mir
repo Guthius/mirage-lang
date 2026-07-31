@@ -1,0 +1,20 @@
+// example_macro_group_arity/main.mir — REJECTION CASE, pinning a diagnostic that only became
+// accurate once the two call-resolution trees were unified (CHECK-7).
+//
+// A macro yields exactly one value, so binding two names to it is an arity error. But
+// check_group_call_returns had no MacroSymbol arm in its symbol dispatch — check_expr's
+// otherwise-identical tree did — so a macro in group position fell through to the catch-all
+// and reported "'twice' is not callable", which is false: it is callable, just not into two
+// slots. The cascade ("unknown identifier 'a'") followed from that.
+//
+// This is the class of divergence the finding was about: the two trees were ~90% identical,
+// and the 10% was not a deliberate difference, it was a gap.
+//
+// Expected: rejected with "group declaration expects 2 return value(s), got 1".
+
+macro twice(n: i32) -> n * 2
+
+pub fn main() -> i32 {
+    const a, b := twice(5)
+    return a + b
+}

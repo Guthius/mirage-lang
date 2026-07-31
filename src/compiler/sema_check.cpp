@@ -734,15 +734,55 @@ namespace sema {
             return trait_method->return_types;
         }
 
-        auto check_group_call_returns(const ast::CallExpr &call, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> std::vector<ResolvedType> {
-            std::string target_module = module_path;
-            std::string name;
-            bool check_pub = false;
+        // THE call-resolution decision tree, shared by every position a call can appear in.
+        //
+        // Resolves the callee and checks the arguments, returning the callee's FULL return
+        // list. In order: explicit generic-function instantiation ('make_fixed[16]()', and its
+        // cross-module 'mod.fn[i32]()' shape), a cross-module namespace chain, a method call on
+        // a value (trait-handle dynamic dispatch, then generic-method instantiation, then a
+        // struct field holding a function pointer), a general expression callee, a local
+        // holding a function pointer, and finally same-module symbol dispatch over
+        // Function/ExtFunction/Macro.
+        //
+        // Callers differ in ARITY, not in resolution:
+        //   - check_expr's CallExpr case wants one value, and narrows via single_value_result
+        //     (which is also where a trailing '?error(...)' slot is dropped).
+        //   - check_group_call_returns wants the whole list ('const a, b := f()', 'try f()').
+        //
+        // Two parameters exist purely because the callers legitimately differ:
+        //
+        //   'expected' is forwarded to generic argument inference. A group call has no single
+        //   expected type and passes nullopt.
+        //
+        //   'instance_key' is the expr_generic_fn_instance key. The two callers genuinely use
+        //   DIFFERENT keys — get_expr_key's variant-slot address for a value call, the
+        //   ast::CallExpr's own address for a group call (which never sees the outer Expr
+        //   variant) — and codegen reads each back where it was written. Passing it in is what
+        //   lets one resolver serve both without codegen changing.
+        auto resolve_call_returns(const ast::CallExpr &call, const std::optional<ResolvedType> &expected,
+                                   const void *instance_key, LocalScope &locals, const std::string &module_path,
+                                   Program &program, DiagnosticEngine &diag, const int loop_depth,
+                                   const int defer_loop_base, const ResolvedType *fn_error_type) -> std::vector<ResolvedType> {
+            const auto fail = [&](std::string msg) -> std::vector<ResolvedType> {
+                error(diag, call.location, std::move(msg));
+                return {};
+            };
+            const auto record_instance = [&](const size_t idx) -> std::vector<ResolvedType> {
+                const auto &instance = *program.generic_fn_instances[idx];
+                check_call_args(call.args, instance.param_types, false, locals, module_path, program, diag,
+                                 call.location, instance.decl ? instance.decl->name : std::string{},
+                                 loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
+                expr_tables_for_write(program, module_path).expr_generic_fn_instance[instance_key] = idx;
+                return instance.return_types;
+            };
 
-            // Explicit generic-function instantiation call ('try make_fixed[16]()') reached
-            // via 'try'/a multi-return group declaration - mirrors check_expr's own
-            // CallExpr case (see its 'index_callee' handling) exactly, including the
-            // cross-module ('mod.generic_fn[i32]()') callee shape.
+            // Explicit generic-function instantiation call ('make_fixed[16]()',
+            // 'make_list[i32]()', or cross-module 'list.make_list[i32]()') — the callee is an
+            // IndexOrInstantiateExpr whose operand names a generic function, either directly
+            // (IdentExpr, same module) or through a namespace chain (MemberExpr, 'mod.fn').
+            // Only intercepted when 'operand' actually IS a generic function; anything else
+            // (ordinary indexing whose result happens to be called, e.g. 'fn_table[i]()')
+            // falls through to the general-expression-callee path below unchanged.
             if (const auto *index_callee = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&call.callee)) {
                 const ast::FunctionDecl *generic_decl = nullptr;
                 std::string decl_module = module_path;
@@ -763,8 +803,7 @@ namespace sema {
                             if (const auto sym_it = mod_it->second.symbols.find((*op_member)->member); sym_it != mod_it->second.symbols.end()) {
                                 if (const auto *fs = std::get_if<FunctionSymbol>(&sym_it->second); fs && fs->decl && !fs->decl->generic_params.empty()) {
                                     if (!fs->is_pub) {
-                                        error(diag, call.location, std::format("'{}' is not pub", (*op_member)->member));
-                                        return {};
+                                        return fail(std::format("'{}' is not pub", (*op_member)->member));
                                     }
                                     generic_decl = fs->decl;
                                     fn_name = (*op_member)->member;
@@ -779,167 +818,180 @@ namespace sema {
                     if (!(*index_callee)->args.empty()) {
                         resolved_args = resolve_explicit_generic_args(generic_decl->generic_params, (*index_callee)->args, module_path, program, diag, call.location, fn_name);
                     } else {
-                        resolved_args = infer_generic_function_args(*generic_decl, call.args, std::nullopt, locals, module_path, program, diag, call.location, loop_depth, defer_loop_base, fn_error_type);
+                        resolved_args = infer_generic_function_args(*generic_decl, call.args, expected, locals, module_path, program, diag, call.location, loop_depth, defer_loop_base, fn_error_type);
                     }
                     if (!resolved_args) return {};
-                    const size_t idx = instantiate_generic_function(program, diag, decl_module, fn_name, std::move(*resolved_args), call.location);
-                    const auto &instance = *program.generic_fn_instances[idx];
-                    check_call_args(call.args, instance.param_types, false, locals, module_path, program, diag, call.location, fn_name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                    expr_tables_for_write(program, module_path).expr_generic_fn_instance[&call] = idx;
-                    return instance.return_types;
+                    return record_instance(instantiate_generic_function(program, diag, decl_module, fn_name, std::move(*resolved_args), call.location));
                 }
             }
 
-            if (const auto *callee_ident = std::get_if<ast::IdentExpr>(&call.callee)) {
-                if (auto local_it = locals.find(callee_ident->name); local_it != locals.end()) {
-                    const auto &local_ty = local_it->second.type;
-                    if (local_ty.kind == TypeKind::Function) {
-                        const auto &sig = fn_sig(local_ty, program);
-                        check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
-                        return sig.return_types;
+            if (const auto *member_callee = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
+                // Cross-module 'mod.fn(...)' — resolved against the named module's symbols.
+                if (const auto target_module = try_resolve_namespace_chain((*member_callee)->object, module_path, locals, program)) {
+                    const auto mod_it = program.modules.find(*target_module);
+                    if (mod_it == program.modules.end()) return {};
+
+                    const std::string &fn_name = (*member_callee)->member;
+                    const auto sym_it = mod_it->second.symbols.find(fn_name);
+                    if (sym_it == mod_it->second.symbols.end()) {
+                        return fail(std::format("unknown function '{}'", fn_name));
                     }
-                    error(diag, call.location, std::format("'{}' is not callable", callee_ident->name));
-                    return {};
-                }
-                // A bare call to a generic function with NO brackets at all ('try
-                // make_list()') - inference only, mirroring check_expr's own bare-ident
-                // CallExpr case.
-                if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
-                    if (const auto sym_it = mod_it->second.symbols.find(callee_ident->name); sym_it != mod_it->second.symbols.end()) {
-                        if (const auto *fs = std::get_if<FunctionSymbol>(&sym_it->second); fs && fs->decl && !fs->decl->generic_params.empty()) {
-                            auto resolved_args = infer_generic_function_args(*fs->decl, call.args, std::nullopt, locals, module_path, program, diag, call.location, loop_depth, defer_loop_base, fn_error_type);
-                            if (!resolved_args) return {};
-                            const size_t idx = instantiate_generic_function(program, diag, module_path, callee_ident->name, std::move(*resolved_args), call.location);
-                            const auto &instance = *program.generic_fn_instances[idx];
-                            check_call_args(call.args, instance.param_types, false, locals, module_path, program, diag, call.location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                            expr_tables_for_write(program, module_path).expr_generic_fn_instance[&call] = idx;
-                            return instance.return_types;
-                        }
-                    }
-                }
-                name = callee_ident->name;
-            } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
-                if (auto ns = try_resolve_namespace_chain((*member)->object, module_path, locals, program)) {
-                    target_module = *ns;
-                    name = (*member)->member;
-                    check_pub = true;
-                } else {
-                    // Method call on a value
-                    auto receiver_type = check_expr((*member)->object, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                    if (receiver_type.kind == TypeKind::Pointer) {
-                        if (const auto *pointee = program.pointee_at(receiver_type.pointee_index)) {
-                            receiver_type = *pointee;
-                        } else {
-                            receiver_type = ResolvedType{.kind = TypeKind::Invalid};
-                        }
-                    }
-                    if (auto trait_returns = try_trait_handle_dispatch(receiver_type, (*member)->member, call.args, &call, locals, module_path, program, diag, call.location, loop_depth, defer_loop_base, fn_error_type)) {
-                        return *trait_returns;
-                    }
-                    const auto *method = find_method(receiver_type, (*member)->member, program);
-                    if (!method) {
-                        // Struct field with function type
-                        if (receiver_type.kind == TypeKind::Struct) {
-                            if (const auto *struct_info = program.struct_at(receiver_type.struct_index)) {
-                                for (const auto &field : struct_info->fields) {
-                                    if (field.name == (*member)->member && field.type.kind == TypeKind::Function) {
-                                        const auto &sig = fn_sig(field.type, program);
-                                        check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, (*member)->member, loop_depth, defer_loop_base, fn_error_type);
-                                        return sig.return_types;
-                                    }
+
+                    return std::visit(
+                        [&]<typename T1>(const T1 &sym) -> std::vector<ResolvedType> {
+                            using S = std::decay_t<T1>;
+                            if constexpr (std::is_same_v<S, FunctionSymbol>) {
+                                if (!sym.is_pub) return fail(std::format("'{}' is not pub", fn_name));
+                                // A bare cross-module call to a generic function with NO
+                                // brackets at all ('list.make_list()', not
+                                // 'list.make_list[i32]()') — inference only, mirroring the
+                                // same-module bare-call case below. Without this the template
+                                // would reach ensure_function_signature_resolved, which refuses
+                                // to resolve a generic signature, leaving 'params' empty and
+                                // producing a bogus arity error.
+                                if (sym.decl && !sym.decl->generic_params.empty()) {
+                                    auto resolved_args = infer_generic_function_args(*sym.decl, call.args, expected, locals, module_path, program, diag, call.location, loop_depth, defer_loop_base, fn_error_type);
+                                    if (!resolved_args) return {};
+                                    return record_instance(instantiate_generic_function(program, diag, *target_module, fn_name, std::move(*resolved_args), call.location));
                                 }
+                                auto &resolved_fn = ensure_function_signature_resolved(*target_module, fn_name, program, diag);
+                                check_call_args(call.args, resolved_fn.params, false, locals, module_path, program, diag, call.location, fn_name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
+                                return resolved_fn.return_types;
+                            } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
+                                if (!sym.is_pub) return fail(std::format("'{}' is not pub", fn_name));
+                                check_call_args(call.args, sym.params, sym.is_variadic, locals, module_path, program, diag, call.location, fn_name, loop_depth, defer_loop_base, fn_error_type);
+                                std::vector<ResolvedType> returns;
+                                if (sym.return_type) returns.push_back(*sym.return_type);
+                                return returns;
+                            } else if constexpr (std::is_same_v<S, MacroSymbol>) {
+                                if (!sym.is_pub) return fail(std::format("'{}' is not pub", fn_name));
+                                auto &resolved_macro = resolve_macro_symbol(*target_module, fn_name, program, diag, call.location);
+                                check_call_args(call.args, resolved_macro.params, false, locals, module_path, program, diag, call.location, fn_name, loop_depth, defer_loop_base, fn_error_type);
+                                return {resolved_macro.result_type};
+                            } else {
+                                return fail(std::format("'{}' is not callable", fn_name));
+                            }
+                        },
+                        sym_it->second);
+                }
+
+                // Method call on a value.
+                auto receiver_type = check_expr((*member_callee)->object, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                if (receiver_type.kind == TypeKind::Pointer) {
+                    if (const auto *pointee = program.pointee_at(receiver_type.pointee_index)) {
+                        receiver_type = *pointee;
+                    } else {
+                        receiver_type = ResolvedType{.kind = TypeKind::Invalid};
+                    }
+                }
+                if (auto trait_returns = try_trait_handle_dispatch(receiver_type, (*member_callee)->member, call.args, &call, locals, module_path, program, diag, call.location, loop_depth, defer_loop_base, fn_error_type)) {
+                    return *trait_returns;
+                }
+                const auto *method = find_method(receiver_type, (*member_callee)->member, program);
+                if (!method) {
+                    // A struct field holding a function pointer, called like a method.
+                    if (receiver_type.kind == TypeKind::Struct) {
+                        if (const auto *struct_info = program.struct_at(receiver_type.struct_index)) {
+                            for (const auto &field : struct_info->fields) {
+                                if (field.name != (*member_callee)->member) continue;
+                                if (field.type.kind == TypeKind::Function) {
+                                    const auto &sig = fn_sig(field.type, program);
+                                    check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type);
+                                    return sig.return_types;
+                                }
+                                break;
                             }
                         }
-                        error(diag, call.location, std::format("no method '{}' on type", (*member)->member));
-                        return {};
                     }
-                    // A method call on a generic type's concrete instantiation ('try
-                    // self.reserve(...)' where 'self: List[i32]') - mirrors check_expr's own
-                    // CallExpr case (see its 'receiver_is_generic_instance' handling) exactly;
-                    // without this, 'method' above stays the unspecialized TEMPLATE, whose own
-                    // param_types/return_types are always empty for a generic type, breaking
-                    // both the arg-count check here AND (since instantiate_generic_method is
-                    // what actually body-checks the instance) silently skipping the callee's
-                    // body entirely.
-                    if (receiver_is_generic_instance(receiver_type, program)) {
-                        const auto idx = instantiate_generic_method(program, diag, receiver_type, (*member)->member, call.location);
-                        if (!idx) {
-                            error(diag, call.location, std::format("no method '{}' on type", (*member)->member));
-                            return {};
-                        }
-                        const auto &instance = *program.generic_fn_instances[*idx];
-                        check_call_args(call.args, instance.param_types, false, locals, module_path, program, diag, call.location, (*member)->member, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                        expr_tables_for_write(program, module_path).expr_generic_fn_instance[&call] = *idx;
-                        return instance.return_types;
-                    }
-                    check_call_args(call.args, method->param_types, false, locals, module_path, program, diag, call.location, (*member)->member, loop_depth, defer_loop_base, fn_error_type, method->is_variadic, method_required_params(*method, program));
-                    return method->return_types;
+                    return fail(std::format("no method '{}' on type", (*member_callee)->member));
                 }
-            } else {
-                // General expression callee (e.g. deref of fn ptr, indexed fn ptr array)
+                // A method call on a generic type's concrete instantiation ('self.reserve(...)'
+                // where 'self: List[i32]') — 'method' above is the unspecialized TEMPLATE
+                // (find_method's bare "List"/"reserve" keying never changes), so its own
+                // param_types/return_types are never populated for a generic type (see
+                // resolve_impl_signatures_for_module's skip) — instantiate_generic_method
+                // resolves the real, per-instantiation signature on demand instead. It is also
+                // what body-checks the instance, so skipping it would silently skip the callee.
+                if (receiver_is_generic_instance(receiver_type, program)) {
+                    const auto idx = instantiate_generic_method(program, diag, receiver_type, (*member_callee)->member, call.location);
+                    if (!idx) return fail(std::format("no method '{}' on type", (*member_callee)->member));
+                    return record_instance(*idx);
+                }
+                check_call_args(call.args, method->param_types, false, locals, module_path, program, diag, call.location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type, method->is_variadic, method_required_params(*method, program));
+                return method->return_types;
+            }
+
+            // General expression callee (a deref of a function pointer, an indexed function
+            // pointer array, ...): evaluate it, then call through if it is a function type.
+            if (!std::holds_alternative<ast::IdentExpr>(call.callee)) {
                 const auto callee_ty = check_expr(call.callee, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                 if (callee_ty.kind == TypeKind::Function) {
                     const auto &sig = fn_sig(callee_ty, program);
                     check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, "<fn ptr>", loop_depth, defer_loop_base, fn_error_type);
                     return sig.return_types;
                 }
-                error(diag, call.location, "unsupported call target");
-                return {};
+                return fail("unsupported call target");
             }
 
-            const auto mod_it = program.modules.find(target_module);
+            const auto *callee_ident = std::get_if<ast::IdentExpr>(&call.callee);
+
+            // A local holding a function pointer shadows any module symbol of the same name.
+            if (const auto local_it = locals.find(callee_ident->name); local_it != locals.end()) {
+                const auto &local_ty = local_it->second.type;
+                if (local_ty.kind == TypeKind::Function) {
+                    const auto &sig = fn_sig(local_ty, program);
+                    check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
+                    return sig.return_types;
+                }
+                return fail(std::format("'{}' is not callable", callee_ident->name));
+            }
+
+            const auto mod_it = program.modules.find(module_path);
             if (mod_it == program.modules.end()) {
-                error(diag, call.location, std::format("internal error: module '{}' not found", target_module));
-                return {};
+                return fail(std::format("internal error: module '{}' not found", module_path));
             }
 
-            const auto sym_it = mod_it->second.symbols.find(name);
+            const auto sym_it = mod_it->second.symbols.find(callee_ident->name);
             if (sym_it == mod_it->second.symbols.end()) {
-                error(diag, call.location, std::format("unknown function '{}'", name));
-                return {};
+                return fail(std::format("unknown function '{}'", callee_ident->name));
             }
 
             return std::visit(
-                [&]<typename T>(const T &sym) -> std::vector<ResolvedType> {
-                    using S = std::decay_t<T>;
+                [&]<typename T1>(const T1 &sym) -> std::vector<ResolvedType> {
+                    using S = std::decay_t<T1>;
                     if constexpr (std::is_same_v<S, FunctionSymbol>) {
-                        if (check_pub && !sym.is_pub) {
-                            error(diag, call.location, std::format("'{}' is not pub", name));
-                            return {};
-                        }
-                        // A bare CROSS-MODULE call to a generic function with no brackets
-                        // ('try hash.fnv1a(v)') — inference only, mirroring check_expr's own
-                        // cross-module case. Without this the template would reach
-                        // ensure_function_signature_resolved, which refuses to resolve a
-                        // generic signature (see is_generic_function), leaving 'params' empty
-                        // and producing a bogus arity error.
-                        if (is_generic_function(sym)) {
-                            auto resolved_args = infer_generic_function_args(*sym.decl, call.args, std::nullopt, locals, module_path, program, diag, call.location, loop_depth, defer_loop_base, fn_error_type);
+                        // A bare call to a generic function with NO brackets at all
+                        // ('make_list()', not 'make_list[]()') — inference only, per spec.md
+                        // §22 "Explicit vs. Inferred Instantiation".
+                        if (sym.decl && !sym.decl->generic_params.empty()) {
+                            auto resolved_args = infer_generic_function_args(*sym.decl, call.args, expected, locals, module_path, program, diag, call.location, loop_depth, defer_loop_base, fn_error_type);
                             if (!resolved_args) return {};
-                            const size_t idx = instantiate_generic_function(program, diag, target_module, name, std::move(*resolved_args), call.location);
-                            const auto &instance = *program.generic_fn_instances[idx];
-                            check_call_args(call.args, instance.param_types, false, locals, module_path, program, diag, call.location, name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                            expr_tables_for_write(program, module_path).expr_generic_fn_instance[&call] = idx;
-                            return instance.return_types;
+                            return record_instance(instantiate_generic_function(program, diag, module_path, callee_ident->name, std::move(*resolved_args), call.location));
                         }
-                        auto &resolved_fn = ensure_function_signature_resolved(target_module, name, program, diag);
-                        check_call_args(call.args, resolved_fn.params, false, locals, module_path, program, diag, call.location, name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
+                        auto &resolved_fn = ensure_function_signature_resolved(module_path, callee_ident->name, program, diag);
+                        check_call_args(call.args, resolved_fn.params, false, locals, module_path, program, diag, call.location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
                         return resolved_fn.return_types;
                     } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
-                        if (check_pub && !sym.is_pub) {
-                            error(diag, call.location, std::format("'{}' is not pub", name));
-                            return {};
-                        }
-                        check_call_args(call.args, sym.params, sym.is_variadic, locals, module_path, program, diag, call.location, name, loop_depth, defer_loop_base, fn_error_type);
+                        check_call_args(call.args, sym.params, sym.is_variadic, locals, module_path, program, diag, call.location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
                         std::vector<ResolvedType> returns;
                         if (sym.return_type) returns.push_back(*sym.return_type);
                         return returns;
+                    } else if constexpr (std::is_same_v<S, MacroSymbol>) {
+                        auto &resolved_macro = resolve_macro_symbol(module_path, callee_ident->name, program, diag, call.location);
+                        check_call_args(call.args, resolved_macro.params, false, locals, module_path, program, diag, call.location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
+                        return {resolved_macro.result_type};
                     } else {
-                        error(diag, call.location, std::format("'{}' is not callable", name));
-                        return {};
+                        return fail(std::format("'{}' is not callable", callee_ident->name));
                     }
                 },
                 sym_it->second);
+        }
+
+        // Multi-return positions: 'const a, b := f()', 'try f()', a return-value group. Takes
+        // the resolver's full return list as-is; there is no single expected type to infer
+        // from, and the key is the CallExpr's own address (see resolve_call_returns).
+        auto check_group_call_returns(const ast::CallExpr &call, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> std::vector<ResolvedType> {
+            return resolve_call_returns(call, std::nullopt, &call, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
         }
 
         static auto is_valid_variadic_arg(const ResolvedType &ty) -> bool {
@@ -3023,223 +3075,9 @@ namespace sema {
                         return returns.empty() ? ResolvedType{.kind = TypeKind::Void} : returns.front();
                     };
 
-                    // Explicit generic-function instantiation call ('make_fixed[16]()',
-                    // 'make_list[i32]()', or cross-module 'list.make_list[i32]()') — the
-                    // callee is an IndexOrInstantiateExpr whose operand names a generic
-                    // function, either directly (IdentExpr, same module) or through a
-                    // namespace chain (MemberExpr, 'mod.fn_name'). Only intercepted when
-                    // 'operand' actually IS a generic function; anything else (ordinary
-                    // indexing whose result happens to be called, e.g. 'fn_table[i]()')
-                    // falls through to the general-expression-callee path below unchanged.
-                    if (auto *index_callee = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&v->callee)) {
-                        const ast::FunctionDecl *generic_decl = nullptr;
-                        std::string decl_module = module_path;
-                        std::string fn_name;
-                        if (const auto *op_ident = std::get_if<ast::IdentExpr>(&(*index_callee)->operand);
-                            op_ident && !locals.contains(op_ident->name)) {
-                            if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
-                                if (const auto sym_it = mod_it->second.symbols.find(op_ident->name); sym_it != mod_it->second.symbols.end()) {
-                                    if (const auto *fs = std::get_if<FunctionSymbol>(&sym_it->second); fs && fs->decl && !fs->decl->generic_params.empty()) {
-                                        generic_decl = fs->decl;
-                                        fn_name = op_ident->name;
-                                    }
-                                }
-                            }
-                        } else if (const auto *op_member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&(*index_callee)->operand)) {
-                            if (const auto target_module = try_resolve_namespace_chain((*op_member)->object, module_path, locals, program)) {
-                                if (const auto mod_it = program.modules.find(*target_module); mod_it != program.modules.end()) {
-                                    if (const auto sym_it = mod_it->second.symbols.find((*op_member)->member); sym_it != mod_it->second.symbols.end()) {
-                                        if (const auto *fs = std::get_if<FunctionSymbol>(&sym_it->second); fs && fs->decl && !fs->decl->generic_params.empty()) {
-                                            if (!fs->is_pub) {
-                                                return error(diag, v->location, std::format("'{}' is not pub", (*op_member)->member));
-                                            }
-                                            generic_decl = fs->decl;
-                                            fn_name = (*op_member)->member;
-                                            decl_module = *target_module;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if (generic_decl) {
-                            std::optional<std::vector<GenericArgValue>> resolved_args;
-                            if (!(*index_callee)->args.empty()) {
-                                resolved_args = resolve_explicit_generic_args(generic_decl->generic_params, (*index_callee)->args, module_path, program, diag, v->location, fn_name);
-                            } else {
-                                resolved_args = infer_generic_function_args(*generic_decl, v->args, expected, locals, module_path, program, diag, v->location, loop_depth, defer_loop_base, fn_error_type);
-                            }
-                            if (!resolved_args) return ResolvedType{.kind = TypeKind::Invalid};
-                            const size_t idx = instantiate_generic_function(program, diag, decl_module, fn_name, std::move(*resolved_args), v->location);
-                            const auto &instance = *program.generic_fn_instances[idx];
-                            check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                            expr_tables_for_write(program, module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
-                            return single_value_result(instance.return_types);
-                        }
-                    }
-
-                    if (auto *member_callee = std::get_if<std::unique_ptr<ast::MemberExpr>>(&v->callee)) {
-                        if (auto target_module = try_resolve_namespace_chain((*member_callee)->object, module_path, locals, program)) {
-                            auto mod_it = program.modules.find(*target_module);
-                            if (mod_it == program.modules.end()) {
-                                return ResolvedType{.kind = TypeKind::Invalid};
-                            }
-
-                            const std::string &fn_name = (*member_callee)->member;
-
-                            auto sym_it = mod_it->second.symbols.find(fn_name);
-                            if (sym_it == mod_it->second.symbols.end()) {
-                                return error(diag, v->location, std::format("unknown function '{}'", fn_name));
-                            }
-
-                            return std::visit(
-                                [&]<typename T1>(const T1 &sym) -> ResolvedType {
-                                    using S = std::decay_t<T1>;
-                                    if constexpr (std::is_same_v<S, FunctionSymbol>) {
-                                        if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
-                                        // A bare cross-module call to a generic function with NO
-                                        // brackets at all ('list.make_list()', not
-                                        // 'list.make_list[i32]()') - inference only, mirroring the
-                                        // same-module bare-call case below.
-                                        if (sym.decl && !sym.decl->generic_params.empty()) {
-                                            auto resolved_args = infer_generic_function_args(*sym.decl, v->args, expected, locals, module_path, program, diag, v->location, loop_depth, defer_loop_base, fn_error_type);
-                                            if (!resolved_args) return ResolvedType{.kind = TypeKind::Invalid};
-                                            const size_t idx = instantiate_generic_function(program, diag, *target_module, fn_name, std::move(*resolved_args), v->location);
-                                            const auto &instance = *program.generic_fn_instances[idx];
-                                            check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                                            expr_tables_for_write(program, module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
-                                            return single_value_result(instance.return_types);
-                                        }
-                                        auto &resolved_fn = ensure_function_signature_resolved(*target_module, fn_name, program, diag);
-                                        check_call_args(v->args, resolved_fn.params, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
-                                        return single_value_result(resolved_fn.return_types);
-                                    } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
-                                        if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
-                                        check_call_args(v->args, sym.params, sym.is_variadic, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type);
-                                        return sym.return_type.value_or(ResolvedType{.kind = TypeKind::Void});
-                                    } else if constexpr (std::is_same_v<S, MacroSymbol>) {
-                                        if (!sym.is_pub) return error(diag, v->location, std::format("'{}' is not pub", fn_name));
-                                        auto &resolved_macro = resolve_macro_symbol(*target_module, fn_name, program, diag, v->location);
-                                        check_call_args(v->args, resolved_macro.params, false, locals, module_path, program, diag, v->location, fn_name, loop_depth, defer_loop_base, fn_error_type);
-                                        return resolved_macro.result_type;
-                                    } else {
-                                        return error(diag, v->location, std::format("'{}' is not callable", fn_name));
-                                    }
-                                },
-                                sym_it->second);
-                        }
-                        // Method call on a value
-                        auto receiver_type = check_expr((*member_callee)->object, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                        if (receiver_type.kind == TypeKind::Pointer) {
-                            if (const auto *pointee = program.pointee_at(receiver_type.pointee_index)) {
-                                receiver_type = *pointee;
-                            } else {
-                                receiver_type = ResolvedType{.kind = TypeKind::Invalid};
-                            }
-                        }
-                        if (auto trait_returns = try_trait_handle_dispatch(receiver_type, (*member_callee)->member, v->args, v.get(), locals, module_path, program, diag, v->location, loop_depth, defer_loop_base, fn_error_type)) {
-                            return single_value_result(*trait_returns);
-                        }
-                        const auto *method = find_method(receiver_type, (*member_callee)->member, program);
-                        if (!method) {
-                            // Maybe it's a struct field with function type
-                            if (receiver_type.kind == TypeKind::Struct && program.struct_at(receiver_type.struct_index)) {
-                                for (const auto &field : program.struct_at(receiver_type.struct_index)->fields) {
-                                    if (field.name == (*member_callee)->member) {
-                                        if (field.type.kind == TypeKind::Function) {
-                                            const auto &sig = fn_sig(field.type, program);
-                                            check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type);
-                                            return single_value_result(sig.return_types);
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-                            return error(diag, v->location, std::format("no method '{}' on type", (*member_callee)->member));
-                        }
-                        // A method call on a generic type's concrete instantiation ('self.reserve(...)'
-                        // where 'self: List[i32]') — 'method' above is the unspecialized TEMPLATE
-                        // (find_method's bare "List"/"reserve" keying never changes), so its own
-                        // param_types/return_types are never populated for a generic type (see
-                        // resolve_impl_signatures_for_module's skip) — instantiate_generic_method
-                        // resolves the real, per-instantiation signature on demand instead.
-                        if (receiver_is_generic_instance(receiver_type, program)) {
-                            const auto idx = instantiate_generic_method(program, diag, receiver_type, (*member_callee)->member, v->location);
-                            if (!idx) {
-                                return error(diag, v->location, std::format("no method '{}' on type", (*member_callee)->member));
-                            }
-                            const auto &instance = *program.generic_fn_instances[*idx];
-                            check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                            expr_tables_for_write(program, module_path).expr_generic_fn_instance[get_expr_key(expr)] = *idx;
-                            return single_value_result(instance.return_types);
-                        }
-                        check_call_args(v->args, method->param_types, false, locals, module_path, program, diag, v->location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type, method->is_variadic, method_required_params(*method, program));
-                        return single_value_result(method->return_types);
-                    }
-
-                    // General expression callee: evaluate, then call through if it's a function type
-                    if (!std::holds_alternative<ast::IdentExpr>(v->callee)) {
-                        const auto callee_ty = check_expr(v->callee, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                        if (callee_ty.kind == TypeKind::Function) {
-                            const auto &sig = fn_sig(callee_ty, program);
-                            check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, "<fn ptr>", loop_depth, defer_loop_base, fn_error_type);
-                            return single_value_result(sig.return_types);
-                        }
-                        return error(diag, v->location, "unsupported call target");
-                    }
-
-                    auto *callee_ident = std::get_if<ast::IdentExpr>(&v->callee);
-
-                    if (auto local_it = locals.find(callee_ident->name); local_it != locals.end()) {
-                        const auto &local_ty = local_it->second.type;
-                        if (local_ty.kind == TypeKind::Function) {
-                            const auto &sig = fn_sig(local_ty, program);
-                            check_call_args(v->args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
-                            return single_value_result(sig.return_types);
-                        }
-                        return error(diag, v->location, std::format("'{}' is not callable", callee_ident->name));
-                    }
-
-                    const auto mod_it = program.modules.find(module_path);
-                    if (mod_it == program.modules.end()) {
-                        return error(diag, v->location, std::format("internal error: module '{}' not found", module_path));
-                    }
-
-                    auto sym_it = mod_it->second.symbols.find(callee_ident->name);
-                    if (sym_it == mod_it->second.symbols.end()) {
-                        return error(diag, v->location, std::format("unknown function '{}'", callee_ident->name));
-                    }
-
-                    return std::visit(
-                        [&]<typename T1>(const T1 &sym) -> ResolvedType {
-                            using S = std::decay_t<T1>;
-                            if constexpr (std::is_same_v<S, FunctionSymbol>) {
-                                // A bare call to a generic function with NO brackets at all
-                                // ('make_list()', not 'make_list[]()') — inference only, per
-                                // spec.md §22 "Explicit vs. Inferred Instantiation".
-                                if (sym.decl && !sym.decl->generic_params.empty()) {
-                                    auto resolved_args = infer_generic_function_args(*sym.decl, v->args, expected, locals, module_path, program, diag, v->location, loop_depth, defer_loop_base, fn_error_type);
-                                    if (!resolved_args) return ResolvedType{.kind = TypeKind::Invalid};
-                                    const size_t idx = instantiate_generic_function(program, diag, module_path, callee_ident->name, std::move(*resolved_args), v->location);
-                                    const auto &instance = *program.generic_fn_instances[idx];
-                                    check_call_args(v->args, instance.param_types, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
-                                    expr_tables_for_write(program, module_path).expr_generic_fn_instance[get_expr_key(expr)] = idx;
-                                    return single_value_result(instance.return_types);
-                                }
-                                auto &resolved_fn = ensure_function_signature_resolved(module_path, callee_ident->name, program, diag);
-                                check_call_args(v->args, resolved_fn.params, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
-                                return single_value_result(resolved_fn.return_types);
-                            } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
-                                check_call_args(v->args, sym.params, sym.is_variadic, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
-                                return sym.return_type.value_or(ResolvedType{.kind = TypeKind::Void});
-                            } else if constexpr (std::is_same_v<S, MacroSymbol>) {
-                                auto &resolved_macro = resolve_macro_symbol(module_path, callee_ident->name, program, diag, v->location);
-                                check_call_args(v->args, resolved_macro.params, false, locals, module_path, program, diag, v->location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
-                                return resolved_macro.result_type;
-                            } else {
-                                return error(diag, v->location, std::format("'{}' is not callable", callee_ident->name));
-                            }
-                        },
-                        sym_it->second);
+                    return single_value_result(resolve_call_returns(
+                        *v, expected, get_expr_key(expr), locals, module_path, program, diag,
+                        loop_depth, defer_loop_base, fn_error_type));
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) {
                     const LvalueInfo lv = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
