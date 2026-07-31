@@ -662,6 +662,13 @@ namespace sema {
                     size_t pos = 0;
                     const long long parsed = std::stoll(raw, &pos, 10);
                     if (pos != raw.size()) throw std::invalid_argument("trailing characters");
+                    // Same rule as generic value arguments: the declared integer type
+                    // constrains the value ('u8' option no longer accepts 300).
+                    if (!scalar_value_fits(static_cast<uint64_t>(parsed), target.kind)) {
+                        diag.report_error(DiagnosticStage::Sema, loc,
+                            std::format("{} '{}' value '{}' does not fit in its declared integer type", noun, key, raw));
+                        return std::nullopt;
+                    }
                     return static_cast<int64_t>(parsed);
                 } catch (...) {
                     diag.report_error(DiagnosticStage::Sema, loc,

@@ -533,6 +533,16 @@ namespace sema {
                             arg_error = true;
                             continue;
                         }
+                        // The declared scalar type participates in the cache key and
+                        // mangling, so it must also constrain the value: 'Buf[300]' for
+                        // '[N: u8]' used to compile with N silently out of range.
+                        if (!scalar_value_fits(*value, param_scalar_type.kind)) {
+                            error(diag, arg.location, std::format(
+                                "generic argument {} for '{}' does not fit in its declared type '{}'",
+                                i + 1, target_name, describe_type(param_scalar_type, program)));
+                            arg_error = true;
+                            continue;
+                        }
                         resolved_args.push_back(GenericArgValue{
                             .is_type = false,
                             .value_arg = static_cast<int64_t>(*value),

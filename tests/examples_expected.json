@@ -419,6 +419,11 @@
     "diag": "examples/example_generic_self_ref_by_value/main.mir:22:5: error: field 'next' stores 'node' by value, which is not yet a complete type; a type cannot contain itself by value \u2014 store it behind a pointer",
     "exit": 1
   },
+  "example_generic_value_arg_range": {
+    "action": "build",
+    "diag": "examples/example_generic_value_arg_range/main.mir:14:18: error: generic argument 1 for 'Buf' does not fit in its declared type 'u8'",
+    "exit": 1
+  },
   "example_generics_bad_param_type": {
     "action": "build",
     "diag": "examples/example_generics_bad_param_type/main.mir:26:14: error: generic parameter 'E' is bound by 'Color', which is not a trait; a bound must name a trait",

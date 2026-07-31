@@ -207,6 +207,26 @@ namespace sema {
             return 0;
         }
     }
+
+    // Whether a folded constant's BITS fit the declared scalar kind: unsigned kinds compare
+    // the unsigned value against the width's max; signed kinds require the signed reading
+    // to be in range. The const evaluators fold negative literals as wrapped
+    // two's-complement bits, which this reading round-trips correctly. Returns true for
+    // non-scalar kinds (nothing to check). Used to validate generic value arguments
+    // ('Buf[300]' for '[N: u8]') and '$option'/'$env' integer values against their targets.
+    [[nodiscard]] inline auto scalar_value_fits(const uint64_t bits, const TypeKind kind) -> bool {
+        const auto sv = static_cast<int64_t>(bits);
+        switch (kind) {
+        case TypeKind::Bool: return bits <= 1;
+        case TypeKind::U8:   return bits <= 0xFF;
+        case TypeKind::U16:  return bits <= 0xFFFF;
+        case TypeKind::U32:  return bits <= 0xFFFF'FFFF;
+        case TypeKind::I8:   return sv >= -128 && sv <= 127;
+        case TypeKind::I16:  return sv >= -32768 && sv <= 32767;
+        case TypeKind::I32:  return sv >= -2147483648LL && sv <= 2147483647LL;
+        default:             return true;
+        }
+    }
 }
 
 // Hashes exactly the fields operator== compares (kind + the 9 identity *_index fields), so

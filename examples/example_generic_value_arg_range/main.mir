@@ -1,0 +1,16 @@
+// example_generic_value_arg_range — a generic value argument must fit its declared scalar
+// type. The declared type participates in the instantiation cache key and mangling but
+// never constrained the value, so 'Buf[300]' for '[N: u8]' compiled with N silently out
+// of range (CODE_REVIEW.md SEMA-7). The boundary value 255 must stay accepted.
+//
+// Expected: compile error "generic argument 1 for 'Buf' does not fit in its declared type 'u8'".
+
+type Buf[N: u8] = struct {
+    data: [N]u8
+}
+
+pub fn main() -> i32 {
+    mut ok: Buf[255] = default
+    mut bad: Buf[300] = default
+    return 0
+}
