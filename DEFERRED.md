@@ -1,223 +1,98 @@
 # Mirage — Deferred Work
 
-What remains after working through `REVIEW_FINDINGS.md` (116 findings, 2026-07-29 → 30)
-and then `OUTSTANDING.md` (2026-07-30 → 31, branch `fixes`). Both of those files have been
-removed: every item in them is now either done or listed below.
+Everything previously listed here has been resolved, on branch `fixes` (2026-07-31, 32
+commits). The only thing still outstanding is one action that cannot be taken from this
+repository at all — see §1.
 
-Nothing here is a regression. Items are either a deliberate scope decision, a defect
-discovered along the way that is larger than the work that found it, or something that
-cannot be done from this repository at all.
-
-Current baseline: build clean, ctest 4/4, 17 Python suites passing, 195/195 corpus
-fixtures matching (no `known_broken` entries).
+Current baseline: build clean, ctest 4/4, 17 Python suites passing, 207/207 corpus fixtures
+matching (no `known_broken` entries).
 
 ---
 
-## 1. Deferred refactors
+## 1. Outstanding: bump the tree-sitter grammar's pinned commit
 
-The "N near-identical implementations that have already drifted" class, deferred by
-explicit decision twice now. None is a bug. Collectively they are the reason bugs like
-CHECK-1 and TYPE-1/TYPE-2 existed, so consolidating reduces the rate of *future* drift
-bugs rather than fixing any present one.
-
-| Area | IDs |
-|---|---|
-| Call resolution | `CHECK-7`, `CHECK-8` |
-| `check_expr` / `check_stmt` size (~1450 / ~625 lines) | `CHECK-9` |
-| Codegen duplication | `CODEGEN-6`, `CODEGEN-7`, `CODEGEN-8`, `CODEGEN-12`, `CODEGEN-13` |
-| Type/layout math | `TYPE-5`, `TYPE-6`, `TYPE-7` |
-| Const-folders (three, hand-synced) | `TYPE-11` |
-| Parser duplication | `PARSE-5`, `PARSE-6`, `PARSE-7`, `PARSE-8` |
-| Sema duplication | `SEMA-9`, `SEMA-11`, `SEMA-12` |
-| LSP | `LSPCORE-12`, `LSPH-8`, `LSPH-10` |
-
-**Highest value first, if revisited:** `TYPE-11` — the three drifted const-folders were the
-direct cause of TYPE-1, TYPE-2, and the unreported `when size_of(...)` wrong-branch bug. It
-is also the largest (multi-day).
-
-**Note on CODEGEN-12:** looks cheap but is not uniform. Two sites work on `llvm::Value*`,
-the third (`const_binary`) on `llvm::Constant*`. A 2-site helper is mechanical; a 3-site one
-needs templating.
-
----
-
-## 2. A generic type cannot refer to its own instantiation
-
-Found while rewriting `examples/dictionary`. Not in either review document.
-
-```mirage
-type node[T: type] = struct {
-    value: T
-    next: *node[T] = nil     // error: generic type instantiation cycle detected at 'node'
-}
-```
-
-The same shape is fine for a non-generic type — `block_header` in `examples/mem` has
-`next: *block_header`. This blocks every node-based generic container: linked lists, trees,
-and chained hash tables.
-
-**Why.** `instantiate_generic_type` (`type_resolver.cpp`) deliberately allocates no slot
-before resolving the declaration's right-hand side — the comment there explains that
-`resolve_type_impl`'s Struct/Enum/Union/Bitset cases already allocate-and-lay-out a fresh
-slot, so the instantiation reuses that machinery. With no slot in existence yet, a
-self-referential field has nothing to point at, and the recursion is caught by the
-`generic_type_resolving` guard and reported as a cycle. That guard cannot distinguish
-"reached through a pointer" (fine — pointer size is known without the pointee's layout)
-from "reached by value" (a genuine cycle).
-
-**What a fix needs.** Pre-allocate and register the instance before resolving its RHS, so a
-pointer field can early-return the in-progress slot. That breaks the invariant
-`resolve_field_type` currently documents and relies on — that `instantiate_generic_type`
-always returns an already-fully-laid-out result — so by-value cycle detection has to move
-from instantiation time to layout time. `size_of`/`align_of` have no completeness check
-today, so a by-value self-reference would otherwise silently compute size 0 instead of
-erroring. That is the delicate part, and it is the reason this was not attempted as part of
-repairing an example fixture.
-
-`examples/dictionary` threads its chains by index instead, with the workaround documented at
-the top of the file.
-
----
-
-## 3. Contextual `.` completion
-
-`add_type_members`' `Bitset` arm is correct but **unreachable from `textDocument/completion`**,
-and adding it changed no observable behaviour. Verified end-to-end, not inferred.
-
-Reaching it needs a receiver expression whose type is a bitset, and no such expression
-exists: a flag is only ever written contextually, as a bare `.Name` taking its meaning from
-the expected type. That form has no receiver chain, so the handler takes the no-receiver
-path (keywords + locals + module symbols) and never consults a type at all. The same is true
-of enum fields and tagged-union variants written contextually — `.Opened` in a match arm,
-`.Read` in `modes += .Read`.
-
-Implementing it needs the *expected type at the cursor*, which nothing in the completion
-handler computes. sema's recorded expression types only help when the buffer parses, and
-completion runs mid-edit on buffers that usually do not.
-
-Its absence is pinned in `tests/lsp_smoke_test.py` as current behaviour, so wiring it up is
-a visible change rather than a silent one. The Trait arm of the same function **is** reached
-and is covered.
-
----
-
-## 4. Find All References is scoped to the import closure
-
-`handle_references` walks `result.ast_program.modules` — the analysed module's import
-closure, not the workspace. A reference from a file that does not import the target is not
-found, and `referencesProvider` is advertised without qualification, so a client cannot tell.
-
-Making it workspace-wide means indexing files no open document reaches, which is a different
-shape of work from anything the LSP does today (every handler currently starts from one
-analysed module). Recorded at the capability declaration in `server.cpp`.
-
----
-
-## 5. Editor tooling outside this repository
+**This is the one item still open, and it is blocked on a push, not on work.**
 
 Zed's syntax highlighting comes from
-**[tree-sitter-mirage](https://github.com/Guthius/tree-sitter-mirage)**, pinned by commit
-SHA in `editors/zed/extension.toml`. It is a separate repository, is not checked out here,
-and cannot be fixed from this one.
+**[tree-sitter-mirage](https://github.com/Guthius/tree-sitter-mirage)**, a separate
+repository pinned by commit SHA in `editors/zed/extension.toml`. The two syntax changes it
+was missing — `//` and `/* */` comments, and the `?` optional-error return marker — are
+implemented and tested there on branch **`sync-with-compiler`**, but not pushed, so there is
+no SHA to point at.
 
-Two syntax changes have landed here since it was last bumped:
+To finish: push and merge that branch, then bump `rev` in `editors/zed/extension.toml`.
 
-- **`//` and `/* */` comments** (2026-07-27) replaced the older `#` syntax.
-- **`?` on the last return type** (2026-07-30) marks an ignorable error.
+The in-repo half is done and safe to have landed early — `highlights.scm` already queries
+the new `optional_error_marker`, `link_declaration` and `diagnostic_declaration` nodes, and a
+query that matches nothing is inert. `editors/zed/README.md` § "Grammar status" has the
+detail.
 
-`editors/zed/README.md` § "Updating the grammar" records exactly what each needs upstream,
-and why the `.scm` files here cannot substitute — they are queries, and a query can only
-match node types the grammar already produces.
-
-VS Code is unaffected: its TextMate grammar lives here, is current on both changes, and is
-now pinned by `tests/editor_grammar_test.py`.
-
----
-
-## 6. `match`/`switch` cannot take a field access as its scrutinee
-
-Found while adding `Type_Info_Generic_Arg.kind` (an inline `union(enum)` field) to
-`runtime/type_info`. Not in either review document.
-
-```mirage
-switch h.kind {          // error: expected '=', got ':'
-    .is_type: {}
-    .is_scalar(v): {}
-}
-
-const k := h.kind        // fine
-switch k { ... }
-```
-
-Only *member access* is affected. An identifier, a deref (`p.*`), a call, an index, and a
-parenthesized expression all parse correctly as scrutinees, and both `match` and `switch`
-behave the same way.
-
-**Why.** It is an ambiguity with qualified tagged-variant construction, not a restriction on
-scrutinees. `parse_postfix`'s member-access branch (`ast.cpp`, the `LBrace` + `Dot` lookahead)
-commits to a `TaggedVariantExpr` whenever a dotted-identifier chain is followed by `{` then
-`.` — that is the `Shape.circle{.radius = 3.0}` form. `switch h.kind { .is_type: ... }` has
-exactly that shape, so the arms get parsed as constructor payload fields and the parser
-demands `.is_type = ...`. The branch is gated on `named_type_from_expr` succeeding, which
-returns `nullopt` for calls, indexes and derefs — which is precisely why those forms escape.
-
-**What a fix needs.** One more token of lookahead past `{ . ident`: `=` means a variant
-constructor's payload field, `:` or `(` means a match arm. Cheap in isolation, but it is a
-change to the disambiguation rule two constructs share, so it wants fixture coverage on both
-sides (a qualified constructor whose first field is named like a variant, and a match whose
-scrutinee is a field) before being trusted.
-
-`examples/example_type_info_generic_args` binds to a local first, with the reason noted inline.
+One thing that was not anticipated when this was written up: dropping `#` as the comment
+character means `#link`/`#error`/`#warn` stop being swallowed as comments and become parse
+errors, so the grammar needed rules for them in the same change.
 
 ---
 
-## 7. Generic trait-impl bodies are never eagerly checked
+## 2. What was resolved
 
-`check_generic_type_method_bodies` (`sema_check.cpp`) finds the methods to check by walking
-`ProgramModule::methods`, which is populated for `impl TYPE { ... }` blocks. `impl TRAIT for
-TYPE { ... }` methods are registered only into `Program::trait_impls_by_type`
-(`sema_declare.cpp`), so a *generic* trait impl — `examples/example_generics_orphan_impl` has
-one — has no eagerly-checked template instance at all.
+### Defects (all were user-visible)
 
-Two consequences, both pre-existing and neither a regression:
+| Was | Now |
+|---|---|
+| A generic type could not refer to its own instantiation, even through a pointer | Works. By-value cycles are caught at layout time instead, which also fixed a pre-existing non-generic bug: `[3]node` inside `node` silently computed size 0. `examples/dictionary` threads its chains by pointer again. |
+| `match`/`switch` could not take a field access as scrutinee | Works. The disambiguation against qualified variant construction needed one more token of lookahead, so `ast::Parser` gained `peek_at`/`check_at`. |
+| Generic trait impls "went unchecked" | The premise was wrong: they did not work **at all**. Declaring one made the target type report `unknown type 'T'`, and calling a method on one hit an internal error. Both fixed, and conformance is now checked against a template receiver rather than skipped. |
+| Compiler diagnostics said `<generic>` where the LSP said `T` | Fixed — and `mangle_generic_args` no longer routes symbol names through a display-only field. |
+| No contextual `.Name` completion | Works, for bitset flags, enum fields and tagged-union variants, via sema's recorded type when the buffer parses and token inference when it does not. |
+| Find All References was scoped to the import closure | Workspace-wide, with name-based cross-bundle identity. Locals and params are still closure-scoped, deliberately — they are function-scoped, so a sweep for one is guaranteed empty. |
+| `\|\|` narrowed nothing in either branch | Its **else**-branch narrows, mirroring `&&`'s then-branch. `docs/spec.md`'s narrowing table moved with it. |
+| The escaping-`&payload` check lost the pointer through a local | Followed through arm-local bindings, plus the tagged-variant-payload and `&v.field` routes that were missing. |
 
-- Type errors in such a body go unreported until something instantiates it, unlike every
-  other generic declaration.
-- The LSP has no template `ExprSideTables` to read for it, so hover/inlay hints there fall
-  back to `shadow_instantiate_and_resolve`'s `u8` placeholder — the behaviour every other
-  generic body was just moved off. That fallback's doc comment names this as its remaining
-  reason to exist.
+Three of the "refactors" turned out to be live defects rather than duplication:
 
-Extending the eager pass to cover trait impls is a handful of lines, but it starts reporting
-diagnostics in bodies that have never been checked, in this repository and in user code
-alike. That is the reason it is here rather than done: it wants its own pass over the corpus,
-not a ride along with an LSP fix.
+- **CODEGEN-7** — `type_of(T)` inside a generic **crashed the compiler** with an uncaught
+  `std::out_of_range`. Two of the three operand readers handled a generic parameter; the
+  third did not.
+- **TYPE-11** — `size_of(i64)` was accepted as an array length but **rejected** as a match
+  arm, because arm patterns used an 8-shape const-folder while array lengths used a
+  17-shape one.
+- **CHECK-7** — a macro in group position reported `'twice' is not callable` (false) and
+  cascaded, because the group call tree had no `MacroSymbol` arm where the value tree did.
+
+### Refactors
+
+All 22 IDs closed: `CHECK-7/8/9`, `CODEGEN-6/7/8/12/13`, `TYPE-5/6/7/11`, `PARSE-5/6/7/8`,
+`SEMA-9/11/12`, `LSPCORE-12`, `LSPH-8/10`.
+
+`check_expr` went 1683 → 707 lines and `check_stmt` 684 → 201.
+
+Where a finding proposed something the code did not support, the reasoning is recorded at the
+site rather than silently skipped:
+
+- **CHECK-9b** — match and switch arm loops are *not* unified. `match` unifies arm types and
+  requires exhaustiveness; `switch` does neither. That is a language rule, not an accident,
+  and encoding it as a boolean flag would make both harder to read. Their genuinely shared
+  front half *is* extracted.
+- **LSPH-8** — `find_expr_by_location` is *not* folded into `ast_walker`. One is an
+  early-exit search, the other an exhaustive callback visitor; unifying means changing four
+  callback signatures and every user.
+- **LSPH-10** — the two cursor-boundary conventions are *deliberately* different and now
+  pinned so they cannot be "fixed" into agreement.
+- **CODEGEN-12** — the *rule* is shared, not the emission: two sites build `llvm::Value*`,
+  the third folds `llvm::Constant*`.
 
 ---
 
-## 8. Compiler diagnostics still say `<generic>` where the LSP says `T`
+## 3. Verification
 
-`ResolvedType::opaque_param_index` now carries a generic parameter's spelling for display,
-and `type_to_string` (`src/lsp/type_printer.cpp`) uses it — so an editor reports `mut n :=
-value` inside `fn write_int[T: type]` as `: T`. `describe_type` (`sema.cpp`), which formats
-the same types for compiler diagnostics, still prints `<generic>` / `<generic: Trait>`.
+Every commit passed: `ctest` 4/4, `examples_smoke_test.py --strict`, and all 17 Python
+suites. Commits touching layout, constant folding or emission were additionally verified by
+diffing emitted LLVM IR across every buildable module — byte-identical except where a change
+was intended.
 
-Wiring it up is three lines and would make several eager-check messages considerably clearer.
-It changes diagnostic *text*, though, so it needs `tests/generics_test.py` and
-`tests/examples_expected.json` re-baselined in the same commit — kept separate from the LSP
-change so that neither obscures the other.
+Two regression guards were found to be worthless on first writing and were rewritten after
+being tested against the mistake they guard (LSPH-10's cursor convention, §4's workspace
+sweep). A guard that has not been seen to fail is not known to work.
 
----
-
-## 9. Smaller notes
-
-- **`compute_condition_narrowing` still does not descend into `||`.** Widened to narrow
-  every operand of an `&&` chain; `||` deliberately unchanged, since an operand being true
-  proves nothing about any other. Documented in `spec.md`'s narrowing table. If a future
-  spec decision wants `||` handled in the *else*-branch (where it does prove something),
-  that is where to start.
-- **The escaping-`&payload` check is syntactic.** It over-reports (a call that only reads
-  the pointer during the arm is flagged) and under-reports (assigning the pointer to an
-  arm-local first is not followed), which is why it is a warning. A real fix needs
-  provenance on `LocalBinding` and propagation through assignment, field stores, call
-  arguments and returns — materially more than the `ErrorState` typestate pass does today.
+The corpus grew 195 → 207 fixtures. Every new one pins behaviour that was previously
+broken, unreachable, or untested.
