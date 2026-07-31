@@ -3652,6 +3652,10 @@ namespace codegen {
                 return size_of(*current_module_path_, pointee);
             }
 
+            // Lowered as a byte-scaled 'getelementptr i8' rather than
+            // ptrtoint/add/inttoptr: a GEP keeps the result's pointer provenance, which
+            // the integer round-trip discards for every 'p + n' — pessimizing alias
+            // analysis in any optimization pipeline downstream.
             auto emit_pointer_offset(llvm::Value *ptr, llvm::Value *amount, const sema::ResolvedType &ptr_type, bool subtract) -> llvm::Value * {
                 auto *i64 = llvm::Type::getInt64Ty(*context_);
                 if (amount->getType()->getIntegerBitWidth() != 64) {
@@ -3663,8 +3667,7 @@ namespace codegen {
                 if (subtract) {
                     amount = builder_.CreateNeg(amount);
                 }
-                auto *base = builder_.CreatePtrToInt(ptr, i64);
-                return builder_.CreateIntToPtr(builder_.CreateAdd(base, amount), llvm_type(*current_module_path_, ptr_type));
+                return builder_.CreateGEP(llvm::Type::getInt8Ty(*context_), ptr, amount);
             }
 
             auto emit_binary_expr(const ast::BinaryExpr &expr) -> llvm::Value * {
