@@ -1,0 +1,64 @@
+// example_type_info_recursive — a self-referential struct's back-reference. Emitting the
+// pointee's descriptor here would recurse forever, so codegen breaks the cycle; with
+// Type_Kind_Or_Info that break degrades to '.kind(Struct)' instead of the bare nil it used to
+// produce, so the reference still says what shape of type it points at.
+//
+// Expected: compiles and runs, exit code 0.
+
+const rt := import("../../runtime/type_info")
+
+pub type Node = struct {
+    value: i32
+    next:  *Node
+}
+
+// True when the reference reports a bare kind equal to 'want'. Phrased as a predicate rather
+// than a 'kind_of' accessor because Type_Kind_Or_Info's two arms are genuinely different
+// answers — there is no Type_Kind that means "it carried a descriptor instead".
+fn is_kind(t: rt.Type_Kind_Or_Info, want: rt.Type_Kind) -> bool {
+    return match t {
+        .kind(k): k == want,
+        .info(_): false,
+    }
+}
+
+fn info_of(t: rt.Type_Kind_Or_Info) -> *rt.Type_Info {
+    return match t {
+        .info(i): i,
+        .kind(_): cast(nil, *rt.Type_Info),
+    }
+}
+
+// The element reference of a Pointer/Slice/Array descriptor. Callers only ever pass one of
+// those three, so the fallback arm is unreachable; it returns a self-reference rather than
+// inventing a sentinel kind.
+fn base_type_of(info: *rt.Type_Info) -> rt.Type_Kind_Or_Info {
+    return match info.* {
+        .Pointer(p): p.base_type,
+        .Slice(s): s.base_type,
+        .Array(a): a.base_type,
+        _: .info(info),
+    }
+}
+
+pub fn main() -> i32 {
+    const info: *rt.Type_Info = cast(type_info_of(type_of(Node)), *rt.Type_Info)
+    if cast(info, anyptr) == nil { return 1 }
+
+    mut result: i32 = 0
+    switch info.* {
+        .Struct(s): {
+            if len(s.fields) != 2 { return 2 }
+            if !is_kind(s.fields[0].base_type, rt.Type_Kind.I32) { result = 10 }
+
+            // '*Node' has its own descriptor; the Node it points back at is still being
+            // emitted, so the cycle break reports the kind rather than the descriptor.
+            const ptr_info := info_of(s.fields[1].base_type)
+            if cast(ptr_info, anyptr) == nil { return 11 }
+            if !is_kind(base_type_of(ptr_info), rt.Type_Kind.Struct) { result = 12 }
+        },
+        _: { result = 3 },
+    }
+
+    return result
+}

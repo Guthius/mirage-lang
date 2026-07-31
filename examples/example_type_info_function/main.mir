@@ -1,0 +1,96 @@
+// example_type_info_function — a function type's params and return_types. 'return_types' is a
+// '[]Type_Kind_Or_Info', and a single-return function makes its backing storage exactly 16
+// bytes: the size at which LLVM's own preferred-alignment heuristic stops helping, so this is
+// the case that regresses if codegen doesn't set the alignment explicitly.
+//
+// Expected: compiles and runs, exit code 0.
+
+const rt := import("../../runtime/type_info")
+
+pub type Callback = fn(count: i32, data: []u8) -> usize
+
+pub type Holder = struct {
+    cb: Callback
+}
+
+fn str_eq(a: []u8, b: []u8) -> bool {
+    if len(a) != len(b) {
+        return false
+    }
+    mut i: usize = 0
+    while i < len(a) {
+        if a[i] != b[i] {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// True when the reference reports a bare kind equal to 'want'. Phrased as a predicate rather
+// than a 'kind_of' accessor because Type_Kind_Or_Info's two arms are genuinely different
+// answers — there is no Type_Kind that means "it carried a descriptor instead".
+fn is_kind(t: rt.Type_Kind_Or_Info, want: rt.Type_Kind) -> bool {
+    return match t {
+        .kind(k): k == want,
+        .info(_): false,
+    }
+}
+
+fn info_of(t: rt.Type_Kind_Or_Info) -> *rt.Type_Info {
+    return match t {
+        .info(i): i,
+        .kind(_): cast(nil, *rt.Type_Info),
+    }
+}
+
+// The element reference of a Pointer/Slice/Array descriptor. Callers only ever pass one of
+// those three, so the fallback arm is unreachable; it returns a self-reference rather than
+// inventing a sentinel kind.
+fn base_type_of(info: *rt.Type_Info) -> rt.Type_Kind_Or_Info {
+    return match info.* {
+        .Pointer(p): p.base_type,
+        .Slice(s): s.base_type,
+        .Array(a): a.base_type,
+        _: .info(info),
+    }
+}
+
+pub fn main() -> i32 {
+    const holder_info: *rt.Type_Info = cast(type_info_of(type_of(Holder)), *rt.Type_Info)
+    if cast(holder_info, anyptr) == nil { return 1 }
+
+    mut fn_info: *rt.Type_Info = cast(nil, *rt.Type_Info)
+    switch holder_info.* {
+        .Struct(s): {
+            if len(s.fields) != 1 { return 2 }
+            fn_info = info_of(s.fields[0].base_type)
+        },
+        _: { return 3 },
+    }
+    if cast(fn_info, anyptr) == nil { return 4 }
+
+    mut result: i32 = 0
+    switch fn_info.* {
+        .Function(f): {
+            if len(f.params) != 2 { return 5 }
+            if len(f.return_types) != 1 { return 6 }
+            if f.is_variadic { result = 10 }
+
+            // A scalar param reports its kind; a slice param reports a descriptor whose own
+            // element is a kind again.
+            if !str_eq(f.params[0].name, "count") { result = 11 }
+            if !is_kind(f.params[0].type_info, rt.Type_Kind.I32) { result = 12 }
+            if !str_eq(f.params[1].name, "data") { result = 13 }
+            const slice_info := info_of(f.params[1].type_info)
+            if cast(slice_info, anyptr) == nil { return 7 }
+            if !is_kind(base_type_of(slice_info), rt.Type_Kind.U8) { result = 14 }
+
+            // The single-element []Type_Kind_Or_Info.
+            if !is_kind(f.return_types[0], rt.Type_Kind.USize) { result = 15 }
+        },
+        _: { result = 8 },
+    }
+
+    return result
+}

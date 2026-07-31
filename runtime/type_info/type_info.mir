@@ -1,24 +1,97 @@
-pub type Type_Kind = enum(u32) {
-    U8      = 1
-    U16     = 2
-    U32     = 3
-    U64     = 4
-    I8      = 5
-    I16     = 6
-    I32     = 7
-    I64     = 8
-    F32     = 9
-    F64     = 10
-    USize   = 11
-    Bool    = 12
-    Byte    = 13
-    Anyptr  = 14
-    Error   = 15
+pub type Type_Info = union(enum) {
+    Pointer: struct {
+        base_type: Type_Kind_Or_Info
+    }
 
+    Slice: struct {
+        base_type: Type_Kind_Or_Info
+    }
+
+    Array: struct {
+        base_type: Type_Kind_Or_Info
+        length: usize
+    }
+
+    Struct: struct {
+        name: []u8
+        fields: []Type_Info_Field
+        size: usize
+        align: usize
+        packed: bool
+        is_generic: bool
+        generic_args: []Type_Info_Generic_Arg
+    }
+
+    Enum: struct {
+        name: []u8
+        variants: []Type_Info_Enum_Variant
+        storage_kind: Type_Kind
+        size: usize
+        is_generic: bool
+        generic_args: []Type_Info_Generic_Arg
+    }
+
+    Union: struct {
+        name: []u8
+        members: []Type_Info_Field
+        size: usize
+        align: usize
+        is_generic: bool
+        generic_args: []Type_Info_Generic_Arg
+    }
+
+    Tagged_Union: struct {
+        name: []u8
+        variants: []Type_Info_Tagged_Variant
+        size: usize
+        align: usize
+        is_generic: bool
+        generic_args: []Type_Info_Generic_Arg
+    }
+
+    Bitset: struct {
+        name: []u8
+        member_type: *Type_Info
+        storage_kind: Type_Kind
+        size: usize
+        is_generic: bool
+        generic_args: []Type_Info_Generic_Arg
+    }
+
+    Function: struct {
+        params: []Type_Info_Param
+        return_types: []Type_Kind_Or_Info
+        is_variadic:  bool
+    }
+
+    Trait: struct {
+        name: []u8
+        methods: []Type_Info_Method
+    }
+
+    Error: struct {
+        members: []*Type_Info
+        is_optional: bool
+    }
+}
+
+pub type Type_Kind = enum(u32) {
+    U8           = 1
+    U16          = 2
+    U32          = 3
+    U64          = 4
+    I8           = 5
+    I16          = 6
+    I32          = 7
+    I64          = 8
+    F32          = 9
+    F64          = 10
+    USize        = 11
+    Bool         = 12
+    Anyptr       = 14
     Pointer      = 16
     Slice        = 17
     Array        = 18
-    Named        = 19
     Struct       = 20
     Enum         = 21
     Union        = 22
@@ -26,125 +99,49 @@ pub type Type_Kind = enum(u32) {
     Bitset       = 24
     Function     = 25
     Trait        = 26
-    Error_Type   = 27
+    Error        = 27
+    Void         = 28
+    Type         = 29
+    Any          = 30
+}
+
+pub type Type_Kind_Or_Info = union(enum) {
+    kind: Type_Kind
+    info: *Type_Info
 }
 
 pub type Type_Info_Field = struct {
-    name:      []u8
-    type_info: anyptr
-    offset:    usize
+    name: []u8
+    base_type: Type_Kind_Or_Info
+    offset: usize
 }
 
 pub type Type_Info_Enum_Variant = struct {
-    name:  []u8
+    name: []u8
     value: i64
 }
 
 pub type Type_Info_Tagged_Variant = struct {
-    name:      []u8
+    name: []u8
     tag_value: u32
-    payload:   anyptr
+    payload: *Type_Kind_Or_Info
 }
 
 pub type Type_Info_Param = struct {
-    name:      []u8
-    type_info: anyptr
+    name: []u8
+    type_info: Type_Kind_Or_Info
 }
 
 pub type Type_Info_Method = struct {
-    name:      []u8
-    type_info: anyptr
+    name: []u8
+    type_info: Type_Kind_Or_Info
 }
 
-// One concrete generic argument a monomorphized instantiation was created with, in
-// declared parameter order. 'is_type' distinguishes a type argument (carries 'type_arg',
-// the argument's own Type_Info) from a value argument (carries the raw scalar 'value_arg'
-// plus 'value_arg_type', the Type_Info of its own scalar type).
 pub type Type_Info_Generic_Arg = struct {
-    is_type:        bool
-    type_arg:       anyptr
-    value_arg:      i64
-    value_arg_type: anyptr
-}
-
-pub type Type_Info = union(enum) {
-    Pointer: struct {
-        base_type: anyptr
-    }
-
-    Slice: struct {
-        base_type: anyptr
-    }
-
-    Array: struct {
-        base_type: anyptr
-        length:    usize
-    }
-
-    Named: struct {
-        name:      []u8
-        base_type: anyptr
-    }
-
-    Struct: struct {
-        name:         []u8
-        fields:       []Type_Info_Field
-        size:         usize
-        align:        usize
-        packed:       bool
-        is_generic:   bool
-        generic_args: []Type_Info_Generic_Arg
-    }
-
-    Enum: struct {
-        name:         []u8
-        variants:     []Type_Info_Enum_Variant
-        storage_kind: Type_Kind
-        size:         usize
-        is_generic:   bool
-        generic_args: []Type_Info_Generic_Arg
-    }
-
-    Union: struct {
-        name:         []u8
-        members:      []Type_Info_Field
-        size:         usize
-        align:        usize
-        is_generic:   bool
-        generic_args: []Type_Info_Generic_Arg
-    }
-
-    Tagged_Union: struct {
-        name:         []u8
-        variants:     []Type_Info_Tagged_Variant
-        size:         usize
-        align:        usize
-        is_generic:   bool
-        generic_args: []Type_Info_Generic_Arg
-    }
-
-    Bitset: struct {
-        name:         []u8
-        member_type:  anyptr
-        storage_kind: Type_Kind
-        size:         usize
-        is_generic:   bool
-        generic_args: []Type_Info_Generic_Arg
-    }
-
-    Function: struct {
-        params:       []Type_Info_Param
-        return_types: []anyptr
-        is_variadic:  bool
-    }
-
-    Trait: struct {
-        name:    []u8
-        methods: []Type_Info_Method
-    }
-
-    Error_Type: struct {
-        members: []anyptr
-        is_optional: bool
+    name: []u8
+    type_info: Type_Kind_Or_Info
+    kind: union(enum) {
+        is_type
+        is_scalar: i64
     }
 }

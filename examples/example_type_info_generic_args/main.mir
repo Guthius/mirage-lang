@@ -1,0 +1,71 @@
+// example_type_info_generic_args — Type_Info_Generic_Arg now names the generic PARAMETER it
+// binds ('T', 'N'), carries one 'type_info' for both flavours of argument, and encodes
+// type-vs-value as a union rather than a bool plus two mutually-exclusive fields.
+//
+// Expected: compiles and runs, exit code 0.
+
+const rt := import("../../runtime/type_info")
+
+pub type Pair[T: type, N: usize] = struct {
+    value: T
+    count: usize
+}
+
+fn str_eq(a: []u8, b: []u8) -> bool {
+    if len(a) != len(b) {
+        return false
+    }
+    mut i: usize = 0
+    while i < len(a) {
+        if a[i] != b[i] {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+fn is_kind(t: rt.Type_Kind_Or_Info, want: rt.Type_Kind) -> bool {
+    return match t {
+        .kind(k): k == want,
+        .info(_): false,
+    }
+}
+
+pub fn main() -> i32 {
+    mut p: Pair[i32, 4] = {.value = 1, .count = 0}
+    const info: *rt.Type_Info = cast(type_info_of(type_of(p)), *rt.Type_Info)
+    if cast(info, anyptr) == nil { return 1 }
+
+    mut result: i32 = 0
+    switch info.* {
+        .Struct(s): {
+            if !s.is_generic { return 2 }
+            if len(s.generic_args) != 2 { return 3 }
+
+            // A type parameter: named for the parameter, not the argument, and 'type_info'
+            // describes the argument.
+            if !str_eq(s.generic_args[0].name, "T") { result = 10 }
+            if !is_kind(s.generic_args[0].type_info, rt.Type_Kind.I32) { result = 11 }
+            // 'match' can't take a field access as its scrutinee, so bind it first.
+            const t_kind := s.generic_args[0].kind
+            switch t_kind {
+                .is_type: {},
+                .is_scalar(_): { result = 12 },
+            }
+
+            // A value parameter: 'type_info' is the value's own scalar type, and the value
+            // itself rides in the 'kind' union.
+            if !str_eq(s.generic_args[1].name, "N") { result = 13 }
+            if !is_kind(s.generic_args[1].type_info, rt.Type_Kind.USize) { result = 14 }
+            const n_kind := s.generic_args[1].kind
+            switch n_kind {
+                .is_scalar(v): { if v != 4 { result = 15 } },
+                .is_type: { result = 16 },
+            }
+        },
+        _: { result = 4 },
+    }
+
+    return result
+}

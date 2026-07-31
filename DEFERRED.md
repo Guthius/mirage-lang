@@ -8,7 +8,7 @@ Nothing here is a regression. Items are either a deliberate scope decision, a de
 discovered along the way that is larger than the work that found it, or something that
 cannot be done from this repository at all.
 
-Current baseline: build clean, ctest 4/4, 17 Python suites passing, 190/190 corpus
+Current baseline: build clean, ctest 4/4, 17 Python suites passing, 195/195 corpus
 fixtures matching (no `known_broken` entries).
 
 ---
@@ -134,7 +134,44 @@ now pinned by `tests/editor_grammar_test.py`.
 
 ---
 
-## 6. Smaller notes
+## 6. `match`/`switch` cannot take a field access as its scrutinee
+
+Found while adding `Type_Info_Generic_Arg.kind` (an inline `union(enum)` field) to
+`runtime/type_info`. Not in either review document.
+
+```mirage
+switch h.kind {          // error: expected '=', got ':'
+    .is_type: {}
+    .is_scalar(v): {}
+}
+
+const k := h.kind        // fine
+switch k { ... }
+```
+
+Only *member access* is affected. An identifier, a deref (`p.*`), a call, an index, and a
+parenthesized expression all parse correctly as scrutinees, and both `match` and `switch`
+behave the same way.
+
+**Why.** It is an ambiguity with qualified tagged-variant construction, not a restriction on
+scrutinees. `parse_postfix`'s member-access branch (`ast.cpp`, the `LBrace` + `Dot` lookahead)
+commits to a `TaggedVariantExpr` whenever a dotted-identifier chain is followed by `{` then
+`.` — that is the `Shape.circle{.radius = 3.0}` form. `switch h.kind { .is_type: ... }` has
+exactly that shape, so the arms get parsed as constructor payload fields and the parser
+demands `.is_type = ...`. The branch is gated on `named_type_from_expr` succeeding, which
+returns `nullopt` for calls, indexes and derefs — which is precisely why those forms escape.
+
+**What a fix needs.** One more token of lookahead past `{ . ident`: `=` means a variant
+constructor's payload field, `:` or `(` means a match arm. Cheap in isolation, but it is a
+change to the disambiguation rule two constructs share, so it wants fixture coverage on both
+sides (a qualified constructor whose first field is named like a variant, and a match whose
+scrutinee is a field) before being trusted.
+
+`examples/example_type_info_generic_args` binds to a local first, with the reason noted inline.
+
+---
+
+## 7. Smaller notes
 
 - **`compute_condition_narrowing` still does not descend into `||`.** Widened to narrow
   every operand of an `&&` chain; `||` deliberately unchanged, since an operand being true

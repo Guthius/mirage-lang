@@ -1,6 +1,9 @@
 # CLion
 .idea
 
+# Claude
+.claude
+
 # Compile Commands
 compile_commands.json
 

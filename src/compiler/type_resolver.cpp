@@ -1822,31 +1822,47 @@ namespace sema {
         return -1;
     }
 
+    namespace {
+        // 'visiting' holds the struct indexes on the current descent. A struct can only reach
+        // itself through a pointer (nothing else could have a finite layout), so without this
+        // guard 'struct Node { next: *Node }' recurses until the stack runs out — which it did,
+        // for any 'type_of'/'any' use of a self-referential type. Re-entering a struct proves
+        // the cycle closed without finding an Opaque, so the answer for that edge is false.
+        auto contains_opaque_impl(const ResolvedType &ty, const Program &program, std::vector<int> &visiting) -> bool {
+            switch (ty.kind) {
+            case TypeKind::Opaque:
+                return true;
+            case TypeKind::Pointer: {
+                const auto *pointee = program.pointee_at(ty.pointee_index);
+                return pointee && contains_opaque_impl(*pointee, program, visiting);
+            }
+            case TypeKind::Array: {
+                const auto *info = program.array_at(ty.array_index);
+                return info && contains_opaque_impl(info->element_type, program, visiting);
+            }
+            case TypeKind::Slice: {
+                const auto *info = program.slice_at(ty.slice_index);
+                return info && contains_opaque_impl(info->element_type, program, visiting);
+            }
+            case TypeKind::Struct: {
+                const auto *info = program.struct_at(ty.struct_index);
+                if (!info) return false;
+                if (std::ranges::find(visiting, ty.struct_index) != visiting.end()) return false;
+                visiting.push_back(ty.struct_index);
+                const bool found = std::ranges::any_of(info->fields,
+                    [&](const auto &f) { return contains_opaque_impl(f.type, program, visiting); });
+                visiting.pop_back();
+                return found;
+            }
+            default:
+                return false;
+            }
+        }
+    }
+
     auto contains_opaque(const ResolvedType &ty, const Program &program) -> bool {
-        switch (ty.kind) {
-        case TypeKind::Opaque:
-            return true;
-        case TypeKind::Pointer: {
-            const auto *pointee = program.pointee_at(ty.pointee_index);
-            return pointee && contains_opaque(*pointee, program);
-        }
-        case TypeKind::Array: {
-            const auto *info = program.array_at(ty.array_index);
-            return info && contains_opaque(info->element_type, program);
-        }
-        case TypeKind::Slice: {
-            const auto *info = program.slice_at(ty.slice_index);
-            return info && contains_opaque(info->element_type, program);
-        }
-        case TypeKind::Struct: {
-            const auto *info = program.struct_at(ty.struct_index);
-            if (!info) return false;
-            return std::ranges::any_of(info->fields,
-                [&](const auto &f) { return contains_opaque(f.type, program); });
-        }
-        default:
-            return false;
-        }
+        std::vector<int> visiting;
+        return contains_opaque_impl(ty, program, visiting);
     }
 
     auto is_opaque_template_instance(const std::optional<GenericInstanceInfo> &generic_instance,

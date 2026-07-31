@@ -1,0 +1,110 @@
+// example_type_info_nested — every nested type reference inside a Type_Info now reports
+// either a bare Type_Kind (scalars, which have no descriptor of their own) or a *Type_Info
+// (everything else), instead of the old 'anyptr' that was simply nil for scalars.
+//
+// Covers: a scalar field, a pointer field whose own pointee is a struct, a slice field whose
+// element is a scalar, and the 'any'/'type' fields that Type_Kind's Void/Type/Any values name.
+//
+// Expected: compiles and runs, exit code 0.
+
+const rt := import("../../runtime/type_info")
+
+pub type Inner = struct {
+    a: i32
+}
+
+pub type Nested = struct {
+    scalar:   i32
+    ptr:      *Inner
+    bytes:    []u8
+    anything: any
+    a_type:   type
+}
+
+fn str_eq(a: []u8, b: []u8) -> bool {
+    if len(a) != len(b) {
+        return false
+    }
+    mut i: usize = 0
+    while i < len(a) {
+        if a[i] != b[i] {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// True when the reference reports a bare kind equal to 'want'. Phrased as a predicate rather
+// than a 'kind_of' accessor because Type_Kind_Or_Info's two arms are genuinely different
+// answers — there is no Type_Kind that means "it carried a descriptor instead".
+fn is_kind(t: rt.Type_Kind_Or_Info, want: rt.Type_Kind) -> bool {
+    return match t {
+        .kind(k): k == want,
+        .info(_): false,
+    }
+}
+
+// The descriptor a reference carries, or nil when it reports a bare kind instead.
+fn info_of(t: rt.Type_Kind_Or_Info) -> *rt.Type_Info {
+    return match t {
+        .info(i): i,
+        .kind(_): cast(nil, *rt.Type_Info),
+    }
+}
+
+// The element reference of a Pointer/Slice/Array descriptor. Callers only ever pass one of
+// those three, so the fallback arm is unreachable; it returns a self-reference rather than
+// inventing a sentinel kind.
+fn base_type_of(info: *rt.Type_Info) -> rt.Type_Kind_Or_Info {
+    return match info.* {
+        .Pointer(p): p.base_type,
+        .Slice(s): s.base_type,
+        .Array(a): a.base_type,
+        _: .info(info),
+    }
+}
+
+fn struct_name_of(info: *rt.Type_Info) -> []u8 {
+    return match info.* {
+        .Struct(s): s.name,
+        _: "",
+    }
+}
+
+pub fn main() -> i32 {
+    const info: *rt.Type_Info = cast(type_info_of(type_of(Nested)), *rt.Type_Info)
+    if cast(info, anyptr) == nil { return 1 }
+
+    mut result: i32 = 0
+    switch info.* {
+        .Struct(s): {
+            if len(s.fields) != 5 { return 2 }
+
+            // A scalar field: no descriptor exists, so the kind is reported directly. This is
+            // exactly the information the old 'anyptr' encoding lost.
+            if !is_kind(s.fields[0].base_type, rt.Type_Kind.I32) { result = 10 }
+
+            // A pointer field: a descriptor exists, and its own base_type recurses into the
+            // pointee's descriptor.
+            const ptr_info := info_of(s.fields[1].base_type)
+            if cast(ptr_info, anyptr) == nil { return 11 }
+            const pointee_info := info_of(base_type_of(ptr_info))
+            if cast(pointee_info, anyptr) == nil { return 12 }
+            if !str_eq(struct_name_of(pointee_info), "Inner") { result = 13 }
+
+            // A slice field: a descriptor for the slice, a bare kind for its scalar element.
+            const slice_info := info_of(s.fields[2].base_type)
+            if cast(slice_info, anyptr) == nil { return 14 }
+            if !is_kind(base_type_of(slice_info), rt.Type_Kind.U8) { result = 15 }
+
+            // 'any' and 'type' have no descriptor either — they are two of the three
+            // Type_Kind values added alongside Type_Kind_Or_Info.
+            if !is_kind(s.fields[3].base_type, rt.Type_Kind.Any) { result = 16 }
+            if !is_kind(s.fields[4].base_type, rt.Type_Kind.Type) { result = 17 }
+        },
+        _: { result = 3 },
+    }
+
+    return result
+}

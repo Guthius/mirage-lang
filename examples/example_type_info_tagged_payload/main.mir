@@ -1,0 +1,86 @@
+// example_type_info_tagged_payload — a tagged union variant's payload reference. It describes
+// the payload as DECLARED: a scalar payload reports '.kind(I32)' rather than the one-field
+// struct the compiler synthesizes to hold it, which is what the old encoding leaked. A
+// payload-free variant is still a nil pointer.
+//
+// Expected: compiles and runs, exit code 0.
+
+const rt := import("../../runtime/type_info")
+
+pub type Value = union(enum) {
+    Number: i32
+    Pair: struct {
+        a: i32
+        b: i32
+    }
+    Nothing
+}
+
+fn str_eq(a: []u8, b: []u8) -> bool {
+    if len(a) != len(b) {
+        return false
+    }
+    mut i: usize = 0
+    while i < len(a) {
+        if a[i] != b[i] {
+            return false
+        }
+        i += 1
+    }
+    return true
+}
+
+// True when the reference reports a bare kind equal to 'want'. Phrased as a predicate rather
+// than a 'kind_of' accessor because Type_Kind_Or_Info's two arms are genuinely different
+// answers — there is no Type_Kind that means "it carried a descriptor instead".
+fn is_kind(t: rt.Type_Kind_Or_Info, want: rt.Type_Kind) -> bool {
+    return match t {
+        .kind(k): k == want,
+        .info(_): false,
+    }
+}
+
+fn info_of(t: rt.Type_Kind_Or_Info) -> *rt.Type_Info {
+    return match t {
+        .info(i): i,
+        .kind(_): cast(nil, *rt.Type_Info),
+    }
+}
+
+fn is_struct(info: *rt.Type_Info) -> bool {
+    return match info.* {
+        .Struct(_): true,
+        _: false,
+    }
+}
+
+pub fn main() -> i32 {
+    const info: *rt.Type_Info = cast(type_info_of(type_of(Value)), *rt.Type_Info)
+    if cast(info, anyptr) == nil { return 1 }
+
+    mut result: i32 = 0
+    switch info.* {
+        .Tagged_Union(u): {
+            if len(u.variants) != 3 { return 2 }
+
+            // A wrapped scalar payload reports the declared type, not the wrapper struct.
+            if !str_eq(u.variants[0].name, "Number") { result = 10 }
+            if cast(u.variants[0].payload, anyptr) == nil { return 3 }
+            if !is_kind(u.variants[0].payload.*, rt.Type_Kind.I32) { result = 11 }
+
+            // A struct payload reports its descriptor.
+            if !str_eq(u.variants[1].name, "Pair") { result = 12 }
+            if cast(u.variants[1].payload, anyptr) == nil { return 4 }
+            const pair_info := info_of(u.variants[1].payload.*)
+            if cast(pair_info, anyptr) == nil { return 5 }
+            if !is_struct(pair_info) { result = 13 }
+
+            // A payload-free variant has no reference at all.
+            if !str_eq(u.variants[2].name, "Nothing") { result = 14 }
+            if cast(u.variants[2].payload, anyptr) != nil { result = 15 }
+        },
+        _: { result = 6 },
+    }
+
+    return result
+}

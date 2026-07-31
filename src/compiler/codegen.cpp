@@ -1902,16 +1902,25 @@ namespace codegen {
             // declared — sema already forced its resolution (see find_type_info_union in
             // sema_check.cpp) for any program that got this far, so this never re-resolves,
             // only reads back what's already there.
-            auto find_type_info_union() const -> const sema::UnionInfo * {
+            // Guards on layout_done/variants because declare_type (sema_declare.cpp) pre-seeds a
+            // TypeSymbol's 'resolved' with its union slot at DECLARATION time, before layout — a
+            // name lookup can therefore hand back a UnionInfo with size 0 and no variants, which
+            // would silently produce zero-byte constants rather than failing.
+            auto find_union_by_name(const std::string &name) const -> const sema::UnionInfo * {
                 for (const auto &mod : sema_program_.modules | std::views::values) {
-                    if (const auto it = mod.symbols.find("Type_Info"); it != mod.symbols.end()) {
+                    if (const auto it = mod.symbols.find(name); it != mod.symbols.end()) {
                         if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second);
                             ts && ts->resolved && ts->resolved->kind == sema::TypeKind::Union) {
-                            return sema_program_.union_at(ts->resolved->union_index);
+                            const auto *u = sema_program_.union_at(ts->resolved->union_index);
+                            if (u && u->layout_done && !u->variants.empty()) return u;
                         }
                     }
                 }
                 return nullptr;
+            }
+
+            auto find_type_info_union() const -> const sema::UnionInfo * {
+                return find_union_by_name("Type_Info");
             }
 
             auto find_resolved_type_by_name(const std::string &module_path, const std::string &name) const -> std::optional<sema::ResolvedType> {
@@ -1924,11 +1933,6 @@ namespace codegen {
                 return *ts->resolved;
             }
 
-            auto named_struct_llvm_type(const std::string &module_path, const std::string &name) -> llvm::Type * {
-                const auto ty = find_resolved_type_by_name(module_path, name);
-                return ty ? llvm_type(module_path, *ty) : llvm::Type::getInt8Ty(*context_);
-            }
-
             static auto find_type_info_variant(const sema::UnionInfo &u, const std::string &name) -> const sema::TaggedUnionVariant * {
                 for (const auto &v : u.variants) {
                     if (v.name == name) return &v;
@@ -1937,11 +1941,17 @@ namespace codegen {
             }
 
             // Fixed numbering from runtime/type_info.mir's own Type_Kind enum — distinct from
-            // (and unrelated to) Program::type_ids' compiler-internal numbering. Only the
-            // scalar kinds that can legally appear as an Enum/Bitset's storage type are ever
-            // passed here.
-            static auto mirage_type_kind_value(sema::TypeKind kind) -> uint32_t {
-                switch (kind) {
+            // (and unrelated to) Program::type_ids' compiler-internal numbering. Covers every
+            // kind that can reach a Type_Kind_Or_Info position, which is why it takes a whole
+            // ResolvedType and not just a TypeKind: sema's single Union kind splits three ways
+            // here (Union/Tagged_Union/Error), and only UnionInfo can tell them apart.
+            //
+            // Type_Kind's numbering has gaps at 13/15/19, where values that turned out to be
+            // unreachable used to sit (Byte — 'byte' resolves to U8; Error — there is no bare
+            // 'error' type, only 'error(...)', which is a synthesized Union; Named — nothing
+            // emits Type_Info's Named variant). The surrounding values kept their numbers.
+            auto mirage_type_kind_value(const sema::ResolvedType &type) const -> uint32_t {
+                switch (type.kind) {
                 case sema::TypeKind::U8:     return 1;
                 case sema::TypeKind::U16:    return 2;
                 case sema::TypeKind::U32:    return 3;
@@ -1955,7 +1965,27 @@ namespace codegen {
                 case sema::TypeKind::USize:  return 11;
                 case sema::TypeKind::Bool:   return 12;
                 case sema::TypeKind::Anyptr: return 14;
-                default:                     return 0;
+                case sema::TypeKind::Pointer:  return 16;
+                case sema::TypeKind::Slice:    return 17;
+                case sema::TypeKind::Array:    return 18;
+                case sema::TypeKind::Struct:   return 20;
+                case sema::TypeKind::Enum:     return 21;
+                case sema::TypeKind::Union: {
+                    const auto *info = sema_program_.union_at(type.union_index);
+                    if (!info) return 22;
+                    if (info->is_error_union) return 27;
+                    return info->is_tagged ? 23 : 22;
+                }
+                case sema::TypeKind::Bitset:   return 24;
+                case sema::TypeKind::Function: return 25;
+                case sema::TypeKind::Trait:    return 26;
+                case sema::TypeKind::Void:     return 28;
+                case sema::TypeKind::Type:     return 29;
+                case sema::TypeKind::Any:      return 30;
+
+                // Invalid/Namespace/Opaque never reach a reflected position: Opaque is rejected
+                // before instantiation is registered, and the other two are not value types.
+                default: return 0;
                 }
             }
 
@@ -1967,13 +1997,22 @@ namespace codegen {
             // Assembles a payload struct's field-value vector in DECLARATION order, dispatching
             // each named assignment to its field's actual index (never assumed position) —
             // robust to the payload struct's own field order as declared in runtime/type_info.mir.
+            //
+            // An assignment naming a field that doesn't exist is a hard error, NOT a silent skip:
+            // unassigned fields are zero-filled below, so a stale name (say, after a field is
+            // renamed in type_info.mir) would otherwise reflect as all-zero data rather than
+            // failing the build. Deliberately omitting an assignment to get the zero-fill is
+            // still fine — that's how Type_Info_Generic_Arg encodes its inactive side.
             auto build_type_info_payload_values(const sema::StructInfo &payload_struct, const std::vector<TypeInfoFieldAssignment> &assignments) -> std::vector<llvm::Constant *> {
                 std::vector<llvm::Constant *> values(payload_struct.fields.size(), nullptr);
                 for (const auto &a : assignments) {
                     const auto it = std::ranges::find(payload_struct.fields, a.name, &sema::StructField::name);
-                    if (it != payload_struct.fields.end()) {
-                        values[static_cast<size_t>(it - payload_struct.fields.begin())] = a.value;
+                    if (it == payload_struct.fields.end()) {
+                        report_codegen_error(diag_, {}, std::format(
+                            "internal error: runtime/type_info's payload struct has no field '{}'", a.name));
+                        continue;
                     }
+                    values[static_cast<size_t>(it - payload_struct.fields.begin())] = a.value;
                 }
                 for (size_t i = 0; i < values.size(); ++i) {
                     if (!values[i]) {
@@ -1983,10 +2022,17 @@ namespace codegen {
                 return values;
             }
 
-            // Builds a ConstantStruct for 'struct_index' from already-computed field values (in
-            // declaration order) — replicates declare_structs()'s exact padding-interleaving so
-            // the result matches struct_lowering(struct_index).type's real LLVM element layout.
+            // Builds a constant for 'struct_index' from already-computed field values (in
+            // declaration order) — replicates declare_structs()'s exact padding-interleaving, so
+            // the result is byte-for-byte the same layout as struct_lowering(struct_index).type.
             // Never recomputes offsets — reads them straight from sema's StructInfo.
+            //
+            // The result is a BESPOKE anonymous packed struct rather than the declared named
+            // type, for the same reason build_type_info_union_constant is: a Type_Kind_Or_Info
+            // field lowers to [16 x i8] (declare_unions lowers every union to a byte array), and
+            // an i8 array cannot hold the pointer relocation the 'info' variant needs. Safe
+            // because every consumer reaches these globals through an untyped 'ptr' — nothing
+            // ever loads one at its declared LLVM type.
             auto build_struct_constant(int struct_index, const std::vector<llvm::Constant *> &field_values) -> llvm::Constant * {
                 const auto &info = sema_program_.structs.at(struct_index);
                 const auto &path = info.module_path;
@@ -1998,34 +2044,134 @@ namespace codegen {
                     if (field.offset > cursor) {
                         elements.push_back(llvm::Constant::getNullValue(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), field.offset - cursor)));
                     }
-                    elements.push_back(field_values.at(i));
-                    cursor = field.offset + size_of(path, field.type);
+                    auto *value = field_values.at(i);
+                    // The cursor advances by sema's size, not the value's — a hand-rolled bespoke
+                    // value of the wrong width would silently shift every later field (and the
+                    // struct's total size, desyncing the element stride of any slice it lands in).
+                    const auto expected = size_of(path, field.type);
+                    if (constant_store_size(value) != expected) {
+                        report_codegen_error(diag_, {}, std::format(
+                            "internal error: runtime/type_info field '{}' constant is {} bytes, expected {}",
+                            field.name, constant_store_size(value), expected));
+                    }
+                    elements.push_back(value);
+                    cursor = field.offset + expected;
                 }
                 if (info.size > cursor) {
                     elements.push_back(llvm::Constant::getNullValue(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), info.size - cursor)));
                 }
-                return llvm::ConstantStruct::get(struct_lowering(struct_index).type, elements);
+                return llvm::ConstantStruct::get(llvm::StructType::get(*context_, elements_types(elements), /*isPacked=*/true), elements);
             }
 
-            // Builds a private constant array of 'elements' plus a {ptr, len} slice constant
-            // pointing at it — the same construction emit_string_literal() uses for []u8,
-            // generalized to any element type. Empty slices use the all-zero {nil, 0}
+            static auto elements_types(const std::vector<llvm::Constant *> &elements) -> std::vector<llvm::Type *> {
+                std::vector<llvm::Type *> types;
+                types.reserve(elements.size());
+                for (auto *e : elements) types.push_back(e->getType());
+                return types;
+            }
+
+            // Byte size of a constant built by this file's type_info emitters. The module's real
+            // DataLayout isn't installed until after codegen returns (see main.cpp), so this
+            // walks the few shapes these builders actually produce rather than asking LLVM.
+            auto constant_store_size(llvm::Type *type) const -> uint32_t {
+                if (type->isPointerTy()) return 8;
+                if (type->isIntegerTy()) return (type->getIntegerBitWidth() + 7) / 8;
+                if (type->isFloatTy()) return 4;
+                if (type->isDoubleTy()) return 8;
+                if (const auto *at = llvm::dyn_cast<llvm::ArrayType>(type)) {
+                    return static_cast<uint32_t>(at->getNumElements()) * constant_store_size(at->getElementType());
+                }
+                if (const auto *st = llvm::dyn_cast<llvm::StructType>(type)) {
+                    // Only ever packed here, so this is a plain sum with no inter-element padding.
+                    uint32_t total = 0;
+                    for (auto *e : st->elements()) total += constant_store_size(e);
+                    return total;
+                }
+                return 0;
+            }
+
+            auto constant_store_size(const llvm::Constant *value) const -> uint32_t {
+                return value ? constant_store_size(value->getType()) : 0;
+            }
+
+            // Size and alignment of a named type declared in runtime/type_info, straight from
+            // sema — used to size/align the backing storage of the slices below without the
+            // module's DataLayout (not installed until after codegen returns).
+            auto named_type_size_align(const std::string &module_path, const std::string &name) const -> std::pair<uint32_t, uint32_t> {
+                const auto ty = find_resolved_type_by_name(module_path, name);
+                if (!ty) return {0, 1};
+                return {size_of(module_path, *ty), align_of(module_path, *ty)};
+            }
+
+            // Builds private constant backing storage for 'elements' plus a {ptr, len} slice
+            // constant pointing at it — the same construction emit_string_literal() uses for
+            // []u8, generalized to any element type. Empty slices use the all-zero {nil, 0}
             // representation, matching how 'nil' coerced to a slice type is represented
             // elsewhere (LiteralNilExpr's Slice case).
-            auto emit_constant_slice(llvm::Type *element_ty, const std::vector<llvm::Constant *> &elements, const char *global_name_prefix) -> llvm::Constant * {
+            //
+            // Two elements of the same Mirage type can now have DIFFERENT LLVM types — a
+            // Type_Kind_Or_Info holding a kind is {i32, [4 x i8], <{i32}>, [4 x i8]} while one
+            // holding a pointer is {i32, [4 x i8], <{ptr}>} — so a homogeneous ConstantArray
+            // isn't always expressible. When the element types differ, the backing store becomes
+            // an anonymous packed ConstantStruct instead; both are byte-identical to
+            // [N x element], because build_struct_constant/build_type_info_union_constant pad
+            // every element to its declared size. Mirage-side indexing is unaffected: it GEPs by
+            // the DECLARED element type (see emit_index_lvalue's slice path), never by whatever
+            // the backing global's own type happens to be.
+            auto emit_constant_slice(const std::vector<llvm::Constant *> &elements, uint32_t element_size, uint32_t element_align, const char *global_name_prefix) -> llvm::Constant * {
                 auto *slice_ty = llvm::StructType::get(*context_, {llvm::PointerType::getUnqual(*context_), llvm::Type::getInt64Ty(*context_)});
                 if (elements.empty()) {
                     return llvm::ConstantAggregateZero::get(slice_ty);
                 }
-                auto *array_ty = llvm::ArrayType::get(element_ty, elements.size());
-                auto *init = llvm::ConstantArray::get(array_ty, elements);
+
+                for (const auto *e : elements) {
+                    if (constant_store_size(e) != element_size) {
+                        report_codegen_error(diag_, {}, std::format(
+                            "internal error: '{}' element constant is {} bytes, expected {}",
+                            global_name_prefix, constant_store_size(e), element_size));
+                    }
+                }
+
+                const bool homogeneous = std::ranges::all_of(elements, [&](const llvm::Constant *e) {
+                    return e->getType() == elements.front()->getType();
+                });
+                llvm::Type *storage_ty = nullptr;
+                llvm::Constant *init = nullptr;
+                if (homogeneous) {
+                    auto *array_ty = llvm::ArrayType::get(elements.front()->getType(), elements.size());
+                    storage_ty = array_ty;
+                    init = llvm::ConstantArray::get(array_ty, elements);
+                } else {
+                    auto *struct_ty = llvm::StructType::get(*context_, elements_types(elements), /*isPacked=*/true);
+                    storage_ty = struct_ty;
+                    init = llvm::ConstantStruct::get(struct_ty, elements);
+                }
+
                 auto *global = new llvm::GlobalVariable(
-                    *module_, array_ty, true, llvm::GlobalValue::PrivateLinkage, init,
+                    *module_, storage_ty, true, llvm::GlobalValue::PrivateLinkage, init,
                     std::format("{}.{}", global_name_prefix, string_counter_++));
+                // Packed structs have ABI alignment 1, and LLVM only bumps an initialized
+                // global's preferred alignment past that once it exceeds 128 bits — which a
+                // one-element []Type_Kind_Or_Info (exactly 128) does not. Set it from sema so
+                // the pointer fields inside are naturally aligned regardless.
+                global->setAlignment(llvm::Align(std::max(element_align, 1U)));
                 llvm::Constant *indices[] = {builder_.getInt32(0), builder_.getInt32(0)};
-                auto *ptr = llvm::ConstantExpr::getInBoundsGetElementPtr(array_ty, global, llvm::ArrayRef(indices));
+                auto *ptr = llvm::ConstantExpr::getInBoundsGetElementPtr(storage_ty, global, llvm::ArrayRef(indices));
                 auto *len = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), elements.size());
                 return llvm::ConstantStruct::get(slice_ty, {ptr, len});
+            }
+
+            // emit_constant_slice for the common case: elements of a type named in
+            // runtime/type_info, whose size/align come straight from that declaration.
+            auto emit_named_element_slice(const std::string &module_path, const std::string &element_type_name,
+                                          const std::vector<llvm::Constant *> &elements, const char *global_name_prefix) -> llvm::Constant * {
+                const auto [element_size, element_align] = named_type_size_align(module_path, element_type_name);
+                return emit_constant_slice(elements, element_size, element_align, global_name_prefix);
+            }
+
+            // emit_constant_slice for a '[]*Type_Info' — a slice of plain pointers.
+            auto emit_type_info_ptr_slice(const std::vector<llvm::Constant *> &elements, const char *global_name_prefix) -> llvm::Constant * {
+                return emit_constant_slice(elements, 8, 8, global_name_prefix);
             }
 
             auto build_type_info_field_entry(const std::string &module_path, const std::string &name, const sema::ResolvedType &type, uint64_t offset) -> llvm::Constant * {
@@ -2033,7 +2179,7 @@ namespace codegen {
                 if (!ty || ty->kind != sema::TypeKind::Struct) return nullptr;
                 auto values = build_type_info_payload_values(sema_program_.structs.at(ty->struct_index), {
                     {"name", emit_string_literal(name)},
-                    {"type_info", type_info_ptr_for(type)},
+                    {"base_type", build_type_kind_or_info_constant(type)},
                     {"offset", builder_.getInt64(offset)},
                 });
                 return build_struct_constant(ty->struct_index, values);
@@ -2049,6 +2195,7 @@ namespace codegen {
                 return build_struct_constant(ty->struct_index, values);
             }
 
+            // 'payload_ptr' is a '*Type_Kind_Or_Info' — nil when the variant is payload-free.
             auto build_type_info_tagged_variant_entry(const std::string &module_path, const std::string &name, uint32_t tag_value, llvm::Constant *payload_ptr) -> llvm::Constant * {
                 const auto ty = find_resolved_type_by_name(module_path, "Type_Info_Tagged_Variant");
                 if (!ty || ty->kind != sema::TypeKind::Struct) return nullptr;
@@ -2065,36 +2212,94 @@ namespace codegen {
                 if (!ty || ty->kind != sema::TypeKind::Struct) return nullptr;
                 auto values = build_type_info_payload_values(sema_program_.structs.at(ty->struct_index), {
                     {"name", emit_string_literal(name)},
-                    {"type_info", type_info_ptr_for(type)},
+                    {"type_info", build_type_kind_or_info_constant(type)},
                 });
                 return build_struct_constant(ty->struct_index, values);
             }
 
-            auto build_type_info_method_entry(const std::string &module_path, const std::string &name, llvm::Constant *type_info_ptr) -> llvm::Constant * {
+            auto build_type_info_method_entry(const std::string &module_path, const std::string &name, llvm::Constant *type_info_value) -> llvm::Constant * {
                 const auto ty = find_resolved_type_by_name(module_path, "Type_Info_Method");
                 if (!ty || ty->kind != sema::TypeKind::Struct) return nullptr;
                 auto values = build_type_info_payload_values(sema_program_.structs.at(ty->struct_index), {
                     {"name", emit_string_literal(name)},
-                    {"type_info", type_info_ptr},
+                    {"type_info", type_info_value},
                 });
                 return build_struct_constant(ty->struct_index, values);
             }
 
-            auto build_type_info_generic_arg_entry(const std::string &module_path, const sema::GenericArgValue &arg) -> llvm::Constant * {
+            // Builds Type_Info_Generic_Arg::kind, the anonymous 'union(enum) { is_type, value:
+            // i64 }' declared inline on that field. Unlike every other union this file emits,
+            // it has no name to look up — its UnionInfo is reached through the field's own
+            // ResolvedType instead.
+            auto build_generic_arg_kind_constant(const sema::ResolvedType &field_type, const sema::GenericArgValue &arg) -> llvm::Constant * {
+                if (field_type.kind != sema::TypeKind::Union) {
+                    report_codegen_error(diag_, {}, "internal error: Type_Info_Generic_Arg's 'kind' field is not a union");
+                    return nullptr;
+                }
+                const auto *u = sema_program_.union_at(field_type.union_index);
+                if (!u) return nullptr;
+
+                const auto *variant = find_type_info_variant(*u, arg.is_type ? "is_type" : "is_scalar");
+                if (!variant) {
+                    report_codegen_error(diag_, {}, std::format(
+                        "internal error: Type_Info_Generic_Arg's 'kind' union has no '{}' variant",
+                        arg.is_type ? "is_type" : "is_scalar"));
+                    return nullptr;
+                }
+
+                llvm::Constant *payload = nullptr;
+                if (!arg.is_type && variant->payload_struct_index >= 0) {
+                    int64_t raw_value = 0;
+                    if (const auto *iv = std::get_if<int64_t>(&arg.value_arg)) raw_value = *iv;
+                    // A scalar variant payload lives in the type resolver's synthetic one-field
+                    // wrapper struct, same as Type_Kind_Or_Info's two arms.
+                    const auto &payload_struct = sema_program_.structs.at(variant->payload_struct_index);
+                    auto values = build_type_info_payload_values(payload_struct, {
+                        {"v", builder_.getInt64(static_cast<uint64_t>(raw_value))},
+                    });
+                    payload = build_struct_constant(variant->payload_struct_index, values);
+                }
+                return build_type_info_union_constant(*u, *variant, payload);
+            }
+
+            auto build_type_info_generic_arg_entry(const std::string &module_path, const std::string &param_name, const sema::GenericArgValue &arg) -> llvm::Constant * {
                 const auto ty = find_resolved_type_by_name(module_path, "Type_Info_Generic_Arg");
                 if (!ty || ty->kind != sema::TypeKind::Struct) return nullptr;
-                auto *null_ptr = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
-                int64_t raw_value = 0;
-                if (!arg.is_type) {
-                    if (const auto *iv = std::get_if<int64_t>(&arg.value_arg)) raw_value = *iv;
+                const auto &info = sema_program_.structs.at(ty->struct_index);
+
+                const auto kind_field = std::ranges::find(info.fields, "kind", &sema::StructField::name);
+                if (kind_field == info.fields.end()) {
+                    report_codegen_error(diag_, {}, "internal error: Type_Info_Generic_Arg has no field 'kind'");
+                    return nullptr;
                 }
-                auto values = build_type_info_payload_values(sema_program_.structs.at(ty->struct_index), {
-                    {"is_type", builder_.getInt1(arg.is_type)},
-                    {"type_arg", arg.is_type ? type_info_ptr_for(arg.type_arg) : null_ptr},
-                    {"value_arg", builder_.getInt64(static_cast<uint64_t>(raw_value))},
-                    {"value_arg_type", arg.is_type ? null_ptr : type_info_ptr_for(arg.value_arg_scalar_type)},
+
+                // One 'type_info' either way — a type argument's own type, or a value
+                // argument's scalar type. The two were separate mutually-exclusive fields
+                // before, which forced one of them to be a meaningless zero on every entry.
+                auto values = build_type_info_payload_values(info, {
+                    {"name", emit_string_literal(param_name)},
+                    {"type_info", build_type_kind_or_info_constant(arg.is_type ? arg.type_arg : arg.value_arg_scalar_type)},
+                    {"kind", build_generic_arg_kind_constant(kind_field->type, arg)},
                 });
                 return build_struct_constant(ty->struct_index, values);
+            }
+
+            // The unspecialized declaration's generic PARAMETER names, in declared order —
+            // GenericInstanceInfo records only the concrete arguments, but it also records
+            // which declaration they came from, and TypeTypeSymbol keeps that declaration's AST
+            // node. Empty if the declaration can't be found, in which case the names reflect as
+            // empty strings rather than failing the build.
+            auto generic_param_names(const sema::GenericInstanceInfo &instance) const -> std::vector<std::string> {
+                const auto mod_it = sema_program_.modules.find(instance.decl_module);
+                if (mod_it == sema_program_.modules.end()) return {};
+                const auto sym_it = mod_it->second.symbols.find(instance.decl_name);
+                if (sym_it == mod_it->second.symbols.end()) return {};
+                const auto *ts = std::get_if<sema::TypeSymbol>(&sym_it->second);
+                if (!ts || !ts->decl) return {};
+                std::vector<std::string> names;
+                names.reserve(ts->decl->generic_params.size());
+                for (const auto &p : ts->decl->generic_params) names.push_back(p.name);
+                return names;
             }
 
             // Pushes 'is_generic'/'generic_args' onto 'assignments' for a Struct/Enum/Union/
@@ -2106,12 +2311,14 @@ namespace codegen {
                                                 std::vector<TypeInfoFieldAssignment> &assignments) {
                 std::vector<llvm::Constant *> arg_entries;
                 if (generic_instance) {
-                    for (const auto &arg : generic_instance->args) {
-                        arg_entries.push_back(build_type_info_generic_arg_entry(module_path, arg));
+                    const auto param_names = generic_param_names(*generic_instance);
+                    for (size_t i = 0; i < generic_instance->args.size(); ++i) {
+                        const auto &name = i < param_names.size() ? param_names[i] : std::string{};
+                        arg_entries.push_back(build_type_info_generic_arg_entry(module_path, name, generic_instance->args[i]));
                     }
                 }
                 assignments.push_back({"is_generic", builder_.getInt1(generic_instance.has_value())});
-                assignments.push_back({"generic_args", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Generic_Arg"), arg_entries, ".type_info_generic_args")});
+                assignments.push_back({"generic_args", emit_named_element_slice(module_path, "Type_Info_Generic_Arg", arg_entries, ".type_info_generic_args")});
             }
 
             // Builds the Type_Info union's own constant value: {tag, [pad], payload, [pad]} as
@@ -2136,7 +2343,10 @@ namespace codegen {
                 }
 
                 if (variant.payload_struct_index >= 0 && payload_value) {
-                    elem_types.push_back(struct_lowering(variant.payload_struct_index).type);
+                    // build_struct_constant returns a bespoke packed type, not the declared named
+                    // one, so take the type from the value itself — using struct_lowering() here
+                    // would assert on the mismatch.
+                    elem_types.push_back(payload_value->getType());
                     elem_values.push_back(payload_value);
                     cursor += sema_program_.structs.at(variant.payload_struct_index).size;
                 }
@@ -2179,6 +2389,8 @@ namespace codegen {
                     // Cycle (e.g. a self-referential struct reached through a pointer field) —
                     // break it with nil rather than recursing forever; the outer type's own
                     // Type_Info is still correct, just this one back-reference is unavailable.
+                    // Nested references land in a Type_Kind_Or_Info, so the nil degrades to
+                    // '.kind(Struct)' rather than vanishing (see build_type_kind_or_info_constant).
                     return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
                 }
                 const auto *type_info_union = find_type_info_union();
@@ -2186,6 +2398,52 @@ namespace codegen {
                     return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
                 }
                 return emit_type_info_global(ty, *type_info_union);
+            }
+
+            // Every nested type reference in a Type_Info goes through here. A type with a real
+            // descriptor becomes '.info(&that descriptor)'; everything else — a builtin scalar,
+            // a recursive back-reference, a trait method — becomes '.kind(K)', so the reference
+            // is never information-free the way the old bare-'anyptr'-nil encoding was.
+            //
+            // Total by construction: type_info_ptr_for's only failure mode is returning nil, and
+            // nil is exactly the signal to fall back to the kind.
+            auto build_type_kind_or_info_constant(const sema::ResolvedType &ty) -> llvm::Constant * {
+                const auto *u = find_union_by_name("Type_Kind_Or_Info");
+                if (!u) {
+                    report_codegen_error(diag_, {}, "internal error: runtime/type_info does not define 'Type_Kind_Or_Info'");
+                    return nullptr;
+                }
+
+                auto *info_ptr = type_info_ptr_for(ty);
+                const bool has_info = info_ptr && !llvm::isa<llvm::ConstantPointerNull>(info_ptr);
+
+                const auto *variant = find_type_info_variant(*u, has_info ? "info" : "kind");
+                if (!variant || variant->payload_struct_index < 0) {
+                    report_codegen_error(diag_, {}, std::format(
+                        "internal error: 'Type_Kind_Or_Info' has no '{}' variant", has_info ? "info" : "kind"));
+                    return nullptr;
+                }
+
+                // Both variants wrap a non-struct payload, which the type resolver holds in a
+                // synthetic one-field struct named "v".
+                const auto &payload_struct = sema_program_.structs.at(variant->payload_struct_index);
+                auto values = build_type_info_payload_values(payload_struct, {
+                    {"v", has_info ? info_ptr : llvm::cast<llvm::Constant>(builder_.getInt32(mirage_type_kind_value(ty)))},
+                });
+                return build_type_info_union_constant(*u, *variant, build_struct_constant(variant->payload_struct_index, values));
+            }
+
+            // As above, but behind a pointer — for Type_Info_Tagged_Variant::payload, the one
+            // field that needs a nil to mean "this variant carries no payload at all".
+            auto emit_type_kind_or_info_global(const sema::ResolvedType &ty) -> llvm::Constant * {
+                auto *value = build_type_kind_or_info_constant(ty);
+                if (!value) return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
+                const auto *u = find_union_by_name("Type_Kind_Or_Info");
+                auto *global = new llvm::GlobalVariable(
+                    *module_, value->getType(), /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage, value,
+                    std::format(".type_kind_or_info.{}", string_counter_++));
+                global->setAlignment(llvm::Align(u ? std::max(u->align, 1U) : 8U));
+                return global;
             }
 
             auto emit_type_info_global(const sema::ResolvedType &ty, const sema::UnionInfo &type_info_union) -> llvm::Constant * {
@@ -2198,18 +2456,18 @@ namespace codegen {
                 switch (ty.kind) {
                 case sema::TypeKind::Pointer: {
                     variant_name = "Pointer";
-                    assignments.push_back({"base_type", type_info_ptr_for(sema_program_.pointer_pointees.at(ty.pointee_index))});
+                    assignments.push_back({"base_type", build_type_kind_or_info_constant(sema_program_.pointer_pointees.at(ty.pointee_index))});
                     break;
                 }
                 case sema::TypeKind::Slice: {
                     variant_name = "Slice";
-                    assignments.push_back({"base_type", type_info_ptr_for(sema_program_.slices.at(ty.slice_index).element_type)});
+                    assignments.push_back({"base_type", build_type_kind_or_info_constant(sema_program_.slices.at(ty.slice_index).element_type)});
                     break;
                 }
                 case sema::TypeKind::Array: {
                     variant_name = "Array";
                     const auto &arr = sema_program_.arrays.at(ty.array_index);
-                    assignments.push_back({"base_type", type_info_ptr_for(arr.element_type)});
+                    assignments.push_back({"base_type", build_type_kind_or_info_constant(arr.element_type)});
                     assignments.push_back({"length", builder_.getInt64(arr.count)});
                     break;
                 }
@@ -2222,7 +2480,7 @@ namespace codegen {
                         field_entries.push_back(build_type_info_field_entry(module_path, f.name, f.type, f.offset));
                     }
                     assignments.push_back({"name", emit_string_literal(tname)});
-                    assignments.push_back({"fields", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Field"), field_entries, ".type_info_fields")});
+                    assignments.push_back({"fields", emit_named_element_slice(module_path, "Type_Info_Field", field_entries, ".type_info_fields")});
                     assignments.push_back({"size", builder_.getInt64(info.size)});
                     assignments.push_back({"align", builder_.getInt64(info.align)});
                     assignments.push_back({"packed", builder_.getInt1(info.is_packed)});
@@ -2238,8 +2496,8 @@ namespace codegen {
                         variant_entries.push_back(build_type_info_enum_variant_entry(module_path, f.name, f.value));
                     }
                     assignments.push_back({"name", emit_string_literal(tname)});
-                    assignments.push_back({"variants", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Enum_Variant"), variant_entries, ".type_info_variants")});
-                    assignments.push_back({"storage_kind", builder_.getInt32(mirage_type_kind_value(info.underlying_type.kind))});
+                    assignments.push_back({"variants", emit_named_element_slice(module_path, "Type_Info_Enum_Variant", variant_entries, ".type_info_variants")});
+                    assignments.push_back({"storage_kind", builder_.getInt32(mirage_type_kind_value(info.underlying_type))});
                     assignments.push_back({"size", builder_.getInt64(primitive_size(info.underlying_type.kind))});
                     push_generic_args_assignments(module_path, info.generic_instance, assignments);
                     break;
@@ -2248,12 +2506,14 @@ namespace codegen {
                     const auto &info = sema_program_.unions.at(ty.union_index);
                     const auto [tmod, tname] = sema::find_type_module_and_name(ty, sema_program_);
                     if (info.is_error_union) {
-                        variant_name = "Error_Type";
+                        variant_name = "Error";
+                        // Stays a '[]*Type_Info': an error member is always an enum or a
+                        // non-error tagged union, so type_info_ptr_for never returns nil here.
                         std::vector<llvm::Constant *> members;
                         for (const auto &m : info.error_member_types) {
                             members.push_back(type_info_ptr_for(m));
                         }
-                        assignments.push_back({"members", emit_constant_slice(llvm::PointerType::getUnqual(*context_), members, ".type_info_err_members")});
+                        assignments.push_back({"members", emit_type_info_ptr_slice(members, ".type_info_err_members")});
                         // '?error(...)' — reflectable because optionality is type identity, so
                         // 'error(E)' and '?error(E)' reach this switch as two distinct unions.
                         assignments.push_back({"is_optional", builder_.getInt1(info.is_optional)});
@@ -2261,13 +2521,17 @@ namespace codegen {
                         variant_name = "Tagged_Union";
                         std::vector<llvm::Constant *> variant_entries;
                         for (const auto &v : info.variants) {
+                            // 'payload_type', not the payload STRUCT: a non-struct payload
+                            // ('Some: i32') is held in a synthetic one-field wrapper struct that
+                            // is a compiler-internal artifact — reflecting it would leak that
+                            // wrapper into user-visible RTTI instead of reporting .kind(I32).
                             llvm::Constant *payload_ptr = v.payload_struct_index >= 0
-                                ? type_info_ptr_for(sema::ResolvedType{.kind = sema::TypeKind::Struct, .struct_index = v.payload_struct_index})
+                                ? emit_type_kind_or_info_global(v.payload_type)
                                 : llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
                             variant_entries.push_back(build_type_info_tagged_variant_entry(module_path, v.name, static_cast<uint32_t>(v.tag_value), payload_ptr));
                         }
                         assignments.push_back({"name", emit_string_literal(tname)});
-                        assignments.push_back({"variants", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Tagged_Variant"), variant_entries, ".type_info_tagged_variants")});
+                        assignments.push_back({"variants", emit_named_element_slice(module_path, "Type_Info_Tagged_Variant", variant_entries, ".type_info_tagged_variants")});
                         assignments.push_back({"size", builder_.getInt64(info.size)});
                         assignments.push_back({"align", builder_.getInt64(info.align)});
                         push_generic_args_assignments(module_path, info.generic_instance, assignments);
@@ -2278,7 +2542,7 @@ namespace codegen {
                             member_entries.push_back(build_type_info_field_entry(module_path, m.name, m.type, 0));
                         }
                         assignments.push_back({"name", emit_string_literal(tname)});
-                        assignments.push_back({"members", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Field"), member_entries, ".type_info_umembers")});
+                        assignments.push_back({"members", emit_named_element_slice(module_path, "Type_Info_Field", member_entries, ".type_info_umembers")});
                         assignments.push_back({"size", builder_.getInt64(info.size)});
                         assignments.push_back({"align", builder_.getInt64(info.align)});
                         push_generic_args_assignments(module_path, info.generic_instance, assignments);
@@ -2290,8 +2554,10 @@ namespace codegen {
                     const auto &info = sema_program_.bitsets.at(ty.bitset_index);
                     const auto [tmod, tname] = sema::find_type_module_and_name(ty, sema_program_);
                     assignments.push_back({"name", emit_string_literal(tname)});
+                    // Stays a '*Type_Info': a bitset's member type is always an enum, so
+                    // type_info_ptr_for never returns nil here.
                     assignments.push_back({"member_type", type_info_ptr_for(info.member_enum_type)});
-                    assignments.push_back({"storage_kind", builder_.getInt32(mirage_type_kind_value(info.storage_type.kind))});
+                    assignments.push_back({"storage_kind", builder_.getInt32(mirage_type_kind_value(info.storage_type))});
                     assignments.push_back({"size", builder_.getInt64(primitive_size(info.storage_type.kind))});
                     push_generic_args_assignments(module_path, info.generic_instance, assignments);
                     break;
@@ -2304,12 +2570,12 @@ namespace codegen {
                         const std::string pname = i < info.param_names.size() ? info.param_names[i] : std::string{};
                         param_entries.push_back(build_type_info_param_entry(module_path, pname, info.param_types[i]));
                     }
-                    std::vector<llvm::Constant *> return_ptrs;
+                    std::vector<llvm::Constant *> return_values;
                     for (const auto &rt : info.return_types) {
-                        return_ptrs.push_back(type_info_ptr_for(rt));
+                        return_values.push_back(build_type_kind_or_info_constant(rt));
                     }
-                    assignments.push_back({"params", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Param"), param_entries, ".type_info_params")});
-                    assignments.push_back({"return_types", emit_constant_slice(llvm::PointerType::getUnqual(*context_), return_ptrs, ".type_info_returns")});
+                    assignments.push_back({"params", emit_named_element_slice(module_path, "Type_Info_Param", param_entries, ".type_info_params")});
+                    assignments.push_back({"return_types", emit_named_element_slice(module_path, "Type_Kind_Or_Info", return_values, ".type_info_returns")});
                     assignments.push_back({"is_variadic", builder_.getInt1(info.is_variadic)});
                     break;
                 }
@@ -2321,14 +2587,15 @@ namespace codegen {
                     if (info) {
                         for (const auto &m : info->methods) {
                             // Trait methods don't carry a separately-interned function-type
-                            // ResolvedType to recurse into — nil 'type_info', name is still
-                            // reflected.
+                            // ResolvedType to recurse into, so 'type_info' degrades to
+                            // '.kind(Function)' — the shape isn't available, but the reference
+                            // is no longer information-free. Name is reflected either way.
                             method_entries.push_back(build_type_info_method_entry(
-                                module_path, m.name, llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_))));
+                                module_path, m.name, build_type_kind_or_info_constant(sema::ResolvedType{.kind = sema::TypeKind::Function})));
                         }
                     }
                     assignments.push_back({"name", emit_string_literal(tname)});
-                    assignments.push_back({"methods", emit_constant_slice(named_struct_llvm_type(module_path, "Type_Info_Method"), method_entries, ".type_info_methods")});
+                    assignments.push_back({"methods", emit_named_element_slice(module_path, "Type_Info_Method", method_entries, ".type_info_methods")});
                     break;
                 }
                 default:
@@ -2356,6 +2623,9 @@ namespace codegen {
                 auto *global = new llvm::GlobalVariable(
                     *module_, union_const->getType(), true, llvm::GlobalValue::PrivateLinkage, union_const,
                     std::format(".type_info.{}", type_info_globals_by_type_.size()));
+                // Bespoke packed types have ABI alignment 1 — set it from sema so the pointer
+                // and slice fields inside are naturally aligned (see emit_constant_slice).
+                global->setAlignment(llvm::Align(std::max(type_info_union.align, 1U)));
                 type_info_globals_by_type_[ty] = global;
                 return global;
             }

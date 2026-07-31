@@ -126,6 +126,19 @@ const info: *rt.Type_Info = cast(type_info_of(type_of(my_var)), *rt.Type_Info)
 
 `type_info_of` returns `nil` for every builtin scalar type (`u8`..`f64`, `usize`, `bool`, `byte`, `anyptr`, `error`) — only compound and user-defined types (pointers, slices, arrays, structs, enums, unions, tagged unions, bitsets, function types, traits) get a real `Type_Info`. `type_info_of` requires importing a module that defines `pub type Type_Info = union(enum) {...}` (i.e. `runtime/type_info`) — using it without that import is a sema error. `Type_Info`'s aggregate payloads (`Struct`/`Enum`/`Union`/`Tagged_Union`/`Bitset`) additionally carry `is_generic`/`generic_args` fields — see [Generics, "RTTI"](#rtti-is_generic-and-generic_args).
 
+A `Type_Info` refers to other types through `Type_Kind_Or_Info`, not through a bare pointer:
+
+```mirage
+pub type Type_Kind_Or_Info = union(enum) {
+    kind: Type_Kind      // the type's kind, for anything with no descriptor of its own
+    info: *Type_Info     // the type's descriptor
+}
+```
+
+A scalar has no `Type_Info` of its own, so a reference to one reports its `Type_Kind` instead — `struct Point { x: i32 }` reflects `fields[0].base_type` as `.kind(Type_Kind.I32)`. `kind` is also the fallback for the two references that exist in principle but aren't reachable: a recursive back-reference (a struct reached again through its own pointer field, reported as `.kind(Type_Kind.Struct)`) and a trait method (reported as `.kind(Type_Kind.Function)`). Every nested reference in `Type_Info` uses this — `Pointer`/`Slice`/`Array`'s `base_type`, `Type_Info_Field.base_type`, `Type_Info_Param`/`Type_Info_Method`'s `type_info`, `Function.return_types`, `Type_Info_Tagged_Variant.payload` (behind a pointer, so `nil` can mean "payload-free"), and `Type_Info_Generic_Arg`'s `type_arg`/`value_arg_type`. `Bitset.member_type` and `Error.members` stay `*Type_Info`: both can only ever name an aggregate.
+
+`Type_Info_Tagged_Variant.payload` describes the payload as *declared*, so a wrapped scalar payload (`Some: i32`) reports `.kind(Type_Kind.I32)` rather than the one-field struct the compiler synthesizes to hold it.
+
 ---
 
 ## 2. Composite Types
@@ -730,7 +743,7 @@ Returns the operand's unique `type` identity. Operand disambiguation is identica
 type_info_of(expr)
 ```
 
-Returns a runtime `*Type_Info` descriptor (as `anyptr`) for a `type`- or `any`-typed operand — any other operand type is a sema error. `nil` for builtin scalar types. See [The `type` Type](#1-primitive-types) above and `runtime/type_info` for `Type_Info`'s definition, and [Generics, "RTTI"](#rtti-is_generic-and-generic_args) for the `is_generic`/`generic_args` fields on aggregate-type descriptors.
+Returns a runtime `*Type_Info` descriptor (as `anyptr`) for a `type`- or `any`-typed operand — any other operand type is a sema error. `nil` for builtin scalar types; a scalar reached as a *member* of some other type is still reported, as a `Type_Kind` inside a `Type_Kind_Or_Info`. See [The `type` Type](#1-primitive-types) above and `runtime/type_info` for `Type_Info`'s definition, and [Generics, "RTTI"](#rtti-is_generic-and-generic_args) for the `is_generic`/`generic_args` fields on aggregate-type descriptors.
 
 ### `len`
 
@@ -2220,7 +2233,7 @@ error already in hand — `try`, `return_err`, `match`/`switch`, boolean
 coercion, the subset rule — ignores the marker entirely. A value inferred
 from a `?`-returning function carries the marking (`const e := touch(n)`
 has type `?error(E)`), and reflection reports it as
-`Type_Info.Error_Type.is_optional`.
+`Type_Info.Error.is_optional`.
 
 `?` on `main` or on an `@init` function is accepted but has no effect:
 neither has a caller that could drop anything, and both already terminate
@@ -3519,12 +3532,20 @@ payloads:
 
 ```mirage
 pub type Type_Info_Generic_Arg = struct {
-    is_type: bool          // true: a type argument; false: a value argument
-    type_arg: anyptr        // *Type_Info of the type argument; nil when !is_type
-    value_arg: i64           // the value argument's raw value; 0 when is_type
-    value_arg_type: anyptr  // *Type_Info of the value argument's own scalar type; nil when is_type
+    name: []u8                   // the PARAMETER's name ('T', 'N'), not the argument's
+    type_info: Type_Kind_Or_Info // a type argument's type, or a value argument's scalar type
+    kind: union(enum) {
+        is_type                  // a type argument
+        is_scalar: i64           // a value argument, carrying its raw value
+    }
 }
 ```
+
+`name` comes from the *unspecialized* declaration's parameter list, so
+`Box[i32]` reports `name = "T"`, not `"i32"` — the argument's own identity is
+in `type_info`. `type_info` is meaningful for both flavours: the type itself
+for a type argument, the value's own scalar type (`usize` for `Buf[4]`) for a
+value argument.
 
 For a non-generic type, `is_generic` is `false` and `generic_args` is empty
 — the same convention used elsewhere in this file for a field-less struct's

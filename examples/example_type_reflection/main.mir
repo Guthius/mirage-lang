@@ -79,6 +79,18 @@ pub fn main() -> i32 {
             if s.fields[0].offset != 0 { result = 20 }
             if !str_eq(s.fields[1].name, "y") { result = 21 }
             if s.fields[1].offset != 4 { result = 22 }
+            // 'base_type' reports a scalar field as a bare Type_Kind — a scalar has no
+            // Type_Info of its own, which is exactly the information the old 'anyptr' field
+            // lost. Also the load-bearing check that a slice of Type_Kind_Or_Info strides
+            // correctly, since its two variants have different LLVM shapes.
+            switch s.fields[0].base_type {
+                .kind(k): { if k != rt.Type_Kind.I32 { result = 27 } },
+                _: { result = 28 },
+            }
+            switch s.fields[1].base_type {
+                .kind(k): { if k != rt.Type_Kind.I32 { result = 29 } },
+                _: { result = 35 },
+            }
         },
         _: { result = 23 },
     }

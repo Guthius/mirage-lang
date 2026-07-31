@@ -60,9 +60,17 @@ NEGATIVE_CASES = [
     ("example_type_info_wrong_arg", "type_info_of() requires an argument of type 'type' or 'any'"),
 ]
 
-# Example dirs that must build+run successfully, exiting 0.
+# Example dirs that must build+run successfully, exiting 0. Each returns a distinct nonzero
+# code per failed assertion, so a nonzero exit points straight at the assertion that broke.
 POSITIVE_CASES = [
     "example_type_reflection",
+    # Type_Kind_Or_Info: every nested type reference reports a Type_Kind (scalars, which have
+    # no descriptor of their own) or a *Type_Info, never an information-free nil.
+    "example_type_info_nested",
+    "example_type_info_recursive",
+    "example_type_info_function",
+    "example_type_info_tagged_payload",
+    "example_type_info_generic_args",
 ]
 
 
@@ -91,7 +99,7 @@ def main() -> int:
     # code this test reuses, not something introduced by the reflection system itself.
     check(actual_lines == expected_lines, f"example_reflection: stdout matches (got {actual_lines!r})")
 
-    for d in ["example_type_reflection", "example_reflection"]:
+    for d in POSITIVE_CASES + ["example_reflection"]:
         result = build(d)
         check(
             "LLVM module verification failed" not in result.stderr,

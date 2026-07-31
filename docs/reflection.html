@@ -187,15 +187,43 @@
         <code>Type_Info</code> is a tagged union with one variant per kind of type it can
         describe — <code>Struct</code>, <code>Enum</code>, <code>Union</code>,
         <code>Tagged_Union</code>, <code>Bitset</code>, <code>Pointer</code>, <code>Slice</code>,
-        <code>Array</code>, <code>Function</code>, <code>Trait</code>, and <code>Error_Type</code>.
+        <code>Array</code>, <code>Function</code>, <code>Trait</code>, and <code>Error</code>.
         Each variant carries exactly the fields you'd expect — a struct's field names and byte
         offsets, an enum's variant names and values, and so on. <code>Type_Kind</code> is a
-        parallel enum used for a couple of "what scalar backs this" fields (an enum or bitset's
-        storage type). Being ordinary Mirage source, you can read its full field list directly:
-        it's just a <code>union(enum)</code> and a handful of small structs, no compiler magic.
+        parallel enum naming every kind of type there is. Being ordinary Mirage source, you can
+        read its full field list directly: it's just a <code>union(enum)</code> and a handful of
+        small structs, no compiler magic.
       </p>
       <p>
-        <code>Error_Type</code> carries its member types plus an <code>is_optional: bool</code>
+        Wherever one type refers to another — a struct field's type, a pointer's pointee, a
+        function's parameters and returns — the reference is a <code>Type_Kind_Or_Info</code>:
+      </p>
+      <pre><code><span class="kw">pub type</span> <span class="ty">Type_Kind_Or_Info</span> = <span class="kw">union</span>(<span class="kw">enum</span>) {
+    <span class="var">kind</span>: <span class="ty">Type_Kind</span>
+    <span class="var">info</span>: *<span class="ty">Type_Info</span>
+}</code></pre>
+      <p>
+        A scalar has no <code>Type_Info</code> of its own, so a reference to one reports its
+        <code>Type_Kind</code> — <code>struct Point { x: i32 }</code> reflects
+        <code>fields[0].base_type</code> as <code>.kind(Type_Kind.I32)</code>. Anything with a
+        real descriptor reports <code>.info</code>. <code>kind</code> is also the fallback for
+        the two references that exist in principle but aren't reachable: a recursive
+        back-reference (a struct reached again through its own pointer field, reported as
+        <code>.kind(Type_Kind.Struct)</code>) and a trait method (reported as
+        <code>.kind(Type_Kind.Function)</code>).
+      </p>
+      <p>
+        Two fields stay plain <code>*Type_Info</code> because they can only ever name an
+        aggregate: <code>Bitset.member_type</code> (always an enum) and
+        <code>Error.members</code>. One is a <em>pointer</em> to a
+        <code>Type_Kind_Or_Info</code> — <code>Type_Info_Tagged_Variant.payload</code>, so that
+        <code>nil</code> can mean "this variant carries no payload at all". It describes the
+        payload as declared, so a wrapped scalar payload (<code>Some: i32</code>) reports
+        <code>.kind(Type_Kind.I32)</code>, not the one-field struct the compiler synthesizes to
+        hold it.
+      </p>
+      <p>
+        <code>Error</code> carries its member types plus an <code>is_optional: bool</code>
         recording whether the type was spelled <code>?error(...)</code> — an error a caller may
         leave unhandled (see <a href="error-handling.html#ignorable-errors">Ignorable Errors</a>).
         The marking is visible here because it is part of the type's identity:
@@ -221,8 +249,10 @@
         It always returns <code>anyptr</code>, and is <code>nil</code> for every builtin scalar
         type (<code>u8</code>..<code>f64</code>, <code>usize</code>, <code>bool</code>,
         <code>byte</code>, <code>anyptr</code>, <code>error</code>) — only compound and
-        user-defined types get a real <code>Type_Info</code>. Check for <code>nil</code> before
-        casting:
+        user-defined types get a real <code>Type_Info</code>. (A scalar reached as a
+        <em>member</em> of some other type is still described, as a <code>Type_Kind</code> inside
+        a <code>Type_Kind_Or_Info</code>; it's only the top-level lookup that has nothing to hand
+        back.) Check for <code>nil</code> before casting:
       </p>
       <pre><code><span class="kw">if</span> <span class="fn">type_info_of</span>(<span class="fn">type_of</span>(<span class="ty">i32</span>)) != <span class="kw">nil</span> { <span class="kw">return</span> <span class="num">1</span> }  <span class="cmt">// never true — i32 is a builtin scalar</span></code></pre>
 

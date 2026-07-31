@@ -171,7 +171,7 @@ namespace sema {
         // '?error(E)' and 'error(E)' intern to two distinct unions with two distinct
         // union_indexes. That is what makes a trait/impl '?' mismatch fall out of the
         // existing return_types comparison, and what lets reflection report it
-        // (Type_Info.Error_Type.is_optional). Set on the OUTER Ok/Failed wrapper only —
+        // (Type_Info.Error.is_optional). Set on the OUTER Ok/Failed wrapper only —
         // the inner member-dispatch union is an implementation detail with no callers.
         // Deliberately NOT part of error_union_is_subset or the try/return_err rules:
         // dropping or adding the marker is semantically inert on a value, because it only

@@ -748,6 +748,26 @@
     "action": "run",
     "exit": 0
   },
+  "example_type_info_function": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_type_info_generic_args": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_type_info_nested": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_type_info_recursive": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_type_info_tagged_payload": {
+    "action": "run",
+    "exit": 0
+  },
   "example_type_info_wrong_arg": {
     "action": "build",
     "diag": "examples/example_type_info_wrong_arg/main.mir:5:16: error: type_info_of() requires an argument of type 'type' or 'any'; got 'i32'. Use 'type_of(expr)' to get the type ID first.",
