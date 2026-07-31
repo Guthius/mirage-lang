@@ -1,0 +1,7 @@
+// Imports lib, so this module IS in lib's import closure when analysed from here — but NOT
+// when the analysis starts at lib/, which is the case the workspace sweep exists for.
+const lib := import("../lib")
+
+pub fn run() -> i32 {
+    return lib.shared_helper(21)
+}

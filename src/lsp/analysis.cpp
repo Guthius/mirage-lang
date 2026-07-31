@@ -48,6 +48,36 @@ namespace lsp::analysis {
         constexpr size_t MAX_CACHED_MODULES = 32;
     }
 
+    auto discover_module_dirs(const std::string &workspace_root) -> std::vector<std::string> {
+        std::vector<std::string> dirs;
+        if (workspace_root.empty()) return dirs;
+
+        std::error_code ec;
+        auto it = std::filesystem::recursive_directory_iterator(
+            workspace_root, std::filesystem::directory_options::skip_permission_denied, ec);
+        if (ec) return dirs;
+
+        std::set<std::string> seen;
+        for (const auto end = std::filesystem::recursive_directory_iterator{}; it != end; it.increment(ec)) {
+            if (ec) break;
+            const auto &entry = *it;
+            if (entry.is_directory(ec)) {
+                const auto name = entry.path().filename().string();
+                // Build trees and VCS/tooling directories hold no source worth searching, and
+                // a build tree in particular can be enormous.
+                if (name.starts_with(".") || name.starts_with("build") || name == "node_modules") {
+                    it.disable_recursion_pending();
+                }
+                continue;
+            }
+            if (entry.path().extension() != ".mir") continue;
+            seen.insert(ast::canonicalize(entry.path().parent_path().string()));
+        }
+
+        dirs.assign(seen.begin(), seen.end());
+        return dirs;
+    }
+
     void DocumentStore::open(const std::string &canonical_path, std::string text) {
         open_texts_[canonical_path] = std::move(text);
         invalidate(canonical_path);
@@ -151,6 +181,10 @@ namespace lsp::analysis {
         }
         unindex_bundle(oldest->first);
         module_results_.erase(oldest);
+    }
+
+    auto DocumentStore::analyse_uncached(const std::string &dir) const -> ProgramResult {
+        return analyse(dir, open_texts_);
     }
 
     auto DocumentStore::ensure_analysed(const std::string &canonical_path) -> ProgramResult & {

@@ -1,0 +1,9 @@
+// The module that DECLARES the target. Nothing here imports anything.
+pub fn shared_helper(v: i32) -> i32 {
+    return v * 2
+}
+
+pub type Colour = enum(i32) {
+    Red
+    Green
+}

@@ -132,6 +132,11 @@ namespace lsp {
 
             analysis::DocumentStore documents;
 
+            // The client's workspace root, from initialize's rootUri/workspaceFolders. Empty
+            // when the client sent neither, in which case Find All References stays scoped to
+            // the analysed module's import closure — the pre-workspace behaviour.
+            std::string workspace_root;
+
             // Coalesces rapid didOpen/didChange bursts for the same file into one
             // publishDiagnostics round, DIAGNOSTICS_DEBOUNCE after the last edit.
             void schedule_diagnostics(const std::string &path) {
@@ -381,6 +386,25 @@ namespace lsp {
                     const auto &watched = workspace.is_object() && workspace.contains("didChangeWatchedFiles")
                         ? workspace["didChangeWatchedFiles"] : json::object();
                     supports_watch_registration = watched.is_object() && watched.value("dynamicRegistration", false);
+
+                    // The root to search for references. 'workspaceFolders' supersedes the
+                    // deprecated 'rootUri', which supersedes the older 'rootPath'; take the
+                    // first folder, since a reference search needs one tree to walk.
+                    std::string root;
+                    if (params.contains("workspaceFolders") && params["workspaceFolders"].is_array() &&
+                        !params["workspaceFolders"].empty()) {
+                        const auto &first = params["workspaceFolders"][0];
+                        if (first.is_object() && first.contains("uri") && first["uri"].is_string()) {
+                            root = canonical_path_of(first["uri"].get<std::string>());
+                        }
+                    }
+                    if (root.empty() && params.contains("rootUri") && params["rootUri"].is_string()) {
+                        root = canonical_path_of(params["rootUri"].get<std::string>());
+                    }
+                    if (root.empty() && params.contains("rootPath") && params["rootPath"].is_string()) {
+                        root = params["rootPath"].get<std::string>();
+                    }
+                    worker.workspace_root = root;
                 }
                 const json capabilities = {
                     {"textDocumentSync", {{"openClose", true}, {"change", 1}}},
@@ -388,8 +412,9 @@ namespace lsp {
                     {"definitionProvider", true},
                     {"completionProvider", {{"triggerCharacters", {"."}}}},
                     {"inlayHintProvider", true},
-                    // Scoped to the analysed module's import closure, not the workspace: a
-                    // reference from a file that does not import the target is not found.
+                    // Workspace-wide when the client supplied a root (see Worker::
+                    // workspace_root); scoped to the analysed module's import closure when it
+                    // did not, since there is then no tree to search.
                     {"referencesProvider", true},
                 };
                 send_response(channel, message["id"], {{"capabilities", capabilities}});
@@ -613,7 +638,16 @@ namespace lsp {
                     run_cancellable_request(cancelled, completed, id_key, channel, id, [&]() -> json {
                         const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
                         auto &result = worker.documents.ensure_analysed(path);
-                        return handlers::handle_references(result, module_path, path, line, character, include_declaration);
+
+                        // Discovered per request rather than cached: files appear and vanish
+                        // between searches, and a stale module list silently misses references.
+                        // The walk is filesystem-bound and dwarfed by analysing what it finds.
+                        handlers::WorkspaceSearch workspace{
+                            .module_dirs = analysis::discover_module_dirs(worker.workspace_root),
+                            .analyse = [&worker](const std::string &dir) { return worker.documents.analyse_uncached(dir); },
+                        };
+                        const auto *search = workspace.module_dirs.empty() ? nullptr : &workspace;
+                        return handlers::handle_references(result, module_path, path, line, character, include_declaration, search);
                     });
                 }, id_key});
             } else if (method == "textDocument/inlayHint") {

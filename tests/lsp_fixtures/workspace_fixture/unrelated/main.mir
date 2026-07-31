@@ -1,0 +1,7 @@
+// A second importer, reached only by a workspace-wide search: opening lib/main.mir analyses
+// lib and its own imports (none), so neither this module nor app/ appears in that closure.
+const lib := import("../lib")
+
+pub fn twice(v: i32) -> i32 {
+    return lib.shared_helper(v) + lib.shared_helper(v)
+}

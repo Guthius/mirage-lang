@@ -43,12 +43,76 @@ namespace lsp::handlers {
             return r.type.enum_index;
         }
 
+        // A reference target's identity, stable ACROSS ProgramResults.
+        //
+        // same_resolution below compares by pointer, which is exact and cheap inside ONE
+        // analysis — every Resolution there came out of the same sema::Program. Between two
+        // it is meaningless: each workspace module is analysed into its own ProgramResult, so
+        // the same function has a different Symbol* in each. Identity then falls back to the
+        // names a declaration is known by, which is what "the same declaration" means once
+        // pointers are off the table.
+        //
+        // 'owner' is the declaring TYPE for a field, method or variant — without it, two
+        // types in one module with a same-named field would collapse together.
+        struct DeclarationKey {
+            Resolution::Kind kind = Resolution::Kind::None;
+            std::string module_path;
+            std::string owner;
+            std::string name;
+
+            auto operator==(const DeclarationKey &) const -> bool = default;
+        };
+
+        auto declaration_key(const Resolution &r, const sema::Program &program) -> DeclarationKey {
+            DeclarationKey key{.kind = r.kind, .module_path = r.module_path, .name = r.name};
+            switch (r.kind) {
+            case Resolution::Kind::StructField:
+            case Resolution::Kind::UnionMember:
+            case Resolution::Kind::Method:
+            case Resolution::Kind::EnumField:
+            case Resolution::Kind::Variant: {
+                // Keyed on the owning type rather than on the member's own pointer. For a
+                // bitset flag the owner is the MEMBER ENUM, not the bitset — the same field is
+                // reachable through both spellings and must compare equal either way, which is
+                // the cross-bundle form of enum_identity_index's collapse above.
+                auto ty = r.type;
+                if (ty.kind == sema::TypeKind::Bitset) {
+                    if (const auto *info = program.bitset_at(ty.bitset_index)) ty = info->member_enum_type;
+                }
+                const auto [mod, name] = find_type_module_and_name(ty, program);
+                key.module_path = mod;
+                key.owner = name;
+                break;
+            }
+            default:
+                break;
+            }
+            return key;
+        }
+
+        // Whether a target can be referenced from a module that does not import its own.
+        //
+        // Locals and params cannot: they are function-scoped, so a workspace-wide sweep for
+        // one would analyse the entire tree to find nothing. Everything else can.
+        auto is_cross_module_referenceable(const Resolution::Kind kind) -> bool {
+            switch (kind) {
+            case Resolution::Kind::Local:
+            case Resolution::Kind::Param:
+            case Resolution::Kind::None:
+            case Resolution::Kind::Builtin:
+            case Resolution::Kind::AsmRegister:
+                return false;
+            default:
+                return true;
+            }
+        }
+
         // Whether a freshly-resolved reference `a` names the same declaration as `b`.
         // Struct/union/method info is compared by pointer identity - stable for the lifetime
         // of one ProgramResult, since nothing mutates program.structs/unions/methods after
         // analysis finishes. Local/param declarations have no comparable pointer, so identity
         // is their own unique declaration-site SourceLocation instead.
-        auto same_declaration(const Resolution &a, const Resolution &b, const sema::Program &program) -> bool {
+        auto same_resolution(const Resolution &a, const Resolution &b, const sema::Program &program) -> bool {
             if (a.kind != b.kind) return false;
             switch (a.kind) {
             case Resolution::Kind::Symbol:
@@ -76,6 +140,19 @@ namespace lsp::handlers {
             default:
                 return false; // Builtin/None are not meaningful reference targets
             }
+        }
+
+        // What a reference must match. The in-bundle search compares Resolutions directly;
+        // the workspace sweep, which sees a different sema::Program per module, compares
+        // DeclarationKeys. Every call site below is identical either way.
+        struct MatchTarget {
+            const Resolution *resolution = nullptr; // in-bundle
+            const DeclarationKey *key = nullptr;    // workspace sweep
+        };
+
+        auto same_declaration(const Resolution &candidate, const MatchTarget &target, const sema::Program &program) -> bool {
+            if (target.resolution) return same_resolution(candidate, *target.resolution, program);
+            return target.key && declaration_key(candidate, program) == *target.key;
         }
 
         // One function/method-like scope to walk: its params (base-name resolution) and body
@@ -109,7 +186,7 @@ namespace lsp::handlers {
 
         // Walks one function/method body collecting every reference that resolves to `target`.
         void collect_references_in_scope(const Scope &scope, const LocalLookupContext &ctx, const std::string &module_path,
-                                          const sema::Program &program, const Resolution &target, std::vector<json> &out) {
+                                          const sema::Program &program, const MatchTarget &target, std::vector<json> &out) {
             AstVisitor visitor;
             visitor.on_expr = [&](const ast::Expr &expr) {
                 if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
@@ -230,26 +307,13 @@ namespace lsp::handlers {
         }
     }
 
-    auto handle_references(analysis::ProgramResult &result, const std::string &module_path, const std::string &path,
-                            const size_t line, const size_t column, const bool include_declaration) -> json {
-        const auto target = resolve_at(result, module_path, path, line, column);
-        // AsmRegister joins None/Builtin here (LSPH-11): it is synthetic, has no declaration
-        // site, and same_declaration's default arm rejects it anyway -- so without this guard
-        // the request walked every module in the import closure doing real resolution work
-        // before returning the empty array it was always going to return.
-        if (target.kind == Resolution::Kind::None || target.kind == Resolution::Kind::Builtin ||
-            target.kind == Resolution::Kind::AsmRegister) {
-            return json::array();
-        }
-
-        std::vector<json> out;
-        if (include_declaration && target.kind != Resolution::Kind::Symbol) {
-            // Kind::Symbol's declaration site is handled per-symbol-kind in the module loop
-            // below (it may be a FunctionDecl/VarDecl/TypeDecl/etc.); everything else has its
-            // declaration-site location directly on the Resolution already.
-            if (auto loc = location_json(target.location); !loc.is_null()) out.push_back(std::move(loc));
-        }
-
+    // Walks every module in ONE analysis, appending each reference matching 'target'.
+    //
+    // Called once for the analysis containing the cursor, and once per additional workspace
+    // module root that the first did not already cover — which is the whole of what makes
+    // this search workspace-wide rather than import-closure-wide.
+    void collect_references_in_program(analysis::ProgramResult &result, const MatchTarget &target,
+                                        const bool include_declaration, std::vector<json> &out) {
         for (const auto &[mod_path, decls] : result.ast_program.modules) {
             const auto sema_mod_it = result.sema_program.modules.find(mod_path);
             if (sema_mod_it == result.sema_program.modules.end()) continue;
@@ -280,8 +344,8 @@ namespace lsp::handlers {
                     for (const auto &p : fn->params) params.push_back({p.name, {}, p.location});
                     collect_references_in_scope({.params = std::move(params), .body = &fn->body}, scoped_ctx(fn, nullptr),
                                                  mod_path, result.sema_program, target, out);
-                    if (include_declaration && target.kind == Resolution::Kind::Symbol) {
-                        if (const auto *fn_sym = std::get_if<sema::FunctionSymbol>(target.symbol);
+                    if (include_declaration && target.resolution && target.resolution->kind == Resolution::Kind::Symbol) {
+                        if (const auto *fn_sym = std::get_if<sema::FunctionSymbol>(target.resolution->symbol);
                             fn_sym && fn_sym->decl == fn) {
                             out.push_back(location_json(fn->location));
                         }
@@ -301,8 +365,8 @@ namespace lsp::handlers {
                         };
                         walk_expr(*var->init, visitor);
                     }
-                    if (include_declaration && target.kind == Resolution::Kind::Symbol) {
-                        if (const auto *global_sym = std::get_if<sema::GlobalSymbol>(target.symbol);
+                    if (include_declaration && target.resolution && target.resolution->kind == Resolution::Kind::Symbol) {
+                        if (const auto *global_sym = std::get_if<sema::GlobalSymbol>(target.resolution->symbol);
                             global_sym && global_sym->decl == var) {
                             out.push_back(location_json(var->location));
                         }
@@ -320,8 +384,8 @@ namespace lsp::handlers {
                         }
                     };
                     walk_expr(macro->expr_template, visitor);
-                    if (include_declaration && target.kind == Resolution::Kind::Symbol) {
-                        if (const auto *macro_sym = std::get_if<sema::MacroSymbol>(target.symbol);
+                    if (include_declaration && target.resolution && target.resolution->kind == Resolution::Kind::Symbol) {
+                        if (const auto *macro_sym = std::get_if<sema::MacroSymbol>(target.resolution->symbol);
                             macro_sym && macro_sym->decl == macro) {
                             out.push_back(location_json(macro->location));
                         }
@@ -338,7 +402,7 @@ namespace lsp::handlers {
                         for (const auto &p : fn.params) params.push_back({p.name, {}, p.location});
                         collect_references_in_scope({.params = std::move(params), .body = &fn.body}, scoped_ctx(nullptr, &fn),
                                                      mod_path, result.sema_program, target, out);
-                        if (include_declaration && target.kind == Resolution::Kind::Method && target.method == sym) {
+                        if (include_declaration && target.resolution && target.resolution->kind == Resolution::Kind::Method && target.resolution->method == sym) {
                             out.push_back(location_json(fn.location));
                         }
                     }
@@ -370,12 +434,57 @@ namespace lsp::handlers {
                         for (const auto &p : fn.params) params.push_back({p.name, {}, p.location});
                         collect_references_in_scope({.params = std::move(params), .body = &fn.body}, scoped_ctx(nullptr, &fn),
                                                      mod_path, result.sema_program, target, out);
-                        if (include_declaration && target.kind == Resolution::Kind::Method && target.method == sym) {
+                        if (include_declaration && target.resolution && target.resolution->kind == Resolution::Kind::Method && target.resolution->method == sym) {
                             out.push_back(location_json(fn.location));
                         }
                     }
                 }
             }
+        }
+    }
+
+    auto handle_references(analysis::ProgramResult &result, const std::string &module_path, const std::string &path,
+                            const size_t line, const size_t column, const bool include_declaration,
+                            const WorkspaceSearch *workspace) -> json {
+        const auto target = resolve_at(result, module_path, path, line, column);
+        // AsmRegister joins None/Builtin here (LSPH-11): it is synthetic, has no declaration
+        // site, and same_declaration's default arm rejects it anyway -- so without this guard
+        // the request walked every module doing real resolution work before returning the
+        // empty array it was always going to return.
+        if (!is_cross_module_referenceable(target.kind) && target.kind != Resolution::Kind::Local &&
+            target.kind != Resolution::Kind::Param) {
+            return json::array();
+        }
+
+        std::vector<json> out;
+        if (include_declaration && target.kind != Resolution::Kind::Symbol) {
+            // Kind::Symbol's declaration site is handled per-symbol-kind in the module loop
+            // below (it may be a FunctionDecl/VarDecl/TypeDecl/etc.); everything else has its
+            // declaration-site location directly on the Resolution already.
+            if (auto loc = location_json(target.location); !loc.is_null()) out.push_back(std::move(loc));
+        }
+
+        collect_references_in_program(result, MatchTarget{.resolution = &target}, include_declaration, out);
+
+        // Everything above is the import closure of the analysed module. A reference from a
+        // file that does not import the target lives outside it, and that is what the sweep
+        // below finds.
+        //
+        // Skipped for a local or param: those are function-scoped, so analysing the whole
+        // workspace to look for one would be pure cost for a guaranteed-empty result.
+        if (!workspace || !is_cross_module_referenceable(target.kind)) return out;
+
+        const auto key = declaration_key(target, result.sema_program);
+        for (const auto &dir : workspace->module_dirs) {
+            // Already covered by the analysis above.
+            if (result.ast_program.modules.contains(dir)) continue;
+
+            auto other = workspace->analyse(dir);
+            // A module that cannot see the target's own module cannot reference it. Cheap to
+            // check, and it skips most of a large workspace.
+            if (!other.ast_program.modules.contains(key.module_path)) continue;
+
+            collect_references_in_program(other, MatchTarget{.key = &key}, /*include_declaration=*/false, out);
         }
 
         return out;

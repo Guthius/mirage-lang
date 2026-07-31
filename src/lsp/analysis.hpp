@@ -12,6 +12,15 @@
 #include <vector>
 
 namespace lsp::analysis {
+    // Every directory under 'workspace_root' holding at least one '.mir' file — i.e. every
+    // Mirage module in the workspace, since a module IS a directory (module_resolver.cpp).
+    //
+    // Skips build outputs and dotted directories: those hold generated or VCS files, and
+    // walking them is both slow and noisy. Returns an empty list for an unreadable or
+    // non-existent root rather than throwing — a workspace-wide search degrading to the
+    // import closure is far better than a request that fails.
+    auto discover_module_dirs(const std::string &workspace_root) -> std::vector<std::string>;
+
     // The result of running the compiler pipeline once for a module root.
     // `source_manager` owns all backing source text; `ast_program` (locations
     // are string_views into `source_manager`) and `sema_program` (expr_types
@@ -68,6 +77,15 @@ namespace lsp::analysis {
         // local-variable-type resolution needs to call sema::resolve_type()
         // (which takes a mutable sema::Program&) against the cached bundle.
         auto ensure_analysed(const std::string &canonical_path) -> ProgramResult &;
+
+        // Analyses 'dir' WITHOUT caching the result, for a one-off whole-workspace sweep.
+        //
+        // Kept out of module_results_ deliberately: a workspace can hold far more modules
+        // than MAX_CACHED_MODULES, and letting a Find-References sweep evict the bundles for
+        // the user's actually-open files would make the next keystroke pay for a full
+        // re-analysis.
+        [[nodiscard]] auto analyse_uncached(const std::string &dir) const -> ProgramResult;
+
 
         // Given `closure_dirs` (the module directory set this analysis round's bundle
         // covers - i.e. its ast_program.modules) and the set of files this round found to

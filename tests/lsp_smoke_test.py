@@ -1020,6 +1020,73 @@ def main() -> int:
     client.notify("textDocument/didClose", {"textDocument": {"uri": gen_uri}})
     client.read_with_timeout(5)
 
+    # --- workspace-wide Find All References (DEFERRED §4) ---
+    #
+    # Needs its own session: the main one deliberately sends 'rootUri: None', which keeps the
+    # search scoped to the analysed module's import closure. That is still the right
+    # behaviour when a client supplies no root, and every reference assertion above depends
+    # on it.
+    #
+    # The fixture is three sibling modules. 'lib' declares the target and imports nothing;
+    # 'app' and 'unrelated' both import lib. Opening lib/main.mir analyses lib and its
+    # imports — which is nothing — so NEITHER importer is in that closure. Finding their uses
+    # is precisely what the workspace sweep adds.
+    ws_root = FIXTURES / "workspace_fixture"
+    ws_client = Client(LSP_BINARY)
+    ws_client.request("initialize", {
+        "processId": None,
+        "rootUri": uri_for(ws_root),
+        "capabilities": {},
+    })
+    ws_client.notify("initialized", {})
+
+    ws_lib = ws_root / "lib" / "main.mir"
+    ws_lib_uri = uri_for(ws_lib)
+    ws_lib_text = ws_lib.read_text()
+    ws_client.notify("textDocument/didOpen", {
+        "textDocument": {"uri": ws_lib_uri, "languageId": "mirage", "version": 1, "text": ws_lib_text},
+    })
+    ws_client.read_with_timeout(5)
+
+    ws_lines = ws_lib_text.splitlines()
+    helper_line = next(i for i, l in enumerate(ws_lines) if "pub fn shared_helper" in l)
+    ws_refs = ws_client.request("textDocument/references", {
+        "textDocument": {"uri": ws_lib_uri},
+        "position": {"line": helper_line, "character": ws_lines[helper_line].index("shared_helper")},
+        "context": {"includeDeclaration": True},
+    })["result"] or []
+
+    ws_files = sorted({Path(r["uri"].removeprefix("file://")).parent.name for r in ws_refs})
+    check(ws_files == ["app", "lib", "unrelated"],
+          f"references on 'shared_helper' reach modules that the analysed closure never loads, got {ws_files}")
+    # 'unrelated' uses it twice on one line; both must be reported, not just the first.
+    unrelated_hits = [r for r in ws_refs if Path(r["uri"].removeprefix("file://")).parent.name == "unrelated"]
+    check(len(unrelated_hits) == 2,
+          f"both uses in the non-importing module are found, got {len(unrelated_hits)}")
+
+    # A LOCAL is function-scoped, so the sweep must not run for it at all — the result stays
+    # confined to the declaring file no matter how large the workspace is.
+    app_main = ws_root / "app" / "main.mir"
+    app_uri = uri_for(app_main)
+    app_text = app_main.read_text()
+    ws_client.notify("textDocument/didOpen", {
+        "textDocument": {"uri": app_uri, "languageId": "mirage", "version": 1, "text": app_text},
+    })
+    ws_client.read_with_timeout(5)
+    app_lines = app_text.splitlines()
+    lib_alias_line = next(i for i, l in enumerate(app_lines) if "const lib := import" in l)
+    alias_refs = ws_client.request("textDocument/references", {
+        "textDocument": {"uri": app_uri},
+        "position": {"line": lib_alias_line, "character": app_lines[lib_alias_line].index("lib")},
+        "context": {"includeDeclaration": True},
+    })["result"] or []
+    alias_files = {Path(r["uri"].removeprefix("file://")).parent.name for r in alias_refs}
+    check(alias_files <= {"app"},
+          f"a module alias local to one file stays confined to it, got {sorted(alias_files)}")
+
+    ws_exit = ws_client.close()
+    check(ws_exit == 0, f"workspace session exits 0, got {ws_exit}")
+
     # --- shutdown / exit ---
     client.notify("textDocument/didClose", {"textDocument": {"uri": multi_uri}})
     close_notification = client.read()
