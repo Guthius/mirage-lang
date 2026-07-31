@@ -162,6 +162,15 @@ auto main() -> int {
         {TK::Identifier, TK::Dot, TK::Star, TK::Semicolon,
          TK::LParen, TK::Identifier, TK::RParen, TK::Semicolon, TK::Eof});
 
+    // An asm block ends a statement ('x := asm { ... }'), so it must trigger ASI —
+    // a following line starting with '-' or '(' was silently glued into the expression
+    // ('(asm ...) - b', a call). Covers both the statement and expression forms.
+    expect_kinds("asm_block_triggers_asi", "asm {\nnop\n}\n-2\n",
+        {TK::KwAsm, TK::AsmBlock, TK::Semicolon, TK::Minus, TK::IntLiteral, TK::Semicolon, TK::Eof});
+    expect_kinds("asm_expr_block_triggers_asi", "x := asm -> rax {\nnop\n}\n(y)\n",
+        {TK::Identifier, TK::ColonEqual, TK::KwAsm, TK::Arrow, TK::Identifier, TK::AsmBlock, TK::Semicolon,
+         TK::LParen, TK::Identifier, TK::RParen, TK::Semicolon, TK::Eof});
+
     if (failures > 0) {
         std::fprintf(stderr, "%d test(s) failed\n", failures);
         return 1;

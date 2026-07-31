@@ -110,6 +110,11 @@ namespace lexer {
             case TokenKind::KwReturnOk:
             case TokenKind::KwBreak:
             case TokenKind::KwContinue:
+            // The raw-captured asm body ('asm { ... }' / 'x := asm -> rax { ... }') ends a
+            // statement exactly like RBrace above. AsmBlock tokens are pushed outside
+            // lex_token(), so their two push sites in tokenize() set the flag directly;
+            // this case keeps the switch the single source of truth.
+            case TokenKind::AsmBlock:
                 return true;
             default:
                 return false;
@@ -163,7 +168,10 @@ namespace lexer {
                             awaiting_asm_expr_body_ = false;
                             tokens.push_back(std::move(*asm_token));
                             last_real_kind_ = TokenKind::AsmBlock;
-                            last_token_is_asi_trigger_ = false;
+                            // An asm block can end a statement ('x := asm -> rax { ... }'),
+                            // so it must trigger ASI: a following line starting with '-',
+                            // '(' or '[' was silently glued into the expression.
+                            last_token_is_asi_trigger_ = true;
                             continue;
                         }
                         if (--asm_header_budget_ <= 0) {
@@ -201,7 +209,7 @@ namespace lexer {
                         if (auto asm_token = lex_asm_block(); asm_token.has_value()) {
                             tokens.push_back(std::move(*asm_token));
                             last_real_kind_ = TokenKind::AsmBlock;
-                            last_token_is_asi_trigger_ = false;
+                            last_token_is_asi_trigger_ = true;
                         } else if (peek() == '-' && peek_next() == '>') {
                             // 'asm -> reg [: type] { ... }' — the header is ordinary Mirage
                             // grammar (Arrow, an identifier, an optional ':' + type), lexed
