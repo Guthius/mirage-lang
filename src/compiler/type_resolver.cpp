@@ -1210,30 +1210,12 @@ namespace sema {
                                 layout_struct(module_path, struct_slot, *st);
                                 variant.payload_type = ResolvedType{.kind = TypeKind::Struct, .struct_index = struct_slot};
                             } else {
+                                // Named struct payload reuses its own slot; anything else gets
+                                // the one-field "v" wrapper. wrap_payload_in_struct below is
+                                // that whole rule — it was written later, for error unions, as
+                                // a copy of the code that used to sit here.
                                 auto payload_type = resolve_field_type(module_path, member.type, member.location);
-                                if (payload_type.kind == TypeKind::Struct) {
-                                    // Named struct payload — reuse its own slot, no wrapping.
-                                    struct_slot = payload_type.struct_index;
-                                } else {
-                                    // Non-struct payload: create a one-field anonymous struct
-                                    struct_slot = static_cast<int>(program.structs.size());
-                                    program.structs.push_back(StructInfo{.module_path = module_path});
-                                    StructInfo payload_info;
-                                    payload_info.module_path = module_path;
-                                    const uint32_t p_size = size_of(module_path, payload_type);
-                                    const uint32_t p_align = align_of(module_path, payload_type);
-                                    payload_info.fields.push_back(StructField{
-                                        .name = "v",
-                                        .type = payload_type,
-                                        .offset = 0,
-                                        .init_expr = nullptr,
-                                        .location = member.location,
-                                    });
-                                    payload_info.size = p_size;
-                                    payload_info.align = p_align;
-                                    payload_info.layout_done = true;
-                                    program.structs[struct_slot] = std::move(payload_info);
-                                }
+                                struct_slot = wrap_payload_in_struct(module_path, payload_type, member.location);
                                 variant.payload_type = payload_type;
                             }
 
@@ -1295,12 +1277,15 @@ namespace sema {
                 return false;
             }
 
-            // Wraps a non-struct payload type in a synthetic one-field struct named "v",
-            // exactly like layout_union's non-struct-payload branch above — reusing that
-            // struct-payload convention keeps every existing payload-reading consumer
-            // (emit_variant_capture, TaggedVariantExpr construction) working unchanged for
-            // synthesized error-union payloads. A struct payload type is used verbatim
-            // (its own slot), no wrapping.
+            // THE tagged-union payload convention, used by both layout_union (for a
+            // user-written 'union(enum)') and synthesize_error_union (for the compiler's own
+            // Ok/Failed wrappers): a struct payload is used verbatim, in its own slot, so its
+            // fields stay directly addressable; anything else is wrapped in a synthetic
+            // one-field struct named "v".
+            //
+            // Every payload-reading consumer — emit_variant_capture, TaggedVariantExpr
+            // construction — is written against that convention, which is why the two
+            // producers must not diverge on it.
             [[nodiscard]] auto wrap_payload_in_struct(const std::string &module_path, const ResolvedType &payload_type, const SourceLocation &location) -> int {
                 if (payload_type.kind == TypeKind::Struct) {
                     return payload_type.struct_index;
