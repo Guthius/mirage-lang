@@ -87,6 +87,37 @@ namespace sema {
     // cosmetic-only FunctionTypeInfo::param_names (they don't participate in interning
     // equality, so a name mismatch never splits a signature into two entries).
     namespace {
+        // Every tagged union in the language is laid out as [u32 tag | padding | payload],
+        // and this is the one place that says so. Three sites computed it independently
+        // before (layout_union's tagged branch, and synthesize_error_union's inner and outer
+        // unions), which is a lot of surface for a rule with four interacting parts — the
+        // tag's own alignment, the payload's, the offset the first forces on the second, and
+        // the tail padding the whole thing rounds up to.
+        //
+        // 'max_payload_align' of 0 is treated as 1 (a union with no payload at all), and a
+        // union that would otherwise be zero-sized gets TAG_ALIGN, so a tag-only union still
+        // occupies its tag.
+        struct TaggedUnionLayout {
+            uint32_t payload_offset;
+            uint32_t align;
+            uint32_t size;
+        };
+
+        constexpr uint32_t TAGGED_UNION_TAG_SIZE = 4;
+        constexpr uint32_t TAGGED_UNION_TAG_ALIGN = 4;
+
+        constexpr auto compute_tagged_union_layout(const uint32_t max_payload_size,
+                                                    const uint32_t max_payload_align) -> TaggedUnionLayout {
+            const uint32_t effective_align = std::max(max_payload_align, 1u);
+            const uint32_t payload_offset =
+                (TAGGED_UNION_TAG_SIZE + effective_align - 1) / effective_align * effective_align;
+            const uint32_t align = std::max(TAGGED_UNION_TAG_ALIGN, max_payload_align);
+            const uint32_t raw_size = payload_offset + max_payload_size;
+            uint32_t size = (raw_size + align - 1) / align * align;
+            if (size == 0) size = TAGGED_UNION_TAG_ALIGN;
+            return {.payload_offset = payload_offset, .align = align, .size = size};
+        }
+
         auto intern_decayed_fn_type(Program &program, std::vector<ResolvedType> params,
                                      std::vector<std::string> names, std::vector<ResolvedType> returns,
                                      const bool is_variadic) -> ResolvedType {
@@ -1155,11 +1186,6 @@ namespace sema {
                 info.is_tagged = decl->is_tagged;
 
                 if (decl->is_tagged) {
-                    // Tagged union: tag (u32) + optional payload
-                    // Layout: [u32 tag | padding | max_payload bytes]
-                    static constexpr uint32_t TAG_SIZE = 4;
-                    static constexpr uint32_t TAG_ALIGN = 4;
-
                     uint32_t max_payload_size = 0;
                     uint32_t max_payload_align = 1;
 
@@ -1224,16 +1250,10 @@ namespace sema {
                         info.variants.push_back(std::move(variant));
                     }
 
-                    // payload_offset = align_up(TAG_SIZE, max_payload_align)
-                    const uint32_t effective_payload_align = std::max(max_payload_align, 1u);
-                    info.payload_offset = (TAG_SIZE + effective_payload_align - 1) / effective_payload_align * effective_payload_align;
-
-                    // Total align = max(tag_align, payload_align)
-                    info.align = std::max(TAG_ALIGN, max_payload_align);
-                    // Total size = align_up(payload_offset + max_payload_size, align)
-                    const uint32_t raw_size = info.payload_offset + max_payload_size;
-                    info.size = (raw_size + info.align - 1) / info.align * info.align;
-                    if (info.size == 0) info.size = TAG_ALIGN; // minimum size for tag-only unions
+                    const auto layout = compute_tagged_union_layout(max_payload_size, max_payload_align);
+                    info.payload_offset = layout.payload_offset;
+                    info.align = layout.align;
+                    info.size = layout.size;
                 } else {
                     uint32_t max_size = 0;
                     uint32_t max_align = 1;
@@ -1315,9 +1335,6 @@ namespace sema {
             // is recorded on the OUTER wrapper only — the inner dispatch union is an
             // implementation detail nobody can name or call.
             auto synthesize_error_union(const std::string &module_path, const std::vector<ResolvedType> &sorted_members, bool is_optional, const SourceLocation &location) -> UnionInfo {
-                static constexpr uint32_t TAG_SIZE = 4;
-                static constexpr uint32_t TAG_ALIGN = 4;
-
                 ResolvedType failed_payload_source;
                 if (sorted_members.size() == 1) {
                     failed_payload_source = sorted_members[0];
@@ -1344,12 +1361,10 @@ namespace sema {
                         inner.variants.push_back(std::move(variant));
                     }
 
-                    const uint32_t eff_align = std::max(max_payload_align, 1u);
-                    inner.payload_offset = (TAG_SIZE + eff_align - 1) / eff_align * eff_align;
-                    inner.align = std::max(TAG_ALIGN, max_payload_align);
-                    const uint32_t raw_size = inner.payload_offset + max_payload_size;
-                    inner.size = (raw_size + inner.align - 1) / inner.align * inner.align;
-                    if (inner.size == 0) inner.size = TAG_ALIGN;
+                    const auto inner_layout = compute_tagged_union_layout(max_payload_size, max_payload_align);
+                    inner.payload_offset = inner_layout.payload_offset;
+                    inner.align = inner_layout.align;
+                    inner.size = inner_layout.size;
                     inner.layout_done = true;
 
                     const int inner_slot = static_cast<int>(program.unions.size());
@@ -1381,12 +1396,10 @@ namespace sema {
                 const auto *failed_struct = program.struct_at(failed_variant.payload_struct_index);
                 const uint32_t max_payload_size = failed_struct ? failed_struct->size : 0;
                 const uint32_t max_payload_align = failed_struct ? failed_struct->align : 1;
-                const uint32_t eff_align = std::max(max_payload_align, 1u);
-                outer.payload_offset = (TAG_SIZE + eff_align - 1) / eff_align * eff_align;
-                outer.align = std::max(TAG_ALIGN, max_payload_align);
-                const uint32_t raw_size = outer.payload_offset + max_payload_size;
-                outer.size = (raw_size + outer.align - 1) / outer.align * outer.align;
-                if (outer.size == 0) outer.size = TAG_ALIGN;
+                const auto outer_layout = compute_tagged_union_layout(max_payload_size, max_payload_align);
+                outer.payload_offset = outer_layout.payload_offset;
+                outer.align = outer_layout.align;
+                outer.size = outer_layout.size;
                 outer.layout_done = true;
 
                 return outer;
