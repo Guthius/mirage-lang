@@ -202,15 +202,10 @@ namespace lsp::handlers {
                 // A bitset's completions are its member enum's fields (LSPH-2): the bitset
                 // declares none of its own.
                 //
-                // NOTE: this arm is currently UNREACHABLE from handle_completion, and adding
-                // it did not change any observable behaviour. Getting here needs a receiver
-                // expression whose type is a bitset, and no such expression exists -- a flag
-                // is only ever written contextually, as a bare '.Name' taking its meaning
-                // from the expected type. That form has no receiver chain, so the handler
-                // takes the no-receiver path and never consults a type at all. Reaching this
-                // needs contextual '.' completion, which is a separate feature; kept because
-                // it is correct and is what that feature will call. Pinned as unimplemented
-                // in lsp_smoke_test.py so wiring it up is a visible change.
+                // Reached exclusively via the CONTEXTUAL '.Name' path: a flag is never
+                // written with a receiver, only as a bare '.Name' taking its meaning from the
+                // expected type (see expected_type_at). This arm was unreachable, and
+                // untested, until that path existed.
                 if (const auto *info = program.bitset_at(type.bitset_index)) {
                     if (const auto *member_enum = program.enum_at(info->member_enum_type.enum_index)) {
                         for (const auto &field : member_enum->fields) {
@@ -260,18 +255,158 @@ namespace lsp::handlers {
         }
     }
 
-    // Three completion contexts, decided from the token stream alone (there is no parse --
-    // the buffer is usually mid-edit and often unparseable):
+    // Four completion contexts:
     //
     //   'receiver.<cursor>'    member access, via chain_prefix + add_type_members
+    //   '.<cursor>'            CONTEXTUAL: a bare '.Name' whose meaning comes from the
+    //                          expected type - an enum field, a tagged-union variant, a
+    //                          bitset flag. See expected_type_at.
     //   'Generic[<cursor>]'    type arguments, via enclosing_bracket_owner + add_type_names
     //   anything else          keywords, locals/params, module symbols
+    // Only these three kinds have contextual '.Name' members worth offering. Anything else
+    // means the surrounding shape determined a type, but not one a leading dot can name.
+    auto has_contextual_members(const sema::ResolvedType &type) -> bool {
+        return type.kind == sema::TypeKind::Enum || type.kind == sema::TypeKind::Bitset ||
+               type.kind == sema::TypeKind::Union;
+    }
+
+    auto is_assignment_op(const TokenKind kind) -> bool {
+        switch (kind) {
+        case TokenKind::Equal:
+        case TokenKind::PlusEqual:
+        case TokenKind::MinusEqual:
+        case TokenKind::AmpEqual:
+        case TokenKind::PipeEqual:
+        case TokenKind::CaretEqual:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    // The type a bare '.Name' at 'dot_index' takes its meaning from, or nullopt when nothing
+    // in the surrounding text determines one.
     //
-    // Still missing: the contextual '.<cursor>' form, where a bare '.Name' takes its meaning
-    // from the expected type (an enum field, a tagged-union variant, a bitset flag). It has
-    // no receiver, so it lands in the third case and is offered value completions. Reaching
-    // add_type_members' Enum/Bitset arms from there needs the expected type at the cursor,
-    // which nothing here currently computes.
+    // Two strategies, in this order:
+    //
+    //  1. ASK SEMA. check_expr's DotIdentExpr case returns the expected type as the node's
+    //     OWN type, so when the buffer parsed and this '.Name' made it into the tree, its
+    //     recorded type IS the answer. Exact, free, and handles arbitrarily complex contexts
+    //     (a nested call argument, a match arm on a field access, ...) with no new analysis.
+    //
+    //  2. INFER FROM TOKENS. Completion runs on buffers that are usually mid-edit and often
+    //     unparseable — a bare '.' with nothing after it typically kills the whole enclosing
+    //     declaration, since there is no error-recovery expression node — so strategy 1 is
+    //     unavailable exactly when the user is most likely to be asking. These are the shapes
+    //     worth recovering, in decreasing order of how often they come up.
+    //
+    // Deliberately conservative: an unrecognised shape returns nullopt and the caller falls
+    // back to what it did before, rather than guessing.
+    auto expected_type_at(const std::vector<Token> &tokens, const size_t dot_index, const size_t line,
+                           const EnclosingFunction &enclosing, const LocalLookupContext &ctx,
+                           const sema::ProgramModule &sema_module, sema::Program &program,
+                           const std::string &module_path,
+                           const std::function<std::optional<Resolution>(const std::string &)> &resolve_base_name)
+        -> std::optional<sema::ResolvedType> {
+        // (1) sema's own answer.
+        if (enclosing.body) {
+            if (const auto *found = find_expr_by_location(*enclosing.body, tokens[dot_index].location)) {
+                if (const auto *ty = find_expr_type(ctx, *found); ty && has_contextual_members(*ty)) {
+                    return *ty;
+                }
+            }
+        }
+
+        // (1b) Still sema's answer, one level out. Inside a braced literal the '.Name' items
+        // are often NOT expression nodes — a bitset literal's members are plain strings on
+        // BitsetExpr, with no expr_types entry of their own — but the LITERAL is, and its
+        // recorded type is exactly the type those names belong to.
+        if (enclosing.body) {
+            if (const auto brace_loc = enclosing_struct_literal_brace(tokens, dot_index + 1)) {
+                if (const auto *literal = find_expr_by_location(*enclosing.body, *brace_loc)) {
+                    if (const auto *ty = find_expr_type(ctx, *literal); ty && has_contextual_members(*ty)) {
+                        return *ty;
+                    }
+                }
+            }
+        }
+
+        const auto type_of_name = [&](const std::string &name) -> std::optional<sema::ResolvedType> {
+            if (const auto res = resolve_base_name(name); res && has_contextual_members(res->type)) {
+                return res->type;
+            }
+            return std::nullopt;
+        };
+
+        // (2a) 'modes += .' / 'modes = .' — assignment to something already typed. Covers the
+        // bitset case DEFERRED called out by name.
+        if (dot_index >= 2 && is_assignment_op(tokens[dot_index - 1].kind) &&
+            tokens[dot_index - 2].kind == TokenKind::Identifier) {
+            if (auto ty = type_of_name(tokens[dot_index - 2].lexeme)) return ty;
+        }
+
+        // (2b) 'const m: Mode = .' — an explicit type annotation names the answer outright.
+        if (dot_index >= 3 && tokens[dot_index - 1].kind == TokenKind::Equal &&
+            tokens[dot_index - 2].kind == TokenKind::Identifier &&
+            tokens[dot_index - 3].kind == TokenKind::Colon) {
+            if (const auto sym_it = sema_module.symbols.find(tokens[dot_index - 2].lexeme);
+                sym_it != sema_module.symbols.end()) {
+                if (const auto *ts = std::get_if<sema::TypeSymbol>(&sym_it->second);
+                    ts && ts->resolved && has_contextual_members(*ts->resolved)) {
+                    return *ts->resolved;
+                }
+            }
+        }
+
+        // (2c) A match/switch arm: '.Variant' takes its meaning from the scrutinee. Walk back
+        // to the innermost enclosing '{' and check whether the construct that opened it is a
+        // match or switch; if so, the tokens between the keyword and the brace are the
+        // scrutinee. Only a plain identifier chain is reconstructed here — anything more
+        // (a call, an index) is what strategy 1 is for.
+        int depth = 0;
+        for (size_t i = dot_index; i-- > 0;) {
+            const auto kind = tokens[i].kind;
+            if (kind == TokenKind::RBrace) {
+                ++depth;
+            } else if (kind == TokenKind::LBrace) {
+                if (depth > 0) { --depth; continue; }
+                // Unmatched '{': this is our enclosing block. Is it a match/switch body?
+                for (size_t j = i; j-- > 0;) {
+                    if (tokens[j].kind == TokenKind::KwMatch || tokens[j].kind == TokenKind::KwSwitch) {
+                        // Scrutinee is tokens (j, i). Take the last identifier chain in it.
+                        if (i >= 1 && tokens[i - 1].kind == TokenKind::Identifier) {
+                            auto names = chain_prefix(tokens, i - 1);
+                            names.push_back(tokens[i - 1].lexeme);
+                            if (auto ty = type_of_name(names.front()); ty && names.size() == 1) return ty;
+                            // A dotted chain: resolve the base, then step through the fields.
+                            if (const auto base = resolve_base_name(names.front())) {
+                                auto container = base->kind == Resolution::Kind::Symbol
+                                    ? symbol_to_container(*base->symbol)
+                                    : Container{.kind = Container::Kind::Type, .module_path = "", .type = base->type};
+                                for (size_t k = 1; k < names.size() && container.kind != Container::Kind::None; ++k) {
+                                    auto [res, next] = step(container, names[k], program);
+                                    container = next;
+                                }
+                                if (container.kind == Container::Kind::Type && has_contextual_members(container.type)) {
+                                    return container.type;
+                                }
+                            }
+                        }
+                        return std::nullopt;
+                    }
+                    // Anything that can't be part of a scrutinee expression ends the search.
+                    if (tokens[j].kind == TokenKind::RBrace || tokens[j].kind == TokenKind::Semicolon ||
+                        tokens[j].kind == TokenKind::LBrace) {
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+
+        return std::nullopt;
+    }
+
     auto handle_completion(analysis::ProgramResult &result, const std::string &module_path,
                             const std::string &path, const size_t line, const size_t column) -> json {
         DiagnosticEngine throwaway_diag(*result.source_manager);
@@ -331,14 +466,17 @@ namespace lsp::handlers {
 
         std::vector<std::string> chain_prefix_names;
         bool dot_triggered = false;
+        bool contextual_dot = false;
         if (chain_anchor) {
             chain_prefix_names = chain_prefix(tokens, *chain_anchor);
             if (!chain_prefix_names.empty()) {
                 dot_triggered = true;
-            } else if (!identifier_index && *chain_anchor >= 1 && tokens[*chain_anchor - 1].kind == TokenKind::Dot) {
-                // Bare "receiver." with receiver itself unresolvable as a chain (e.g. after a
-                // call/index) - chain_prefix can't reconstruct these; nothing to offer.
-                return json::array();
+            } else if (*chain_anchor >= 1 && tokens[*chain_anchor - 1].kind == TokenKind::Dot) {
+                // A '.' with no identifier chain before it. Either a CONTEXTUAL '.Name' — whose
+                // meaning comes from the expected type — or a member access on a receiver
+                // chain_prefix cannot reconstruct (a call or index result). expected_type_at
+                // tells the two apart: it answers only for the former.
+                contextual_dot = true;
             }
         }
 
@@ -360,6 +498,20 @@ namespace lsp::handlers {
         };
 
         std::vector<json> items;
+
+        if (contextual_dot) {
+            if (const auto expected = expected_type_at(tokens, *chain_anchor - 1, line, enclosing, ctx,
+                                                        sema_mod_it->second, result.sema_program, module_path,
+                                                        resolve_base_name)) {
+                add_type_members(*expected, result.sema_program, module_path, prefix, items);
+                return items;
+            }
+            // Nothing here determines a type. With nothing typed after the '.' there is
+            // genuinely nothing to offer (the pre-existing behaviour for an unreconstructable
+            // receiver); with a partially-typed name, fall through to value completions, which
+            // is what that case did before.
+            if (!identifier_index) return json::array();
+        }
 
         if (dot_triggered) {
             const auto base = resolve_base_name(chain_prefix_names[0]);

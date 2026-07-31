@@ -287,6 +287,18 @@ namespace lsp::handlers {
     };
     auto token_span(const Token &token) -> TokenSpan;
 
+    // The '{' of the braced literal enclosing token 'index', if any — walking out over
+    // balanced brackets. Used to resolve a leading-dot name against the literal's own type
+    // ('.field' in a struct literal, '.Flag' in a bitset one) rather than against whatever
+    // else happens to be in scope.
+    auto enclosing_struct_literal_brace(const std::vector<Token> &tokens, size_t index) -> std::optional<SourceLocation>;
+
+    // The Expr node whose own location is exactly 'target', searched depth-first from a
+    // statement. Source locations are unique per position, so at most one node matches.
+    // Returns nullptr if none does — which for a mid-edit buffer is the common case, since a
+    // half-written expression usually fails to parse into the tree at all.
+    auto find_expr_by_location(const ast::Stmt &stmt, const SourceLocation &target) -> const ast::Expr *;
+
     // Finds the token whose span CONTAINS 1-based (line, column) — see token_span for why
     // that is not the same test completion uses. Returns its index into `tokens`, or nullopt
     // if the position isn't on a token.

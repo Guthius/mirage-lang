@@ -1018,6 +1018,13 @@ namespace lsp::handlers {
                                     if (const auto *r = find_expr_by_location(v, target)) return r;
                                 }
                                 return nullptr;
+                            } else if constexpr (std::is_same_v<W, ast::BitsetExpr>) {
+                                // Its MEMBERS are plain names, not expression nodes, so there is
+                                // nothing inside to recurse into — but the literal itself has a
+                                // location and a recorded type, which is what lets a leading-dot
+                                // flag inside it be resolved against the bitset (see
+                                // expected_type_at).
+                                return location_matches(alt.location, target) ? &expr : nullptr;
                             } else {
                                 return nullptr; // EmptyExpr
                             }

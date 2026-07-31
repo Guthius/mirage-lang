@@ -806,19 +806,52 @@ def main() -> int:
     check(any(it["label"] == "area" and it.get("detail") == "trait method" for it in shape_items),
           f"trait-handle completions are labelled 'trait method', got {shape_items}")
 
-    # add_type_members' Bitset arm is, by contrast, NOT reachable from completion at all.
-    # It needs a receiver whose type is a bitset, and there is no such expression: a flag is
-    # only ever written contextually, as a bare '.Name' whose meaning comes from the expected
-    # type. That form has no receiver chain, so the handler takes the no-receiver path
-    # (keywords + locals + module symbols) and never consults a type.
+    # --- contextual '.Name' completion (DEFERRED §3) ---
     #
-    # Pinned as the CURRENT behaviour rather than the desired one, so that implementing
-    # contextual '.' completion is a deliberate, visible change here rather than a silent
-    # one. See DEFERRED.md.
+    # A bitset flag, an enum field and a tagged-union variant are only ever written
+    # contextually, as a bare '.Name' taking its meaning from the EXPECTED type. That form has
+    # no receiver chain, so completion used to fall through to the no-receiver path and offer
+    # keywords and locals — and add_type_members' Bitset arm was unreachable outright.
+    #
+    # Each assertion below exercises a different way the expected type is found: see
+    # expected_type_at. The first two are answered by sema (the buffer parses, so the
+    # DotIdentExpr carries its own resolved type); the rest are the token-level fallbacks that
+    # matter when it does not.
+
+    # Inside a bitset literal, against the declared type of the variable being initialised.
     flag_items = sym_completion("{.Close, .Flush}", "Close")
     flag_labels = [it["label"] for it in flag_items]
-    check("Close" not in flag_labels,
-          f"contextual '.flag' completion is not implemented (offers no bitset flags), got {flag_labels}")
+    check("Close" in flag_labels and "Flush" in flag_labels and "Read" in flag_labels,
+          f"contextual '.flag' inside a bitset literal offers the member enum's fields, got {flag_labels}")
+    check(any(it["label"] == "Close" and it.get("detail") == "bitset flag" for it in flag_items),
+          f"bitset flag completions are labelled 'bitset flag', got {flag_items}")
+    check("if" not in flag_labels and "counter" not in flag_labels,
+          f"contextual '.flag' offers ONLY flags, not keywords or locals, got {flag_labels}")
+
+    # 'modes += .Read' — compound assignment to an already-typed local.
+    compound_items = sym_completion("modes += .Read", "Read")
+    compound_labels = [it["label"] for it in compound_items]
+    check("Read" in compound_labels and "Close" in compound_labels,
+          f"contextual '.flag' after '+=' offers the bitset's flags, got {compound_labels}")
+
+    # A match arm pattern: '.Opened' takes its meaning from the scrutinee's type.
+    arm_items = sym_completion(".Opened(p): p.id,", "Opened")
+    arm_labels = [it["label"] for it in arm_items]
+    check("Opened" in arm_labels and "Closed" in arm_labels,
+          f"contextual '.Variant' in a match arm offers the scrutinee's variants, got {arm_labels}")
+
+    # And in a switch arm, which reaches the same code by a different route.
+    switch_arm_items = sym_completion(".Opened(p): { return p.id }", "Opened")
+    switch_arm_labels = [it["label"] for it in switch_arm_items]
+    check("Opened" in switch_arm_labels and "Closed" in switch_arm_labels,
+          f"contextual '.Variant' in a switch arm offers the scrutinee's variants, got {switch_arm_labels}")
+
+    # A contextual variant used as a call ARGUMENT — the shape only sema can answer, since the
+    # expected type comes from the callee's parameter list.
+    call_arg_items = sym_completion("describe(.Opened{.id = 1})", "Opened")
+    call_arg_labels = [it["label"] for it in call_arg_items]
+    check("Opened" in call_arg_labels and "Closed" in call_arg_labels,
+          f"contextual '.Variant' as a call argument offers the parameter's variants, got {call_arg_labels}")
 
     # --- the two cursor conventions must stay different (LSPH-10) ---
     #
