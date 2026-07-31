@@ -2933,7 +2933,10 @@ namespace sema {
 
             for (const auto &arm : v->arms) {
                 if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
-                    const auto val_type = check_expr(arm.value, locals, module_path, program, diag,
+                    // Arm-local copy, as in the scalar path: an arm body's error-state
+                    // narrowing must not leak into sibling arms.
+                    auto arm_locals = locals;
+                    const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
                         arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
                     if (first_arm) { arm_type = val_type; first_arm = false; }
                     else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
@@ -2990,7 +2993,8 @@ namespace sema {
                 }
                 if (!found) {
                     error(diag, arm.location, std::format("no variant '{}' on {}", vp.name, union_info.is_error_union ? "error" : "tagged union"));
-                    const auto val_type = check_expr(arm.value, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+                    auto arm_locals = locals;
+                    const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     if (first_arm) { arm_type = val_type; first_arm = false; }
                 }
             }
@@ -3027,7 +3031,8 @@ namespace sema {
 
         for (const auto &arm : v->arms) {
             if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
-                const auto val_type = check_expr(arm.value, locals, module_path, program, diag,
+                auto arm_locals = locals;
+                const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
                     arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
                 if (first_arm) { arm_type = val_type; first_arm = false; }
                 else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
@@ -3059,7 +3064,8 @@ namespace sema {
                 error(diag, arm.location, std::format("no enum field named '{}'", vp.name));
             }
 
-            const auto val_type = check_expr(arm.value, locals, module_path, program, diag,
+            auto arm_locals = locals;
+            const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
                 arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
             if (first_arm) { arm_type = val_type; first_arm = false; }
             else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
