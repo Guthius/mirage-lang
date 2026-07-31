@@ -38,11 +38,31 @@ cmake --build build
 
 ## Usage
 
+The compiler takes an action (`build` or `run`) and a **module directory** (every `.mir`
+file in the directory is one module):
+
 ```sh
-mirage source.mir               # compile to ./a.out
-mirage -o myprogram source.mir  # specify output path
-mirage --emit-ir source.mir     # print LLVM IR instead of linking
-mirage --freestanding source.mir
+mirage build my_project             # compile to ./a.out
+mirage build -o myprogram my_project
+mirage run my_project               # compile and run
+mirage build --emit-ir my_project   # print LLVM IR to stdout instead of compiling
+mirage build --freestanding my_project
+```
+
+Options:
+
+```
+-o, --output <file>       Output file name (default: a.out)
+-l <lib>                  Link with additional library (may be repeated)
+--std=<path>              Override the standard library path (takes precedence over MIRAGE_PATH)
+--cc=<program>            Linker driver to invoke (default: clang, or $MIRAGE_CC)
+--emit-ir                 Print LLVM IR to stdout instead of compiling
+--freestanding            Compile without standard library
+--noinit                  Skip generating/calling the synthesized '@init'-runner '_init'
+--opt key=value           Set a compile-time '$option' value (may be repeated)
+--print-link-directives   Print collected '#link' directives and exit
+--dump-ast                Print the parsed AST shape and exit
+--no-eager-generic-check  Only type-check a generic's body once it is instantiated
 ```
 
 ## Language Tour
