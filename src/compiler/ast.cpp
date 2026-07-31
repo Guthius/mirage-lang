@@ -4,6 +4,7 @@
 #include "asm_parser.hpp"
 #include "asm_registers.hpp"
 
+#include <charconv>
 #include <format>
 #include <sstream>
 
@@ -1148,8 +1149,20 @@ namespace ast {
                 auto digits = token.lexeme;
                 std::erase(digits, '_');
 
+                // from_chars rather than std::stod: stod throws on out-of-range input
+                // ('1e999'), which previously terminated the compiler.
+                double value = 0.0;
+                const auto [ptr, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), value);
+                if (ec == std::errc::result_out_of_range) {
+                    parser.report_error(location, std::format("float literal '{}' is out of range for f64", token.lexeme));
+                    value = 0.0;
+                } else if (ec != std::errc{} || ptr != digits.data() + digits.size()) {
+                    parser.report_error(location, std::format("malformed float literal '{}'", token.lexeme));
+                    value = 0.0;
+                }
+
                 return LiteralFloatExpr{
-                    .value = std::stod(digits),
+                    .value = value,
                     .location = location,
                 };
             }

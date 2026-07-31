@@ -1,0 +1,10 @@
+// example_float_literal_range — an out-of-range float literal must produce a diagnostic.
+// '1e999' previously threw std::out_of_range out of std::stod and terminated the compiler
+// with no diagnostic at all (CODE_REVIEW.md FE-2).
+//
+// Expected: compile error "float literal '1e999' is out of range for f64".
+
+pub fn main() -> i32 {
+    const x := 1e999
+    return 0
+}

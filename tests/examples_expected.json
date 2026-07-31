@@ -353,6 +353,11 @@
     "action": "run",
     "exit": 0
   },
+  "example_float_literal_range": {
+    "action": "build",
+    "diag": "examples/example_float_literal_range/main.mir:8:16: error: float literal '1e999' is out of range for f64",
+    "exit": 1
+  },
   "example_float_underscore": {
     "action": "run",
     "exit": 7

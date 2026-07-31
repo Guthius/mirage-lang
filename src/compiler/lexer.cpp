@@ -440,7 +440,12 @@ namespace lexer {
                         advance();
                     }
 
+                    const auto exponent_digits_start = pos_;
                     skip_digits();
+                    if (pos_ == exponent_digits_start) {
+                        // '1e' / '1e+' — previously lexed as-is and silently decoded as 1.0.
+                        diagnostics_.report_error(DiagnosticStage::Lexer, make_location(), "missing digits in float exponent");
+                    }
                 }
 
                 return make_token(is_float ? TokenKind::FloatLiteral : TokenKind::IntLiteral, start);
@@ -458,7 +463,11 @@ namespace lexer {
                         advance();
                     }
 
+                    const auto exponent_digits_start = pos_;
                     skip_digits();
+                    if (pos_ == exponent_digits_start) {
+                        diagnostics_.report_error(DiagnosticStage::Lexer, make_location(), "missing digits in float exponent");
+                    }
                 }
 
                 return make_token(TokenKind::FloatLiteral, start);
