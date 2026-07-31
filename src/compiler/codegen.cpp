@@ -2877,6 +2877,10 @@ namespace codegen {
                         return sema::ResolvedType{.kind = sema::TypeKind::Pointer, .pointee_index = static_cast<int>(i)};
                     }
                 }
+                // Sema interns '*self_type' when it declares the method, so a miss is a
+                // compiler bug. It used to fall back to pointee_index 0 — a pointer to
+                // whatever type happened to be interned first, silently.
+                report_codegen_error(diag_, {}, "internal error: no interned pointer type for method receiver");
                 return sema::ResolvedType{.kind = sema::TypeKind::Pointer, .pointee_index = 0};
             }
 
@@ -6646,9 +6650,15 @@ namespace codegen {
                         auto *ptr_ll_ty = llvm::PointerType::getUnqual(*context_);
                         elem_slot = create_entry_alloca(current_function_, ptr_ll_ty, stmt.element_name);
                         const auto &pointees = sema_program_.pointer_pointees;
-                        int ptr_idx = 0;
+                        int ptr_idx = -1;
                         for (int i = 0; i < (int)pointees.size(); i++) {
                             if (pointees[i] == elem_type) { ptr_idx = i; break; }
+                        }
+                        if (ptr_idx < 0) {
+                            // Sema interns '*elem_type' when it checks a by-ref for-in, so a
+                            // miss is a compiler bug — not a license to alias pointee 0.
+                            report_codegen_error(diag_, stmt.location, "internal error: no interned pointer type for by-ref loop element");
+                            ptr_idx = 0;
                         }
                         auto ptr_type = sema::ResolvedType{.kind = sema::TypeKind::Pointer, .pointee_index = ptr_idx};
                         locals_[stmt.element_name] = LocalValue{.alloca = elem_slot, .type = ptr_type, .type_module = type_module};
