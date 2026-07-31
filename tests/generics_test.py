@@ -97,6 +97,17 @@ CASES = [
         ["via_local=10 defaulted=6 overridden=-3 twice=12"],
         [],
     ),
+    # A generic instantiated behind a type alias whose declaring module is reached only through
+    # a NAMED import, so it is not force-declared. find_type_decl_for read "module not declared
+    # yet" as "not a generic decl" and laid the template body out unbound, reporting
+    # "unknown type 'T'" against the declaration and caching the wreckage.
+    (
+        "example_generics_cross_module_alias",
+        "run",
+        30,
+        ["a=10 b=20"],
+        [],
+    ),
     # Rejection cases — each new restriction/coherence error from spec.md §22.
     (
         "example_generics_orphan_impl",

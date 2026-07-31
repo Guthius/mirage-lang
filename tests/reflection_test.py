@@ -71,6 +71,11 @@ POSITIVE_CASES = [
     "example_type_info_function",
     "example_type_info_tagged_payload",
     "example_type_info_generic_args",
+    # A struct with a trait-typed field. Emitting the trait's Type_Info reaches a synthesized
+    # 'Function' ResolvedType per trait method whose fn_index is -1, which type_info_ptr_for
+    # used to pass to an unchecked fn_signatures.at() — an uncaught std::out_of_range that
+    # aborted the compiler outright, so "exits 0" is itself the regression assertion here.
+    "example_reflect_trait_field",
 ]
 
 
@@ -87,6 +92,15 @@ def main() -> int:
     for example_dir in POSITIVE_CASES:
         result = run(example_dir)
         check(result.returncode == 0, f"{example_dir}: builds and runs, exit 0 (stderr: {result.stderr!r})")
+
+    # Not just "did not crash": the trait method must come back as the DEGRADED
+    # '.kind(Function)' encoding, which is what type_info_ptr_for returning nil for an unset
+    # index is supposed to produce.
+    result = run("example_reflect_trait_field")
+    check(
+        result.stdout.strip() == "fields=2 greet_is_kind=1",
+        f"example_reflect_trait_field: trait method reflects as .kind(Function) (got {result.stdout.strip()!r})",
+    )
 
     # The println/print_any/any/type_of/type_info_of integration test.
     result = run("example_reflection")

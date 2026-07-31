@@ -1,0 +1,113 @@
+// example_reflect_trait_field — reflecting a struct that has a TRAIT-typed field.
+//
+// This used to be a hard compiler abort (uncaught std::out_of_range, no diagnostic), through a
+// three-level recursion inside codegen's Type_Info emission:
+//
+//   emit_type_info_global(Holder)      -- Struct case, walks its fields
+//     -> build_type_kind_or_info_constant(Greeter)
+//       -> emit_type_info_global(Greeter)   -- Trait case, walks its methods
+//         -> build_type_kind_or_info_constant(ResolvedType{.kind = Function})
+//
+// That last ResolvedType is synthesized on the spot, deliberately: a trait method carries no
+// separately-interned function-type, so its 'fn_index' stays -1 and the reference is meant to
+// degrade to '.kind(Function)'. build_type_kind_or_info_constant's own doc comment says as
+// much. But type_info_ptr_for admitted TypeKind::Function unconditionally instead of returning
+// nil for an unset index, so emit_type_info_global's Function case reached
+// 'fn_signatures.at(-1)' and threw.
+//
+// Any struct with a trait-typed field triggered it — including core/string's String and
+// core/list's List, both of which hold an 'allocator: Allocator'. Every program that formatted
+// a value through core/fmt was one working sema pass away from this crash.
+//
+// Expected: compiles and runs, prints "fields=2 greet_is_kind=1", exit code 0.
+
+const rt := import("../../runtime/type_info")
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub type Greeter = trait {
+    fn greet(self) -> i32
+}
+
+pub type Impl = struct {
+    x: i32
+}
+
+impl Greeter for Impl {
+    fn greet(self) -> i32 {
+        return self.x
+    }
+}
+
+pub type Holder = struct {
+    g: Greeter
+    n: i32
+}
+
+// nil unless 'tko' carries a real descriptor — the '.kind' side is the degraded encoding.
+fn info_of(tko: rt.Type_Kind_Or_Info) -> *rt.Type_Info {
+    mut out: *rt.Type_Info = nil
+
+    switch tko {
+        .info(p): {
+            out = cast(p, *rt.Type_Info)
+        },
+        _: {
+            out = nil
+        }
+    }
+
+    return out
+}
+
+// 1 when the trait's first method came back as '.kind(Function)' rather than a descriptor,
+// which is exactly the encoding whose absence used to crash codegen.
+fn first_method_is_kind(trait_info: *rt.Type_Info) -> i32 {
+    if trait_info == nil {
+        return 0
+    }
+
+    mut out: i32 = 0
+
+    switch trait_info.* {
+        .Trait(t): {
+            if len(t.methods) > 0 {
+                switch t.methods[0].type_info {
+                    .kind(_): {
+                        out = 1
+                    },
+                    _: {
+                        out = 0
+                    }
+                }
+            }
+        },
+        _: {
+            out = 0
+        }
+    }
+
+    return out
+}
+
+pub fn main() -> i32 {
+    mut impl_value: Impl = { .x = 7 }
+    mut h: Holder = { .g = &impl_value, .n = 1 }
+
+    const info: *rt.Type_Info = cast(type_info_of(type_of(h)), *rt.Type_Info)
+
+    mut fields: i32 = -1
+    mut greet_is_kind: i32 = 0
+
+    switch info.* {
+        .Struct(s): {
+            fields = cast(len(s.fields), i32)
+            // Field 0 is the trait handle; recurse into its own descriptor.
+            greet_is_kind = first_method_is_kind(info_of(s.fields[0].base_type))
+        },
+        _: fields = -1
+    }
+
+    printf("fields=%d greet_is_kind=%d\n", fields, greet_is_kind)
+    return 0
+}

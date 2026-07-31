@@ -1,0 +1,29 @@
+// The mirror image of a/a.mir. Whichever of the two modules ends up declared first, ITS
+// force-layout loop resolves an alias naming a generic in the other — which is, at that
+// moment, still undeclared.
+
+const a := import("../a")
+
+pub type Box_B[T: type] = struct {
+    value: *T
+    n: usize
+}
+
+pub type Alias_A = a.Box_A[i32]
+
+pub fn make_box_b(value: *i32) -> Box_B[i32] {
+    return {
+        .value = value,
+        .n = 1,
+    }
+}
+
+pub fn read_alias_a(x: *Alias_A) -> i32 {
+    return x.get(0).*
+}
+
+impl Box_B[T: type] {
+    pub fn get(self, index: usize) -> *T {
+        return &self.value[index]
+    }
+}

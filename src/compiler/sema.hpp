@@ -1222,9 +1222,15 @@ namespace sema {
     // slot in Program::generic_type_instance_lookup. Cycle-guarded by (decl_name, args) —
     // see type_resolver.cpp. Reports a sema error and returns TypeKind::Invalid if 'args'
     // doesn't match 'decl_name's declared arity/param kinds.
+    //
+    // 'ast_program' plays the same role it does on resolve_type: non-null only when the call
+    // comes from a declare-phase site that may run before every module is declared, letting
+    // the declaration's RHS declare a cross-module target on demand rather than misresolving
+    // it. Left null by the check-phase callers, where every module is declared already.
     auto instantiate_generic_type(Program &program, DiagnosticEngine &diag, const std::string &module_path,
                                    const std::string &decl_name, std::vector<GenericArgValue> args,
-                                   const SourceLocation &use_loc) -> ResolvedType;
+                                   const SourceLocation &use_loc,
+                                   const ast::Program *ast_program = nullptr) -> ResolvedType;
     // Same cache-or-create shape as instantiate_generic_type, for a generic free function.
     // Resolves the instance's signature eagerly (so its param/return types are immediately
     // usable for call-checking); returns its stable INDEX into

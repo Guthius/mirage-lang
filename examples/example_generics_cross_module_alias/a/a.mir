@@ -1,0 +1,29 @@
+// Declares one generic type, and aliases the OTHER module's generic. 'b' is reached through a
+// NAMED import, which — unlike declare_bare_import — never calls ensure_module_declared on its
+// target. See main.mir for why the pairing with b/b.mir is what makes this deterministic.
+
+const b := import("../b")
+
+pub type Box_A[T: type] = struct {
+    value: *T
+    n: usize
+}
+
+pub type Alias_B = b.Box_B[i32]
+
+pub fn make_box_a(value: *i32) -> Box_A[i32] {
+    return {
+        .value = value,
+        .n = 1,
+    }
+}
+
+pub fn read_alias_b(x: *Alias_B) -> i32 {
+    return x.get(0).*
+}
+
+impl Box_A[T: type] {
+    pub fn get(self, index: usize) -> *T {
+        return &self.value[index]
+    }
+}

@@ -383,7 +383,20 @@ namespace sema {
             // type symbol" or "not found", used purely to decide whether a NamedType names a
             // generic declaration before committing to a resolution strategy.
             auto find_type_decl_for(const std::string &module_path, const std::string &name) const -> const ast::TypeDecl * {
-                const auto mod_it = program.modules.find(module_path);
+                auto mod_it = program.modules.find(module_path);
+                if (mod_it == program.modules.end() && ast_program) {
+                    // Same on-demand fallback as resolve_final_shallow/walk_namespace_chain, and
+                    // load-bearing for exactly the same reason. A module reached only through a
+                    // NAMED import ('const list := import("core/list")') is never force-declared
+                    // the way declare_bare_import's target is, so "absent from program.modules"
+                    // here means "not declared YET", not "not generic". Reading it as the latter
+                    // sends an instantiation ('list.List[anyptr]') down the non-generic path in
+                    // the caller, which lays out the template's struct body with no
+                    // GenericBindingEnv ("unknown type 'T'") and caches that in
+                    // TypeSymbol::resolved, poisoning every later use of the type.
+                    ensure_module_declared(*ast_program, module_path, program, diag);
+                    mod_it = program.modules.find(module_path);
+                }
                 if (mod_it == program.modules.end()) return nullptr;
                 const auto sym_it = mod_it->second.symbols.find(name);
                 if (sym_it == mod_it->second.symbols.end()) return nullptr;
@@ -520,7 +533,8 @@ namespace sema {
                 }
                 if (arg_error) return ResolvedType{.kind = TypeKind::Invalid};
 
-                return instantiate_generic_type(program, diag, target_module, target_name, std::move(resolved_args), named.location);
+                return instantiate_generic_type(program, diag, target_module, target_name, std::move(resolved_args),
+                                                 named.location, ast_program);
             }
 
             // Resolves a NamedType appearing in an ordinary type-position (a pointer
@@ -576,6 +590,22 @@ namespace sema {
 
                 if (ts->resolved) {
                     return *ts->resolved;
+                }
+
+                // A generic DECLARATION has no standalone ResolvedType to produce — 'List'
+                // alone is never a type, only 'List[...]' is (see declare_type, which never
+                // fills TypeSymbol::resolved for one, and ensure_module_declared's force-layout
+                // loop, which skips them). Every legitimate route to a generic name goes through
+                // resolve_generic_named_type -> instantiate_generic_type instead, so arriving
+                // here means some caller mistook the template for a plain type. Refuse rather
+                // than resolve: laying out the RHS with no GenericBindingEnv active reports
+                // "unknown type 'T'" against the declaration itself and then CACHES the bogus
+                // result below, so every later use of the type inherits the corruption instead
+                // of just this one reference failing.
+                if (ts->decl && !ts->decl->generic_params.empty()) {
+                    return error(diag, loc, std::format(
+                        "'{}' used without generic arguments — expected {} ('{}[...]')",
+                        name, ts->decl->generic_params.size(), name));
                 }
 
                 const auto key = std::make_pair(module_path, name);
@@ -2068,7 +2098,7 @@ namespace sema {
 
     auto instantiate_generic_type(Program &program, DiagnosticEngine &diag, const std::string &module_path,
                                    const std::string &decl_name, std::vector<GenericArgValue> args,
-                                   const SourceLocation &use_loc) -> ResolvedType {
+                                   const SourceLocation &use_loc, const ast::Program *ast_program) -> ResolvedType {
         // NOTE: an instantiation whose arguments are still unbound ('Slot[K, V]' written
         // inside a generic declaration) IS built here, as an ordinary slot — it is simply
         // tagged as a template by is_opaque_template_instance and never emitted.
@@ -2148,7 +2178,7 @@ namespace sema {
         //
         // Anything else (a type alias: '= *T', '= []T', '= u32') is resolved whole, exactly
         // as before, with no slot on the stack.
-        Resolver inner{program, diag, nullptr, &env, &decl.generic_params};
+        Resolver inner{program, diag, ast_program, &env, &decl.generic_params};
         const auto preallocated = inner.preallocate_aggregate(decl.type, module_path);
 
         const GenericInstanceInfo instance_info{.decl_module = module_path, .decl_name = decl_name, .args = args};

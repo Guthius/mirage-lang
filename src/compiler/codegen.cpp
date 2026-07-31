@@ -2333,19 +2333,34 @@ namespace codegen {
             // Program::type_ids' id, since most references are reached recursively and were
             // never independently 'type_of'/any-coerced, so have no id of their own).
             auto type_info_ptr_for(const sema::ResolvedType &ty) -> llvm::Constant * {
-                switch (ty.kind) {
-                case sema::TypeKind::Pointer:
-                case sema::TypeKind::Slice:
-                case sema::TypeKind::Array:
-                case sema::TypeKind::Struct:
-                case sema::TypeKind::Enum:
-                case sema::TypeKind::Union:
-                case sema::TypeKind::Bitset:
-                case sema::TypeKind::Function:
-                case sema::TypeKind::Trait:
-                    break;
-                default:
-                    // Builtin scalars (ids 1-15) and anything else Type_Info has no shape for.
+                // Each admitted kind is described by a side-table entry emit_type_info_global
+                // reaches with an unchecked '.at(index)'. A kind whose index was never assigned
+                // (-1) has no shape to describe and MUST return nil here rather than reach that
+                // '.at' — nil is exactly the signal build_type_kind_or_info_constant turns into
+                // '.kind(K)'. The live case is Function: emit_type_info_global's Trait branch
+                // synthesizes a bare 'ResolvedType{.kind = Function}' per trait method (no
+                // interned signature, so fn_index stays -1), which otherwise threw
+                // std::out_of_range and killed the whole compilation. The others are guarded on
+                // the same principle rather than because a reproducer is known.
+                const auto has_shape = [&] {
+                    switch (ty.kind) {
+                    case sema::TypeKind::Pointer:  return ty.pointee_index >= 0;
+                    case sema::TypeKind::Slice:    return ty.slice_index >= 0;
+                    case sema::TypeKind::Array:    return ty.array_index >= 0;
+                    case sema::TypeKind::Struct:   return ty.struct_index >= 0;
+                    case sema::TypeKind::Enum:     return ty.enum_index >= 0;
+                    case sema::TypeKind::Union:    return ty.union_index >= 0;
+                    case sema::TypeKind::Bitset:   return ty.bitset_index >= 0;
+                    case sema::TypeKind::Function: return ty.fn_index >= 0;
+                    // Reads its info through the bounds-safe trait_at(), which already degrades
+                    // to a name-only descriptor rather than throwing.
+                    case sema::TypeKind::Trait:    return true;
+                    default:
+                        // Builtin scalars (ids 1-15) and anything else Type_Info has no shape for.
+                        return false;
+                    }
+                }();
+                if (!has_shape) {
                     return llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*context_));
                 }
                 if (const auto it = type_info_globals_by_type_.find(ty); it != type_info_globals_by_type_.end()) {

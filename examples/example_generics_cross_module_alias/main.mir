@@ -1,0 +1,47 @@
+// example_generics_cross_module_alias — a generic type instantiated behind a type alias in a
+// module that reaches the generic's definition through a NAMED import. This is the shape of
+// core/fmt's 'type Visited = list.List[anyptr]'.
+//
+// The bug: Resolver::find_type_decl_for is how resolve_named_type_shallow (and
+// resolve_field_type) decide whether a NamedType names a generic declaration. Unlike its
+// siblings resolve_final_shallow / resolve_final_full / walk_namespace_chain it had no
+// ensure_module_declared fallback — it just returned nullptr when the target module was not in
+// Program::modules YET. A named import never force-declares its target, so when
+// ensure_module_declared ran its force-layout loop over a module's own type symbols and reached
+// such an alias, the target module did not exist yet. find_type_decl_for said nullptr,
+// resolve_named_type_shallow read that as "not generic", and fell through to
+// resolve_final_shallow — which declared the target on demand, found the generic, and resolved
+// its raw 'struct { value: *T ... }' template body with NO GenericBindingEnv active. Result:
+// "unknown type 'T'" reported against the DECLARATION, and — far worse — that bogus
+// ResolvedType cached in TypeSymbol::resolved, so every later use of the type inherited it and
+// produced a cascade of unrelated-looking errors at the USE sites.
+//
+// a/ and b/ are deliberately symmetric: each declares a generic and aliases the other's. That
+// is what makes the fixture order-independent. Program::modules is an unordered_map, so which
+// module check_program's declare loop reaches first depends on a hash of absolute paths — but
+// whichever one it is, that module's force-layout loop hits an alias whose target is still
+// undeclared. A one-directional a-depends-on-b arrangement reproduces only when the hash order
+// happens to cooperate, which is no regression test at all.
+//
+// Expected: compiles and runs, prints "a=10 b=20", exit code 30.
+
+import("a")
+import("b")
+
+ext fn printf(fmt: *u8, ...) -> i32
+
+pub fn main() -> i32 {
+    mut first: i32 = 10
+    mut second: i32 = 20
+
+    // Each module reads the OTHER's generic through its alias, so both aliases must have
+    // resolved to real instantiations rather than to a poisoned template.
+    mut box_a := make_box_a(&first)
+    mut box_b := make_box_b(&second)
+
+    const via_a := read_alias_a(&box_a)
+    const via_b := read_alias_b(&box_b)
+
+    printf("a=%d b=%d\n", via_a, via_b)
+    return via_a + via_b
+}
