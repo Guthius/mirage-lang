@@ -703,9 +703,17 @@ namespace sema {
                 diag.report_error(DiagnosticStage::Sema, when_decl.location,
                     "'when' condition must be a compile-time constant expression. "
                     "Use 'if' for runtime conditions.");
-            } else if (const auto folded = evaluate_const_value(when_decl.condition, module_path, sema_program, diag)) {
-                if (const auto *iv = std::get_if<int64_t>(&*folded)) {
+            } else {
+                // Mirrors check_when_stmt: a constant condition that fails to fold is an
+                // evaluator bug and must be reported, never silently treated as false.
+                const auto folded = evaluate_const_value(when_decl.condition, module_path, sema_program, diag);
+                if (const auto *iv = folded ? std::get_if<int64_t>(&*folded) : nullptr) {
                     selected = (*iv != 0);
+                } else if (!folded) {
+                    // A string-valued fold already carries the Bool expected-type diagnostic
+                    // from the check_expr above.
+                    diag.report_error(DiagnosticStage::Sema, when_decl.location,
+                        "internal error: 'when' condition is a constant expression but could not be evaluated");
                 }
             }
 

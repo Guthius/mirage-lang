@@ -5207,9 +5207,19 @@ namespace sema {
             diag.report_error(DiagnosticStage::Sema, when_stmt.location,
                 "'when' condition must be a compile-time constant expression. "
                 "Use 'if' for runtime conditions.");
-        } else if (const auto folded = evaluate_const_value(when_stmt.condition, module_path, program, diag)) {
-            if (const auto *iv = std::get_if<int64_t>(&*folded)) {
+        } else {
+            // "Couldn't fold" must never be silently read as "folded to false": that is how
+            // a 'when' with a macro-call condition once compiled the wrong branch with no
+            // diagnostic. Any constant condition that fails to fold to an integer here is a
+            // bug in the evaluator (or already carries its own type diagnostic).
+            const auto folded = evaluate_const_value(when_stmt.condition, module_path, program, diag);
+            if (const auto *iv = folded ? std::get_if<int64_t>(&*folded) : nullptr) {
                 selected = (*iv != 0);
+            } else if (!folded) {
+                // A string-valued fold is not reported here: the Bool expected-type check
+                // above has already diagnosed that condition.
+                diag.report_error(DiagnosticStage::Sema, when_stmt.location,
+                    "internal error: 'when' condition is a constant expression but could not be evaluated");
             }
         }
 

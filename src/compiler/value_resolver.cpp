@@ -797,7 +797,22 @@ namespace sema {
         return target;
     }
 
+    namespace {
+        // The recursive worker behind evaluate_const_value. 'macro_args' carries the
+        // *evaluated* argument values of the macro invocation whose template is currently
+        // being folded (empty outside a template). Values rather than argument expressions
+        // deliberately: binding expressions would let an argument that is itself an
+        // identifier collide with the parameter name it is bound to and recurse forever
+        // ('macro inc(x) -> x + 1' called as 'inc(x)' with a global 'x').
+        auto evaluate_const_value_impl(const ast::Expr &expr, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::unordered_map<std::string, ConstFoldValue> &macro_args) -> std::optional<ConstFoldValue>;
+    }
+
     auto evaluate_const_value(const ast::Expr &expr, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> std::optional<ConstFoldValue> {
+        return evaluate_const_value_impl(expr, module_path, program, diag, {});
+    }
+
+    namespace {
+        auto evaluate_const_value_impl(const ast::Expr &expr, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::unordered_map<std::string, ConstFoldValue> &macro_args) -> std::optional<ConstFoldValue> {
         return std::visit(
             [&]<typename T>(const T &v) -> std::optional<ConstFoldValue> {
                 using V = std::decay_t<T>;
@@ -816,6 +831,13 @@ namespace sema {
                 }
 
                 if constexpr (std::is_same_v<V, ast::IdentExpr>) {
+                    // Inside a macro template, a parameter reference folds to the already
+                    // evaluated argument — checked before the module globals, mirroring
+                    // eval_integer_const_expr's lookup order.
+                    if (const auto arg = macro_args.find(v.name); arg != macro_args.end()) {
+                        return arg->second;
+                    }
+
                     const auto mod_it = program.modules.find(module_path);
                     if (mod_it == program.modules.end()) return std::nullopt;
                     const auto sym_it = mod_it->second.symbols.find(v.name);
@@ -823,7 +845,9 @@ namespace sema {
                     const auto *g = std::get_if<GlobalSymbol>(&sym_it->second);
                     if (!g || g->is_mut || !g->decl->init) return std::nullopt;
                     resolve_global_symbol(module_path, v.name, program, diag, g->decl->location);
-                    return evaluate_const_value(*g->decl->init, module_path, program, diag);
+                    // A global's initializer is a closed expression — never evaluated with
+                    // the current template's parameter bindings.
+                    return evaluate_const_value_impl(*g->decl->init, module_path, program, diag, {});
                 }
 
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
@@ -839,7 +863,7 @@ namespace sema {
                     const auto *g = std::get_if<GlobalSymbol>(&other_sym_it->second);
                     if (!g || g->is_mut || !g->decl->init) return std::nullopt;
                     resolve_global_symbol(*other_module_path, v->member, program, diag, g->decl->location);
-                    return evaluate_const_value(*g->decl->init, *other_module_path, program, diag);
+                    return evaluate_const_value_impl(*g->decl->init, *other_module_path, program, diag, {});
                 }
 
                 if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
@@ -899,7 +923,7 @@ namespace sema {
 
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
                     if (v->op == ast::UnaryOp::AddressOf || v->op == ast::UnaryOp::Deref) return std::nullopt;
-                    const auto inner = evaluate_const_value(v->operand, module_path, program, diag);
+                    const auto inner = evaluate_const_value_impl(v->operand, module_path, program, diag, macro_args);
                     const auto *iv = inner ? std::get_if<int64_t>(&*inner) : nullptr;
                     if (!iv) return std::nullopt;
                     const auto folded = fold_signed_unary(v->op, *iv);
@@ -909,8 +933,8 @@ namespace sema {
 
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
                     if (v->op == ast::BinaryOp::LogicalAnd || v->op == ast::BinaryOp::LogicalOr) {
-                        const auto lhs = evaluate_const_value(v->lhs, module_path, program, diag);
-                        const auto rhs = evaluate_const_value(v->rhs, module_path, program, diag);
+                        const auto lhs = evaluate_const_value_impl(v->lhs, module_path, program, diag, macro_args);
+                        const auto rhs = evaluate_const_value_impl(v->rhs, module_path, program, diag, macro_args);
                         const auto *li = lhs ? std::get_if<int64_t>(&*lhs) : nullptr;
                         const auto *ri = rhs ? std::get_if<int64_t>(&*rhs) : nullptr;
                         if (!li || !ri) return std::nullopt;
@@ -924,7 +948,7 @@ namespace sema {
                         // so its value is resolved via the OTHER side's already-check_expr'd type
                         // (ProgramModule::expr_types), not by recursing into it directly.
                         const auto resolve_side = [&](const ast::Expr &side, const ast::Expr &other) -> std::optional<int64_t> {
-                            if (const auto folded = evaluate_const_value(side, module_path, program, diag)) {
+                            if (const auto folded = evaluate_const_value_impl(side, module_path, program, diag, macro_args)) {
                                 if (const auto *iv = std::get_if<int64_t>(&*folded)) return *iv;
                                 return std::nullopt;
                             }
@@ -944,8 +968,8 @@ namespace sema {
                         return int64_t{(v->op == ast::BinaryOp::Equal ? (*lhs == *rhs) : (*lhs != *rhs)) ? 1 : 0};
                     }
 
-                    const auto lhs = evaluate_const_value(v->lhs, module_path, program, diag);
-                    const auto rhs = evaluate_const_value(v->rhs, module_path, program, diag);
+                    const auto lhs = evaluate_const_value_impl(v->lhs, module_path, program, diag, macro_args);
+                    const auto rhs = evaluate_const_value_impl(v->rhs, module_path, program, diag, macro_args);
                     const auto *li = lhs ? std::get_if<int64_t>(&*lhs) : nullptr;
                     const auto *ri = rhs ? std::get_if<int64_t>(&*rhs) : nullptr;
                     if (!li || !ri) return std::nullopt;
@@ -957,7 +981,7 @@ namespace sema {
                 }
 
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
-                    return evaluate_const_value(v->value, module_path, program, diag);
+                    return evaluate_const_value_impl(v->value, module_path, program, diag, macro_args);
                 }
 
                 // is_constant_expr_impl above reports both of these as constant, so this
@@ -998,21 +1022,48 @@ namespace sema {
                     // constant-only context (e.g. '#link's data argument) that accepts a
                     // ternary here would hit an "internal error: could not resolve" instead
                     // of the correct diagnostic or value.
-                    const auto cond = evaluate_const_value(v->condition, module_path, program, diag);
+                    const auto cond = evaluate_const_value_impl(v->condition, module_path, program, diag, macro_args);
                     const auto *ci = cond ? std::get_if<int64_t>(&*cond) : nullptr;
                     if (!ci) return std::nullopt;
-                    return evaluate_const_value(*ci != 0 ? v->then_expr : v->else_expr, module_path, program, diag);
+                    return evaluate_const_value_impl(*ci != 0 ? v->then_expr : v->else_expr, module_path, program, diag, macro_args);
                 }
 
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
-                    const auto cond = evaluate_const_value(v->condition, module_path, program, diag);
+                    const auto cond = evaluate_const_value_impl(v->condition, module_path, program, diag, macro_args);
                     const auto *ci = cond ? std::get_if<int64_t>(&*cond) : nullptr;
                     if (!ci) return std::nullopt;
-                    return evaluate_const_value(*ci != 0 ? v->then_expr : v->else_expr, module_path, program, diag);
+                    return evaluate_const_value_impl(*ci != 0 ? v->then_expr : v->else_expr, module_path, program, diag, macro_args);
+                }
+
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
+                    // A macro call — the only call shape is_constant_expr_impl accepts, so
+                    // this evaluator must fold it too (see the SizeOfExpr comment above; a
+                    // 'when four() == 4' condition used to compile the ELSE branch with no
+                    // diagnostic because this case was missing). Arity and resolution are
+                    // guarded here as well: this evaluator also runs on expressions a prior
+                    // diagnostic already flagged, and must degrade to nullopt, not crash.
+                    const auto *callee = std::get_if<ast::IdentExpr>(&v->callee);
+                    if (!callee) return std::nullopt;
+                    const auto mod_it = program.modules.find(module_path);
+                    if (mod_it == program.modules.end()) return std::nullopt;
+                    const auto sym_it = mod_it->second.symbols.find(callee->name);
+                    if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
+                    const auto *macro = std::get_if<MacroSymbol>(&sym_it->second);
+                    if (!macro || !macro->is_resolved || !macro->decl) return std::nullopt;
+                    if (v->args.size() != macro->decl->params.size()) return std::nullopt;
+
+                    std::unordered_map<std::string, ConstFoldValue> bound;
+                    for (size_t i = 0; i < v->args.size(); ++i) {
+                        auto arg_value = evaluate_const_value_impl(v->args[i], module_path, program, diag, macro_args);
+                        if (!arg_value) return std::nullopt;
+                        bound.emplace(macro->decl->params[i].name, std::move(*arg_value));
+                    }
+                    return evaluate_const_value_impl(macro->decl->expr_template, module_path, program, diag, bound);
                 }
 
                 return std::nullopt;
             },
             expr);
+        }
     }
 }

@@ -1,0 +1,27 @@
+// example_when_macro_condition — a 'when' condition containing a macro call must fold and
+// select the correct branch. is_constant_expr accepted macro calls but evaluate_const_value
+// could not fold them, and the consumers silently read "couldn't fold" as false — so both
+// 'when's below used to compile their wrong branch with no diagnostic (CODE_REVIEW.md SEMA-1).
+//
+// Expected: exit code 3 — bit 1 from the direct macro condition, bit 2 from the
+// macro-with-argument condition (arguments that are themselves constants must fold too).
+
+macro four() -> 4
+macro double_it(x: i32) -> x * 2
+
+const SEED: i32 = 3
+
+pub fn main() -> i32 {
+    mut code: i32 = 0
+    when four() == 4 {
+        code = code + 1
+    } else {
+        code = code + 100
+    }
+    when double_it(SEED) == 6 {
+        code = code + 2
+    } else {
+        code = code + 200
+    }
+    return code
+}

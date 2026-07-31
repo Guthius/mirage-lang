@@ -882,6 +882,10 @@
     "action": "run",
     "exit": 0
   },
+  "example_when_macro_condition": {
+    "action": "run",
+    "exit": 3
+  },
   "example_when_nonconst_condition": {
     "action": "build",
     "diag": "examples/example_when_nonconst_condition/main.mir:11:5: error: 'when' condition must be a compile-time constant expression. Use 'if' for runtime conditions.",
