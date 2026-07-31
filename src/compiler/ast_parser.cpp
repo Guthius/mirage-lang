@@ -134,7 +134,7 @@ namespace ast {
                 break;
             }
 
-            if (auto decl = parse_decl(parser, true); decl.has_value()) {
+            if (auto decl = parse_decl(parser); decl.has_value()) {
                 decls.push_back(std::move(*decl));
             }
 

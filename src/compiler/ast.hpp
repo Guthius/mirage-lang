@@ -1074,7 +1074,7 @@ namespace ast {
     auto skip_semicolons(Parser &parser) -> void;
 
     auto parse_type(Parser &parser) -> Type;
-    auto parse_decl(Parser &parser, bool top_level) -> std::optional<Decl>;
+    auto parse_decl(Parser &parser) -> std::optional<Decl>;
     auto parse_stmt(Parser &parser) -> Stmt;
     auto parse_expr(Parser &parser, bool allow_import = false) -> Expr;
 

@@ -3578,7 +3578,7 @@ namespace ast {
 
             const LoopProgressGuard progress_guard(parser);
 
-            if (auto d = parse_decl(parser, /*top_level=*/true)) {
+            if (auto d = parse_decl(parser)) {
                 decls.push_back(std::move(*d));
             }
         }
@@ -3597,7 +3597,7 @@ namespace ast {
         return parse_when_chain<WhenDecl, std::vector<Decl>>(parser, parse_when_decl_body);
     }
 
-    auto parse_decl(Parser &parser, const bool top_level) -> std::optional<Decl> {
+    auto parse_decl(Parser &parser) -> std::optional<Decl> {
         // Attributes are currently legal only immediately before a 'fn' declaration (see
         // Attribute's doc comment in ast.hpp). Parsed unconditionally here, before 'is_pub'
         // (attribute-before-pub ordering: '@naked pub fn f()', never 'pub @naked fn f()'), and
@@ -3614,7 +3614,7 @@ namespace ast {
             skip_semicolons(parser);
         }
 
-        const auto is_pub = !top_level || parser.match(TokenKind::KwPub);
+        const auto is_pub = parser.match(TokenKind::KwPub);
 
         if (!attributes.empty() && !parser.check(TokenKind::KwFn)) {
             parser.report_error(attributes.front().location, "attributes are only allowed on 'fn' declarations");
