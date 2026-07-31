@@ -139,6 +139,19 @@ def test_oversized_headers() -> None:
     check(b"header line exceeds" in result.stderr, "oversized header line is reported")
 
 
+def test_repeat_initialize() -> None:
+    # Exactly one initialize per session, per spec. A repeat used to be honoured, rewriting
+    # the worker's workspace root on the main thread while worker tasks could be reading it.
+    result = drive(session(
+        frame({"jsonrpc": "2.0", "id": 7, "method": "initialize",
+               "params": {"processId": None, "rootUri": None, "capabilities": {}}}),
+    ))
+    check(result.returncode == 0, f"repeat-initialize session exits cleanly (got {result.returncode})")
+    seen = responses(result.stdout)
+    check(seen.get(7) == "error", "a repeat initialize is answered with InvalidRequest, not honoured")
+    check(seen.get(100) == "result", "server keeps serving after the repeat initialize")
+
+
 def test_untitled_uri() -> None:
     # canonical_path_of returns "" for non-file URIs, but no caller enforced that: an
     # 'untitled:' buffer (a plain New File in VS Code) opened a phantom "" document,
@@ -165,6 +178,7 @@ def main() -> int:
     test_malformed_requests()
     test_empty_content_changes()
     test_oversized_headers()
+    test_repeat_initialize()
     test_untitled_uri()
 
     print()

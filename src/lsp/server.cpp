@@ -523,6 +523,16 @@ namespace lsp {
             try {
 
             if (method == "initialize") {
+                // Exactly one initialize per session, per spec; a repeat is a protocol
+                // violation. It is also unsafe to honour: worker.workspace_root and
+                // worker.utf16_positions are written below on the main thread under the
+                // "before any request task exists" contract, which only the first
+                // initialize satisfies — a rewrite would race worker-thread reads.
+                if (state == LifecycleState::Running) {
+                    std::cerr << "mirage-lsp: repeat 'initialize' received, rejecting\n";
+                    send_error(channel, message["id"], INVALID_REQUEST, "server is already initialized");
+                    continue;
+                }
                 state = LifecycleState::Running;
                 // Whether the client can accept byte columns on the wire. The LSP default is
                 // UTF-16 code units; a client that lists "utf-8" in
