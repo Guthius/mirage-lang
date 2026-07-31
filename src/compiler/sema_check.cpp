@@ -1315,6 +1315,52 @@ namespace sema {
             return {ResolvedType{.kind = TypeKind::Invalid}, false};
         }
 
+        // What indexing 'expr' yields, once it is known to BE an index rather than a generic
+        // instantiation: the element type, plus the operand type the caller may still need.
+        struct IndexedElement {
+            ResolvedType element;
+            ResolvedType operand;
+        };
+
+        // Type-checks 'operand[subscript]' and returns the element type. nullopt means the
+        // operand is not indexable at all, already reported.
+        //
+        // Shared by value position (check_expr) and lvalue position (resolve_lvalue), which
+        // carried two copies of this — the finding notes any fix had to be applied to both.
+        // What stays at the call sites is what genuinely differs: the GATE in front (an lvalue
+        // rejects a generic instantiation as "not an assignable expression"; a value position
+        // first tries to read one as a function-pointer value), and writability, which only an
+        // lvalue cares about.
+        auto check_indexed_element(const ast::IndexOrInstantiateExpr &v, LocalScope &locals, const std::string &module_path,
+                                    Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base,
+                                    const ResolvedType *fn_error_type) -> std::optional<IndexedElement> {
+            const auto operand = check_expr(v.operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+            const auto index = check_expr(std::get<ast::Expr>(v.args[0].value), locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+            // Invalid means the index expression already reported; a second message here just
+            // buries it.
+            if (!index.is_integer() && index.kind != TypeKind::Opaque && index.kind != TypeKind::Invalid) {
+                error(diag, v.location, "index must be an integer expression");
+            }
+
+            if (operand.kind == TypeKind::Opaque) {
+                // Element type is unknowable until 'T' is. Writable, per the caller: 'buf[i] = x'
+                // through a generic array must not be pre-emptively rejected.
+                return IndexedElement{opaque_unary_result("index", operand, diag, v.location, program), operand};
+            }
+            if (operand.kind == TypeKind::Pointer) {
+                const auto *pointee = program.pointee_at(operand.pointee_index);
+                return IndexedElement{pointee ? *pointee : ResolvedType{.kind = TypeKind::Invalid}, operand};
+            }
+            if (operand.kind == TypeKind::Array) {
+                return IndexedElement{array_element_type(operand, module_path, program), operand};
+            }
+            if (operand.kind == TypeKind::Slice) {
+                return IndexedElement{slice_element_type(operand, module_path, program), operand};
+            }
+            error(diag, v.location, "indexing requires a pointer, array, or slice operand");
+            return std::nullopt;
+        }
+
         auto resolve_lvalue(const ast::Expr &expr, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> LvalueInfo {
             return std::visit(
                 [&]<typename T>(const T &v) -> LvalueInfo {
@@ -1377,32 +1423,16 @@ namespace sema {
                             error(diag, v->location, "not an assignable expression");
                             return {ResolvedType{.kind = TypeKind::Invalid}, false};
                         }
-                        const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                        const auto index = check_expr(std::get<ast::Expr>(v->args[0].value), locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                        // Invalid means the index expression already reported; a second
-                        // message here just buries it.
-                        if (!index.is_integer() && index.kind != TypeKind::Opaque && index.kind != TypeKind::Invalid) {
-                            error(diag, v->location, "index must be an integer expression");
-                        }
-                        if (operand.kind == TypeKind::Opaque) {
-                            // Element type is unknowable until 'T' is; writable, since
-                            // 'buf[i] = x' through a generic array must not be pre-emptively
-                            // rejected.
-                            return {opaque_unary_result("index", operand, diag, v->location, program), true};
-                        }
-                        if (operand.kind == TypeKind::Pointer) {
-                            const auto *pointee = program.pointee_at(operand.pointee_index);
-                            return {pointee ? *pointee : ResolvedType{.kind = TypeKind::Invalid}, true};
-                        }
-                        if (operand.kind == TypeKind::Array) {
+                        const auto indexed = check_indexed_element(*v, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
+                        if (!indexed) return {ResolvedType{.kind = TypeKind::Invalid}, false};
+                        // Indexing THROUGH a pointer or slice is always writable — the handle
+                        // being const says nothing about the pointee. An array is stored inline,
+                        // so writing an element needs the array itself to be writable.
+                        if (indexed->operand.kind == TypeKind::Array) {
                             auto owner = resolve_lvalue(v->operand, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
-                            return {array_element_type(operand, module_path, program), owner.writable};
+                            return {indexed->element, owner.writable};
                         }
-                        if (operand.kind == TypeKind::Slice) {
-                            return {slice_element_type(operand, module_path, program), true};
-                        }
-                        error(diag, v->location, "indexing requires a pointer, array, or slice operand");
-                        return {ResolvedType{.kind = TypeKind::Invalid}, false};
+                        return {indexed->element, true};
 
                     } else {
                         // get_expr_location(), not a zero-valued SourceLocation{}: an empty
@@ -3554,25 +3584,8 @@ namespace sema {
                         return error(diag, v->location,
                             "a generic type instantiation names a type, not a value; it cannot be used here");
                     }
-                    const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                    const auto index = check_expr(std::get<ast::Expr>(v->args[0].value), locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                    if (!index.is_integer() && index.kind != TypeKind::Opaque && index.kind != TypeKind::Invalid) {
-                        error(diag, v->location, "index must be an integer expression");
-                    }
-                    if (operand.kind == TypeKind::Opaque) {
-                        return opaque_unary_result("index", operand, diag, v->location, program);
-                    }
-                    if (operand.kind == TypeKind::Pointer) {
-                        const auto *pointee = program.pointee_at(operand.pointee_index);
-                        return pointee ? *pointee : ResolvedType{.kind = TypeKind::Invalid};
-                    }
-                    if (operand.kind == TypeKind::Array) {
-                        return array_element_type(operand, module_path, program);
-                    }
-                    if (operand.kind == TypeKind::Slice) {
-                        return slice_element_type(operand, module_path, program);
-                    }
-                    return error(diag, v->location, "indexing requires a pointer, array, or slice operand");
+                    const auto indexed = check_indexed_element(*v, locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
+                    return indexed ? indexed->element : ResolvedType{.kind = TypeKind::Invalid};
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
                     const auto operand = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
