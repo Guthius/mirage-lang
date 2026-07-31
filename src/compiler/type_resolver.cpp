@@ -1157,8 +1157,6 @@ namespace sema {
             }
 
             void layout_enum(const std::string &module_path, const int slot, const std::unique_ptr<ast::EnumType> &decl) {
-                auto &mod = program.modules.at(module_path);
-
                 // Resolve underlying type (default: i32)
                 ResolvedType underlying;
                 if (decl->underlying_type) {
