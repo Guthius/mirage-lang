@@ -2783,8 +2783,13 @@ namespace sema {
         for (size_t i = 0; i < arms.size(); ++i) {
             if (!std::holds_alternative<ast::MatchExpr::DefaultPattern>(arms[i].pattern)) continue;
             if (out_default_arm_idx.has_value()) {
+                // Keep the FIRST '_' as the recorded default: later diagnostics
+                // ("unreachable default arm") must point at it, not at the duplicate
+                // just reported here.
                 error(diag, arms[i].location, "duplicate default arm '_'");
-            } else if (i + 1 != arms.size()) {
+                continue;
+            }
+            if (i + 1 != arms.size()) {
                 error(diag, arms[i].location, "default arm '_' must be the last arm");
             }
             out_default_arm_idx = i;
