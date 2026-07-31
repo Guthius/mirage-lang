@@ -899,6 +899,24 @@ namespace ast {
         // '$option(key)' / '$option(key, default)'. 'option' is parsed as a plain
         // identifier after the '$' sigil (not a keyword) — mirrors 'ext fn's precedent of
         // dispatching on a bare identifier lexeme rather than reserving a new keyword.
+        // The shared '(key)' / '(key, default)' argument tail of '$option' and '$env'.
+        struct KeyDefaultArgs {
+            std::string key;
+            std::optional<Expr> default_value;
+        };
+        auto parse_key_default_args(Parser &parser) -> KeyDefaultArgs {
+            parser.expect(TokenKind::LParen, "'('");
+            auto key = parse_string_literal(parser);
+
+            std::optional<Expr> default_value;
+            if (parser.match(TokenKind::Comma)) {
+                default_value = parse_expr(parser);
+            }
+
+            parser.expect(TokenKind::RParen, "')'");
+            return KeyDefaultArgs{.key = std::move(key.value), .default_value = std::move(default_value)};
+        }
+
         auto parse_option_expr(Parser &parser) -> Expr {
             const auto location = parser.current_location();
             parser.expect(TokenKind::Dollar, "'$'");
@@ -910,18 +928,10 @@ namespace ast {
             }
             parser.advance(); // consume 'option'
 
-            parser.expect(TokenKind::LParen, "'('");
-            const auto key = parse_string_literal(parser);
-
-            std::optional<Expr> default_value;
-            if (parser.match(TokenKind::Comma)) {
-                default_value = parse_expr(parser);
-            }
-
-            parser.expect(TokenKind::RParen, "')'");
+            auto [key, default_value] = parse_key_default_args(parser);
 
             return std::make_unique<OptionExpr>(OptionExpr{
-                .key = key.value,
+                .key = std::move(key),
                 .default_value = std::move(default_value),
                 .location = location,
             });
@@ -936,18 +946,10 @@ namespace ast {
             parser.expect(TokenKind::Dollar, "'$'");
             parser.advance(); // consume 'env'
 
-            parser.expect(TokenKind::LParen, "'('");
-            const auto key = parse_string_literal(parser);
-
-            std::optional<Expr> default_value;
-            if (parser.match(TokenKind::Comma)) {
-                default_value = parse_expr(parser);
-            }
-
-            parser.expect(TokenKind::RParen, "')'");
+            auto [key, default_value] = parse_key_default_args(parser);
 
             return std::make_unique<EnvExpr>(EnvExpr{
-                .key = key.value,
+                .key = std::move(key),
                 .default_value = std::move(default_value),
                 .location = location,
             });
@@ -1149,6 +1151,21 @@ namespace ast {
             return attrs;
         }
 
+        // Shared operand disambiguation for 'size_of'/'align_of'/'type_of': a token that
+        // can only ever begin a type parses as a TypeExpr operand, anything else as an
+        // ordinary expression — the same one-token lookahead rule parse_generic_arg uses
+        // (grammar.md note 12).
+        auto parse_type_or_expr_operand(Parser &parser) -> Expr {
+            if (starts_type_only(parser)) {
+                const auto type_location = parser.current_location();
+                return std::make_unique<TypeExpr>(TypeExpr{
+                    .type = parse_type(parser),
+                    .location = type_location,
+                });
+            }
+            return parse_expr(parser);
+        }
+
         auto parse_primary(Parser &parser) -> Expr {
             const auto location = parser.current_location();
 
@@ -1229,15 +1246,7 @@ namespace ast {
                 parser.advance();
                 parser.expect(TokenKind::LParen, "'('");
 
-                auto operand = starts_type_only(parser)
-                    ? [&]() -> Expr {
-                          const auto type_location = parser.current_location();
-                          return std::make_unique<TypeExpr>(TypeExpr{
-                              .type = parse_type(parser),
-                              .location = type_location,
-                          });
-                      }()
-                    : parse_expr(parser);
+                auto operand = parse_type_or_expr_operand(parser);
 
                 parser.expect(TokenKind::RParen, "')'");
 
@@ -1251,15 +1260,7 @@ namespace ast {
                 parser.advance();
                 parser.expect(TokenKind::LParen, "'('");
 
-                auto operand = starts_type_only(parser)
-                    ? [&]() -> Expr {
-                          const auto type_location = parser.current_location();
-                          return std::make_unique<TypeExpr>(TypeExpr{
-                              .type = parse_type(parser),
-                              .location = type_location,
-                          });
-                      }()
-                    : parse_expr(parser);
+                auto operand = parse_type_or_expr_operand(parser);
 
                 parser.expect(TokenKind::RParen, "')'");
 
@@ -1273,15 +1274,7 @@ namespace ast {
                 parser.advance();
                 parser.expect(TokenKind::LParen, "'('");
 
-                auto operand = starts_type_only(parser)
-                    ? [&]() -> Expr {
-                          const auto type_location = parser.current_location();
-                          return std::make_unique<TypeExpr>(TypeExpr{
-                              .type = parse_type(parser),
-                              .location = type_location,
-                          });
-                      }()
-                    : parse_expr(parser);
+                auto operand = parse_type_or_expr_operand(parser);
 
                 parser.expect(TokenKind::RParen, "')'");
 
@@ -2447,13 +2440,12 @@ namespace ast {
             };
         }
 
-        auto parse_return_stmt(Parser &parser) -> ReturnStmt {
-            const auto location = parser.current_location();
-
-            parser.expect(TokenKind::KwReturn, "'return'");
-
+        // The shared value list of 'return' and 'return_ok': zero or more comma-separated
+        // expressions. With no values at all, 'out_possible_asi_gotcha' records whether the
+        // next token suggests the intended value was severed by a virtual ';'.
+        auto parse_return_value_list(Parser &parser, bool &out_possible_asi_gotcha) -> std::vector<Expr> {
             std::vector<Expr> values;
-            bool possible_asi_gotcha = false;
+            out_possible_asi_gotcha = false;
             if (can_start_expr(parser.current().kind)) {
                 values.push_back(parse_expr(parser));
 
@@ -2461,8 +2453,18 @@ namespace ast {
                     values.push_back(parse_expr(parser));
                 }
             } else {
-                possible_asi_gotcha = is_asi_gotcha_candidate(parser);
+                out_possible_asi_gotcha = is_asi_gotcha_candidate(parser);
             }
+            return values;
+        }
+
+        auto parse_return_stmt(Parser &parser) -> ReturnStmt {
+            const auto location = parser.current_location();
+
+            parser.expect(TokenKind::KwReturn, "'return'");
+
+            bool possible_asi_gotcha = false;
+            auto values = parse_return_value_list(parser, possible_asi_gotcha);
 
             return ReturnStmt{
                 .return_values = std::move(values),
@@ -2489,17 +2491,8 @@ namespace ast {
 
             parser.expect(TokenKind::KwReturnOk, "'return_ok'");
 
-            std::vector<Expr> values;
             bool possible_asi_gotcha = false;
-            if (can_start_expr(parser.current().kind)) {
-                values.push_back(parse_expr(parser));
-
-                while (parser.match(TokenKind::Comma)) {
-                    values.push_back(parse_expr(parser));
-                }
-            } else {
-                possible_asi_gotcha = is_asi_gotcha_candidate(parser);
-            }
+            auto values = parse_return_value_list(parser, possible_asi_gotcha);
 
             return ReturnOkStmt{
                 .return_values = std::move(values),
@@ -2669,6 +2662,33 @@ namespace ast {
         // param names are: parse_type always starts with an Identifier/keyword and
         // never itself contains a top-level ':' immediately following a leading
         // identifier.
+        // One optional '->' return-type clause: '-> T' or '-> (T1, T2, ...)', with
+        // 'parse_slot' parsing a single slot (a bare type for fn-pointer types, an
+        // optionally named type for fn declarations). Shared by
+        // parse_function_return_types and parse_function_type so the list grammar —
+        // virtual-';' skipping, comma placement, recovery — cannot drift between them.
+        template <typename ParseSlot>
+        void parse_return_type_clause(Parser &parser, ParseSlot &&parse_slot) {
+            if (!parser.match(TokenKind::Arrow)) {
+                return;
+            }
+            if (parser.match(TokenKind::LParen)) {
+                // Multi-return: -> (T1, T2, ...)
+                while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
+                    const LoopProgressGuard progress_guard(parser);
+                    parse_slot();
+                    skip_semicolons(parser);
+                    if (!parser.check(TokenKind::RParen)) {
+                        parser.expect(TokenKind::Comma, "','");
+                    }
+                }
+                parser.expect(TokenKind::RParen, "')'");
+            } else {
+                // Single return: -> T
+                parse_slot();
+            }
+        }
+
         auto parse_function_return_types(Parser &parser) -> FunctionReturnTypes {
             FunctionReturnTypes result;
             std::vector<std::optional<SourceLocation>> question_locations;
@@ -2683,23 +2703,7 @@ namespace ast {
                 result.types.push_back(parse_return_slot_type(parser, question_locations));
             };
 
-            if (parser.match(TokenKind::Arrow)) {
-                if (parser.match(TokenKind::LParen)) {
-                    // Multi-return: -> (T1, T2, ...) or -> (name1: T1, name2: T2, ...)
-                    while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
-                        const LoopProgressGuard progress_guard(parser);
-                        parse_one();
-                        skip_semicolons(parser);
-                        if (!parser.check(TokenKind::RParen)) {
-                            parser.expect(TokenKind::Comma, "','");
-                        }
-                    }
-                    parser.expect(TokenKind::RParen, "')'");
-                } else {
-                    // Single return: -> T  or  -> name: T
-                    parse_one();
-                }
-            }
+            parse_return_type_clause(parser, parse_one);
 
             report_misplaced_optional_errors(parser, question_locations);
             return result;
@@ -2865,23 +2869,9 @@ namespace ast {
 
             std::vector<Type> return_types;
             std::vector<std::optional<SourceLocation>> question_locations;
-            if (parser.match(TokenKind::Arrow)) {
-                if (parser.match(TokenKind::LParen)) {
-                    // Multi-return: -> (T1, T2, ...)
-                    while (!parser.check(TokenKind::RParen) && !parser.at_end()) {
-                        const LoopProgressGuard progress_guard(parser);
-                        return_types.push_back(parse_return_slot_type(parser, question_locations));
-                        skip_semicolons(parser);
-                        if (!parser.check(TokenKind::RParen)) {
-                            parser.expect(TokenKind::Comma, "','");
-                        }
-                    }
-                    parser.expect(TokenKind::RParen, "')'");
-                } else {
-                    // Single return: -> T
-                    return_types.push_back(parse_return_slot_type(parser, question_locations));
-                }
-            }
+            parse_return_type_clause(parser, [&] {
+                return_types.push_back(parse_return_slot_type(parser, question_locations));
+            });
             report_misplaced_optional_errors(parser, question_locations);
 
             return std::make_unique<FunctionType>(FunctionType{
