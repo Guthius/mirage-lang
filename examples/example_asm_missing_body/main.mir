@@ -1,0 +1,12 @@
+// example_asm_missing_body — an 'asm ->' header with no '{ ... }' body must produce one
+// clean diagnostic. The failed expect() returns the CURRENT token without advancing, and
+// the parser then ran the asm lexer/parser pipeline on that unrelated token's lexeme,
+// producing cascading "expected an instruction mnemonic" noise at a misleading location
+// (CODE_REVIEW.md FE-7).
+//
+// Expected: compile error "expected asm block body, got 'return'".
+
+pub fn main() -> i32 {
+    const x := asm -> rax: i64
+    return 0
+}

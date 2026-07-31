@@ -1361,6 +1361,17 @@ namespace ast {
                 }
 
                 const auto block_tok = parser.expect(TokenKind::AsmBlock, "asm block body");
+                if (block_tok.kind != TokenKind::AsmBlock) {
+                    // expect() reported and did NOT advance; tokenizing the unrelated
+                    // current token's lexeme as asm produced cascading bogus diagnostics
+                    // ("expected an instruction mnemonic") at a misleading location.
+                    return std::make_unique<AsmExpr>(AsmExpr{
+                        .instructions = {},
+                        .result_register = std::move(result_register),
+                        .result_type = std::move(result_type),
+                        .location = location,
+                    });
+                }
                 auto asm_tokens = asm_lexer::tokenize(block_tok.lexeme, block_tok.location, parser.diagnostics());
                 auto stmt = asm_parser::parse(asm_tokens, parser.diagnostics());
 
@@ -3283,6 +3294,11 @@ namespace ast {
     auto parse_asm_stmt(Parser &parser) -> std::unique_ptr<AsmStmt> {
         parser.expect(TokenKind::KwAsm, "'asm'");
         const auto block_tok = parser.expect(TokenKind::AsmBlock, "asm block body");
+        if (block_tok.kind != TokenKind::AsmBlock) {
+            // Mirrors the AsmExpr guard in parse_primary: expect() reported without
+            // advancing, so the current token's lexeme is not an asm body.
+            return std::make_unique<AsmStmt>();
+        }
 
         auto asm_tokens = asm_lexer::tokenize(block_tok.lexeme, block_tok.location, parser.diagnostics());
         auto stmt = asm_parser::parse(asm_tokens, parser.diagnostics());

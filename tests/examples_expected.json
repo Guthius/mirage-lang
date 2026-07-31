@@ -80,6 +80,11 @@
     "diag": "examples/example_asm_memory_operand/main.mir:14:22: error: unexpected character '+' in asm block",
     "exit": 1
   },
+  "example_asm_missing_body": {
+    "action": "build",
+    "diag": "examples/example_asm_missing_body/main.mir:11:5: error: expected asm block body, got 'return'",
+    "exit": 1
+  },
   "example_asm_module_scope": {
     "action": "build",
     "diag": "examples/example_asm_module_scope/main.mir:9:6: error: asm blocks are only legal inside function bodies",
