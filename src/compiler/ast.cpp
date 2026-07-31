@@ -2204,6 +2204,57 @@ namespace ast {
             };
         }
 
+        // The common core of a variable declaration -- '(mut|const) name' followed by
+        // ': type [= init]' or ':= init' -- shared by the statement form and the
+        // module-scope form, which differ only in the group-decl branch (statement
+        // only) and 'is_pub' (module scope only).
+        struct VarDeclParts {
+            bool is_mut = false;
+            std::string name;
+            std::optional<Type> type;
+            std::optional<Expr> init;
+            SourceLocation location;
+        };
+
+        // 'allow_group': the statement form supports 'a, b := f()' group declarations;
+        // when a ',' follows the first name we return with only the header fields
+        // filled so the caller can hand off to the group parser. The module-scope form
+        // has no group syntax, so a ',' there falls through to the normal
+        // "expected ':' or ':='" error.
+        auto parse_var_decl_parts(Parser &parser, const bool allow_group) -> VarDeclParts {
+            VarDeclParts parts;
+            parts.location = parser.current_location();
+
+            parts.is_mut = parser.match(TokenKind::KwMut);
+            if (!parts.is_mut) {
+                parser.expect(TokenKind::KwConst, "'const' or 'mut'");
+            }
+
+            parts.name = parser.expect_identifier();
+            if (allow_group && parser.check(TokenKind::Comma)) {
+                return parts;
+            }
+
+            if (parser.match(TokenKind::Colon)) {
+                parts.type = parse_type(parser);
+            }
+
+            if (parts.type.has_value()) {
+                if (parser.match(TokenKind::Equal)) {
+                    parts.init = parse_expr(parser, false);
+                }
+            } else {
+                parser.expect(TokenKind::ColonEqual, "':' or ':='");
+                parts.init = parse_expr(parser, !parts.is_mut);
+            }
+
+            if (!parts.is_mut && parts.init == std::nullopt) {
+                parser.report_error(parser.current_location(), "'const' requires an initializer");
+            }
+
+            return parts;
+        }
+
         auto parse_var_decl_group_stmt(Parser &parser, const bool is_mut, SourceLocation location, std::string first_name) -> Stmt {
             std::vector<std::string> names;
 
@@ -2237,43 +2288,17 @@ namespace ast {
         }
 
         auto parse_var_decl_stmt(Parser &parser) -> Stmt {
-            const auto location = parser.current_location();
-
-            const auto is_mut = parser.match(TokenKind::KwMut);
-            if (!is_mut) {
-                parser.expect(TokenKind::KwConst, "'const' or 'mut'");
-            }
-
-            const auto var_name = parser.expect_identifier();
+            auto parts = parse_var_decl_parts(parser, /*allow_group=*/true);
             if (parser.check(TokenKind::Comma)) {
-                return parse_var_decl_group_stmt(parser, is_mut, location, var_name);
-            }
-
-            std::optional<Type> type = std::nullopt;
-            if (parser.match(TokenKind::Colon)) {
-                type = parse_type(parser);
-            }
-
-            std::optional<Expr> init_expr = std::nullopt;
-            if (type.has_value()) {
-                if (parser.match(TokenKind::Equal)) {
-                    init_expr = parse_expr(parser, false);
-                }
-            } else {
-                parser.expect(TokenKind::ColonEqual, "':' or ':='");
-                init_expr = parse_expr(parser, !is_mut);
-            }
-
-            if (!is_mut && init_expr == std::nullopt) {
-                parser.report_error(parser.current_location(), "'const' requires an initializer");
+                return parse_var_decl_group_stmt(parser, parts.is_mut, parts.location, std::move(parts.name));
             }
 
             return VarDeclStmt{
-                .is_mut = is_mut,
-                .name = var_name,
-                .type = std::move(type),
-                .init = std::move(init_expr),
-                .location = location,
+                .is_mut = parts.is_mut,
+                .name = std::move(parts.name),
+                .type = std::move(parts.type),
+                .init = std::move(parts.init),
+                .location = parts.location,
             };
         }
 
@@ -2992,41 +3017,15 @@ namespace ast {
         }
 
         auto parse_var_decl(Parser &parser, const bool is_pub) -> Decl {
-            const auto location = parser.current_location();
-
-            const auto is_mut = parser.match(TokenKind::KwMut);
-            if (!is_mut) {
-                parser.expect(TokenKind::KwConst, "'const' or 'mut'");
-            }
-
-            const auto name = parser.expect_identifier();
-
-            std::optional<Type> type = std::nullopt;
-            if (parser.match(TokenKind::Colon)) {
-                type = parse_type(parser);
-            }
-
-            std::optional<Expr> init_expr = std::nullopt;
-            if (type.has_value()) {
-                if (parser.match(TokenKind::Equal)) {
-                    init_expr = parse_expr(parser, false);
-                }
-            } else {
-                parser.expect(TokenKind::ColonEqual, "':' or ':='");
-                init_expr = parse_expr(parser, !is_mut);
-            }
-
-            if (!is_mut && init_expr == std::nullopt) {
-                parser.report_error(parser.current_location(), "'const' requires an initializer");
-            }
+            auto parts = parse_var_decl_parts(parser, /*allow_group=*/false);
 
             return VarDecl{
                 .is_pub = is_pub,
-                .is_mut = is_mut,
-                .name = name,
-                .type = std::move(type),
-                .init = std::move(init_expr),
-                .location = location,
+                .is_mut = parts.is_mut,
+                .name = std::move(parts.name),
+                .type = std::move(parts.type),
+                .init = std::move(parts.init),
+                .location = parts.location,
             };
         }
 
