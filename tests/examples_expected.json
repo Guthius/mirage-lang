@@ -391,6 +391,11 @@
     "action": "run",
     "exit": 25
   },
+  "example_generic_bad_value_param_type": {
+    "action": "build",
+    "diag": "examples/example_generic_bad_value_param_type/main.mir:9:10: error: generic parameter 'N' declared type must be 'type', a trait name, or a builtin scalar type (bool, an integer kind, or usize)",
+    "exit": 1
+  },
   "example_generic_self_ref": {
     "action": "run",
     "exit": 42

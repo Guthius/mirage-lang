@@ -1,0 +1,16 @@
+// example_generic_bad_value_param_type — instantiating a generic whose value parameter has
+// an illegal declared type must not crash. The declaration error below was reported, but
+// the declaration stayed registered and the instantiation then hit an unchecked
+// std::get<BuiltinType>, aborting the compiler (and the LSP worker) with
+// std::bad_variant_access (CODE_REVIEW.md SEMA-4).
+//
+// Expected: the declaration diagnostic, exit code 1 — not an abort.
+
+type Foo[N: *i32] = struct {
+    data: [4]u8
+}
+
+pub fn main() -> i32 {
+    mut f: Foo[3] = default
+    return 0
+}

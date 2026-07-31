@@ -515,7 +515,16 @@ namespace sema {
                             arg_error = true;
                             continue;
                         }
-                        const auto param_scalar_type = resolve_builtin(std::get<ast::BuiltinType>(param.type).kind);
+                        // An illegal value-param type ('[N: *i32]') was reported by
+                        // validate_generic_param_types, but the declaration stays registered
+                        // — so this must degrade instead of std::get-ing an alternative that
+                        // isn't there (which aborted the compiler, and the LSP with it).
+                        const auto *param_builtin = std::get_if<ast::BuiltinType>(&param.type);
+                        if (!param_builtin) {
+                            arg_error = true;
+                            continue;
+                        }
+                        const auto param_scalar_type = resolve_builtin(param_builtin->kind);
                         const auto value = eval_integer_const_expr(*expr_arg, module_path, {});
                         if (!value) {
                             error(diag, arg.location, std::format(
