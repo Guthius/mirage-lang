@@ -144,6 +144,10 @@ namespace asm_lexer {
                 int64_t value = 0;
                 const auto [ptr, ec] = std::from_chars(text_.data() + digits_start, text_.data() + digits_end, value, is_hex ? 16 : 10);
                 (void)ptr;
+                if (ec == std::errc::result_out_of_range) {
+                    diagnostics_.report_error(DiagnosticStage::Lexer, loc, "integer immediate does not fit in 64 bits");
+                    return;
+                }
                 if (ec != std::errc{} || digits_start == digits_end) {
                     diagnostics_.report_error(DiagnosticStage::Lexer, loc, "malformed integer immediate in asm block");
                     return;

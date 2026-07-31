@@ -1,0 +1,13 @@
+// example_asm_immediate_overflow — an asm immediate past what int64_t can hold used to be
+// conflated with a syntax error: from_chars' result_out_of_range fell into the generic
+// "malformed integer immediate in asm block" report (CODE_REVIEW.md FE-21). Overflow is a
+// distinct mistake and must be named as such.
+//
+// Expected: compile error "integer immediate does not fit in 64 bits".
+
+pub fn main() -> i32 {
+    asm {
+        mov rax, 99999999999999999999
+    }
+    return 0
+}

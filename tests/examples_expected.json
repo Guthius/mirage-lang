@@ -79,6 +79,11 @@
     "diag": "examples/example_asm_high_byte_register/main.mir:17:13: error: register 'ah' is not supported in inline asm (v1)",
     "exit": 1
   },
+  "example_asm_immediate_overflow": {
+    "action": "build",
+    "diag": "examples/example_asm_immediate_overflow/main.mir:10:18: error: integer immediate does not fit in 64 bits",
+    "exit": 1
+  },
   "example_asm_memory_operand": {
     "action": "build",
     "diag": "examples/example_asm_memory_operand/main.mir:14:22: error: unexpected character '+' in asm block",
