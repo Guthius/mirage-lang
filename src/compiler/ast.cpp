@@ -2550,11 +2550,14 @@ namespace ast {
             param.is_mut = policy.allow_mut && parser.match(TokenKind::KwMut);
             param.name = parser.expect_identifier();
 
-            if (parser.match(TokenKind::Colon)) {
-                if (policy.variadic_rejection.empty() && seen_variadic) {
-                    parser.report_error(param.location, "'...' variadic parameter must be the last parameter in the parameter list");
-                }
+            // Before branching on ':' vs ':=': a ':='-form parameter after a variadic one
+            // ('fn f(xs: ...i32, y := 0)') used to sail through because the check lived
+            // inside the ':' branch only.
+            if (policy.variadic_rejection.empty() && seen_variadic) {
+                parser.report_error(param.location, "'...' variadic parameter must be the last parameter in the parameter list");
+            }
 
+            if (parser.match(TokenKind::Colon)) {
                 if (parser.check(TokenKind::DotDotDot)) {
                     if (policy.variadic_rejection.empty()) {
                         parser.advance();

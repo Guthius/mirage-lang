@@ -1,0 +1,13 @@
+// example_variadic_then_default_param — a parameter after a variadic one must be rejected
+// regardless of its form. The must-be-last check lived inside the ': type' branch, so a
+// ':='-form parameter after the variadic sailed through the parser (CODE_REVIEW.md FE-11).
+//
+// Expected: compile error "'...' variadic parameter must be the last parameter".
+
+fn f(xs: ...i32, y := 0) -> i32 {
+    return y
+}
+
+pub fn main() -> i32 {
+    return 0
+}

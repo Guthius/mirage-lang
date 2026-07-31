@@ -928,6 +928,11 @@
     "action": "run",
     "exit": 0
   },
+  "example_variadic_then_default_param": {
+    "action": "build",
+    "diag": "examples/example_variadic_then_default_param/main.mir:7:18: error: '...' variadic parameter must be the last parameter in the parameter list",
+    "exit": 1
+  },
   "example_when_expr_precedence": {
     "action": "run",
     "exit": 0
