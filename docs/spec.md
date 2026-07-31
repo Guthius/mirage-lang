@@ -172,6 +172,13 @@ A scalar has no `Type_Info` of its own, so a reference to one reports its `Type_
 
 A typed pointer to a value of type `T`. Address taken with unary `&`. Typed pointers are implicitly assignable to/from `anyptr`.
 
+There is no const-pointer type: `*T` is always writable through, and `&` may be applied
+to a `const` binding. Taking the address of a `const` therefore yields a pointer through
+which the storage **can** be mutated (`const x := 5; const p := &x; p.* = 7` is legal) —
+`const` constrains the *binding*, not storage reached through a pointer. This is a
+deliberate v1 decision; code that needs read-only views should pass values (which copy)
+rather than pointers.
+
 Dereferenced with the **postfix** `.*` operator — `p.*` reads or writes the pointee (there is no C-style prefix `*p`; a leading `*` in expression position is not a valid operator):
 
 ```mirage
