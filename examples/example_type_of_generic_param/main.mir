@@ -1,0 +1,30 @@
+// example_type_of_generic_param/main.mir — 'type_of(T)' on a generic parameter, inside the
+// instantiation being emitted.
+//
+// This used to TERMINATE THE COMPILER with an uncaught std::out_of_range. Codegen has three
+// near-identical readers for the operand of size_of/align_of/type_of, and only the first two
+// handled a bare reference to the currently-emitting instance's own type parameter — 'T' is
+// not a module symbol by the time codegen runs, and never gets its own expr_types entry. The
+// third fell through to a .at() on a key that is never present.
+//
+// Not a deliberate difference; the three were maintained by hand and one was missed
+// (CODEGEN-7). They now share one resolver.
+//
+// Expected: compiles and runs, exit code 7.
+
+fn describe[T: type](v: T) -> i32 {
+    // The parameter and a value of that type must agree.
+    if type_of(T) != type_of(v) { return 1 }
+    // And must disagree with an unrelated type.
+    if type_of(T) == type_of(bool) { return 2 }
+    return cast(size_of(T), i32) + cast(align_of(T), i32)
+}
+
+pub fn main() -> i32 {
+    // i16: size 2 + align 2 == 4; u8: 1 + 1 == 2. 4 + 2 == 6, plus 1 for the i32 check below.
+    const a := describe[i16](0)
+    const b := describe[u8](0)
+    if a != 4 { return 90 }
+    if b != 2 { return 91 }
+    return a + b + 1
+}

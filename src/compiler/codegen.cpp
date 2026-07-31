@@ -5524,97 +5524,73 @@ namespace codegen {
                 return expr.is_prefix ? next : old;
             }
 
+            // The type named by a size_of/align_of/type_of operand, plus the module to
+            // interpret it in.
+            //
+            // Four shapes, tried in order:
+            //   1. a bare type name in the current module;
+            //   2. a bare reference to the CURRENTLY-EMITTING generic instance's own type
+            //      parameter ('size_of(T)' inside an instantiation) — never a module symbol by
+            //      the time codegen runs (shadow_generic_type_params' temporary entry is long
+            //      gone, see check_generic_function_instance_body) and never given its own
+            //      expr_types entry either, since sema's own SizeOfExpr case resolves 'T' via
+            //      that same temporary shadow and returns early. Read straight off the active
+            //      substitution env, exactly as sema did;
+            //   3. a namespaced type name ('mod.Type');
+            //   4. otherwise the operand is a VALUE expression, and its recorded type is used.
+            //
+            // Shared by all three operand readers. type_of_operand USED TO LACK case 2, which
+            // was not a deliberate difference: 'type_of(T)' inside a generic function fell
+            // through to a .at() on a key that is never present and terminated the compiler
+            // with an uncaught std::out_of_range.
+            struct OperandType {
+                std::string module_path;
+                sema::ResolvedType type;
+            };
+
+            auto resolve_operand_type(const ast::Expr &operand) const -> OperandType {
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&operand)) {
+                    if (const auto it = current_module_->symbols.find(ident->name); it != current_module_->symbols.end()) {
+                        if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second); ts && ts->resolved) {
+                            return {*current_module_path_, *ts->resolved};
+                        }
+                    }
+                    if (!sema_program_.active_generic_env_stack.empty()) {
+                        for (const auto &binding : *sema_program_.active_generic_env_stack.back()) {
+                            if (binding.is_type && binding.param_name == ident->name) {
+                                return {*current_module_path_, binding.type_value};
+                            }
+                        }
+                    }
+                }
+                if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&operand)) {
+                    if (const auto ns = try_namespace_chain((*member)->object)) {
+                        const auto &mod = module_for(*ns);
+                        if (const auto it = mod.symbols.find((*member)->member); it != mod.symbols.end()) {
+                            if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second); ts && ts->resolved) {
+                                return {*ns, *ts->resolved};
+                            }
+                        }
+                    }
+                }
+                return {*current_module_path_, current_exprs_->expr_types.at(sema::get_expr_key(operand))};
+            }
+
             auto sizeof_operand(const ast::SizeOfExpr &expr) const -> uint64_t {
-                if (const auto *ident = std::get_if<ast::IdentExpr>(&expr.operand)) {
-                    if (const auto it = current_module_->symbols.find(ident->name); it != current_module_->symbols.end()) {
-                        if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second); ts && ts->resolved) {
-                            return size_of(*current_module_path_, *ts->resolved);
-                        }
-                    }
-                    // A bare reference to the CURRENTLY-EMITTING generic instance's own type
-                    // param (e.g. 'T' inside 'size_of(T)') - never a module symbol by the time
-                    // codegen runs (shadow_generic_type_params' temporary module.symbols entry
-                    // is long restored/removed by then - see check_generic_function_instance_
-                    // body), and never given its own expr_types entry either (sema's own
-                    // SizeOfExpr case resolves 'T' via that same temporary shadow and returns
-                    // early, without ever recursing check_expr onto the operand) - resolve it
-                    // the same way sema did, straight off the active substitution env
-                    // (Program::active_generic_env_stack, pushed by emit_generic_function_
-                    // instance/emit_generic_method_instance for the exact duration of this
-                    // instance's own body emission).
-                    if (!sema_program_.active_generic_env_stack.empty()) {
-                        for (const auto &binding : *sema_program_.active_generic_env_stack.back()) {
-                            if (binding.is_type && binding.param_name == ident->name) {
-                                return size_of(*current_module_path_, binding.type_value);
-                            }
-                        }
-                    }
-                }
-                if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr.operand)) {
-                    if (const auto ns = try_namespace_chain((*member)->object)) {
-                        const auto &mod = module_for(*ns);
-                        if (const auto it = mod.symbols.find((*member)->member); it != mod.symbols.end()) {
-                            if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second); ts && ts->resolved) {
-                                return size_of(*ns, *ts->resolved);
-                            }
-                        }
-                    }
-                }
-                return size_of(*current_module_path_, current_exprs_->expr_types.at(sema::get_expr_key(expr.operand)));
+                const auto operand = resolve_operand_type(expr.operand);
+                return size_of(operand.module_path, operand.type);
             }
 
-            // Mirrors sizeof_operand() above exactly, substituting align_of() for size_of().
             auto align_of_operand(const ast::AlignOfExpr &expr) const -> uint64_t {
-                if (const auto *ident = std::get_if<ast::IdentExpr>(&expr.operand)) {
-                    if (const auto it = current_module_->symbols.find(ident->name); it != current_module_->symbols.end()) {
-                        if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second); ts && ts->resolved) {
-                            return align_of(*current_module_path_, *ts->resolved);
-                        }
-                    }
-                    // See sizeof_operand's identical case above for why this is needed.
-                    if (!sema_program_.active_generic_env_stack.empty()) {
-                        for (const auto &binding : *sema_program_.active_generic_env_stack.back()) {
-                            if (binding.is_type && binding.param_name == ident->name) {
-                                return align_of(*current_module_path_, binding.type_value);
-                            }
-                        }
-                    }
-                }
-                if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr.operand)) {
-                    if (const auto ns = try_namespace_chain((*member)->object)) {
-                        const auto &mod = module_for(*ns);
-                        if (const auto it = mod.symbols.find((*member)->member); it != mod.symbols.end()) {
-                            if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second); ts && ts->resolved) {
-                                return align_of(*ns, *ts->resolved);
-                            }
-                        }
-                    }
-                }
-                return align_of(*current_module_path_, current_exprs_->expr_types.at(sema::get_expr_key(expr.operand)));
+                const auto operand = resolve_operand_type(expr.operand);
+                return align_of(operand.module_path, operand.type);
             }
 
-            // Mirrors sizeof_operand() above, but never invents a new id - every id a program
-            // can ever reference was already assigned synchronously during sema's whole-program
-            // check_expr pass (see intern_type_id), so this only ever reads sema_program_.type_ids.
+            // Never invents a new id: every id a program can reference was already assigned
+            // synchronously during sema's whole-program check_expr pass (see intern_type_id),
+            // so this only ever reads sema_program_.type_ids.
             auto type_of_operand(const ast::TypeOfExpr &expr) const -> uint64_t {
-                if (const auto *ident = std::get_if<ast::IdentExpr>(&expr.operand)) {
-                    if (const auto it = current_module_->symbols.find(ident->name); it != current_module_->symbols.end()) {
-                        if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second); ts && ts->resolved) {
-                            return sema_program_.type_ids.at(*ts->resolved);
-                        }
-                    }
-                }
-                if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr.operand)) {
-                    if (const auto ns = try_namespace_chain((*member)->object)) {
-                        const auto &mod = module_for(*ns);
-                        if (const auto it = mod.symbols.find((*member)->member); it != mod.symbols.end()) {
-                            if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second); ts && ts->resolved) {
-                                return sema_program_.type_ids.at(*ts->resolved);
-                            }
-                        }
-                    }
-                }
-                return sema_program_.type_ids.at(current_exprs_->expr_types.at(sema::get_expr_key(expr.operand)));
+                return sema_program_.type_ids.at(resolve_operand_type(expr.operand).type);
             }
 
             // Sema has already validated the path (containment, existence) by the time codegen
