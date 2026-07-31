@@ -163,6 +163,11 @@ namespace ast {
         // appending to 'args'. Shared by parse_generic_args and parse_index_or_slice_expr,
         // which differ only in how the first argument is obtained -- the latter has to parse
         // it before it can tell an index/instantiation from a slice.
+        //
+        // That first-argument difference is why the two keep their own '[' / ']' framing
+        // rather than sharing a whole-list helper: parse_index_or_slice_expr cannot know it is
+        // reading a generic argument list until after it has read the first item and found no
+        // '..'. Only the repeated part is genuinely common, and that is this.
         auto parse_generic_arg_list_tail(Parser &parser, std::vector<GenericArg> &args) -> void {
             while (!parser.check(TokenKind::RBracket) && !parser.at_end()) {
                 const LoopProgressGuard progress_guard(parser);
@@ -2238,28 +2243,48 @@ namespace ast {
         // literal block (mirrors WhileStmt forcing parse_block_stmt for its body), unlike
         // IfStmt's 'then_stmt' which accepts any statement. Legality/foldability of
         // 'condition' as a compile-time constant is enforced in sema, not here.
-        auto parse_when_stmt(Parser &parser) -> std::unique_ptr<WhenStmt> {
+        // 'when cond BODY [else (when cond BODY ... | BODY)]' — the compile-time conditional,
+        // in both the forms it takes: WhenStmt over a block of statements, and WhenDecl over a
+        // list of module-scope declarations.
+        //
+        // The two differ only in what a BODY is and which node they build. Sharing the chain
+        // itself is what keeps 'else when' meaning the same thing in both — an inconsistency
+        // there would be a difference in the language, not just in the parser.
+        template <typename Node, typename Body>
+        auto parse_when_chain(Parser &parser, auto parse_body) -> std::unique_ptr<Node> {
             const auto location = parser.current_location();
-
             parser.expect(TokenKind::KwWhen, "'when'");
 
             auto condition = parse_expr(parser);
-            auto then_block = std::move(*std::get<std::unique_ptr<BlockStmt>>(parse_block_stmt(parser)));
+            auto then_body = parse_body(parser);
 
-            std::optional<std::variant<BlockStmt, std::unique_ptr<WhenStmt>>> else_branch = std::nullopt;
+            // 'else when' recurses (chaining another condition); a bare 'else' takes a body.
+            std::optional<std::variant<Body, std::unique_ptr<Node>>> else_branch = std::nullopt;
             if (parser.match(TokenKind::KwElse)) {
                 if (parser.check(TokenKind::KwWhen)) {
-                    else_branch = parse_when_stmt(parser);
+                    else_branch = parse_when_chain<Node, Body>(parser, parse_body);
                 } else {
-                    else_branch = std::move(*std::get<std::unique_ptr<BlockStmt>>(parse_block_stmt(parser)));
+                    else_branch = parse_body(parser);
                 }
             }
 
-            return std::make_unique<WhenStmt>(WhenStmt{
-                .condition = std::move(condition),
-                .then_block = std::move(then_block),
-                .else_branch = std::move(else_branch),
-                .location = location,
+            Node node;
+            node.condition = std::move(condition);
+            node.else_branch = std::move(else_branch);
+            node.location = location;
+            // The one place the two nodes are not interchangeable: they name the then-body
+            // field for what it holds.
+            if constexpr (std::is_same_v<Node, WhenStmt>) {
+                node.then_block = std::move(then_body);
+            } else {
+                node.then_decls = std::move(then_body);
+            }
+            return std::make_unique<Node>(std::move(node));
+        }
+
+        auto parse_when_stmt(Parser &parser) -> std::unique_ptr<WhenStmt> {
+            return parse_when_chain<WhenStmt, BlockStmt>(parser, [](Parser &p) {
+                return std::move(*std::get<std::unique_ptr<BlockStmt>>(parse_block_stmt(p)));
             });
         }
 
@@ -3515,27 +3540,7 @@ namespace ast {
     // with '$option'/'type'/'ext fn' is a SEMA error (see spec), not a parse error, so
     // parsing here must succeed for any decl kind and let sema reject the disallowed ones.
     auto parse_when_decl(Parser &parser) -> std::unique_ptr<WhenDecl> {
-        const auto location = parser.current_location();
-        parser.expect(TokenKind::KwWhen, "'when'");
-
-        auto condition = parse_expr(parser);
-        auto then_decls = parse_when_decl_body(parser);
-
-        std::optional<std::variant<std::vector<Decl>, std::unique_ptr<WhenDecl>>> else_branch = std::nullopt;
-        if (parser.match(TokenKind::KwElse)) {
-            if (parser.check(TokenKind::KwWhen)) {
-                else_branch = parse_when_decl(parser);
-            } else {
-                else_branch = parse_when_decl_body(parser);
-            }
-        }
-
-        return std::make_unique<WhenDecl>(WhenDecl{
-            .condition = std::move(condition),
-            .then_decls = std::move(then_decls),
-            .else_branch = std::move(else_branch),
-            .location = location,
-        });
+        return parse_when_chain<WhenDecl, std::vector<Decl>>(parser, parse_when_decl_body);
     }
 
     auto parse_decl(Parser &parser, const bool top_level) -> std::optional<Decl> {
