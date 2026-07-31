@@ -364,7 +364,7 @@ namespace sema {
                 if (is_aggregate_no_cmp(lhs) || is_aggregate_no_cmp(rhs)) {
                     return error(diag, loc, "struct, array, union, and slice types do not support comparison operators");
                 }
-                if (!is_assignable(lhs, rhs) && !is_assignable(rhs, lhs)) {
+                if (!is_assignable(lhs, rhs, program) && !is_assignable(rhs, lhs, program)) {
                     return error(diag, loc, "operand type mismatch in comparison");
                 }
                 return ResolvedType{.kind = TypeKind::Bool};
@@ -542,12 +542,9 @@ namespace sema {
       // (declared in sema.hpp) so sema.cpp's default-parameter-value checking can use it too.
 
     auto assignable_in_module(const ResolvedType &from, const ResolvedType &to, const std::string &module_path, Program &program) -> bool {
-        if (from.kind == TypeKind::Array && to.kind == TypeKind::Slice) {
-            return array_element_type(from, module_path, program) == slice_element_type(to, module_path, program);
-        }
-        if (from.kind == TypeKind::Slice && to.kind == TypeKind::Array) {
-            return slice_element_type(from, module_path, program) == array_element_type(to, module_path, program);
-        }
+        // array<->slice and slice->pointer are element-checked inside is_assignable itself
+        // (the fallthrough below); only the coercions unavailable to plain is_assignable
+        // callers are added here.
         if (from.kind == TypeKind::Array && to.kind == TypeKind::Pointer) {
             const auto *pointee = program.pointee_at(to.pointee_index);
             return pointee && array_element_type(from, module_path, program) == *pointee;
@@ -577,7 +574,7 @@ namespace sema {
                 return true;
             }
         }
-        return is_assignable(from, to);
+        return is_assignable(from, to, program);
     }
 
     namespace {
@@ -1744,7 +1741,7 @@ namespace sema {
                     const auto field_type = struct_info->fields[i].type;
 
                     const auto init_ty = check_expr(*field.init, scope, instance_info.decl_module, program, diag, field_type, 0);
-                    if (!is_assignable(init_ty, field_type)) {
+                    if (!is_assignable(init_ty, field_type, program)) {
                         diag.report_error(DiagnosticStage::Sema, field.location,
                             std::format("default value type mismatch for field '{}'", field.name));
                     }

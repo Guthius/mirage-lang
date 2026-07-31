@@ -451,7 +451,7 @@ namespace sema {
             LocalScope no_locals;
             const auto init_ty = check_expr(*g->decl->init, no_locals, module_path, program, diag, has_declared_ty ? std::optional(declared_ty) : std::nullopt, 0, -1, nullptr);
             if (has_declared_ty) {
-                if (!is_assignable(init_ty, declared_ty)) {
+                if (!is_assignable(init_ty, declared_ty, program)) {
                     diag.report_error(DiagnosticStage::Sema, g->decl->location, "type mismatch in variable declaration");
                 }
                 g->type = declared_ty;
@@ -586,7 +586,7 @@ namespace sema {
         if (m->decl->result_type) {
             const auto declared_ty = resolve_type(*m->decl->result_type, module_path, program, diag);
             const auto actual_ty = check_expr(m->decl->expr_template, macro_scope, module_path, program, diag, declared_ty, 0);
-            if (!is_assignable(actual_ty, declared_ty)) {
+            if (!is_assignable(actual_ty, declared_ty, program)) {
                 diag.report_error(DiagnosticStage::Sema, m->decl->location,
                     "macro body type does not match declared result type");
             }

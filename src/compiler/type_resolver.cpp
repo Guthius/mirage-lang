@@ -1999,7 +1999,7 @@ namespace sema {
         });
     }
 
-    auto is_assignable(const ResolvedType &from, const ResolvedType &to) -> bool {
+    auto is_assignable(const ResolvedType &from, const ResolvedType &to, const Program &program) -> bool {
         if (from == to) return true;
         // An unbound generic parameter is assignment-compatible with everything, in both
         // directions. Whether a real 'T' actually is depends on the instantiation, which by
@@ -2013,10 +2013,30 @@ namespace sema {
         // nil (Anyptr) is assignable to/from function pointer types
         if (from.kind == TypeKind::Anyptr && to.kind == TypeKind::Function) return true;
         if (from.kind == TypeKind::Function && to.kind == TypeKind::Anyptr) return true;
-        if (from.kind == TypeKind::Array && to.kind == TypeKind::Slice) return true;
-        if (from.kind == TypeKind::Slice && to.kind == TypeKind::Array) return true;
+
+        // The container conversions compare element/pointee types. These rows were once
+        // element-blind, which let 'const S: []u8 = A' with 'A: [3]i32' through sema and
+        // into an LLVM verifier failure with no source location.
+        const auto element_of = [&](const ResolvedType &ty) -> const ResolvedType * {
+            if (ty.kind == TypeKind::Array) {
+                const auto *info = program.array_at(ty.array_index);
+                return info ? &info->element_type : nullptr;
+            }
+            const auto *info = program.slice_at(ty.slice_index);
+            return info ? &info->element_type : nullptr;
+        };
+        if ((from.kind == TypeKind::Array && to.kind == TypeKind::Slice) ||
+            (from.kind == TypeKind::Slice && to.kind == TypeKind::Array)) {
+            const auto *from_elem = element_of(from);
+            const auto *to_elem = element_of(to);
+            return from_elem && to_elem && *from_elem == *to_elem;
+        }
+        if (from.kind == TypeKind::Slice && to.kind == TypeKind::Pointer) {
+            const auto *from_elem = element_of(from);
+            const auto *pointee = program.pointee_at(to.pointee_index);
+            return from_elem && pointee && *from_elem == *pointee;
+        }
         if (from.kind == TypeKind::Anyptr && to.kind == TypeKind::Slice) return true;
-        if (from.kind == TypeKind::Slice && to.kind == TypeKind::Pointer) return true;
         if (from.kind == TypeKind::Slice && to.kind == TypeKind::Anyptr) return true;
         return false;
     }

@@ -2118,7 +2118,11 @@ The following types are mutually assignable without explicit cast:
 | `*T`            | `anyptr`      |                                      |
 | `anyptr`        | fn ptr type   | nil-to-fn-ptr coercion               |
 | fn ptr type     | `anyptr`      |                                      |
-| `[N]T`          | `[]T`         | array decays to slice                |
+| `[N]T`         | `[]T`         | array decays to slice; element types must match exactly |
+| `[]T`          | `[N]T`        | slice re-views as array; element types must match exactly |
+| `[]T`          | `*T`          | slice's data pointer; element/pointee types must match exactly |
+| `anyptr`        | `[]T`         | nil-to-slice coercion                |
+| `[]T`          | `anyptr`      |                                      |
 | `bitset(...)`   | its storage type | expected-type position only — see §18, "Bitset Types" |
 
 Arithmetic, bitwise, and other binary operations require both operands to have the same type (except `anyptr ± integer`). The bitset → storage-type row above is deliberately **not** symmetric and does **not** apply during binary-operator type resolution: a raw integer never implicitly coerces to a bitset (use `cast`), and mixing a bitset with a raw integer in a binary operator is always a sema error regardless of expected type.

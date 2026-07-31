@@ -1113,11 +1113,14 @@ namespace sema {
     auto is_opaque_template_instance(const std::optional<GenericInstanceInfo> &generic_instance,
                                       const Program &program) -> bool;
 
-    auto is_assignable(const ResolvedType &from, const ResolvedType &to) -> bool;
+    // Core assignability, including the element-checked container conversions
+    // (array<->slice, slice->pointer). Takes Program to compare element/pointee types.
+    auto is_assignable(const ResolvedType &from, const ResolvedType &to, const Program &program) -> bool;
     // Like is_assignable, but also allows the additional expected-type-position-only
-    // coercions available at an ordinary call/assignment site (array<->slice/pointer,
-    // bitset->storage). Used for call-argument checking and default-parameter-value
-    // type-checking so a defaulted argument coerces exactly like an explicit one would.
+    // coercions available at an ordinary call/assignment site (array->pointer,
+    // bitset->storage, ?error<->error with identical members). Used for call-argument
+    // checking and default-parameter-value type-checking so a defaulted argument coerces
+    // exactly like an explicit one would.
     auto assignable_in_module(const ResolvedType &from, const ResolvedType &to, const std::string &module_path, Program &program) -> bool;
     // Minimal human-readable rendering of a resolved type, used for trait conformance
     // and default-parameter-value diagnostics.

@@ -1,0 +1,13 @@
+// example_global_slice_element_mismatch — the container conversions must compare element
+// types everywhere. is_assignable's array->slice row was element-blind, so this global
+// passed sema and died with a location-free "LLVM module verification failed"
+// (CODE_REVIEW.md SEMA-3).
+//
+// Expected: compile error "type mismatch in variable declaration".
+
+const A: [3]i32 = {1, 2, 3}
+const S: []u8 = A
+
+pub fn main() -> i32 {
+    return 0
+}

@@ -608,7 +608,7 @@ namespace sema {
             LocalScope empty;
             const auto u8_slice = intern_slice(sema_program, ResolvedType{.kind = TypeKind::U8});
             const auto ty = check_expr(expr, empty, module_path, sema_program, diag, u8_slice, 0);
-            if (!is_assignable(ty, u8_slice)) {
+            if (!is_assignable(ty, u8_slice, sema_program)) {
                 diag.report_error(DiagnosticStage::Sema, location,
                     std::format("{} argument must be a compile-time constant '[]u8' expression", what));
                 return std::nullopt;

@@ -544,7 +544,7 @@ namespace sema {
                     const auto field_type = struct_info->fields[i].type;
 
                     const auto init_ty = check_expr(*field.init, empty, module_path, program, diag, field_type, 0);
-                    if (!is_assignable(init_ty, field_type)) {
+                    if (!is_assignable(init_ty, field_type, program)) {
                         diag.report_error(DiagnosticStage::Sema, field.location,
                                           std::format("default value type mismatch for field '{}'", field.name));
                     }
