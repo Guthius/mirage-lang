@@ -85,15 +85,36 @@ namespace lsp::analysis {
         return it == open_texts_.end() ? nullptr : &it->second;
     }
 
+    void DocumentStore::index_bundle(const std::string &key) {
+        const auto it = module_results_.find(key);
+        if (it == module_results_.end()) return;
+        for (const auto &dir : it->second.result.ast_program.modules | std::views::keys) {
+            bundle_of_dir_[dir].insert(key);
+        }
+    }
+
+    void DocumentStore::unindex_bundle(const std::string &key) {
+        const auto it = module_results_.find(key);
+        if (it == module_results_.end()) return;
+        for (const auto &dir : it->second.result.ast_program.modules | std::views::keys) {
+            const auto entry = bundle_of_dir_.find(dir);
+            if (entry == bundle_of_dir_.end()) continue;
+            entry->second.erase(key);
+            if (entry->second.empty()) bundle_of_dir_.erase(entry);
+        }
+    }
+
     void DocumentStore::invalidate(const std::string &canonical_path) {
         const auto dir = std::filesystem::path(canonical_path).parent_path().string();
 
-        for (auto it = module_results_.begin(); it != module_results_.end();) {
-            if (it->second.result.ast_program.modules.contains(dir)) {
-                it = module_results_.erase(it);
-            } else {
-                ++it;
-            }
+        const auto entry = bundle_of_dir_.find(dir);
+        if (entry == bundle_of_dir_.end()) return;
+
+        // Copied: unindex_bundle mutates bundle_of_dir_, including this very entry.
+        const auto keys = entry->second;
+        for (const auto &key : keys) {
+            unindex_bundle(key);
+            module_results_.erase(key);
         }
     }
 
@@ -109,6 +130,7 @@ namespace lsp::analysis {
                 std::ranges::any_of(open_dirs, [&](const auto &dir) { return modules.contains(dir); });
 
             if (!still_referenced) {
+                unindex_bundle(it->first);
                 it = module_results_.erase(it);
             } else {
                 ++it;
@@ -127,21 +149,28 @@ namespace lsp::analysis {
                 oldest = it;
             }
         }
+        unindex_bundle(oldest->first);
         module_results_.erase(oldest);
     }
 
     auto DocumentStore::ensure_analysed(const std::string &canonical_path) -> ProgramResult & {
         const auto dir = ast::canonicalize(std::filesystem::path(canonical_path).parent_path().string());
 
-        for (auto &bundle : module_results_ | std::views::values) {
-            if (bundle.result.ast_program.modules.contains(dir)) {
-                bundle.last_access = ++access_clock_;
-                return bundle.result;
-            }
+        // Any bundle whose closure already contains this directory will do — they analysed
+        // the same sources. The old linear scan likewise took whichever came first in
+        // unordered iteration order.
+        if (const auto entry = bundle_of_dir_.find(dir); entry != bundle_of_dir_.end() && !entry->second.empty()) {
+            auto &bundle = module_results_.at(*entry->second.begin());
+            bundle.last_access = ++access_clock_;
+            return bundle.result;
         }
 
+        // insert_or_assign may replace an existing bundle under this key, so drop its index
+        // entries first.
+        unindex_bundle(dir);
         auto [it, inserted] = module_results_.insert_or_assign(
             dir, CachedBundle{.result = analyse(dir, open_texts_), .last_access = ++access_clock_});
+        index_bundle(dir);
         evict_lru_if_over_capacity();
         return it->second.result;
     }

@@ -120,8 +120,24 @@ namespace lsp::analysis {
         // the least-recently-accessed bundle when over capacity.
         void evict_lru_if_over_capacity();
 
+        // Adds/removes 'key''s bundle in bundle_of_dir_ below. Every erase from
+        // module_results_ must be paired with unindex_bundle, or a stale directory keeps
+        // resolving to a bundle that no longer exists.
+        void index_bundle(const std::string &key);
+        void unindex_bundle(const std::string &key);
+
         std::unordered_map<std::string, std::string> open_texts_;        // canonical file path -> buffer text
         std::unordered_map<std::string, CachedBundle> module_results_;   // module root dir -> last analysis
+
+        // Every module directory reachable from a cached bundle -> the keys of the bundles
+        // that reach it. Bundles are keyed by their ROOT directory, but lookups ask whether a
+        // directory appears anywhere in a bundle's import CLOSURE — which a plain find() on
+        // module_results_ would miss for an imported-but-not-root module, and which is why
+        // this was a linear scan over every bundle before.
+        //
+        // Set-valued because two bundles legitimately share a dependency: erasing one must
+        // not unmap a directory the other still reaches.
+        std::unordered_map<std::string, std::set<std::string>> bundle_of_dir_;
         std::set<std::string> last_published_nonempty_diag_files_;       // see files_that_became_clean()
         uint64_t access_clock_ = 0;
     };
