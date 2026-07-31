@@ -115,6 +115,18 @@
   "->"
 ] @operator
 
+; The '?' that marks an ignorable error on a return type is NOT the ternary operator, and
+; the grammar now gives it its own node so the two can be told apart. Placed after the
+; operator list above so this more specific pattern wins.
+;
+; Scoped as @keyword.operator rather than @operator: it is part of the TYPE, saying how the
+; caller must treat the result, not something applied to two operands.
+(optional_error_marker) @keyword.operator
+
+; Compile-time directives. '#' is a sigil, not a comment - see the grammar's own note.
+(link_declaration) @keyword.directive
+(diagnostic_declaration) @keyword.directive
+
 ["." ".." "..."] @punctuation.delimiter
 
 ["," ";" ":"] @punctuation.delimiter

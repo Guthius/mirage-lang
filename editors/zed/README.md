@@ -62,35 +62,38 @@ part of it. A query can only match node types the grammar already produces — i
 cannot introduce one. So any syntax change that needs a new node is a two-step
 job: land it upstream first, bump `rev`, then write the query here.
 
-### Known stale, in landing order
+### Grammar status
 
-Neither of these can be fixed from this repository.
+Both syntax changes that were outstanding here have landed upstream:
 
-**`//` and `/* */` comments (landed 2026-07-27)** replaced the older `#` comment
-syntax. `highlights.scm` already asks for `(comment) @comment` and `config.toml`
-already declares the right delimiters for comment toggling, so nothing here needs
-to change — but both depend on the upstream grammar's comment rule recognising the
-new forms. If it still matches `#`, comments highlight wrongly in Zed while being
-correct in VS Code, whose grammar lives in this repo
-(`editors/vscode/syntaxes/mirage.tmLanguage.json`, pinned by
-`tests/editor_grammar_test.py`).
+- **`//` and `/* */` comments** (2026-07-27) replaced the older `#` syntax.
+  `highlights.scm` already asked for `(comment) @comment` and `config.toml` already
+  declared the right delimiters, so nothing here needed changing — but both depended
+  on the upstream grammar recognising the new forms.
 
-**`?` on the last return type (landed 2026-07-30)** marks an ignorable error:
+  Removing `#` as a comment character had a consequence worth recording: `#` is the
+  sigil for compile-time directives (`#link`, `#error`, `#warn`), and while it *was*
+  the comment character those were silently swallowed. The grammar therefore gained
+  rules for them at the same time, or every directive would have become a parse error
+  — a whole line of red. `highlights.scm` scopes them as `@keyword.directive`.
 
-```mirage
-fn alloc(size: usize) -> (anyptr, ?Allocator_Error)
-fn touch(size: usize) -> ?error(Alloc_Error)
-```
+- **`?` on the last return type** (2026-07-30) marks an ignorable error:
 
-The grammar needs an optional-marker node on its return-slot rule — the `?` is
-legal only on the **last** return type, so it belongs to that rule rather than
-being a free-floating token. Once it exists, add a query for it here.
+  ```mirage
+  fn alloc(size: usize) -> (anyptr, ?Allocator_Error)
+  fn touch(size: usize) -> ?error(Alloc_Error)
+  ```
 
-Until then `highlights.scm` scopes a bare `"?"` as `@operator`, which is the
-ternary's scope. That is the right fallback: the marker gets operator colouring
-rather than no colouring, and nothing is mis-scoped as a type. Do not try to
-special-case it in a query — without a distinct node there is nothing to match on
-that the ternary would not also match.
+  The grammar now emits an `optional_error_marker` node for it, so it can be told
+  apart from the ternary `?`. Without a distinct node the two are the same token and
+  no query can separate them, which is why `highlights.scm` used to scope a bare `"?"`
+  as `@operator` and leave it there. It is now `@keyword.operator` — the marker is part
+  of the TYPE, saying how the caller must treat the result, rather than an operator
+  applied to two operands.
+
+If `rev` in `extension.toml` is older than those changes, comments and the `?` marker
+will highlight wrongly in Zed while being correct in VS Code, whose TextMate grammar
+lives in this repository and is pinned by `tests/editor_grammar_test.py`.
 
 ## Publishing
 
