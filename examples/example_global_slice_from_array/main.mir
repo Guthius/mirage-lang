@@ -1,0 +1,17 @@
+// example_global_slice_from_array — a slice-typed global initialized from an
+// element-matched const array must produce a working fat pointer. codegen used to set the
+// folded ARRAY constant as the slice global's initializer, failing LLVM verification with
+// no source location (found while fixing CODE_REVIEW.md SEMA-3; logged as CG-19).
+//
+// Expected: exit code 12 — (10 + 20 + 12) summed through the slice, minus len(S) * 10.
+
+const A: [3]i32 = {10, 20, 12}
+const S: []i32 = A
+
+pub fn main() -> i32 {
+    mut sum: i32 = 0
+    for v in S {
+        sum = sum + v
+    }
+    return sum - cast(len(S), i32) * 10
+}

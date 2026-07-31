@@ -552,6 +552,10 @@
     "diag": "examples/example_global_slice_element_mismatch/main.mir:9:1: error: type mismatch in variable declaration",
     "exit": 1
   },
+  "example_global_slice_from_array": {
+    "action": "run",
+    "exit": 12
+  },
   "example_impl": {
     "action": "run",
     "exit": 20

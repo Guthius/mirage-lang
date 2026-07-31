@@ -1679,9 +1679,56 @@ namespace codegen {
                         }
 
                         llvm::Constant *init = global->decl->init ? emit_constant_expr(*global->decl->init) : zero_value(path, global->type);
-                        globals_.at(global_key(path, name))->setInitializer(init);
+
+                        // sema permits an element-matched array initializer for a slice-typed
+                        // global ('const S: []i32 = A'); the folded constant is the ARRAY
+                        // value, which must be wrapped into the fat pointer here or the
+                        // initializer type won't match the global's.
+                        if (init && global->decl->init && global->type.kind == sema::TypeKind::Slice) {
+                            const auto init_ty = expr_type(*global->decl->init);
+                            if (init_ty.kind == sema::TypeKind::Array) {
+                                init = array_constant_as_slice(path, name, *global->decl->init, init, init_ty);
+                            }
+                        }
+
+                        auto *storage = globals_.at(global_key(path, name));
+                        if (!init || init->getType() != storage->getValueType()) {
+                            // A missing constant already carries its own diagnostic
+                            // (emit_const_or_runtime's fall-through); a shape this path cannot
+                            // represent must be reported here rather than left for the LLVM
+                            // verifier to reject without a source location.
+                            if (init) {
+                                report_codegen_error(diag_, global->decl->location, "unsupported global constant initializer");
+                            }
+                            init = llvm::Constant::getNullValue(storage->getValueType());
+                        }
+                        storage->setInitializer(init);
                     }
                 }
+            }
+
+            // Builds the '{ptr, len}' fat-pointer constant for a slice-typed global whose
+            // initializer folded to an array constant. A direct reference to another const
+            // global array aliases that global's storage (matching how a local 'const s:
+            // []T = arr' takes the array's address); any other constant shape gets a
+            // synthesized private backing global.
+            auto array_constant_as_slice(const std::string &path, const std::string &name, const ast::Expr &init_expr, llvm::Constant *array_init, const sema::ResolvedType &init_ty) -> llvm::Constant * {
+                const auto *info = sema_program_.array_at(init_ty.array_index);
+                const uint64_t count = info ? info->count : 0;
+
+                llvm::Constant *data = nullptr;
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&init_expr)) {
+                    if (const auto backing = globals_.find(global_key(path, ident->name)); backing != globals_.end()) {
+                        data = backing->second;
+                    }
+                }
+                if (!data) {
+                    data = new llvm::GlobalVariable(*module_, array_init->getType(), /*isConstant=*/true,
+                        llvm::GlobalValue::InternalLinkage, array_init, symbol_name(path, name) + ".data");
+                }
+
+                auto *slice_ty = llvm::cast<llvm::StructType>(llvm_type(path, sema::ResolvedType{.kind = sema::TypeKind::Slice}));
+                return llvm::ConstantStruct::get(slice_ty, {data, builder_.getInt64(count)});
             }
 
             void emit_functions() {
