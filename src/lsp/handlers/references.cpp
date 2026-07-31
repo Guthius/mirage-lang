@@ -442,6 +442,20 @@ namespace lsp::handlers {
                             out.push_back(location_json(var->location));
                         }
                     }
+                } else if (const auto *type_decl = std::get_if<ast::TypeDecl>(&decl)) {
+                    if (include_declaration && target.resolution && target.resolution->kind == Resolution::Kind::Symbol) {
+                        if (const auto *type_sym = std::get_if<sema::TypeSymbol>(target.resolution->symbol);
+                            type_sym && type_sym->decl == type_decl) {
+                            out.push_back(location_json(type_decl->location));
+                        }
+                    }
+                } else if (const auto *ext_fn = std::get_if<ast::ExtFunctionDecl>(&decl)) {
+                    if (include_declaration && target.resolution && target.resolution->kind == Resolution::Kind::Symbol) {
+                        if (const auto *ext_sym = std::get_if<sema::ExtFunctionSymbol>(target.resolution->symbol);
+                            ext_sym && ext_sym->decl == ext_fn) {
+                            out.push_back(location_json(ext_fn->location));
+                        }
+                    }
                 } else if (const auto *macro = std::get_if<ast::MacroDecl>(&decl)) {
                     std::vector<ParamInfo> params;
                     for (const auto &p : macro->params) params.push_back({p.name, {}, p.location});
