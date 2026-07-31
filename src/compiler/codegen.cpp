@@ -12,6 +12,7 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Type.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/TargetParser/Triple.h>
 
 #include <algorithm>
 #include <cctype>
@@ -229,6 +230,20 @@ namespace codegen {
             }
 
             auto run() -> std::unique_ptr<llvm::Module> {
+                // Hosted '_start' glue, the panic writer, freestanding syscalls, and the
+                // SysV eightbyte classifier are all x86-64 Linux specific. The driver
+                // targets the HOST triple, so on any other host this refused cleanly —
+                // previously it emitted x86 inline asm into an aarch64 module and failed
+                // at assembly time (hosted) or produced wrong syscalls (freestanding).
+                if (const auto &triple = module_->getTargetTriple();
+                    !options_.target_triple.empty() &&
+                    (triple.getArch() != llvm::Triple::x86_64 || !triple.isOSLinux())) {
+                    report_codegen_error(diag_, {}, std::format(
+                        "target '{}' is not supported: code generation currently targets x86-64 Linux only",
+                        options_.target_triple));
+                    return nullptr;
+                }
+
                 declare_unions();
                 declare_structs();
                 declare_globals_and_functions();
