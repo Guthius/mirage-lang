@@ -1,0 +1,10 @@
+mut seed: i32 = 0
+
+@init
+fn setup_lib() {
+    seed = 40
+}
+
+pub fn get_seed() -> i32 {
+    return seed
+}

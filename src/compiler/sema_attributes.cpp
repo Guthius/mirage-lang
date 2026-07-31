@@ -302,13 +302,27 @@ namespace sema {
                 if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr> || std::is_same_v<V, ast::LiteralFloatExpr> ||
                               std::is_same_v<V, ast::LiteralStringExpr> || std::is_same_v<V, ast::LiteralCharExpr> ||
                               std::is_same_v<V, ast::LiteralBoolExpr> || std::is_same_v<V, ast::LiteralNilExpr> ||
-                              std::is_same_v<V, ast::IdentExpr> || std::is_same_v<V, ast::ImportBinExpr> ||
+                              std::is_same_v<V, ast::ImportBinExpr> ||
                               std::is_same_v<V, ast::IotaExpr> || std::is_same_v<V, ast::DotIdentExpr> ||
                               std::is_same_v<V, ast::DefaultExpr> || std::is_same_v<V, ast::UndefinedExpr> ||
                               std::is_same_v<V, std::unique_ptr<ast::TypeExpr>> || std::is_same_v<V, std::unique_ptr<ast::AsmExpr>>) {
                     // Leaves w.r.t. foreign-reference detection: no nested Expr fields relevant
                     // here (TypeExpr wraps a Type, not a value; AsmExpr's operands are
                     // registers/immediates/local variables only, never cross-module symbols).
+
+                } else if constexpr (std::is_same_v<V, ast::IdentExpr>) {
+                    // A bare-imported symbol is referenced as a plain identifier but lives in
+                    // another module — treating it as a leaf meant '@init' bodies calling one
+                    // produced NO dependency edge, and init_call_order could silently run
+                    // initializers in the wrong order.
+                    if (!locals.contains(v.name)) {
+                        if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
+                            if (const auto origin = mod_it->second.bare_import_origins.find(v.name);
+                                origin != mod_it->second.bare_import_origins.end()) {
+                                on_foreign_ref(origin->second.module_path, origin->second.symbol_name, v.location);
+                            }
+                        }
+                    }
 
                 } else if constexpr (std::is_same_v<V, ast::ImportExpr>) {
                     // Handled by the MemberExpr case below (when this IS the '.object' of one) —

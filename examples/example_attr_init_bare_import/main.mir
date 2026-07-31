@@ -1,0 +1,19 @@
+// example_attr_init_bare_import — '@init' ordering must see references made through BARE
+// imports. The dependency walker only created edges for qualified 'mod.symbol' accesses;
+// a bare-imported symbol is a plain identifier, so this module's '@init' calling one
+// produced no edge and lib's initializer could run after ours (CODE_REVIEW.md SEMA-8).
+//
+// Expected: exit code 42 — get_seed() must already see lib's initialized seed (40) + 2.
+
+import("lib")
+
+mut captured: i32 = 0
+
+@init
+fn setup_main() {
+    captured = get_seed() + 2
+}
+
+pub fn main() -> i32 {
+    return captured
+}

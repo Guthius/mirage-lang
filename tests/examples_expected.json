@@ -153,6 +153,10 @@
     "diag": "examples/example_attr_init_bad_return/main.mir:7:1: error: '@init' functions must return nothing or 'error(...)'",
     "exit": 1
   },
+  "example_attr_init_bare_import": {
+    "action": "run",
+    "exit": 42
+  },
   "example_attr_init_basic": {
     "action": "run",
     "exit": 0
