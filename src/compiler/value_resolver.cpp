@@ -485,7 +485,28 @@ namespace sema {
     // signature can therefore depend on another's, regardless of Program::modules'
     // unordered iteration order.
     auto ensure_function_signature_resolved(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag) -> FunctionSymbol & {
-        auto &sym = std::get<FunctionSymbol>(program.modules.at(module_path).symbols.at(name));
+        // find/get_if rather than at()/std::get: the sema_check callers have all just
+        // looked the symbol up, but the bare-import alias path (sema.cpp) passes an
+        // origin recorded in an earlier pass, and the LSP runs sema on broken programs
+        // — an internal-error diagnostic beats terminating the analysis thread (see the
+        // *_at accessors' rationale in sema.hpp).
+        FunctionSymbol *sym_ptr = nullptr;
+        if (const auto module_it = program.modules.find(module_path); module_it != program.modules.end()) {
+            if (const auto sym_it = module_it->second.symbols.find(name); sym_it != module_it->second.symbols.end()) {
+                sym_ptr = std::get_if<FunctionSymbol>(&sym_it->second);
+            }
+        }
+        if (sym_ptr == nullptr) {
+            diag.report_error(DiagnosticStage::Sema, SourceLocation{},
+                std::format("internal error: no function symbol '{}' in module '{}'", name, module_path));
+            // Inert placeholder: empty params/returns, already "resolved" so callers
+            // read it without triggering further resolution. Reset each time — a caller
+            // on this bug path may have scribbled on it.
+            static FunctionSymbol invalid_fn;
+            invalid_fn = FunctionSymbol{.is_resolved = true};
+            return invalid_fn;
+        }
+        auto &sym = *sym_ptr;
         if (sym.is_resolved) {
             return sym;
         }

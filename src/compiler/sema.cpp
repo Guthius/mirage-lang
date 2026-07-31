@@ -216,10 +216,26 @@ namespace sema {
                     }
                 } else if (auto *ef = std::get_if<ExtFunctionSymbol>(&sym)) {
                     if (const auto origin = module.bare_import_origins.find(name); origin != module.bare_import_origins.end()) {
-                        auto &origin_sym = std::get<ExtFunctionSymbol>(program.modules.at(origin->second.module_path).symbols.at(origin->second.symbol_name));
-                        resolve_ext_function_symbol(origin->second.module_path, origin_sym, program, diag);
-                        *ef = origin_sym;
-                        ef->is_pub = false;
+                        // find/get_if rather than at()/std::get: the alias was recorded from
+                        // the same declaration pass, so a miss here is a compiler bug — but
+                        // the LSP runs sema on broken programs, and an internal-error
+                        // diagnostic beats terminating the analysis thread (see the *_at
+                        // accessors' rationale in sema.hpp).
+                        ExtFunctionSymbol *origin_sym = nullptr;
+                        if (const auto origin_module = program.modules.find(origin->second.module_path); origin_module != program.modules.end()) {
+                            if (const auto sym_it = origin_module->second.symbols.find(origin->second.symbol_name); sym_it != origin_module->second.symbols.end()) {
+                                origin_sym = std::get_if<ExtFunctionSymbol>(&sym_it->second);
+                            }
+                        }
+                        if (origin_sym == nullptr) {
+                            diag.report_error(DiagnosticStage::Sema, ef->decl ? ef->decl->location : SourceLocation{},
+                                std::format("internal error: bare-import origin '{}.{}' for '{}' is not an ext function",
+                                    origin->second.module_path, origin->second.symbol_name, name));
+                        } else {
+                            resolve_ext_function_symbol(origin->second.module_path, *origin_sym, program, diag);
+                            *ef = *origin_sym;
+                            ef->is_pub = false;
+                        }
                     } else {
                         resolve_ext_function_symbol(module_path, *ef, program, diag);
                     }
