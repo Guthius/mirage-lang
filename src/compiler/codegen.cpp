@@ -1659,7 +1659,7 @@ namespace codegen {
 
                 const auto sym_it = root_it->second.symbols.find("main");
                 if (sym_it == root_it->second.symbols.end()) {
-                    report_codegen_error(diag_, {}, "hosted build requires 'pub fn main()' or 'pub fn main() -> i32' in the entry module");
+                    report_codegen_error(diag_, {}, std::format("hosted build requires 'pub fn main()' or 'pub fn main() -> i32' in the entry module '{}'", ast_program_.root_module_path));
                     return nullptr;
                 }
 
@@ -3020,7 +3020,7 @@ namespace codegen {
                     if (instance.return_types.empty()) {
                         builder_.CreateRetVoid();
                     } else {
-                        report_codegen_error(diag_, {}, std::format("generic instantiation '{}' may fall through without returning a value", instance.mangled_name));
+                        report_codegen_error(diag_, instance.decl ? instance.decl->location : SourceLocation{}, std::format("generic instantiation '{}' may fall through without returning a value", instance.mangled_name));
                         builder_.CreateUnreachable();
                     }
                 }
@@ -3493,7 +3493,7 @@ namespace codegen {
                 return signedness(from_type) ? builder_.CreateSExt(value, to) : builder_.CreateZExt(value, to);
             }
 
-            auto emit_cast(llvm::Value *value, const sema::ResolvedType &from, const sema::ResolvedType &to) -> llvm::Value * {
+            auto emit_cast(llvm::Value *value, const sema::ResolvedType &from, const sema::ResolvedType &to, const SourceLocation &loc = {}) -> llvm::Value * {
                 auto *to_ty = llvm_type(*current_module_path_, to);
                 if (from == to) {
                     return value;
@@ -3503,20 +3503,20 @@ namespace codegen {
                 // integer type (see llvm_type's TypeKind::Enum case) - so unwrap and
                 // reuse the existing integer/float/bool cast paths below.
                 if (from.kind == sema::TypeKind::Enum) {
-                    return emit_cast(value, sema_program_.enums.at(from.enum_index).underlying_type, to);
+                    return emit_cast(value, sema_program_.enums.at(from.enum_index).underlying_type, to, loc);
                 }
                 if (to.kind == sema::TypeKind::Enum) {
-                    return emit_cast(value, from, sema_program_.enums.at(to.enum_index).underlying_type);
+                    return emit_cast(value, from, sema_program_.enums.at(to.enum_index).underlying_type, loc);
                 }
 
                 // Bitsets are likewise their storage integer type at the LLVM level (see
                 // llvm_type's TypeKind::Bitset case). Sema already rejects a cast between
                 // two different bitset types, so at most one side is ever Bitset here.
                 if (from.kind == sema::TypeKind::Bitset) {
-                    return emit_cast(value, sema_program_.bitsets.at(from.bitset_index).storage_type, to);
+                    return emit_cast(value, sema_program_.bitsets.at(from.bitset_index).storage_type, to, loc);
                 }
                 if (to.kind == sema::TypeKind::Bitset) {
-                    return emit_cast(value, from, sema_program_.bitsets.at(to.bitset_index).storage_type);
+                    return emit_cast(value, from, sema_program_.bitsets.at(to.bitset_index).storage_type, loc);
                 }
 
                 if (from.kind == sema::TypeKind::Bool && to.kind != sema::TypeKind::Bool && to.is_integer()) {
@@ -3561,7 +3561,7 @@ namespace codegen {
                     return builder_.CreateFCmpONE(value, llvm::ConstantFP::get(value->getType(), 0.0));
                 }
 
-                report_codegen_error(diag_, {}, "unsupported scalar cast");
+                report_codegen_error(diag_, loc, "unsupported scalar cast");
                 return llvm::UndefValue::get(to_ty);
             }
 
@@ -4931,7 +4931,7 @@ namespace codegen {
                                 // extract the fat value's data word (word 1 of {id, data}).
                                 return builder_.CreateExtractValue(emit_expr(v->value), {1});
                             }
-                            return emit_cast(emit_expr(v->value), from, ty);
+                            return emit_cast(emit_expr(v->value), from, ty, v->location);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
                             // A generic function instantiation naming a monomorphized instance as
                             // a function-pointer value ('fnv1a[i32]') — sema recorded which
@@ -6002,7 +6002,7 @@ namespace codegen {
                                             // not reachable for a program that passed sema's
                                             // is_constant_expr check, but guard against crashing
                                             // codegen on an already-erroring program.
-                                            report_codegen_error(diag_, {}, "unsupported global constant initializer");
+                                            report_codegen_error(diag_, bv.location, "unsupported global constant initializer");
                                             return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
                                         }
 
@@ -6065,7 +6065,7 @@ namespace codegen {
                             }
                         }
 
-                        report_codegen_error(diag_, {}, "unsupported global constant initializer");
+                        report_codegen_error(diag_, sema::get_expr_location(expr), "unsupported global constant initializer");
                         return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
                     },
                     expr);
