@@ -712,7 +712,12 @@ hex_int       ::= '0x' HEX_DIGIT { HEX_DIGIT | '_' }
 bin_int       ::= '0b' BIN_DIGIT { BIN_DIGIT | '_' }
 octal_int     ::= '0o' OCTAL_DIGIT { OCTAL_DIGIT | '_' }
 
-FLOAT_LITERAL ::= DIGIT { DIGIT } '.' DIGIT { DIGIT }
+FLOAT_LITERAL ::= digits '.' digits [ exponent ]
+                | '.' digits [ exponent ]
+                | digits exponent
+
+digits        ::= DIGIT { DIGIT | '_' }
+exponent      ::= ('e' | 'E') [ '+' | '-' ] digits
 
 STRING_LITERAL ::= '"' { char | escape_seq } '"'
 

@@ -1143,8 +1143,13 @@ namespace ast {
             if (parser.check(TokenKind::FloatLiteral)) {
                 auto &token = parser.advance();
 
+                // Digit-group underscores are part of the lexeme ('1_000.5'); strip them
+                // before conversion, which would otherwise stop at the first '_'.
+                auto digits = token.lexeme;
+                std::erase(digits, '_');
+
                 return LiteralFloatExpr{
-                    .value = std::stod(token.lexeme),
+                    .value = std::stod(digits),
                     .location = location,
                 };
             }

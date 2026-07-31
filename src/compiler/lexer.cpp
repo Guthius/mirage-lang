@@ -440,9 +440,7 @@ namespace lexer {
                         advance();
                     }
 
-                    while (!at_end() && is_digit(peek())) {
-                        advance();
-                    }
+                    skip_digits();
                 }
 
                 return make_token(is_float ? TokenKind::FloatLiteral : TokenKind::IntLiteral, start);
@@ -460,9 +458,7 @@ namespace lexer {
                         advance();
                     }
 
-                    while (!at_end() && is_digit(peek())) {
-                        advance();
-                    }
+                    skip_digits();
                 }
 
                 return make_token(TokenKind::FloatLiteral, start);

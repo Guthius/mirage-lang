@@ -353,6 +353,10 @@
     "action": "run",
     "exit": 0
   },
+  "example_float_underscore": {
+    "action": "run",
+    "exit": 7
+  },
   "example_fmt": {
     "action": "run",
     "exit": 0

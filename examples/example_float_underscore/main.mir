@@ -1,0 +1,23 @@
+// example_float_underscore — digit-group underscores in float literals must decode to the
+// same value as their plain spellings. '1_000.5' once silently parsed as 1.0 because the
+// conversion stopped at the first '_' (CODE_REVIEW.md FE-1).
+//
+// Expected: exit code 7 — one bit per literal that decodes correctly.
+
+pub fn main() -> i32 {
+    const a := 1_000.5
+    const b := 1.5e1_0
+    const c := 1_2.2_5
+
+    mut code: i32 = 0
+    if a == 1000.5 {
+        code = code + 1
+    }
+    if b == 15000000000.0 {
+        code = code + 2
+    }
+    if c == 12.25 {
+        code = code + 4
+    }
+    return code
+}
