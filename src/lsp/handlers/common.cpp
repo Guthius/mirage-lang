@@ -482,45 +482,40 @@ namespace lsp::handlers {
         return {};
     }
 
-    void walk_stmt_for_locals(const ast::Stmt &stmt, const std::string &name, const size_t before_line,
-                              const LocalLookupContext &ctx, std::optional<LocalInfo> &best) {
+    // The statement-nesting walk both local lookups share: descend into every construct that
+    // can contain declarations, handing each DECLARING statement to 'visit_decl'.
+    //
+    // Deliberately does not descend into expressions. A local can only be introduced by a
+    // statement, and both callers only ever wanted names — which is also why this is separate
+    // from ast_walker.hpp's exhaustive Expr+Stmt visitor.
+    //
+    // 'visit_decl' is called with ForInStmt, VarDeclStmt or VarDeclGroupStmt, before the
+    // walk descends into a loop body — so a name declared by the loop header is seen before
+    // anything inside it, which is the order both callers' shadowing semantics assume.
+    template <typename VisitDecl>
+    void walk_declaring_stmts(const ast::Stmt &stmt, const VisitDecl &visit_decl) {
         std::visit(
             [&]<typename T>(const T &node) {
                 using U = std::decay_t<T>;
                 if constexpr (std::is_same_v<U, std::unique_ptr<ast::BlockStmt>>) {
-                    for (const auto &s : node->stmts)
-                        walk_stmt_for_locals(s, name, before_line, ctx, best);
+                    for (const auto &s : node->stmts) walk_declaring_stmts(s, visit_decl);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IfStmt>>) {
-                    walk_stmt_for_locals(node->then_stmt, name, before_line, ctx, best);
-                    if (node->else_stmt) walk_stmt_for_locals(*node->else_stmt, name, before_line, ctx, best);
+                    walk_declaring_stmts(node->then_stmt, visit_decl);
+                    if (node->else_stmt) walk_declaring_stmts(*node->else_stmt, visit_decl);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::WhileStmt>>) {
-                    walk_stmt_for_locals(node->body, name, before_line, ctx, best);
+                    walk_declaring_stmts(node->body, visit_decl);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::ForInStmt>>) {
-                    if (node->location.line <= before_line &&
-                        (node->element_name == name || node->index_name == name)) {
-                        best = LocalInfo{.location = node->location, .type = {}};
-                    }
-                    walk_stmt_for_locals(node->body, name, before_line, ctx, best);
+                    visit_decl(*node);
+                    walk_declaring_stmts(node->body, visit_decl);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SwitchStmt>>) {
-                    for (const auto &arm : node->arms)
-                        walk_stmt_for_locals(arm.body, name, before_line, ctx, best);
+                    for (const auto &arm : node->arms) walk_declaring_stmts(arm.body, visit_decl);
                 } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::DeferStmt>>) {
-                    walk_stmt_for_locals(node->body, name, before_line, ctx, best);
-                } else if constexpr (std::is_same_v<U, ast::VarDeclStmt>) {
-                    if (node.name == name && node.location.line <= before_line) {
-                        const auto result = resolve_var_decl_type(node, ctx);
-                        best = LocalInfo{.location = node.location, .type = result.type, .display_override = result.display_override};
-                    }
-                } else if constexpr (std::is_same_v<U, ast::VarDeclGroupStmt>) {
-                    if (node.location.line <= before_line) {
-                        if (const auto idx = std::ranges::find(node.names, name); idx != node.names.end()) {
-                            const auto name_index = static_cast<size_t>(idx - node.names.begin());
-                            best = LocalInfo{.location = node.location, .type = resolve_group_decl_name_type(node, name_index, ctx)};
-                        }
-                    }
+                    walk_declaring_stmts(node->body, visit_decl);
+                } else if constexpr (std::is_same_v<U, ast::VarDeclStmt> || std::is_same_v<U, ast::VarDeclGroupStmt>) {
+                    visit_decl(node);
                 }
-                // ExprStmt, ContinueStmt, BreakStmt, ReturnStmt,
-                // ReturnErrStmt, ReturnOkStmt declare no names.
+                // ExprStmt, ContinueStmt, BreakStmt, ReturnStmt, ReturnErrStmt and
+                // ReturnOkStmt declare no names.
             },
             stmt);
     }
@@ -528,53 +523,57 @@ namespace lsp::handlers {
     auto find_local(const ast::Stmt &body, const LocalLookupContext &ctx, const std::string &name,
                     const size_t before_line) -> std::optional<LocalInfo> {
         std::optional<LocalInfo> best;
-        walk_stmt_for_locals(body, name, before_line, ctx, best);
+        walk_declaring_stmts(body, [&]<typename N>(const N &node) {
+            using U = std::decay_t<N>;
+            if constexpr (std::is_same_v<U, ast::ForInStmt>) {
+                if (node.location.line <= before_line &&
+                    (node.element_name == name || node.index_name == name)) {
+                    best = LocalInfo{.location = node.location, .type = {}};
+                }
+            } else if constexpr (std::is_same_v<U, ast::VarDeclStmt>) {
+                if (node.name == name && node.location.line <= before_line) {
+                    const auto result = resolve_var_decl_type(node, ctx);
+                    best = LocalInfo{.location = node.location, .type = result.type, .display_override = result.display_override};
+                }
+            } else if constexpr (std::is_same_v<U, ast::VarDeclGroupStmt>) {
+                if (node.location.line <= before_line) {
+                    if (const auto idx = std::ranges::find(node.names, name); idx != node.names.end()) {
+                        const auto name_index = static_cast<size_t>(idx - node.names.begin());
+                        best = LocalInfo{.location = node.location, .type = resolve_group_decl_name_type(node, name_index, ctx)};
+                    }
+                }
+            }
+        });
         return best;
     }
 
-    // Generalizes walk_stmt_for_locals from "search for one specific name" to "record every
-    // name declared before `before_line`" - same shadowing semantics (a later declaration of
-    // the same name overwrites the earlier entry, since blocks are walked in source order).
+    // "Record every name declared before 'before_line'" — the same walk as find_local, with
+    // last-write-wins shadowing (blocks are walked in source order, so a later declaration of
+    // a name overwrites the earlier entry).
     void collect_stmt_locals(const ast::Stmt &stmt, const size_t before_line, const LocalLookupContext &ctx,
                               std::unordered_map<std::string, LocalInfo> &out) {
-        std::visit(
-            [&]<typename T>(const T &node) {
-                using U = std::decay_t<T>;
-                if constexpr (std::is_same_v<U, std::unique_ptr<ast::BlockStmt>>) {
-                    for (const auto &s : node->stmts)
-                        collect_stmt_locals(s, before_line, ctx, out);
-                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::IfStmt>>) {
-                    collect_stmt_locals(node->then_stmt, before_line, ctx, out);
-                    if (node->else_stmt) collect_stmt_locals(*node->else_stmt, before_line, ctx, out);
-                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::WhileStmt>>) {
-                    collect_stmt_locals(node->body, before_line, ctx, out);
-                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::ForInStmt>>) {
-                    if (node->location.line <= before_line) {
-                        if (node->index_name != "_") out[node->index_name] = LocalInfo{.location = node->location, .type = {}};
-                        out[node->element_name] = LocalInfo{.location = node->location, .type = {}};
-                    }
-                    collect_stmt_locals(node->body, before_line, ctx, out);
-                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::SwitchStmt>>) {
-                    for (const auto &arm : node->arms)
-                        collect_stmt_locals(arm.body, before_line, ctx, out);
-                } else if constexpr (std::is_same_v<U, std::unique_ptr<ast::DeferStmt>>) {
-                    collect_stmt_locals(node->body, before_line, ctx, out);
-                } else if constexpr (std::is_same_v<U, ast::VarDeclStmt>) {
-                    if (node.location.line <= before_line) {
-                        const auto result = resolve_var_decl_type(node, ctx);
-                        out[node.name] = LocalInfo{.location = node.location, .type = result.type, .display_override = result.display_override};
-                    }
-                } else if constexpr (std::is_same_v<U, ast::VarDeclGroupStmt>) {
-                    if (node.location.line <= before_line) {
-                        for (size_t i = 0; i < node.names.size(); ++i) {
-                            out[node.names[i]] = LocalInfo{.location = node.location, .type = resolve_group_decl_name_type(node, i, ctx)};
-                        }
+        walk_declaring_stmts(stmt, [&]<typename N>(const N &node) {
+            using U = std::decay_t<N>;
+            if constexpr (std::is_same_v<U, ast::ForInStmt>) {
+                if (node.location.line <= before_line) {
+                    // '_' is the discard spelling for an unwanted index; it is not a name the
+                    // user can refer to, so it must not be offered.
+                    if (node.index_name != "_") out[node.index_name] = LocalInfo{.location = node.location, .type = {}};
+                    out[node.element_name] = LocalInfo{.location = node.location, .type = {}};
+                }
+            } else if constexpr (std::is_same_v<U, ast::VarDeclStmt>) {
+                if (node.location.line <= before_line) {
+                    const auto result = resolve_var_decl_type(node, ctx);
+                    out[node.name] = LocalInfo{.location = node.location, .type = result.type, .display_override = result.display_override};
+                }
+            } else if constexpr (std::is_same_v<U, ast::VarDeclGroupStmt>) {
+                if (node.location.line <= before_line) {
+                    for (size_t i = 0; i < node.names.size(); ++i) {
+                        out[node.names[i]] = LocalInfo{.location = node.location, .type = resolve_group_decl_name_type(node, i, ctx)};
                     }
                 }
-                // ExprStmt, ContinueStmt, BreakStmt, ReturnStmt,
-                // ReturnErrStmt, ReturnOkStmt declare no names.
-            },
-            stmt);
+            }
+        });
     }
 
     auto collect_locals_in_scope(const ast::Stmt &body, const LocalLookupContext &ctx, const size_t before_line)
@@ -913,6 +912,15 @@ namespace lsp::handlers {
     // sema_check.cpp (which already exhaustively enumerate every
     // Expr/Stmt alternative and their nested Expr/Stmt fields), just
     // recursing instead of type-checking.
+    //
+    // NOT built on ast_walker.hpp's visitor, deliberately (LSPH-8). That walker is
+    // exhaustive and callback-driven; this is a search with early exit, and it also matches a
+    // node's OWN location before recursing for SizeOf/AlignOf/Len/Member/IndexOrInstantiate,
+    // which the walker has no notion of. Giving the walker early-exit semantics would mean
+    // changing all four of its callback signatures to return bool, and every existing user
+    // (Find References, Inlay Hints) with them — a large change to satisfy a resemblance
+    // rather than a shared behaviour. The genuinely duplicated walk, the one shared by the two
+    // local-name lookups, is walk_declaring_stmts above.
     //
     // Known gap: TaggedVariantExpr::payload is a bare
     // std::optional<StructExpr>, not wrapped in an ast::Expr, so it has
