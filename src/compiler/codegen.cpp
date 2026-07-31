@@ -5787,6 +5787,13 @@ namespace codegen {
             auto emit_import_bin(const ast::ImportBinExpr &expr) const -> llvm::Constant * {
                 const auto resolved = ast::resolve_contained_path(*current_module_path_, expr.path);
                 std::ifstream file(resolved, std::ios::binary);
+                if (!file) {
+                    // Sema verified the file existed, but that was an earlier point in
+                    // time — deleted in between, it silently became an empty '[]u8'.
+                    report_codegen_error(diag_, expr.location,
+                        std::format("import_bin: cannot open file: '{}'", expr.path));
+                    return llvm::ConstantAggregateZero::get(llvm::ArrayType::get(llvm::Type::getInt8Ty(*context_), 0));
+                }
                 const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
                 if (bytes.empty()) {
