@@ -980,7 +980,7 @@ namespace sema {
                     expr);
             }
 
-            auto eval_integer_const_expr(const ast::Expr &expr, const std::string &module_path, const std::unordered_map<std::string, const ast::Expr *> &macro_args, uint64_t iota_value = 0) -> std::optional<uint64_t> {
+            auto eval_integer_const_expr(const ast::Expr &expr, const std::string &module_path, const std::unordered_map<std::string, uint64_t> &macro_args, uint64_t iota_value = 0) -> std::optional<uint64_t> {
                 return std::visit(
                     [&]<typename T>(const T &v) -> std::optional<uint64_t> {
                         using V = std::decay_t<T>;
@@ -995,10 +995,15 @@ namespace sema {
                             return v.value ? 1 : 0;
 
                         } else if constexpr (std::is_same_v<V, ast::IdentExpr>) {
-                            // A value generic-param reference (e.g. 'N' inside 'fn
-                            // make_fixed[N: usize]() -> [N]u8') folds to its bound constant —
-                            // checked before macro_args/globals, mirroring how
-                            // find_generic_type_binding takes priority for type params.
+                            // Innermost binding first: a macro parameter reference resolves to
+                            // its already-evaluated argument, then the active generic env's
+                            // value params, then module globals — the same order as
+                            // evaluate_const_value's IdentExpr case, so the two evaluators
+                            // cannot disagree on a shadowed name.
+                            if (const auto arg = macro_args.find(v.name); arg != macro_args.end()) {
+                                return arg->second;
+                            }
+
                             if (generic_env) {
                                 for (const auto &binding : *generic_env) {
                                     if (!binding.is_type && binding.param_name == v.name) {
@@ -1010,10 +1015,6 @@ namespace sema {
                                 }
                             }
 
-                            if (const auto arg = macro_args.find(v.name); arg != macro_args.end()) {
-                                return eval_integer_const_expr(*arg->second, module_path, macro_args);
-                            }
-
                             auto &mod = program.modules.at(module_path);
                             const auto sym_it = mod.symbols.find(v.name);
                             if (sym_it == mod.symbols.end()) return std::nullopt;
@@ -1021,7 +1022,9 @@ namespace sema {
                             const auto *global = std::get_if<GlobalSymbol>(&sym_it->second);
                             if (!global || global->is_mut || !global->decl->init) return std::nullopt;
                             resolve_global_symbol(module_path, v.name, program, diag, v.location);
-                            return eval_integer_const_expr(*global->decl->init, module_path, macro_args);
+                            // A global's initializer is a closed expression — never evaluated
+                            // with the current template's parameter bindings.
+                            return eval_integer_const_expr(*global->decl->init, module_path, {});
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
                             return sizeof_expr_operand(module_path, *v);
@@ -1062,12 +1065,24 @@ namespace sema {
                             auto *macro = std::get_if<MacroSymbol>(&sym_it->second);
                             if (!macro) return std::nullopt;
                             auto &resolved_macro = resolve_macro_symbol(module_path, callee->name, program, diag, callee->location);
+                            // This evaluator also runs on expressions a prior diagnostic
+                            // already flagged (an arity mismatch used to index v->args out of
+                            // bounds here and abort the compiler) — degrade to nullopt on any
+                            // shape that isn't a fully-resolved, correctly-called macro.
+                            if (!resolved_macro.decl || !resolved_macro.is_resolved) return std::nullopt;
+                            if (v->args.size() != resolved_macro.decl->params.size()) return std::nullopt;
 
-                            std::unordered_map<std::string, const ast::Expr *> nested_args = macro_args;
-                            for (size_t i = 0; i < resolved_macro.decl->params.size(); ++i) {
-                                nested_args[resolved_macro.decl->params[i].name] = &v->args[i];
+                            // Arguments are bound as *evaluated values*, not expressions: an
+                            // argument that is itself an identifier colliding with the
+                            // parameter name ('inc(x)' passing a global 'x') would otherwise
+                            // resolve to its own binding and recurse without bound.
+                            std::unordered_map<std::string, uint64_t> bound;
+                            for (size_t i = 0; i < v->args.size(); ++i) {
+                                const auto arg_value = eval_integer_const_expr(v->args[i], module_path, macro_args);
+                                if (!arg_value) return std::nullopt;
+                                bound.emplace(resolved_macro.decl->params[i].name, *arg_value);
                             }
-                            return eval_integer_const_expr(resolved_macro.decl->expr_template, module_path, nested_args);
+                            return eval_integer_const_expr(resolved_macro.decl->expr_template, module_path, bound);
 
                         } else {
                             return std::nullopt;

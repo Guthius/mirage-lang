@@ -1,0 +1,14 @@
+// example_macro_arity_const_context — a macro called with the wrong arity in a type
+// context must produce diagnostics, not a crash. eval_integer_const_expr iterated the
+// macro's params and indexed the call's args unchecked, so the arity error below was
+// followed by an out-of-bounds abort of the compiler itself (CODE_REVIEW.md SEMA-5).
+//
+// Expected: the arity diagnostic plus the unevaluable-length diagnostic, exit code 1.
+
+macro twice(a: i32) -> a * 2
+
+const buf: [twice()]u8 = default
+
+pub fn main() -> i32 {
+    return 0
+}

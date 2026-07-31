@@ -1,0 +1,16 @@
+// example_macro_arg_shadows_param — a macro argument that is an identifier with the same
+// name as the parameter it binds must fold correctly in const contexts. Arguments used to
+// be bound as *expressions*, so evaluating the template's 'x' looked the argument 'x'
+// up in the macro's own binding map again and recursed until the stack overflowed
+// (CODE_REVIEW.md SEMA-5 / SEMA-19).
+//
+// Expected: exit code 4 — len(buf) where buf: [inc(x)]u8 and x = 3.
+
+macro inc(x: i32) -> x + 1
+
+const x: i32 = 3
+const buf: [inc(x)]u8 = default
+
+pub fn main() -> i32 {
+    return cast(len(buf), i32)
+}
