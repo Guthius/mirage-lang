@@ -699,6 +699,53 @@ namespace sema {
                 return resolve_final_shallow(module_path, name, check_pub, loc);
             }
 
+            // Whether 'ty' is an aggregate whose layout has not finished — i.e. a type that
+            // has a slot but no size yet, because we are inside the very call computing it.
+            // Storing one BY VALUE is a type that contains itself, which has no finite size.
+            //
+            // Looks through arrays (a '[3]T' member is still T stored by value, three times)
+            // but deliberately NOT through pointers or slices: those are a fixed-size handle
+            // whose size never depends on the pointee's, which is exactly what makes
+            // 'next: *node[T]' legal and is the entire point of the in-progress slot.
+            [[nodiscard]] auto incomplete_aggregate_name(const ResolvedType &ty) const -> std::optional<std::string> {
+                switch (ty.kind) {
+                case TypeKind::Struct:
+                    if (const auto *info = program.struct_at(ty.struct_index); info && !info->layout_done) break;
+                    return std::nullopt;
+                case TypeKind::Union:
+                    if (const auto *info = program.union_at(ty.union_index); info && !info->layout_done) break;
+                    return std::nullopt;
+                case TypeKind::Array:
+                    if (const auto *info = program.array_at(ty.array_index)) return incomplete_aggregate_name(info->element_type);
+                    return std::nullopt;
+                default:
+                    return std::nullopt;
+                }
+                const auto [mod, name] = find_type_module_and_name(ty, program);
+                return name.empty() ? std::optional<std::string>{"<anonymous>"} : std::optional{name};
+            }
+
+            // Rejects a by-value member of a type that is still being laid out. Returns true if
+            // it reported.
+            //
+            // This is where by-value cycle detection lives for GENERIC types. The non-generic
+            // path catches its own at resolve_final_full's struct_resolving/union_resolving
+            // guard, before any layout starts, because a named type's layout is forced through
+            // that function. A generic instantiation has no equivalent chokepoint — a slot is
+            // published before its RHS is resolved so that pointer self-reference works, and at
+            // that moment "reached through a pointer" and "reached by value" look identical.
+            // Only layout can tell them apart: the pointer never asks for a size.
+            [[nodiscard]] auto reject_incomplete_member(const ResolvedType &ty, const SourceLocation &loc,
+                                                         const std::string_view what, const std::string_view member_name) -> bool {
+                const auto incomplete = incomplete_aggregate_name(ty);
+                if (!incomplete) return false;
+                diag.report_error(DiagnosticStage::Sema, loc, std::format(
+                    "{} '{}' stores '{}' by value, which is not yet a complete type; a type cannot "
+                    "contain itself by value — store it behind a pointer",
+                    what, member_name, *incomplete));
+                return true;
+            }
+
             void layout_struct(const std::string &module_path, const int slot, const std::unique_ptr<ast::StructType> &decl) {
                 StructInfo info;
                 info.module_path = module_path;
@@ -709,6 +756,9 @@ namespace sema {
 
                 for (auto &field : decl->fields) {
                     auto field_type = resolve_field_type(module_path, field.type, field.location);
+                    if (reject_incomplete_member(field_type, field.location, "field", field.name)) {
+                        field_type = ResolvedType{.kind = TypeKind::Invalid};
+                    }
                     const uint32_t f_size = size_of(module_path, field_type);
                     uint32_t f_align = decl->is_packed ? 1 : align_of(module_path, field_type);
 
@@ -740,13 +790,16 @@ namespace sema {
                         return *binding;
                     }
 
-                    // Explicit generic_args on a field's type ('child: List[i32]') always
-                    // routes through resolve_generic_named_type below, which — via
-                    // instantiate_generic_type — always produces an already-FULLY-laid-out
-                    // result (a fresh instantiation is laid out synchronously, the same way
-                    // an anonymous inline struct/enum/union/bitset already is), so it's safe
-                    // to use directly as a struct field's type exactly like the plain
-                    // resolve_final_full path below.
+                    // Explicit generic_args on a field's type ('child: List[i32]') route
+                    // through resolve_generic_named_type below.
+                    //
+                    // That normally yields a fully-laid-out instantiation, but NOT always: if
+                    // this field is inside the very instantiation being requested
+                    // ('next: node[T]' within 'node[T]'), instantiate_generic_type hands back
+                    // its own in-progress slot, which has no layout yet. Callers must therefore
+                    // treat the result as possibly incomplete — layout_struct/layout_union do,
+                    // via reject_incomplete_member, and that is where a by-value cycle is
+                    // reported. Do not reintroduce an assumption of completeness here.
                     if (!named->generic_args.empty()) {
                         return resolve_type_impl(field_type, module_path);
                     }
@@ -1189,6 +1242,9 @@ namespace sema {
                                 // that whole rule — it was written later, for error unions, as
                                 // a copy of the code that used to sit here.
                                 auto payload_type = resolve_field_type(module_path, member.type, member.location);
+                                if (reject_incomplete_member(payload_type, member.location, "variant", member.name)) {
+                                    payload_type = ResolvedType{.kind = TypeKind::Invalid};
+                                }
                                 struct_slot = wrap_payload_in_struct(module_path, payload_type, member.location);
                                 variant.payload_type = payload_type;
                             }
@@ -1216,6 +1272,9 @@ namespace sema {
 
                     for (const auto &member : decl->members) {
                         auto member_type = resolve_field_type(module_path, member.type, member.location);
+                        if (reject_incomplete_member(member_type, member.location, "union member", member.name)) {
+                            member_type = ResolvedType{.kind = TypeKind::Invalid};
+                        }
                         const uint32_t m_size = size_of(module_path, member_type);
                         const uint32_t m_align = align_of(module_path, member_type);
 
@@ -1728,6 +1787,56 @@ namespace sema {
                     type);
             }
 
+            // Allocates the slot an aggregate type expression will occupy, WITHOUT laying it
+            // out, so a handle to it exists before its own contents are resolved. Returns
+            // nullopt for every non-aggregate type expression, which has no slot to allocate.
+            //
+            // Only instantiate_generic_type needs this. A named non-generic type gets the
+            // same thing for free at declare time (declare_type fills TypeSymbol::resolved
+            // before any layout runs); a generic declaration deliberately has no "the" type
+            // to fill in, so its instantiation has to do it here instead.
+            auto preallocate_aggregate(const ast::Type &type, const std::string &module_path) -> std::optional<ResolvedType> {
+                if (std::holds_alternative<std::unique_ptr<ast::StructType>>(type)) {
+                    program.structs.push_back(StructInfo{.module_path = module_path});
+                    return ResolvedType{.kind = TypeKind::Struct, .struct_index = static_cast<int>(program.structs.size()) - 1};
+                }
+                if (std::holds_alternative<std::unique_ptr<ast::EnumType>>(type)) {
+                    program.enums.push_back(EnumInfo{});
+                    return ResolvedType{.kind = TypeKind::Enum, .enum_index = static_cast<int>(program.enums.size()) - 1};
+                }
+                if (std::holds_alternative<std::unique_ptr<ast::UnionType>>(type)) {
+                    program.unions.push_back(UnionInfo{.module_path = module_path});
+                    return ResolvedType{.kind = TypeKind::Union, .union_index = static_cast<int>(program.unions.size()) - 1};
+                }
+                if (std::holds_alternative<std::unique_ptr<ast::BitsetType>>(type)) {
+                    program.bitsets.push_back(BitsetInfo{});
+                    return ResolvedType{.kind = TypeKind::Bitset, .bitset_index = static_cast<int>(program.bitsets.size()) - 1};
+                }
+                return std::nullopt;
+            }
+
+            // Lays out a slot obtained from preallocate_aggregate. Split from it so a handle
+            // to the slot can be published (and so become reachable through a self-referential
+            // pointer field) while this runs.
+            void layout_preallocated(const ast::Type &type, const std::string &module_path, const ResolvedType &slot) {
+                switch (slot.kind) {
+                case TypeKind::Struct:
+                    layout_struct(module_path, slot.struct_index, std::get<std::unique_ptr<ast::StructType>>(type));
+                    break;
+                case TypeKind::Enum:
+                    layout_enum(module_path, slot.enum_index, std::get<std::unique_ptr<ast::EnumType>>(type));
+                    break;
+                case TypeKind::Union:
+                    layout_union(module_path, slot.union_index, std::get<std::unique_ptr<ast::UnionType>>(type));
+                    break;
+                case TypeKind::Bitset:
+                    layout_bitset(module_path, slot.bitset_index, std::get<std::unique_ptr<ast::BitsetType>>(type));
+                    break;
+                default:
+                    break;
+                }
+            }
+
             static auto resolve_builtin(const ast::BuiltinTypeKind kind) -> ResolvedType {
                 switch (kind) {
                 case ast::BuiltinTypeKind::U8:     return ResolvedType{.kind = TypeKind::U8};
@@ -1975,12 +2084,20 @@ namespace sema {
             if (k == key) return ty;
         }
 
-        for (const auto &resolving_key : program.resolve_state.generic_type_resolving) {
-            if (resolving_key == key) {
-                diag.report_error(DiagnosticStage::Sema, use_loc,
-                    std::format("generic type instantiation cycle detected at '{}'", decl_name));
-                return ResolvedType{.kind = TypeKind::Invalid};
-            }
+        // Already being instantiated further up the stack. If a slot was pre-allocated for it,
+        // hand that back: the reference is legal exactly when it does not need the layout, and
+        // the only such reference is through a pointer. A by-value one gets a slot with no
+        // layout, which layout_struct/layout_union reject by name a moment later — deliberately
+        // there rather than here, because THIS function cannot tell the two apart.
+        //
+        // Without a slot (a non-aggregate RHS, 'type Ptr[T: type] = *T') there is nothing to
+        // hand back and self-reference is a genuine infinite regress.
+        for (const auto &in_progress : program.resolve_state.generic_type_resolving) {
+            if (in_progress.key != key) continue;
+            if (in_progress.slot) return *in_progress.slot;
+            diag.report_error(DiagnosticStage::Sema, use_loc,
+                std::format("generic type instantiation cycle detected at '{}'", decl_name));
+            return ResolvedType{.kind = TypeKind::Invalid};
         }
 
         const auto mod_it = program.modules.find(module_path);
@@ -2021,38 +2138,62 @@ namespace sema {
             });
         }
 
-        // Resolve the declaration's RHS with the substitution env active. Deliberately does
-        // NOT pre-allocate a slot first: resolve_type_impl's own StructType/EnumType/
-        // UnionType/BitsetType cases already allocate-and-lay-out a fresh slot for any
-        // by-value type expression they see (the same path an anonymous inline type takes)
-        // — this instantiation just reuses that machinery as-is, then tags the resulting
-        // slot below.
-        const ScopedResolvePush generic_guard(program.resolve_state.generic_type_resolving, key);
+        // Resolve the declaration's RHS with the substitution env active.
+        //
+        // An aggregate RHS gets its slot allocated FIRST and published on the in-progress
+        // stack, so a self-referential field ('next: *node[T]') resolving back to this same
+        // key finds a handle to point at rather than a cycle error. That mirrors what the
+        // non-generic path already gets from declare_type filling TypeSymbol::resolved
+        // up-front — the reason 'next: *block_header' has always worked.
+        //
+        // Anything else (a type alias: '= *T', '= []T', '= u32') is resolved whole, exactly
+        // as before, with no slot on the stack.
         Resolver inner{program, diag, nullptr, &env, &decl.generic_params};
-        const auto result = inner.resolve_type_impl(decl.type, module_path);
+        const auto preallocated = inner.preallocate_aggregate(decl.type, module_path);
 
-        GenericInstanceInfo instance_info{.decl_module = module_path, .decl_name = decl_name, .args = args};
-        switch (result.kind) {
-        case TypeKind::Struct:
-            if (result.struct_index >= 0 && static_cast<size_t>(result.struct_index) < program.structs.size())
-                program.structs[result.struct_index].generic_instance = instance_info;
-            break;
-        case TypeKind::Enum:
-            if (result.enum_index >= 0 && static_cast<size_t>(result.enum_index) < program.enums.size())
-                program.enums[result.enum_index].generic_instance = instance_info;
-            break;
-        case TypeKind::Union:
-            if (result.union_index >= 0 && static_cast<size_t>(result.union_index) < program.unions.size())
-                program.unions[result.union_index].generic_instance = instance_info;
-            break;
-        case TypeKind::Bitset:
-            if (result.bitset_index >= 0 && static_cast<size_t>(result.bitset_index) < program.bitsets.size())
-                program.bitsets[result.bitset_index].generic_instance = instance_info;
-            break;
-        default:
-            break;
+        const GenericInstanceInfo instance_info{.decl_module = module_path, .decl_name = decl_name, .args = args};
+        const auto stamp_instance = [&](const ResolvedType &ty) {
+            switch (ty.kind) {
+            case TypeKind::Struct:
+                if (ty.struct_index >= 0 && static_cast<size_t>(ty.struct_index) < program.structs.size())
+                    program.structs[ty.struct_index].generic_instance = instance_info;
+                break;
+            case TypeKind::Enum:
+                if (ty.enum_index >= 0 && static_cast<size_t>(ty.enum_index) < program.enums.size())
+                    program.enums[ty.enum_index].generic_instance = instance_info;
+                break;
+            case TypeKind::Union:
+                if (ty.union_index >= 0 && static_cast<size_t>(ty.union_index) < program.unions.size())
+                    program.unions[ty.union_index].generic_instance = instance_info;
+                break;
+            case TypeKind::Bitset:
+                if (ty.bitset_index >= 0 && static_cast<size_t>(ty.bitset_index) < program.bitsets.size())
+                    program.bitsets[ty.bitset_index].generic_instance = instance_info;
+                break;
+            default:
+                break;
+            }
+        };
+
+        ResolvedType result;
+        {
+            const ScopedResolvePush generic_guard(program.resolve_state.generic_type_resolving,
+                                                   ResolveState::GenericTypeInProgress{.key = key, .slot = preallocated});
+            if (preallocated) {
+                // Stamped BEFORE layout as well as after: find_type_module_and_name reads this
+                // tag to name the type, and layout is exactly when a by-value cycle in it gets
+                // reported. Without it the diagnostic can only say "<anonymous>". Each layout_*
+                // assigns a freshly built Info over the slot wholesale, so the tag does not
+                // survive — hence stamping twice rather than once.
+                stamp_instance(*preallocated);
+                inner.layout_preallocated(decl.type, module_path, *preallocated);
+                result = *preallocated;
+            } else {
+                result = inner.resolve_type_impl(decl.type, module_path);
+            }
         }
 
+        stamp_instance(result);
         program.generic_type_instance_lookup.push_back({key, result});
 
         return result;

@@ -1,0 +1,26 @@
+// example_recursive_array_field/main.mir — REJECTION CASE. A type cannot contain an ARRAY
+// of itself, for the same reason it cannot contain itself directly.
+//
+// Not a generics case at all — found while adding by-value cycle detection for generic
+// instantiation (see example_generic_self_ref_by_value), and pre-existing.
+//
+// The direct form 'next: node' was already caught, at resolve time, by the
+// struct_resolving guard. The array form was not: resolving '[3]node' asks for the element
+// type SHALLOWLY, gets the in-progress handle, reads its size back as 0, and interns an
+// array of size 0. This file used to compile and report size_of(node) == 4 — the i32 alone,
+// with 'kids' silently contributing nothing.
+//
+// The layout-time completeness check looks through arrays for exactly this reason, and
+// deliberately does not look through pointers or slices, which are a fixed size that never
+// depends on the element's.
+//
+// Expected: rejected, naming the field.
+
+type node = struct {
+    value: i32
+    kids: [3]node
+}
+
+pub fn main() -> i32 {
+    return cast(size_of(node), i32)
+}

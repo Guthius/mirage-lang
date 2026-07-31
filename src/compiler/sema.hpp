@@ -567,13 +567,31 @@ namespace sema {
         // on-demand, out of Program::modules' unordered iteration order; this detects a
         // circular dependency between modules' 'when' conditions.
         std::set<std::string> when_module_declaring;
-        // Cycle guard for instantiate_generic_type, keyed by (decl, concrete args) — a
-        // recursive generic type (e.g. 'type Node[T: type] = struct { next: *Node[T] }')
-        // is fine (pointer indirection breaks the cycle, same as any non-generic recursive
-        // struct — the pointee is resolved lazily, no layout forced), but a genuinely
-        // infinite instantiation chain (no indirection anywhere) must still be caught.
-        // Linear-scan (small, rare), not a set, since GenericInstanceKey has no operator<.
-        std::vector<GenericInstanceKey> generic_type_resolving;
+        // One in-flight instantiate_generic_type call: its (decl, concrete args) key, plus
+        // the slot it pre-allocated for the result before resolving the declaration's RHS.
+        struct GenericTypeInProgress {
+            GenericInstanceKey key;
+            // The already-allocated, NOT-yet-laid-out handle, when the declaration's RHS is
+            // an aggregate. Re-entering with the same key returns this instead of erroring,
+            // which is what lets 'type Node[T: type] = struct { next: *Node[T] }' work: the
+            // pointer field only needs the handle, never the layout.
+            //
+            // nullopt when the RHS is NOT an aggregate ('type Ptr[T: type] = *T'), where
+            // there is no slot to hand back and self-reference really is an infinite
+            // regress. Those still report a cycle at instantiation time.
+            std::optional<ResolvedType> slot;
+        };
+        // In-flight generic type instantiations, innermost last. Mirrors what the non-generic
+        // path gets for free from TypeSymbol::resolved being populated at declare time (see
+        // resolve_final_shallow's early return, which is exactly why '*block_header' works
+        // and '*Node[T]' did not until this existed).
+        //
+        // By-value cycles are NOT detected here — a slot handed back is indistinguishable
+        // from a finished one at this point. They are caught at LAYOUT time instead, by
+        // layout_struct/layout_union rejecting a field whose type is an aggregate still
+        // missing its layout_done. Linear-scan (small, rare), not a set, since
+        // GenericInstanceKey has no operator<.
+        std::vector<GenericTypeInProgress> generic_type_resolving;
         // Ordered ancestor stack of trait_index currently mid-flattening (layout_trait's
         // composition-resolution step, type_resolver.cpp) — pushed/popped around that step
         // only. Distinct from trait_resolving above: that set exists purely to short-circuit

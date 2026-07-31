@@ -5,13 +5,14 @@
 // generic aggregate reaching codegen: 'dictionary[i32, i32]' holds a '*entry[i32, i32]'
 // arena, which is a generic instantiation referenced from another generic instantiation.
 //
-// Chains are threaded by INDEX rather than by a 'next: *entry[K, V]' pointer. That is a
-// deliberate workaround, not a design preference: a generic type cannot currently refer to
-// its own instantiation even through a pointer -- 'type node[T: type] = struct { next:
-// *node[T] }' is rejected with "generic type instantiation cycle detected". The same shape
-// is fine for a non-generic type (see block_header in examples/mem). Indices are also the
-// reason 0 means "end of chain": entry slots are numbered from 1 so that a zeroed
-// 'dictionary' is already a valid empty one.
+// Chains are threaded by POINTER, through 'next: *entry[K, V]' -- a generic type referring
+// to its own instantiation. That is the natural way to write this and it is what the type
+// means; it is only worth remarking on because it used to be rejected, and this file used
+// to thread its chains by index as a documented workaround. See
+// examples/example_generic_self_ref for the reduced case.
+//
+// Entries are bump-allocated out of one arena and never individually freed, so a chain link
+// stays valid for the lifetime of the dictionary.
 
 const mem := import("../mem")
 
@@ -21,11 +22,11 @@ const max_entries: i32 = 64
 pub type entry[K: type, V: type] = struct {
     key: K
     value: V
-    next: i32 = 0
+    next: *entry[K, V] = nil
 }
 
 pub type dictionary[K: type, V: type] = struct {
-    buckets: [table_size]i32
+    buckets: [table_size]*entry[K, V]
     entries: *entry[K, V] = nil
     count: i32 = 0
 }
@@ -56,37 +57,38 @@ impl dictionary[K: type, V: type] {
 
         const index := hash(&key, size_of(K))
 
-        mut i := self.buckets[index]
-        while i != 0 {
-            if self.entries[i - 1].key == key {
-                self.entries[i - 1].value = value
+        mut cur := self.buckets[index]
+        while cur != nil {
+            if cur.*.key == key {
+                cur.*.value = value
                 return true
             }
-            i = self.entries[i - 1].next
+            cur = cur.*.next
         }
 
         if self.count >= max_entries {
             return false
         }
 
-        self.entries[self.count].key = key
-        self.entries[self.count].value = value
-        self.entries[self.count].next = self.buckets[index]
+        mut slot := &self.entries[self.count]
+        slot.*.key = key
+        slot.*.value = value
+        slot.*.next = self.buckets[index]
         self.count++
-        self.buckets[index] = self.count
+        self.buckets[index] = slot
         return true
     }
 
     pub fn try_get(self, key: K, value: *V) -> bool {
         const index := hash(&key, size_of(K))
 
-        mut i := self.buckets[index]
-        while i != 0 {
-            if self.entries[i - 1].key == key {
-                value.* = self.entries[i - 1].value
+        mut cur := self.buckets[index]
+        while cur != nil {
+            if cur.*.key == key {
+                value.* = cur.*.value
                 return true
             }
-            i = self.entries[i - 1].next
+            cur = cur.*.next
         }
 
         return false
@@ -97,19 +99,19 @@ impl dictionary[K: type, V: type] {
     pub fn remove(self, key: K) -> bool {
         const index := hash(&key, size_of(K))
 
-        mut i := self.buckets[index]
-        mut prev: i32 = 0
-        while i != 0 {
-            if self.entries[i - 1].key == key {
-                if prev == 0 {
-                    self.buckets[index] = self.entries[i - 1].next
+        mut cur := self.buckets[index]
+        mut prev: *entry[K, V] = nil
+        while cur != nil {
+            if cur.*.key == key {
+                if prev == nil {
+                    self.buckets[index] = cur.*.next
                 } else {
-                    self.entries[prev - 1].next = self.entries[i - 1].next
+                    prev.*.next = cur.*.next
                 }
                 return true
             }
-            prev = i
-            i = self.entries[i - 1].next
+            prev = cur
+            cur = cur.*.next
         }
 
         return false

@@ -1,0 +1,60 @@
+// example_generic_self_ref/main.mir — a generic type may refer to its own instantiation
+// through a pointer, exactly as a non-generic one always could.
+//
+// 'type node[T: type] = struct { next: *node[T] }' used to be rejected outright with
+// "generic type instantiation cycle detected at 'node'", while the identical shape on a
+// non-generic type ('block_header' in examples/mem has 'next: *block_header') has always
+// worked. That blocked every node-based generic container: linked lists, trees, and
+// chained hash tables.
+//
+// The asymmetry was structural rather than intentional. A non-generic declaration gets its
+// slot allocated at declare time, so a self-referential pointer field finds a handle to
+// point at; a generic declaration has no "the" type until instantiated, so nothing existed
+// to point at and the recursion looked like an infinite one. Instantiation now allocates
+// its slot before resolving the declaration's right-hand side.
+//
+// The by-value counterpart is still rejected — see example_generic_self_ref_by_value.
+//
+// Expected: compiles and runs, exit code 42.
+
+type node[T: type] = struct {
+    value: T
+    next: *node[T] = nil
+}
+
+// A second self-referential generic, to check the instance cache keys on the ARGUMENTS:
+// node[i32] and node[u8] must get separate slots, each with its own self-pointer.
+fn sum_i32(head: *node[i32]) -> i32 {
+    mut total: i32 = 0
+    mut cur := head
+    while cur != nil {
+        total += cur.*.value
+        cur = cur.*.next
+    }
+    return total
+}
+
+fn count_u8(head: *node[u8]) -> i32 {
+    mut n: i32 = 0
+    mut cur := head
+    while cur != nil {
+        n += 1
+        cur = cur.*.next
+    }
+    return n
+}
+
+pub fn main() -> i32 {
+    mut c: node[i32] = { .value = 30 }
+    mut b: node[i32] = { .value = 9 }
+    mut a: node[i32] = { .value = 1 }
+    a.next = &b
+    b.next = &c
+
+    // A mutually-recursive pair through pointers is fine for the same reason.
+    mut y: node[u8] = { .value = 2 }
+    mut x: node[u8] = { .value = 1 }
+    x.next = &y
+
+    return sum_i32(&a) + count_u8(&x)
+}

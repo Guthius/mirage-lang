@@ -1,0 +1,27 @@
+// example_generic_self_ref_by_value/main.mir — REJECTION CASE, the other half of
+// example_generic_self_ref.
+//
+// Reaching a type through a POINTER while it is being laid out is fine: a pointer is a
+// fixed size that never depends on its pointee's. Reaching it BY VALUE is not — the type
+// would have to contain itself, which has no finite size.
+//
+// This is the delicate half of allowing generic self-reference at all. Instantiation now
+// publishes a slot before resolving the declaration's right-hand side, and at that moment
+// "reached through a pointer" and "reached by value" are indistinguishable — both simply
+// ask for the in-progress handle. So by-value detection cannot live at instantiation time
+// (where the old, over-broad "generic type instantiation cycle" error lived); it lives at
+// LAYOUT time instead, which is the first point that asks for a size.
+//
+// Without that check the field would silently read back as size 0 and the enclosing type
+// would be quietly laid out wrong, with no diagnostic anywhere.
+//
+// Expected: rejected, with the field named and no size computed.
+
+type node[T: type] = struct {
+    value: T
+    next: node[T]
+}
+
+pub fn main() -> i32 {
+    return cast(size_of(node[i32]), i32)
+}
