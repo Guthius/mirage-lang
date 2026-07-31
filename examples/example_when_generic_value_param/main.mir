@@ -1,0 +1,18 @@
+// example_when_generic_value_param — 'when' on a value generic parameter must pick a
+// different branch per instantiation. evaluate_const_value never consulted the active
+// generic env, so 'when N > 2' folded to false for EVERY instance and both calls below
+// used to take the else branch (CODE_REVIEW.md SEMA-2).
+//
+// Expected: exit code 11 — category[8]() = 10 (then branch) + category[1]() = 1 (else).
+
+fn category[N: usize]() -> i32 {
+    when N > 2 {
+        return 10
+    } else {
+        return 1
+    }
+}
+
+pub fn main() -> i32 {
+    return category[8]() + category[1]()
+}

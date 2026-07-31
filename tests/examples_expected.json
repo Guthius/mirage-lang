@@ -882,6 +882,10 @@
     "action": "run",
     "exit": 0
   },
+  "example_when_generic_value_param": {
+    "action": "run",
+    "exit": 11
+  },
   "example_when_macro_condition": {
     "action": "run",
     "exit": 3

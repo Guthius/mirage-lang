@@ -832,10 +832,22 @@ namespace sema {
 
                 if constexpr (std::is_same_v<V, ast::IdentExpr>) {
                     // Inside a macro template, a parameter reference folds to the already
-                    // evaluated argument — checked before the module globals, mirroring
-                    // eval_integer_const_expr's lookup order.
+                    // evaluated argument — the innermost binding, so checked first.
                     if (const auto arg = macro_args.find(v.name); arg != macro_args.end()) {
                         return arg->second;
+                    }
+
+                    // A value generic-param reference ('N' inside a generic body) folds to
+                    // its per-instance bound constant. is_constant_expr merges these names
+                    // from the same stack, so this evaluator must resolve them too — a
+                    // 'when N > 2' inside a generic used to fold to false for EVERY
+                    // instantiation because this lookup was missing.
+                    if (!program.active_generic_env_stack.empty()) {
+                        for (const auto &binding : *program.active_generic_env_stack.back()) {
+                            if (!binding.is_type && binding.param_name == v.name) {
+                                return binding.const_value;
+                            }
+                        }
                     }
 
                     const auto mod_it = program.modules.find(module_path);
