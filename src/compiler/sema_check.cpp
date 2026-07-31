@@ -1982,22 +1982,21 @@ namespace sema {
         const GenericInstanceKey key{.module_path = module_path, .decl_name = decl_name, .args = args};
 
         if (!suppressed) {
-            for (const auto &[k, idx] : program.generic_fn_instance_lookup) {
-                if (k == key) {
-                    // Mark needed on the CACHE HIT too, not only on first creation. A generic
-                    // first reached by the eager pass is created with the mark suppressed; if
-                    // the first real call site then found it cached and returned here without
-                    // marking it, nothing would ever emit it and the link would fail.
-                    if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
-                    return idx;
-                }
+            if (const auto it = program.generic_fn_instance_lookup.find(key); it != program.generic_fn_instance_lookup.end()) {
+                const size_t idx = it->second;
+                // Mark needed on the CACHE HIT too, not only on first creation. A generic
+                // first reached by the eager pass is created with the mark suppressed; if
+                // the first real call site then found it cached and returned here without
+                // marking it, nothing would ever emit it and the link would fail.
+                if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
+                return idx;
             }
         }
 
         auto push_invalid = [&]() -> size_t {
             program.generic_fn_instances.push_back(std::make_unique<GenericFunctionInstance>());
             const size_t idx = program.generic_fn_instances.size() - 1;
-            program.generic_fn_instance_lookup.push_back({key, idx});
+            program.generic_fn_instance_lookup.emplace(key, idx);
             return idx;
         };
 
@@ -2096,7 +2095,7 @@ namespace sema {
             return idx;
         }
 
-        program.generic_fn_instance_lookup.push_back({key, idx});
+        program.generic_fn_instance_lookup.emplace(key, idx);
         if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
 
         if (bounds_ok) check_generic_function_instance_body(idx, program, diag);
@@ -2139,13 +2138,12 @@ namespace sema {
 
         const GenericInstanceKey key{.module_path = type_module, .decl_name = type_name + "::" + method_name, .args = args};
         if (!suppressed) {
-            for (const auto &[k, idx] : program.generic_fn_instance_lookup) {
-                if (k == key) {
-                    // Mark on the cache hit too — see the identical note in
-                    // instantiate_generic_function.
-                    if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
-                    return idx;
-                }
+            if (const auto it = program.generic_fn_instance_lookup.find(key); it != program.generic_fn_instance_lookup.end()) {
+                const size_t idx = it->second;
+                // Mark on the cache hit too — see the identical note in
+                // instantiate_generic_function.
+                if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
+                return idx;
             }
         }
 
@@ -2204,7 +2202,7 @@ namespace sema {
 
         if (suppressed) return idx; // see instantiate_generic_function's identical branch
 
-        program.generic_fn_instance_lookup.push_back({key, idx});
+        program.generic_fn_instance_lookup.emplace(key, idx);
         if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
 
         check_generic_function_instance_body(idx, program, diag);

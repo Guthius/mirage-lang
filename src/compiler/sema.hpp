@@ -253,6 +253,24 @@ namespace sema {
         auto operator==(const GenericInstanceKey &) const -> bool = default;
     };
 
+    // Hash over exactly the fields operator== compares, so GenericInstanceKey can key an
+    // unordered_map. Deliberately NOT the instance's mangled name: mangling drops the
+    // module path and sanitizes type spellings, so two distinct keys can mangle alike.
+    struct GenericInstanceKeyHash {
+        auto operator()(const GenericInstanceKey &k) const -> size_t {
+            size_t h = std::hash<std::string>{}(k.module_path);
+            const auto mix = [&h](const size_t v) { h ^= v + 0x9e3779b9U + (h << 6) + (h >> 2); };
+            mix(std::hash<std::string>{}(k.decl_name));
+            for (const auto &arg : k.args) {
+                mix(std::hash<bool>{}(arg.is_type));
+                mix(std::hash<ResolvedType>{}(arg.type_arg));
+                mix(std::visit([]<typename V>(const V &v) { return std::hash<V>{}(v); }, arg.value_arg));
+                mix(std::hash<ResolvedType>{}(arg.value_arg_scalar_type));
+            }
+            return h;
+        }
+    };
+
     // One concrete instantiation of a generic function OR method — both share this one
     // shape (a method additionally sets 'self_type' and 'impl_decl'; a free function
     // instantiation leaves those unset and uses 'decl' instead). Signature (param/return
@@ -801,12 +819,12 @@ namespace sema {
 
         // Generic function/method instantiation cache + liveness, mirroring the type-side
         // tables immediately above. 'generic_fn_instance_lookup' maps a GenericInstanceKey to
-        // an index into 'generic_fn_instances' (linear scan, same interning idiom). Each
+        // an index into 'generic_fn_instances'. Each
         // instance is heap-allocated (unique_ptr, not stored by value) so a REFERENCE
         // returned by instantiate_generic_function/instantiate_generic_method stays valid
         // even if a later, nested/recursive instantiation triggers another push_back on this
         // vector — only the vector of pointers would reallocate, never the pointee objects.
-        std::vector<std::pair<GenericInstanceKey, size_t>> generic_fn_instance_lookup;
+        std::unordered_map<GenericInstanceKey, size_t, GenericInstanceKeyHash> generic_fn_instance_lookup;
         std::vector<std::unique_ptr<GenericFunctionInstance>> generic_fn_instances;
         std::set<size_t> generic_fn_instances_needed;
 
