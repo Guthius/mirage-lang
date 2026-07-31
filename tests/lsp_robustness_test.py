@@ -93,12 +93,17 @@ def test_malformed_requests() -> None:
         frame({"jsonrpc": "2.0", "id": 3, "method": "textDocument/definition", "params": {}}),
         # A malformed *notification*: no one to answer, so it must be logged and dropped.
         frame({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {}}),
+        # A non-string "method" used to throw OUTSIDE the dispatch try/catch (the field is
+        # read before it) and std::terminate the whole server.
+        frame({"jsonrpc": "2.0", "id": 4, "method": 42, "params": {}}),
+        frame({"jsonrpc": "2.0", "method": None, "params": {}}),
     ))
 
     check(result.returncode == 0, f"server exits cleanly after malformed requests (got {result.returncode})")
     seen = responses(result.stdout)
     check(seen.get(2) == "error", "hover without a position gets a JSON-RPC error, not a crash")
     check(seen.get(3) == "error", "definition without a textDocument gets a JSON-RPC error")
+    check(seen.get(4) == "error", "non-string 'method' gets a JSON-RPC error, not a dead server")
     # shutdown is answered on the main thread, after every malformed message above, so
     # receiving its response proves dispatch survived all of them.
     check(seen.get(100) == "result", "shutdown is still answered after the malformed requests")

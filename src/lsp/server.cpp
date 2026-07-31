@@ -328,7 +328,21 @@ namespace lsp {
                 continue;
             }
 
-            const auto method = message.value("method", std::string{});
+            // Extracted defensively: this runs OUTSIDE the try below, and
+            // message.value("method", ...) throws when the field exists with a non-string
+            // type ('{"method": 42}') — one malformed message used to std::terminate the
+            // whole server.
+            std::string method;
+            if (const auto it = message.find("method"); it != message.end()) {
+                if (!it->is_string()) {
+                    std::cerr << "mirage-lsp: message with non-string 'method', rejecting\n";
+                    if (message.contains("id") && !message["id"].is_null()) {
+                        send_error(channel, message["id"], INVALID_REQUEST, "'method' must be a string");
+                    }
+                    continue;
+                }
+                method = it->get<std::string>();
+            }
             const bool has_id = message.contains("id") && !message["id"].is_null();
 
             std::cerr << "mirage-lsp: <- " << (method.empty() ? "(response)" : method) << "\n";
