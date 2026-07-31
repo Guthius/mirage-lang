@@ -1128,7 +1128,20 @@ namespace codegen {
 
             // Emit a value that default-initializes `type` in `type_module`.
             // Applies struct field-level init exprs recursively; zeros everything else.
-            auto emit_default_value(const std::string &type_module, const sema::ResolvedType &type) -> llvm::Value * {
+            // A zeroed aggregate with each field's declared default inserted, recursively.
+            //
+            // 'eval_field' is the ONLY thing that differed between the runtime and constant
+            // forms of this: emit_expr for the former, emit_const_or_runtime for the latter
+            // (global initializers, where there is no valid instruction insertion point).
+            // CreateInsertValue over all-constant operands folds rather than emitting, which
+            // is what lets the constant form cast the result back to llvm::Constant.
+            //
+            // Note the recursion carries 'eval_field' with it, so a nested default is
+            // evaluated in the same mode as the aggregate containing it — the property that
+            // was previously maintained by having two whole functions call themselves.
+            template <typename EvalField>
+            auto emit_default_value_impl(const std::string &type_module, const sema::ResolvedType &type,
+                                          const EvalField &eval_field) -> llvm::Value * {
                 if (type.kind == sema::TypeKind::Struct) {
                     const auto &info = sema_program_.structs.at(type.struct_index);
                     const auto &struct_module = info.module_path;
@@ -1142,12 +1155,9 @@ namespace codegen {
                     for (size_t i = 0; i < info.fields.size(); ++i) {
                         const auto &field = info.fields[i];
                         const auto ll_idx = lowering.field_indices.at(i);
-                        llvm::Value *fval;
-                        if (field.init_expr) {
-                            fval = emit_expr(*field.init_expr);
-                        } else {
-                            fval = emit_default_value(struct_module, field.type);
-                        }
+                        llvm::Value *fval = field.init_expr
+                                                ? eval_field(*field.init_expr)
+                                                : emit_default_value_impl(struct_module, field.type, eval_field);
                         agg = builder_.CreateInsertValue(agg, fval, {ll_idx});
                     }
 
@@ -1158,7 +1168,7 @@ namespace codegen {
                     auto *ll_ty = llvm_type(type_module, type);
                     llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
                     for (uint64_t i = 0; i < array_info.count; ++i) {
-                        auto *elem = emit_default_value(type_module, array_info.element_type);
+                        auto *elem = emit_default_value_impl(type_module, array_info.element_type, eval_field);
                         agg = builder_.CreateInsertValue(agg, elem, {static_cast<unsigned>(i)});
                     }
                     return agg;
@@ -1169,45 +1179,16 @@ namespace codegen {
                 return zero_value(type_module, type);
             }
 
-            // Constant analogue of emit_default_value, for use inside emit_const_or_runtime
-            // (i.e. global initializers), where there is no valid instruction insertion point.
-            // Recurses via emit_const_or_runtime instead of emit_expr for field-level defaults.
+            auto emit_default_value(const std::string &type_module, const sema::ResolvedType &type) -> llvm::Value * {
+                return emit_default_value_impl(type_module, type,
+                    [this](const ast::Expr &e) -> llvm::Value * { return emit_expr(e); });
+            }
+
+            // Constant analogue, for use inside emit_const_or_runtime (i.e. global
+            // initializers).
             auto emit_const_default_value(const std::string &type_module, const sema::ResolvedType &type) -> llvm::Constant * {
-                if (type.kind == sema::TypeKind::Struct) {
-                    const auto &info = sema_program_.structs.at(type.struct_index);
-                    const auto &struct_module = info.module_path;
-                    auto *ll_ty = llvm_type(struct_module, type);
-                    llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
-                    const auto &lowering = struct_lowering(type.struct_index);
-
-                    const ScopedEmitModule module_scope(*this, struct_module);
-                    use_struct_instance_exprs(type.struct_index);
-
-                    for (size_t i = 0; i < info.fields.size(); ++i) {
-                        const auto &field = info.fields[i];
-                        const auto ll_idx = lowering.field_indices.at(i);
-                        llvm::Constant *fval = field.init_expr
-                                                    ? llvm::cast<llvm::Constant>(emit_const_or_runtime(*field.init_expr, true))
-                                                    : emit_const_default_value(struct_module, field.type);
-                        agg = builder_.CreateInsertValue(agg, fval, {ll_idx});
-                    }
-
-                    return llvm::cast<llvm::Constant>(agg);
-                }
-                if (type.kind == sema::TypeKind::Array) {
-                    const auto &array_info = sema_program_.arrays.at(type.array_index);
-                    auto *ll_ty = llvm_type(type_module, type);
-                    llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
-                    for (uint64_t i = 0; i < array_info.count; ++i) {
-                        auto *elem = emit_const_default_value(type_module, array_info.element_type);
-                        agg = builder_.CreateInsertValue(agg, elem, {static_cast<unsigned>(i)});
-                    }
-                    return llvm::cast<llvm::Constant>(agg);
-                }
-                if (type.kind == sema::TypeKind::Union) {
-                    return llvm::Constant::getNullValue(unions_.at(type.union_index));
-                }
-                return zero_value(type_module, type);
+                return llvm::cast<llvm::Constant>(emit_default_value_impl(type_module, type,
+                    [this](const ast::Expr &e) -> llvm::Value * { return emit_const_or_runtime(e, true); }));
             }
 
             // Materializes an omitted trailing call argument from its default-parameter
@@ -1281,71 +1262,96 @@ namespace codegen {
 
             // Emit a struct value from an explicit StructExpr, filling in field defaults
             // for any fields not provided in the initializer.
-            auto emit_struct_expr_value(const ast::StructExpr &se, const sema::ResolvedType &ty) -> llvm::Value * {
+            // The shared shape of a struct literal's lowering: a zeroed aggregate, the
+            // provided fields inserted, then declared defaults for any field the literal
+            // omitted.
+            //
+            // 'eval_provided' and 'eval_default' are the only difference between the runtime
+            // and constant forms. They stay SEPARATE rather than collapsing into one callback
+            // because the two are not interchangeable: a provided value is coerced to the
+            // field's declared type (emit_value_as), while a default is emitted as written —
+            // it was authored against that type already.
+            template <typename EvalProvided, typename EvalDefault>
+            auto emit_struct_literal(const std::vector<ast::StructExpr::Field> &provided_fields, const sema::ResolvedType &ty,
+                                      const EvalProvided &eval_provided, const EvalDefault &eval_default) -> llvm::Value * {
                 const auto &info = sema_program_.structs.at(ty.struct_index);
                 const auto &struct_module = info.module_path;
                 auto *ll_ty = llvm_type(struct_module, ty);
                 llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
                 const auto &lowering = struct_lowering(ty.struct_index);
 
-                // Track which fields are covered by the StructExpr
                 std::unordered_map<std::string, const ast::StructExpr::Field *> provided;
-                for (const auto &sf : se.fields) {
+                for (const auto &sf : provided_fields) {
                     provided[sf.name] = &sf;
                 }
 
-                // Insert fields in StructExpr order
-                for (const auto &sf : se.fields) {
+                // Written order, not declaration order: a field initializer may reference an
+                // earlier one.
+                for (const auto &sf : provided_fields) {
                     if (std::holds_alternative<ast::UndefinedExpr>(sf.expr)) continue;
                     const auto it = std::ranges::find(info.fields, sf.name, &sema::StructField::name);
                     if (it == info.fields.end()) continue;
                     const auto field_pos = static_cast<size_t>(std::distance(info.fields.begin(), it));
-                    const auto ll_idx = lowering.field_indices.at(field_pos);
-                    agg = builder_.CreateInsertValue(agg, emit_value_as(sf.expr, it->type, struct_module), {ll_idx});
+                    agg = builder_.CreateInsertValue(agg, eval_provided(sf.expr, it->type, struct_module),
+                                                      {lowering.field_indices.at(field_pos)});
                 }
 
-                // Insert remaining fields from their default init exprs (in declaration order)
+                // Defaults are written in the DECLARING module and read its expression tables.
                 const ScopedEmitModule module_scope(*this, struct_module);
                 use_struct_instance_exprs(ty.struct_index);
 
                 for (size_t i = 0; i < info.fields.size(); ++i) {
                     const auto &field = info.fields[i];
-                    if (provided.contains(field.name)) continue;
-                    if (!field.init_expr) continue;
-                    const auto ll_idx = lowering.field_indices.at(i);
-                    agg = builder_.CreateInsertValue(agg, emit_expr(*field.init_expr), {ll_idx});
+                    if (provided.contains(field.name) || !field.init_expr) continue;
+                    agg = builder_.CreateInsertValue(agg, eval_default(*field.init_expr), {lowering.field_indices.at(i)});
                 }
 
                 return agg;
             }
 
-            // Emit a struct value from a positional ArrayExpr, assigning values to
-            // fields by declaration order and filling remaining fields from their
-            // default init exprs.
-            auto emit_positional_struct_expr_value(const ast::ArrayExpr &ae, const sema::ResolvedType &ty) -> llvm::Value * {
+            // Positional form ('{1, 2}'): values fill fields in declaration order, and any
+            // field past the end falls back to its declared default.
+            template <typename EvalProvided, typename EvalDefault>
+            auto emit_positional_struct_literal(const std::vector<ast::Expr> &values, const sema::ResolvedType &ty,
+                                                 const EvalProvided &eval_provided, const EvalDefault &eval_default) -> llvm::Value * {
                 const auto &info = sema_program_.structs.at(ty.struct_index);
                 const auto &struct_module = info.module_path;
                 auto *ll_ty = llvm_type(struct_module, ty);
                 llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
                 const auto &lowering = struct_lowering(ty.struct_index);
 
-                for (size_t i = 0; i < ae.values.size(); ++i) {
-                    if (std::holds_alternative<ast::UndefinedExpr>(ae.values[i])) continue;
-                    const auto ll_idx = lowering.field_indices.at(i);
-                    agg = builder_.CreateInsertValue(agg, emit_value_as(ae.values[i], info.fields[i].type, struct_module), {ll_idx});
+                for (size_t i = 0; i < values.size(); ++i) {
+                    if (std::holds_alternative<ast::UndefinedExpr>(values[i])) continue;
+                    agg = builder_.CreateInsertValue(agg, eval_provided(values[i], info.fields[i].type, struct_module),
+                                                      {lowering.field_indices.at(i)});
                 }
 
                 const ScopedEmitModule module_scope(*this, struct_module);
                 use_struct_instance_exprs(ty.struct_index);
 
-                for (size_t i = ae.values.size(); i < info.fields.size(); ++i) {
+                for (size_t i = values.size(); i < info.fields.size(); ++i) {
                     const auto &field = info.fields[i];
                     if (!field.init_expr) continue;
-                    const auto ll_idx = lowering.field_indices.at(i);
-                    agg = builder_.CreateInsertValue(agg, emit_expr(*field.init_expr), {ll_idx});
+                    agg = builder_.CreateInsertValue(agg, eval_default(*field.init_expr), {lowering.field_indices.at(i)});
                 }
 
                 return agg;
+            }
+
+            auto emit_struct_expr_value(const ast::StructExpr &se, const sema::ResolvedType &ty) -> llvm::Value * {
+                return emit_struct_literal(se.fields, ty,
+                    [this](const ast::Expr &e, const sema::ResolvedType &field_ty, const std::string &mod) -> llvm::Value * {
+                        return emit_value_as(e, field_ty, mod);
+                    },
+                    [this](const ast::Expr &e) -> llvm::Value * { return emit_expr(e); });
+            }
+
+            auto emit_positional_struct_expr_value(const ast::ArrayExpr &ae, const sema::ResolvedType &ty) -> llvm::Value * {
+                return emit_positional_struct_literal(ae.values, ty,
+                    [this](const ast::Expr &e, const sema::ResolvedType &field_ty, const std::string &mod) -> llvm::Value * {
+                        return emit_value_as(e, field_ty, mod);
+                    },
+                    [this](const ast::Expr &e) -> llvm::Value * { return emit_expr(e); });
             }
 
             // Emit an array value from an explicit ArrayExpr; trailing elements are
@@ -5823,63 +5829,23 @@ namespace codegen {
                                             return llvm::UndefValue::get(llvm_type(*current_module_path_, ty));
                                         }
 
-                                        const auto &info = sema_program_.structs.at(ty.struct_index);
-                                        const auto &struct_module = info.module_path;
-                                        auto *ll_ty = llvm_type(struct_module, ty);
-                                        llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
-                                        const auto &lowering = struct_lowering(ty.struct_index);
-
-                                        std::unordered_map<std::string, const ast::StructExpr::Field *> provided;
-                                        for (const auto &sf : bv.fields) {
-                                            provided[sf.name] = &sf;
-                                        }
-
-                                        for (const auto &sf : bv.fields) {
-                                            if (std::holds_alternative<ast::UndefinedExpr>(sf.expr)) continue;
-                                            const auto it = std::ranges::find(info.fields, sf.name, &sema::StructField::name);
-                                            if (it == info.fields.end()) continue;
-                                            const auto field_pos = static_cast<size_t>(std::distance(info.fields.begin(), it));
-                                            const auto ll_idx = lowering.field_indices.at(field_pos);
-                                            agg = builder_.CreateInsertValue(agg, llvm::cast<llvm::Constant>(emit_const_or_runtime(sf.expr, true)), {ll_idx});
-                                        }
-
-                                        const ScopedEmitModule module_scope(*this, struct_module);
-                                        use_struct_instance_exprs(ty.struct_index);
-
-                                        for (size_t i = 0; i < info.fields.size(); ++i) {
-                                            const auto &field = info.fields[i];
-                                            if (provided.contains(field.name) || !field.init_expr) continue;
-                                            const auto ll_idx = lowering.field_indices.at(i);
-                                            agg = builder_.CreateInsertValue(agg, llvm::cast<llvm::Constant>(emit_const_or_runtime(*field.init_expr, true)), {ll_idx});
-                                        }
-
-                                        return llvm::cast<llvm::Constant>(agg);
+                                        // Same builder as the runtime path, with the
+                                        // constant evaluator. Note a provided value is NOT
+                                        // coerced here: emit_const_or_runtime folds it against
+                                        // the declared type already.
+                                        return llvm::cast<llvm::Constant>(emit_struct_literal(bv.fields, ty,
+                                            [this](const ast::Expr &e, const sema::ResolvedType &, const std::string &) -> llvm::Value * {
+                                                return emit_const_or_runtime(e, true);
+                                            },
+                                            [this](const ast::Expr &e) -> llvm::Value * { return emit_const_or_runtime(e, true); }));
                                     } else if constexpr (std::is_same_v<BVT, ast::BitsetExpr>) {
                                         return llvm::cast<llvm::Constant>(emit_bitset_expr_value(bv, ty));
                                     } else if (ty.kind == sema::TypeKind::Struct) { // positional struct init
-                                        const auto &info = sema_program_.structs.at(ty.struct_index);
-                                        const auto &struct_module = info.module_path;
-                                        auto *ll_ty = llvm_type(struct_module, ty);
-                                        llvm::Value *agg = llvm::Constant::getNullValue(ll_ty);
-                                        const auto &lowering = struct_lowering(ty.struct_index);
-
-                                        for (size_t i = 0; i < bv.values.size(); ++i) {
-                                            if (std::holds_alternative<ast::UndefinedExpr>(bv.values[i])) continue;
-                                            const auto ll_idx = lowering.field_indices.at(i);
-                                            agg = builder_.CreateInsertValue(agg, llvm::cast<llvm::Constant>(emit_const_or_runtime(bv.values[i], true)), {ll_idx});
-                                        }
-
-                                        const ScopedEmitModule module_scope(*this, struct_module);
-                                        use_struct_instance_exprs(ty.struct_index);
-
-                                        for (size_t i = bv.values.size(); i < info.fields.size(); ++i) {
-                                            const auto &field = info.fields[i];
-                                            if (!field.init_expr) continue;
-                                            const auto ll_idx = lowering.field_indices.at(i);
-                                            agg = builder_.CreateInsertValue(agg, llvm::cast<llvm::Constant>(emit_const_or_runtime(*field.init_expr, true)), {ll_idx});
-                                        }
-
-                                        return llvm::cast<llvm::Constant>(agg);
+                                        return llvm::cast<llvm::Constant>(emit_positional_struct_literal(bv.values, ty,
+                                            [this](const ast::Expr &e, const sema::ResolvedType &, const std::string &) -> llvm::Value * {
+                                                return emit_const_or_runtime(e, true);
+                                            },
+                                            [this](const ast::Expr &e) -> llvm::Value * { return emit_const_or_runtime(e, true); }));
                                     } else { // ast::ArrayExpr
                                         const auto &array_info = sema_program_.arrays.at(ty.array_index);
                                         auto *ll_ty = llvm_type(*current_module_path_, ty);
