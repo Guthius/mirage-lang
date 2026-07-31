@@ -39,6 +39,11 @@
     "action": "run",
     "exit": 40
   },
+  "example_array_type_too_large": {
+    "action": "build",
+    "diag": "examples/example_array_type_too_large/main.mir:9:14: error: array type is too large: 4294967296 elements of 1 bytes exceed the maximum supported array size of 4294967295 bytes",
+    "exit": 1
+  },
   "example_asi_deref": {
     "action": "run",
     "exit": 0

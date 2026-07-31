@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <format>
+#include <limits>
 #include <unordered_map>
 
 namespace sema {
@@ -1798,7 +1799,15 @@ namespace sema {
                             if (!count || element.kind == TypeKind::Opaque) {
                                 return ResolvedType{.kind = TypeKind::Opaque};
                             }
-                            return intern_array(program, element, *count, size_of(module_path, element) * *count, align_of(module_path, element));
+                            // ArrayInfo::size is uint32_t; unchecked, the byte-size product
+                            // would wrap silently and a >4 GiB array type would lay out small.
+                            const uint64_t element_size = size_of(module_path, element);
+                            if (element_size > 0 && *count > std::numeric_limits<uint32_t>::max() / element_size) {
+                                return error(diag, v->location,
+                                    std::format("array type is too large: {} elements of {} bytes exceed the maximum supported array size of {} bytes",
+                                        *count, element_size, std::numeric_limits<uint32_t>::max()));
+                            }
+                            return intern_array(program, element, *count, static_cast<uint32_t>(element_size * *count), align_of(module_path, element));
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceType>>) {
                             auto element = resolve_type_impl(v->base_type, module_path);
@@ -2310,8 +2319,15 @@ namespace sema {
         Resolver resolver{program, diag, nullptr, env, nullptr};
         const auto element = resolver.resolve_type_impl((*array_type)->base_type, module_path);
         const auto count = static_cast<uint64_t>(array_lit->values.size());
+        // Same uint32_t byte-size cap as resolve_type_impl's sized-array path.
+        const uint64_t element_size = resolver.size_of(module_path, element);
+        if (element_size > 0 && count > std::numeric_limits<uint32_t>::max() / element_size) {
+            return error(diag, expr_location(*init),
+                std::format("array type is too large: {} elements of {} bytes exceed the maximum supported array size of {} bytes",
+                    count, element_size, std::numeric_limits<uint32_t>::max()));
+        }
         return intern_array(program, element, count,
-                             resolver.size_of(module_path, element) * static_cast<uint32_t>(count),
+                             static_cast<uint32_t>(element_size * count),
                              resolver.align_of(module_path, element));
     }
 
@@ -2334,6 +2350,12 @@ namespace sema {
 
         if (size > 1024 * 1024) {
             diag.warn(DiagnosticStage::Sema, loc, std::format("import_bin: '{}' is {} bytes, exceeding 1 MiB", path, size));
+        }
+
+        // Same uint32_t cap as the array-type paths above: ArrayInfo::size would wrap.
+        if (size > std::numeric_limits<uint32_t>::max()) {
+            return error(diag, loc, std::format("import_bin: '{}' is {} bytes, exceeding the maximum supported array size of {} bytes",
+                path, size, std::numeric_limits<uint32_t>::max()));
         }
 
         return intern_array(program, ResolvedType{.kind = TypeKind::U8}, size, static_cast<uint32_t>(size), 1);

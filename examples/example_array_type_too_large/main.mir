@@ -1,0 +1,11 @@
+// example_array_type_too_large — ArrayInfo::size is a uint32_t, so an array type whose
+// byte size exceeds 4294967295 used to wrap silently and lay out small (CODE_REVIEW.md
+// SEMA-16): '[0x1_0000_0000]u8' computed a byte size of 0. Such a type must be rejected
+// at resolution time.
+//
+// Expected: compile error "exceed the maximum supported array size".
+
+pub fn main() -> i32 {
+    mut big: [0x1_0000_0000]u8 = undefined
+    return 0
+}
