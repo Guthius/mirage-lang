@@ -725,91 +725,90 @@ namespace sema {
                 return std::nullopt;
             }
         }
+
+        // Shared implementation of resolve_option_expr/resolve_env_expr below, which
+        // differ only in where the raw value string comes from and how the diagnostics
+        // name it (the same split coerce_option_string above already models). Target-type
+        // priority (expected > default's type > []u8), raw-string coercion or
+        // default-value folding, and the expr_option_values caching are identical.
+        //
+        // 'lookup_value': the value source — the '--opt' table for '$option',
+        // std::getenv for '$env'; nullopt means "not provided". 'missing_message': the
+        // full "required ..." error for when neither a value nor a default exists (the
+        // two directives phrase the remedy differently).
+        auto resolve_option_like_expr(const void *expr_key, const std::string &key,
+                                       const std::optional<ast::Expr> &default_value, const SourceLocation &location,
+                                       std::optional<ResolvedType> expected, const std::string &module_path,
+                                       Program &program, DiagnosticEngine &diag,
+                                       const std::function<std::optional<std::string>()> &lookup_value,
+                                       const char *directive, const char *noun,
+                                       const std::string &missing_message) -> ResolvedType {
+            ResolvedType target;
+            if (expected) {
+                target = *expected;
+                // Still check the default against the known target — needed both to catch a
+                // type mismatch and (for e.g. a bare '.Variant' enum literal default, which is
+                // otherwise contextless) to populate expr_types so evaluate_const_value below
+                // can resolve it.
+                if (default_value) {
+                    LocalScope empty;
+                    check_expr(*default_value, empty, module_path, program, diag, target, 0);
+                }
+            } else if (default_value) {
+                LocalScope empty;
+                target = check_expr(*default_value, empty, module_path, program, diag, std::nullopt, 0);
+            } else {
+                target = intern_slice(program, ResolvedType{.kind = TypeKind::U8});
+            }
+
+            std::optional<ConstFoldValue> resolved_value;
+
+            if (const auto raw = lookup_value()) {
+                resolved_value = coerce_option_string(*raw, target, program, diag, location, key, directive, noun);
+            } else if (default_value) {
+                resolved_value = evaluate_const_value(*default_value, module_path, program, diag);
+                if (!resolved_value) {
+                    diag.report_error(DiagnosticStage::Sema, location,
+                        std::format("'{}' default value for '{}' is not a compile-time constant", directive, key));
+                }
+            } else {
+                diag.report_error(DiagnosticStage::Sema, location, missing_message);
+            }
+
+            if (resolved_value) {
+                if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
+                    mod_it->second.expr_option_values[expr_key] = *resolved_value;
+                }
+            }
+
+            return target;
+        }
     }
 
     auto resolve_option_expr(const void *expr_key, const ast::OptionExpr &opt, std::optional<ResolvedType> expected,
                               const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType {
-        ResolvedType target;
-        if (expected) {
-            target = *expected;
-            // Still check the default against the known target — needed both to catch a
-            // type mismatch and (for e.g. a bare '.Variant' enum literal default, which is
-            // otherwise contextless) to populate expr_types so evaluate_const_value below
-            // can resolve it.
-            if (opt.default_value) {
-                LocalScope empty;
-                check_expr(*opt.default_value, empty, module_path, program, diag, target, 0);
-            }
-        } else if (opt.default_value) {
-            LocalScope empty;
-            target = check_expr(*opt.default_value, empty, module_path, program, diag, std::nullopt, 0);
-        } else {
-            target = intern_slice(program, ResolvedType{.kind = TypeKind::U8});
-        }
-
-        std::optional<ConstFoldValue> resolved_value;
-
-        const auto opt_it = program.options.opt_values.find(opt.key);
-        if (opt_it != program.options.opt_values.end()) {
-            resolved_value = coerce_option_string(opt_it->second, target, program, diag, opt.location, opt.key, "$option", "option");
-        } else if (opt.default_value) {
-            resolved_value = evaluate_const_value(*opt.default_value, module_path, program, diag);
-            if (!resolved_value) {
-                diag.report_error(DiagnosticStage::Sema, opt.location,
-                    std::format("'$option' default value for '{}' is not a compile-time constant", opt.key));
-            }
-        } else {
-            diag.report_error(DiagnosticStage::Sema, opt.location,
-                std::format("required option '{}' was not provided.\n       Pass it with: --opt {}=<value>", opt.key, opt.key));
-        }
-
-        if (resolved_value) {
-            if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
-                mod_it->second.expr_option_values[expr_key] = *resolved_value;
-            }
-        }
-
-        return target;
+        return resolve_option_like_expr(
+            expr_key, opt.key, opt.default_value, opt.location, std::move(expected), module_path, program, diag,
+            [&]() -> std::optional<std::string> {
+                const auto opt_it = program.options.opt_values.find(opt.key);
+                if (opt_it == program.options.opt_values.end()) return std::nullopt;
+                return opt_it->second;
+            },
+            "$option", "option",
+            std::format("required option '{}' was not provided.\n       Pass it with: --opt {}=<value>", opt.key, opt.key));
     }
 
     auto resolve_env_expr(const void *expr_key, const ast::EnvExpr &opt, std::optional<ResolvedType> expected,
                            const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ResolvedType {
-        ResolvedType target;
-        if (expected) {
-            target = *expected;
-            if (opt.default_value) {
-                LocalScope empty;
-                check_expr(*opt.default_value, empty, module_path, program, diag, target, 0);
-            }
-        } else if (opt.default_value) {
-            LocalScope empty;
-            target = check_expr(*opt.default_value, empty, module_path, program, diag, std::nullopt, 0);
-        } else {
-            target = intern_slice(program, ResolvedType{.kind = TypeKind::U8});
-        }
-
-        std::optional<ConstFoldValue> resolved_value;
-
-        if (const char *env_value = std::getenv(opt.key.c_str()); env_value != nullptr) {
-            resolved_value = coerce_option_string(env_value, target, program, diag, opt.location, opt.key, "$env", "environment variable");
-        } else if (opt.default_value) {
-            resolved_value = evaluate_const_value(*opt.default_value, module_path, program, diag);
-            if (!resolved_value) {
-                diag.report_error(DiagnosticStage::Sema, opt.location,
-                    std::format("'$env' default value for '{}' is not a compile-time constant", opt.key));
-            }
-        } else {
-            diag.report_error(DiagnosticStage::Sema, opt.location,
-                std::format("required environment variable '{}' was not set.\n       Set it with: {}=<value>", opt.key, opt.key));
-        }
-
-        if (resolved_value) {
-            if (const auto mod_it = program.modules.find(module_path); mod_it != program.modules.end()) {
-                mod_it->second.expr_option_values[expr_key] = *resolved_value;
-            }
-        }
-
-        return target;
+        return resolve_option_like_expr(
+            expr_key, opt.key, opt.default_value, opt.location, std::move(expected), module_path, program, diag,
+            [&]() -> std::optional<std::string> {
+                const char *env_value = std::getenv(opt.key.c_str());
+                if (env_value == nullptr) return std::nullopt;
+                return std::string{env_value};
+            },
+            "$env", "environment variable",
+            std::format("required environment variable '{}' was not set.\n       Set it with: {}=<value>", opt.key, opt.key));
     }
 
     namespace {
