@@ -8,6 +8,7 @@
 #include "handlers/hover.hpp"
 #include "handlers/inlay_hint.hpp"
 #include "handlers/references.hpp"
+#include "position_encoding.hpp"
 #include "task_queue.hpp"
 #include "transport.hpp"
 #include "uri.hpp"
@@ -15,9 +16,11 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <mutex>
 #include <ranges>
+#include <sstream>
 #include <set>
 #include <stop_token>
 #include <thread>
@@ -121,6 +124,42 @@ namespace lsp {
             std::vector<std::string> done_;
         };
 
+        // Line text for outgoing position conversion, in preference order: the analysed
+        // bundle's own sources (covers the request's whole import closure), then an open
+        // buffer, then disk. The fallbacks exist for workspace-sweep reference results,
+        // which point at files outside the requested module's closure; disk reads are
+        // cached for the lifetime of one returned lookup (i.e. one request's conversion).
+        // Must only run on the worker thread: it reads the DocumentStore.
+        auto make_line_lookup(analysis::ProgramResult &result, const analysis::DocumentStore &documents)
+            -> encoding::LineLookup {
+            auto disk_cache = std::make_shared<std::unordered_map<std::string, std::string>>();
+            return [&result, &documents, disk_cache](const std::string &file, const size_t line) -> std::string {
+                if (const auto view = result.source_manager->get_source_line(file, line); !view.empty()) {
+                    return std::string(view);
+                }
+                if (const auto *open = documents.text_of(file)) {
+                    return std::string(encoding::line_from_text(*open, line));
+                }
+                auto it = disk_cache->find(file);
+                if (it == disk_cache->end()) {
+                    std::ifstream in(file, std::ios::binary);
+                    std::ostringstream text;
+                    text << in.rdbuf();
+                    it = disk_cache->emplace(file, std::move(text).str()).first;
+                }
+                return std::string(encoding::line_from_text(it->second, line));
+            };
+        }
+
+        // Incoming 1-based (line, character) with `character` in UTF-16 code units →
+        // the same position with a 1-based byte column. Worker-thread only, like
+        // make_line_lookup.
+        auto request_byte_column(analysis::ProgramResult &result, const std::string &path,
+                                 const size_t line, const size_t utf16_character) -> size_t {
+            const auto text = result.source_manager->get_source_line(path, line);
+            return encoding::utf16_to_byte_column(text, utf16_character - 1) + 1;
+        }
+
         // Owns the only DocumentStore instance and runs exclusively on the analysis
         // worker thread - every Task pushed onto the queue that touches `documents` or
         // diagnostics bookkeeping is executed by Worker::run, never by the stdin thread.
@@ -137,6 +176,15 @@ namespace lsp {
             // when the client sent neither, in which case Find All References stays scoped to
             // the analysed module's import closure — the pre-workspace behaviour.
             std::string workspace_root;
+
+            // Whether the wire speaks UTF-16 code-unit columns (the LSP default). The
+            // compiler counts byte columns throughout, so when this is true every incoming
+            // position is converted to bytes and every outgoing one back to UTF-16 — on
+            // THIS thread, since the conversions read document text. False only when the
+            // client's positionEncodings offered "utf-8" and initialize advertised it.
+            // Written on the main thread during initialize, before any request task exists
+            // (same contract as workspace_root).
+            bool utf16_positions = true;
 
             // Coalesces rapid didOpen/didChange bursts for the same file into one
             // publishDiagnostics round, DIAGNOSTICS_DEBOUNCE after the last edit.
@@ -181,7 +229,12 @@ namespace lsp {
                     auto &result = documents.ensure_analysed(open_path);
                     auto grouped = handlers::group_diagnostics_by_file(result.diagnostics);
                     if (const auto it = grouped.find(path); it != grouped.end() && !it->second.empty()) {
-                        return std::move(it->second);
+                        auto diags = std::move(it->second);
+                        if (utf16_positions) {
+                            const auto line_of = make_line_lookup(result, documents);
+                            for (auto &diag : diags) encoding::positions_to_utf16(diag, path, line_of);
+                        }
+                        return diags;
                     }
                 }
                 return json::array();
@@ -212,7 +265,11 @@ namespace lsp {
                     grouped[stale_file];
                 }
 
+                const auto line_of = utf16_positions ? make_line_lookup(result, documents) : encoding::LineLookup{};
                 for (auto &[filename, diags] : grouped) {
+                    if (line_of) {
+                        for (auto &diag : diags) encoding::positions_to_utf16(diag, filename, line_of);
+                    }
                     send_notification(out_, "textDocument/publishDiagnostics", {
                         {"uri", path_to_uri(filename)},
                         {"diagnostics", std::move(diags)},
@@ -467,6 +524,11 @@ namespace lsp {
 
             if (method == "initialize") {
                 state = LifecycleState::Running;
+                // Whether the client can accept byte columns on the wire. The LSP default is
+                // UTF-16 code units; a client that lists "utf-8" in
+                // capabilities.general.positionEncodings (LSP 3.17) can take the compiler's
+                // native byte columns unconverted.
+                bool client_accepts_utf8 = false;
                 // Whether the client will accept a watcher registered at runtime. Read
                 // defensively: every level is optional, and nlohmann's operator[] would
                 // auto-vivify a missing key rather than report it.
@@ -477,6 +539,18 @@ namespace lsp {
                     const auto &watched = workspace.is_object() && workspace.contains("didChangeWatchedFiles")
                         ? workspace["didChangeWatchedFiles"] : json::object();
                     supports_watch_registration = watched.is_object() && watched.value("dynamicRegistration", false);
+
+                    const auto &general = client_caps.is_object() && client_caps.contains("general")
+                        ? client_caps["general"] : json::object();
+                    if (general.is_object() && general.contains("positionEncodings") &&
+                        general["positionEncodings"].is_array()) {
+                        for (const auto &enc : general["positionEncodings"]) {
+                            if (enc.is_string() && enc.get<std::string>() == "utf-8") {
+                                client_accepts_utf8 = true;
+                                break;
+                            }
+                        }
+                    }
 
                     // The root to search for references. 'workspaceFolders' supersedes the
                     // deprecated 'rootUri', which supersedes the older 'rootPath'; take the
@@ -497,7 +571,8 @@ namespace lsp {
                     }
                     worker.workspace_root = root;
                 }
-                const json capabilities = {
+                worker.utf16_positions = !client_accepts_utf8;
+                json capabilities = {
                     {"textDocumentSync", {{"openClose", true}, {"change", 1}}},
                     {"hoverProvider", true},
                     {"definitionProvider", true},
@@ -508,6 +583,11 @@ namespace lsp {
                     // did not, since there is then no tree to search.
                     {"referencesProvider", true},
                 };
+                // Advertised only when negotiated: absent means the spec default, UTF-16,
+                // which the request/response conversion above then upholds.
+                if (client_accepts_utf8) {
+                    capabilities["positionEncoding"] = "utf-8";
+                }
                 send_response(channel, message["id"], {{"capabilities", capabilities}});
             } else if (method == "initialized") {
                 std::cerr << "mirage-lsp: client finished initializing\n";
@@ -644,8 +724,14 @@ namespace lsp {
                         return [&worker, path, line, character, is_hover]() -> json {
                             const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
                             auto &result = worker.documents.ensure_analysed(path);
-                            return is_hover ? handlers::handle_hover(result, module_path, path, line, character)
-                                            : handlers::handle_definition(result, module_path, path, line, character);
+                            const auto column = worker.utf16_positions
+                                ? request_byte_column(result, path, line, character) : character;
+                            auto response = is_hover ? handlers::handle_hover(result, module_path, path, line, column)
+                                                     : handlers::handle_definition(result, module_path, path, line, column);
+                            if (worker.utf16_positions) {
+                                encoding::positions_to_utf16(response, path, make_line_lookup(result, worker.documents));
+                            }
+                            return response;
                         };
                     });
             } else if (method == "textDocument/completion") {
@@ -656,7 +742,11 @@ namespace lsp {
                         return [&worker, path, line, character]() -> json {
                             const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
                             auto &result = worker.documents.ensure_analysed(path);
-                            return handlers::handle_completion(result, module_path, path, line, character);
+                            const auto column = worker.utf16_positions
+                                ? request_byte_column(result, path, line, character) : character;
+                            // Completion items carry no positions, so there is nothing to
+                            // convert on the way out.
+                            return handlers::handle_completion(result, module_path, path, line, column);
                         };
                     });
             } else if (method == "textDocument/references") {
@@ -673,6 +763,8 @@ namespace lsp {
                         return [&worker, path, line, character, include_declaration]() -> json {
                             const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
                             auto &result = worker.documents.ensure_analysed(path);
+                            const auto column = worker.utf16_positions
+                                ? request_byte_column(result, path, line, character) : character;
 
                             // Discovered per request rather than cached: files appear and vanish
                             // between searches, and a stale module list silently misses references.
@@ -682,7 +774,11 @@ namespace lsp {
                                 .analyse = [&worker](const std::string &dir) { return worker.documents.analyse_uncached(dir); },
                             };
                             const auto *search = workspace.module_dirs.empty() ? nullptr : &workspace;
-                            return handlers::handle_references(result, module_path, path, line, character, include_declaration, search);
+                            auto response = handlers::handle_references(result, module_path, path, line, column, include_declaration, search);
+                            if (worker.utf16_positions) {
+                                encoding::positions_to_utf16(response, path, make_line_lookup(result, worker.documents));
+                            }
+                            return response;
                         };
                     });
             } else if (method == "textDocument/inlayHint") {
@@ -690,10 +786,16 @@ namespace lsp {
                     [&](const std::string &path, const std::shared_ptr<std::atomic<bool>> &) -> std::function<json()> {
                         const auto start_line = message["params"]["range"]["start"]["line"].get<size_t>() + 1;
                         const auto end_line = message["params"]["range"]["end"]["line"].get<size_t>() + 1;
+                        // The request's range characters are ignored (hints are selected by
+                        // line), so only the outgoing hint positions need conversion.
                         return [&worker, path, start_line, end_line]() -> json {
                             const auto module_path = ast::canonicalize(std::filesystem::path(path).parent_path().string());
                             auto &result = worker.documents.ensure_analysed(path);
-                            return handlers::handle_inlay_hint(result, module_path, path, start_line, end_line);
+                            auto response = handlers::handle_inlay_hint(result, module_path, path, start_line, end_line);
+                            if (worker.utf16_positions) {
+                                encoding::positions_to_utf16(response, path, make_line_lookup(result, worker.documents));
+                            }
+                            return response;
                         };
                     });
             } else {

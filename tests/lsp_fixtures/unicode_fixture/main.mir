@@ -1,0 +1,5 @@
+pub fn main() -> i32 {
+    mut width: usize = 3
+    width = len("héé") + width
+    return 0
+}

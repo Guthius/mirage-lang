@@ -159,6 +159,8 @@ add_executable(mirage-lsp
         src/lsp/transport.cpp
         src/lsp/uri.hpp
         src/lsp/uri.cpp
+        src/lsp/position_encoding.hpp
+        src/lsp/position_encoding.cpp
         src/lsp/analysis.hpp
         src/lsp/analysis.cpp
         src/lsp/handlers/diagnostics.hpp
