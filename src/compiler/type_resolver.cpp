@@ -666,7 +666,8 @@ namespace sema {
 
                     const auto key = std::make_pair(module_path, name);
                     if (program.resolve_state.struct_resolving.contains(key)) {
-                        return error(diag, loc, std::format("by-value struct cycle detected at '{}'", name));
+                        return error(diag, loc, std::format(
+                            "by-value struct cycle detected at '{}': a type cannot contain itself by value — store it behind a pointer", name));
                     }
 
                     const ScopedResolveMark resolving_guard(program.resolve_state.struct_resolving, key);
@@ -1785,7 +1786,18 @@ namespace sema {
                                 return error(diag, v->location,
                                     "array type '[?]T' can only be used as the declared type of a 'const'/'let' declaration with an array literal initializer");
                             }
-                            auto element = resolve_type_impl(v->base_type, module_path);
+                            // An array element is stored by value, so a named struct/union
+                            // element must be FULLY laid out here — its size feeds directly
+                            // into this array type's size. resolve_field_type is the existing
+                            // chokepoint with exactly that behavior (generic bindings and
+                            // generic instantiations keep their resolve_type_impl routing;
+                            // plain named types go through resolve_final_full, whose
+                            // struct_resolving guard turns a true by-value cycle into a
+                            // proper diagnostic). Without this, layout order between two
+                            // sibling types depends on symbol-table iteration order and
+                            // 'field stores T by value, which is not yet a complete type'
+                            // fires spuriously.
+                            auto element = resolve_field_type(module_path, v->base_type, v->location);
                             const auto count = array_len_expr_value(*v->size, module_path);
                             // Degrade to plain Opaque when the length or the element is an
                             // unbound generic parameter, rather than interning an array with a
