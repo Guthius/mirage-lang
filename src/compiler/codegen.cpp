@@ -2882,47 +2882,65 @@ namespace codegen {
                 return sema::ResolvedType{.kind = sema::TypeKind::Pointer, .pointee_index = 0};
             }
 
-            void emit_method(const std::string &module_path, const std::string &type_name, const sema::MethodInfo &info) {
-                const auto key = method_fn_key_for(info);
-                current_function_ = functions_.at(FunctionKey{module_path, key});
-                current_returns_ = info.return_types;
+            // Resets every piece of per-function emission state, points the builder at a
+            // fresh entry block, and records the return list — the shared prologue of
+            // function, method, and generic-instance emission (it was pasted in all
+            // three, and the state-reset list had to be extended in lockstep).
+            void begin_function_body(llvm::Function *fn, const std::vector<sema::ResolvedType> &returns) {
+                current_function_ = fn;
+                current_returns_ = returns;
                 locals_.clear();
                 macro_args_.clear();
                 continue_targets_.clear();
                 break_targets_.clear();
                 defer_scopes_.clear();
                 next_block_is_loop_body_ = false;
-
                 auto *entry = llvm::BasicBlock::Create(*context_, "entry", current_function_);
                 builder_.SetInsertPoint(entry);
+            }
 
-                // First arg is self (a pointer to the struct/enum)
-                auto arg_it = current_function_->arg_begin();
+            // Spills the 'self' argument and registers the receiver local; returns the
+            // iterator advanced past it.
+            auto bind_self_param(llvm::Function::arg_iterator arg_it, const sema::ResolvedType &self_type, const std::string &module_path) -> llvm::Function::arg_iterator {
                 arg_it->setName("self");
                 auto *self_slot = create_entry_alloca(current_function_, llvm::PointerType::getUnqual(*context_), "self");
                 builder_.CreateStore(arg_it, self_slot);
                 locals_["self"] = LocalValue{
                     .alloca = self_slot,
-                    .type = find_self_ptr_type(info.self_type),
+                    .type = find_self_ptr_type(self_type),
                     .type_module = module_path,
                 };
-                ++arg_it;
+                return ++arg_it;
+            }
 
-                // Remaining args
+            // Spills each remaining SSA argument into a named alloca and registers the
+            // local. 'arg_it' already points past 'self' when the caller bound one.
+            // Templated because free functions and impl methods declare structurally
+            // identical but distinct Param types (ast::FunctionDecl::Param vs
+            // ast::ImplDecl::Function::Param).
+            template <typename ParamT>
+            void bind_param_locals(llvm::Function::arg_iterator arg_it, const std::vector<ParamT> &params, const std::vector<sema::ResolvedType> &param_types, const std::string &module_path) {
                 size_t index = 0;
                 for (; arg_it != current_function_->arg_end(); ++arg_it, ++index) {
-                    const auto &param = info.decl->params[index];
+                    const auto &param = params[index];
                     arg_it->setName(param.name);
-                    auto *slot = create_entry_alloca(current_function_, llvm_type(module_path, info.param_types[index]), param.name);
+                    auto *slot = create_entry_alloca(current_function_, llvm_type(module_path, param_types[index]), param.name);
                     builder_.CreateStore(arg_it, slot);
                     locals_[param.name] = LocalValue{
                         .alloca = slot,
-                        .type = info.param_types[index],
+                        .type = param_types[index],
                         .type_module = param.type
-                                           ? type_module_for_ast_type(*param.type, module_path, info.param_types[index])
+                                           ? type_module_for_ast_type(*param.type, module_path, param_types[index])
                                            : module_path,
                     };
                 }
+            }
+
+            void emit_method(const std::string &module_path, const std::string &type_name, const sema::MethodInfo &info) {
+                const auto key = method_fn_key_for(info);
+                begin_function_body(functions_.at(FunctionKey{module_path, key}), info.return_types);
+                const auto arg_it = bind_self_param(current_function_->arg_begin(), info.self_type, module_path);
+                bind_param_locals(arg_it, info.decl->params, info.param_types, module_path);
 
                 emit_stmt(info.decl->body);
 
@@ -2996,17 +3014,7 @@ namespace codegen {
                 if (const auto *instance_exprs = sema_program_.find_fn_instance_exprs(idx)) {
                     current_exprs_ = instance_exprs;
                 }
-                current_function_ = functions_.at(FunctionKey{module_path, instance.mangled_name});
-                current_returns_ = instance.return_types;
-                locals_.clear();
-                macro_args_.clear();
-                continue_targets_.clear();
-                break_targets_.clear();
-                defer_scopes_.clear();
-                next_block_is_loop_body_ = false;
-
-                auto *entry = llvm::BasicBlock::Create(*context_, "entry", current_function_);
-                builder_.SetInsertPoint(entry);
+                begin_function_body(functions_.at(FunctionKey{module_path, instance.mangled_name}), instance.return_types);
 
                 const auto &generic_params = instance.decl ? instance.decl->generic_params
                                                              : *instance.generic_params_for_method;
@@ -3014,48 +3022,12 @@ namespace codegen {
                 const sema::ActiveGenericEnvStack::PushGuard env_guard(
                     const_cast<sema::Program &>(sema_program_).active_generic_env_stack, &env);
 
-                auto arg_it = current_function_->arg_begin();
                 if (instance.impl_decl) {
-                    arg_it->setName("self");
-                    auto *self_slot = create_entry_alloca(current_function_, llvm::PointerType::getUnqual(*context_), "self");
-                    builder_.CreateStore(arg_it, self_slot);
-                    locals_["self"] = LocalValue{
-                        .alloca = self_slot,
-                        .type = find_self_ptr_type(*instance.self_type),
-                        .type_module = module_path,
-                    };
-                    ++arg_it;
-
-                    size_t index = 0;
-                    for (; arg_it != current_function_->arg_end(); ++arg_it, ++index) {
-                        const auto &param = instance.impl_decl->params[index];
-                        arg_it->setName(param.name);
-                        auto *slot = create_entry_alloca(current_function_, llvm_type(module_path, instance.param_types[index]), param.name);
-                        builder_.CreateStore(arg_it, slot);
-                        locals_[param.name] = LocalValue{
-                            .alloca = slot,
-                            .type = instance.param_types[index],
-                            .type_module = param.type
-                                               ? type_module_for_ast_type(*param.type, module_path, instance.param_types[index])
-                                               : module_path,
-                        };
-                    }
+                    const auto arg_it = bind_self_param(current_function_->arg_begin(), *instance.self_type, module_path);
+                    bind_param_locals(arg_it, instance.impl_decl->params, instance.param_types, module_path);
                     emit_stmt(instance.impl_decl->body);
                 } else {
-                    size_t index = 0;
-                    for (; arg_it != current_function_->arg_end(); ++arg_it, ++index) {
-                        const auto &param = instance.decl->params[index];
-                        arg_it->setName(param.name);
-                        auto *slot = create_entry_alloca(current_function_, llvm_type(module_path, instance.param_types[index]), param.name);
-                        builder_.CreateStore(arg_it, slot);
-                        locals_[param.name] = LocalValue{
-                            .alloca = slot,
-                            .type = instance.param_types[index],
-                            .type_module = param.type
-                                               ? type_module_for_ast_type(*param.type, module_path, instance.param_types[index])
-                                               : module_path,
-                        };
-                    }
+                    bind_param_locals(current_function_->arg_begin(), instance.decl->params, instance.param_types, module_path);
                     emit_stmt(instance.decl->body);
                 }
 
@@ -3461,33 +3433,8 @@ namespace codegen {
             }
 
             void emit_function(const std::string &module_path, const std::string &name, const sema::FunctionSymbol &fn) {
-                current_function_ = functions_.at(FunctionKey{module_path, name});
-                current_returns_ = fn.return_types;
-                locals_.clear();
-                macro_args_.clear();
-                continue_targets_.clear();
-                break_targets_.clear();
-                defer_scopes_.clear();
-                next_block_is_loop_body_ = false;
-
-                auto *entry = llvm::BasicBlock::Create(*context_, "entry", current_function_);
-                builder_.SetInsertPoint(entry);
-
-                size_t index = 0;
-                for (auto &arg : current_function_->args()) {
-                    const auto &param = fn.decl->params[index];
-                    arg.setName(param.name);
-                    auto *slot = create_entry_alloca(current_function_, llvm_type(module_path, fn.params[index]), param.name);
-                    builder_.CreateStore(&arg, slot);
-                    locals_[param.name] = LocalValue{
-                        .alloca = slot,
-                        .type = fn.params[index],
-                        .type_module = param.type
-                                           ? type_module_for_ast_type(*param.type, module_path, fn.params[index])
-                                           : module_path,
-                    };
-                    ++index;
-                }
+                begin_function_body(functions_.at(FunctionKey{module_path, name}), fn.return_types);
+                bind_param_locals(current_function_->arg_begin(), fn.decl->params, fn.params, module_path);
 
                 emit_stmt(fn.decl->body);
 
