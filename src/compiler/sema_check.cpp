@@ -593,6 +593,11 @@ namespace sema {
         return is_assignable(from, to, program);
     }
 
+    // Defined further below (near the other per-node helpers); forward-declared here so
+    // the generic-instantiation value path can share the fn-pointer decay rules.
+    auto check_fn_pointer_decay(bool is_variadic, const ast::FunctionDecl *decl, const std::string &name, const SourceLocation &loc, DiagnosticEngine &diag) -> bool;
+    auto match_expected_fn_signature(const std::vector<ResolvedType> &params, const std::vector<ResolvedType> &returns, const ResolvedType &expected, const std::string &name, const SourceLocation &loc, Program &program, DiagnosticEngine &diag) -> ResolvedType;
+
     namespace {
         auto slice_cast_elements_match(const ResolvedType &from, const ResolvedType &to, const std::string &module_path, Program &program) -> bool {
             if (to.kind != TypeKind::Slice) return true;
@@ -1903,6 +1908,37 @@ namespace sema {
         return args;
     }
 
+    // The cache-hit half both instantiation paths share. Marking needed on the CACHE HIT
+    // too, not only on first creation, is load-bearing: a generic first reached by the
+    // eager pass is created with the mark suppressed; if the first real call site then
+    // found it cached and returned without marking, nothing would ever emit it and the
+    // link would fail.
+    auto lookup_cached_generic_instance(Program &program, const GenericInstanceKey &key) -> std::optional<size_t> {
+        const auto it = program.generic_fn_instance_lookup.find(key);
+        if (it == program.generic_fn_instance_lookup.end()) return std::nullopt;
+        const size_t idx = it->second;
+        if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
+        return idx;
+    }
+
+    // The registration half both instantiation paths share: push the instance, hand its
+    // expression tables to the Program (the caller's ScopedGenericScope still holds a raw
+    // pointer to the pointee; moving the unique_ptr does not move what it points at), and
+    // — unless suppressed (see args_contain_opaque: not a real monomorphization; kept out
+    // of every registry so the eager pass never caches or emits it) — cache and mark it.
+    auto register_generic_instance(Program &program, const GenericInstanceKey &key,
+                                    std::unique_ptr<GenericFunctionInstance> instance,
+                                    std::unique_ptr<ExprSideTables> instance_exprs,
+                                    const bool suppressed) -> size_t {
+        program.generic_fn_instances.push_back(std::move(instance));
+        const size_t idx = program.generic_fn_instances.size() - 1;
+        program.generic_fn_instance_exprs[idx] = std::move(instance_exprs);
+        if (suppressed) return idx;
+        program.generic_fn_instance_lookup.emplace(key, idx);
+        if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
+        return idx;
+    }
+
     auto instantiate_generic_function(Program &program, DiagnosticEngine &diag, const std::string &module_path,
                                        const std::string &decl_name, std::vector<GenericArgValue> args,
                                        const SourceLocation &use_loc) -> size_t {
@@ -1932,15 +1968,7 @@ namespace sema {
         const GenericInstanceKey key{.module_path = module_path, .decl_name = decl_name, .args = args};
 
         if (!suppressed) {
-            if (const auto it = program.generic_fn_instance_lookup.find(key); it != program.generic_fn_instance_lookup.end()) {
-                const size_t idx = it->second;
-                // Mark needed on the CACHE HIT too, not only on first creation. A generic
-                // first reached by the eager pass is created with the mark suppressed; if
-                // the first real call site then found it cached and returned here without
-                // marking it, nothing would ever emit it and the link would fail.
-                if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
-                return idx;
-            }
+            if (const auto cached = lookup_cached_generic_instance(program, key)) return *cached;
         }
 
         auto push_invalid = [&]() -> size_t {
@@ -2017,24 +2045,11 @@ namespace sema {
         check_param_defaults(decl.params, instance->param_types, instance->required_params,
                               instance->param_default_is_const, module_path, program, diag, &default_scope);
 
-        program.generic_fn_instances.push_back(std::move(instance));
-        const size_t idx = program.generic_fn_instances.size() - 1;
-        // 'generic_scope' is still live and holds a raw pointer to the pointee; moving the
-        // unique_ptr does not move what it points at.
-        program.generic_fn_instance_exprs[idx] = std::move(instance_exprs);
-
-        if (suppressed) {
-            // Not cached, not marked for emission, body not checked here — the callee's own
-            // eager pass checks its body once, at its declaration. The index is still returned
-            // so the caller can check this call's arguments against the resolved signature.
-            return idx;
-        }
-
-        program.generic_fn_instance_lookup.emplace(key, idx);
-        if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
-
-        if (bounds_ok) check_generic_function_instance_body(idx, program, diag);
-
+        // For a suppressed instance the body is not checked here either — the callee's
+        // own eager pass checks it once, at its declaration; the index is still returned
+        // so the caller can check this call's arguments against the resolved signature.
+        const size_t idx = register_generic_instance(program, key, std::move(instance), std::move(instance_exprs), suppressed);
+        if (!suppressed && bounds_ok) check_generic_function_instance_body(idx, program, diag);
         return idx;
     }
 
@@ -2073,13 +2088,7 @@ namespace sema {
 
         const GenericInstanceKey key{.module_path = type_module, .decl_name = type_name + "::" + method_name, .args = args};
         if (!suppressed) {
-            if (const auto it = program.generic_fn_instance_lookup.find(key); it != program.generic_fn_instance_lookup.end()) {
-                const size_t idx = it->second;
-                // Mark on the cache hit too — see the identical note in
-                // instantiate_generic_function.
-                if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
-                return idx;
-            }
+            if (const auto cached = lookup_cached_generic_instance(program, key)) return cached;
         }
 
         static const std::vector<ast::GenericParam> empty_generic_params;
@@ -2118,17 +2127,8 @@ namespace sema {
         check_param_defaults(template_method->decl->params, instance->param_types, instance->required_params,
                               instance->param_default_is_const, type_module, program, diag, &default_scope);
 
-        program.generic_fn_instances.push_back(std::move(instance));
-        const size_t idx = program.generic_fn_instances.size() - 1;
-        program.generic_fn_instance_exprs[idx] = std::move(instance_exprs);
-
-        if (suppressed) return idx; // see instantiate_generic_function's identical branch
-
-        program.generic_fn_instance_lookup.emplace(key, idx);
-        if (program.template_check_depth == 0) program.generic_fn_instances_needed.insert(idx);
-
-        check_generic_function_instance_body(idx, program, diag);
-
+        const size_t idx = register_generic_instance(program, key, std::move(instance), std::move(instance_exprs), suppressed);
+        if (!suppressed) check_generic_function_instance_body(idx, program, diag);
         return idx;
     }
 
@@ -2429,16 +2429,8 @@ namespace sema {
 
         const size_t idx = instantiate_generic_function(program, diag, decl_module, *decl_name, std::move(*args), expr.location);
         const auto &instance = *program.generic_fn_instances[idx];
-        if (instance.is_variadic) {
-            return error(diag, expr.location, std::format(
-                "cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", *decl_name));
-        }
-        if (instance.decl && find_attribute(instance.decl->attributes, "always_inline")) {
-            diag.warn(DiagnosticStage::Sema, expr.location, std::format(
-                "taking the address of '@always_inline' function '{}'. Calls through a "
-                "function pointer cannot be inlined. The function will still exist as a "
-                "symbol but the '@always_inline' attribute has no effect on indirect calls.",
-                *decl_name));
+        if (!check_fn_pointer_decay(instance.is_variadic, instance.decl, *decl_name, expr.location, diag)) {
+            return ResolvedType{.kind = TypeKind::Invalid};
         }
         // Recorded under the ENCLOSING expr's key so codegen can map this node straight to
         // 'instance.mangled_name''s llvm::Function — the same side table generic CALLS use.
@@ -3422,27 +3414,11 @@ namespace sema {
                             "specific instantiation (e.g. '{}[i32]')", v.name, v.name));
                     }
                     auto &resolved_fn = ensure_function_signature_resolved(module_path, v.name, program, diag);
-                    if (resolved_fn.is_variadic) {
-                        return error(diag, v.location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v.name));
+                    if (!check_fn_pointer_decay(resolved_fn.is_variadic, resolved_fn.decl, v.name, v.location, diag)) {
+                        return ResolvedType{.kind = TypeKind::Invalid};
                     }
-                    if (resolved_fn.decl && find_attribute(resolved_fn.decl->attributes, "always_inline")) {
-                        diag.warn(DiagnosticStage::Sema, v.location, std::format(
-                            "taking the address of '@always_inline' function '{}'. Calls through a "
-                            "function pointer cannot be inlined. The function will still exist as a "
-                            "symbol but the '@always_inline' attribute has no effect on indirect calls.",
-                            v.name));
-                    }
-                    // With a function-typed expectation, honour it exactly (so a
-                    // signature mismatch names the expectation rather than yielding a
-                    // second, vaguer error downstream).
                     if (expected && expected->kind == TypeKind::Function) {
-                        const auto &exp_sig = fn_sig(*expected, program);
-                        if (function_params_compatible(resolved_fn.params, exp_sig.param_types) &&
-                            resolved_fn.return_types == exp_sig.return_types &&
-                            !exp_sig.is_variadic) {
-                            return *expected;
-                        }
-                        return error(diag, v.location, std::format("'{}' has a different signature from the expected function type", v.name));
+                        return match_expected_fn_signature(resolved_fn.params, resolved_fn.return_types, *expected, v.name, v.location, program, diag);
                     }
                     // No expectation (or a non-function one): a bare function name in
                     // value position decays to its own function-pointer type, so
@@ -3640,6 +3616,114 @@ namespace sema {
 
     }
 
+    // The shared front half of TernaryExpr and WhenExpr checking (the two cases were
+    // identical up to the mismatch noun and WhenExpr's constant-fold recording): the Bool
+    // condition, per-branch typestate narrowing (mirroring IfStmt — each branch gets its
+    // own locals copy, no merge back, so a narrowing cannot leak into the sibling branch
+    // or outward), and the non-literal-branch-first ordering swap so a lone literal
+    // branch unifies against the other branch's real type ('cond ? 5 : x' used to default
+    // the literal to i32 and report a spurious mismatch while its mirror image compiled).
+    // The callers keep their own Opaque/mismatch/result handling, which is where the two
+    // constructs genuinely differ.
+    auto check_condition_branch_types(const ast::Expr &condition, const ast::Expr &then_expr, const ast::Expr &else_expr,
+                                       LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag,
+                                       const std::optional<ResolvedType> &expected, const int loop_depth, const int defer_loop_base,
+                                       const ResolvedType *fn_error_type) -> std::pair<ResolvedType, ResolvedType> {
+        check_expr(condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
+        const auto narrowings = compute_condition_narrowing(condition, locals, program);
+        auto then_locals = locals;
+        auto else_locals = locals;
+        apply_condition_narrowing(then_locals, narrowings, true, condition, program);
+        apply_condition_narrowing(else_locals, narrowings, false, condition, program);
+
+        ResolvedType then_ty, else_ty;
+        if (is_coercible_literal(then_expr) && !is_coercible_literal(else_expr)) {
+            else_ty = check_expr(else_expr, else_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+            then_ty = check_expr(then_expr, then_locals, module_path, program, diag, else_ty, loop_depth, defer_loop_base, fn_error_type);
+        } else {
+            then_ty = check_expr(then_expr, then_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+            else_ty = check_expr(else_expr, else_locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
+        }
+        return {then_ty, else_ty};
+    }
+
+    // Shared by every function-name-to-function-pointer decay site (same-module idents,
+    // cross-module members, explicit generic instantiations — the block had been pasted
+    // three times): a variadic function has no pointer type, and an '@always_inline' one
+    // silently loses its attribute through an indirect call. Returns false after
+    // reporting the variadic rejection.
+    auto check_fn_pointer_decay(const bool is_variadic, const ast::FunctionDecl *decl, const std::string &name, const SourceLocation &loc, DiagnosticEngine &diag) -> bool {
+        if (is_variadic) {
+            diag.report_error(DiagnosticStage::Sema, loc, std::format(
+                "cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", name));
+            return false;
+        }
+        if (decl && find_attribute(decl->attributes, "always_inline")) {
+            diag.warn(DiagnosticStage::Sema, loc, std::format(
+                "taking the address of '@always_inline' function '{}'. Calls through a "
+                "function pointer cannot be inlined. The function will still exist as a "
+                "symbol but the '@always_inline' attribute has no effect on indirect calls.",
+                name));
+        }
+        return true;
+    }
+
+    // With a function-typed expectation, honour it exactly — so a signature mismatch
+    // names the expectation rather than yielding a second, vaguer error downstream.
+    auto match_expected_fn_signature(const std::vector<ResolvedType> &params, const std::vector<ResolvedType> &returns, const ResolvedType &expected, const std::string &name, const SourceLocation &loc, Program &program, DiagnosticEngine &diag) -> ResolvedType {
+        const auto &exp_sig = fn_sig(expected, program);
+        if (function_params_compatible(params, exp_sig.param_types) &&
+            returns == exp_sig.return_types &&
+            !exp_sig.is_variadic) {
+            return expected;
+        }
+        return error(diag, loc, std::format("'{}' has a different signature from the expected function type", name));
+    }
+
+    // Shared by the SizeOfExpr and AlignOfExpr cases, which were byte-identical except
+    // the noun: size_of/align_of on a (possibly qualified) TYPE name — checked first via
+    // try_resolve_namespace_chain so 'size_of(a.b.T)' resolves through arbitrarily many
+    // namespace hops, same as any other qualified type reference. Falls back to
+    // evaluating the operand as an ordinary value expression if it isn't a type-name
+    // shape. Operand shapes the parser can't spell as an IdentExpr/MemberExpr
+    // (pointer/array/slice/fn-ptr types, builtin type keywords) arrive as a TypeExpr
+    // instead and resolve via check_expr's TypeExpr case.
+    auto check_size_align_operand(const ast::Expr &operand, const std::string_view noun, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
+        if (const auto *ident = std::get_if<ast::IdentExpr>(&operand)) {
+            const auto mod_it = program.modules.find(module_path);
+            if (mod_it != program.modules.end()) {
+                if (auto sym_it = mod_it->second.symbols.find(ident->name); sym_it != mod_it->second.symbols.end() && std::holds_alternative<TypeSymbol>(sym_it->second)) {
+                    return ResolvedType{.kind = TypeKind::USize};
+                }
+            }
+        } else if (const auto *mem = std::get_if<std::unique_ptr<ast::MemberExpr>>(&operand)) {
+            if (auto target_module = try_resolve_namespace_chain((*mem)->object, module_path, locals, program)) {
+                auto mod_it = program.modules.find(*target_module);
+                if (mod_it != program.modules.end()) {
+                    if (auto sym_it = mod_it->second.symbols.find((*mem)->member); sym_it != mod_it->second.symbols.end() && std::holds_alternative<TypeSymbol>(sym_it->second)) {
+                        return ResolvedType{.kind = TypeKind::USize};
+                    }
+                }
+            }
+        }
+        if (const auto *inst = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&operand)) {
+            if (const auto instantiated = try_resolve_generic_type_instantiation(**inst, module_path, program, diag)) {
+                // Record the operand's resolved type so codegen can read it back.
+                // codegen holds a const Program and cannot instantiate, so its
+                // size_of_operand/align_of_operand fall back to expr_types for anything
+                // their own ident/member fast paths do not recognize.
+                expr_tables_for_write(program, module_path).expr_types[get_expr_key(operand)] = *instantiated;
+                return ResolvedType{.kind = TypeKind::USize};
+            }
+        }
+        const auto operand_type = check_expr(operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+        if (operand_type.kind == TypeKind::Namespace) {
+            return error(diag, get_expr_location(operand),
+                std::format("'{}' requires a type or a value; this names an imported module", noun));
+        }
+        return ResolvedType{.kind = TypeKind::USize};
+    }
+
     auto check_type_of_expr(const ast::Expr &expr, const std::unique_ptr<ast::TypeOfExpr> & v, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
         // Same ident/qualified-type-name special lookup as SizeOfExpr above, so
         // 'type_of(TypeName)'/'type_of(module.TypeName)' resolve the NAMED type
@@ -3731,23 +3815,11 @@ namespace sema {
                     if (std::holds_alternative<FunctionSymbol>(sym_it->second)) {
                         auto &fn = ensure_function_signature_resolved(*target_mod, v->member, program, diag);
                         if (!fn.is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
-                        if (fn.is_variadic) {
-                            return error(diag, v->location, std::format("cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", v->member));
-                        }
-                        if (fn.decl && find_attribute(fn.decl->attributes, "always_inline")) {
-                            diag.warn(DiagnosticStage::Sema, v->location, std::format(
-                                "taking the address of '@always_inline' function '{}'. Calls through a "
-                                "function pointer cannot be inlined. The function will still exist as a "
-                                "symbol but the '@always_inline' attribute has no effect on indirect calls.",
-                                v->member));
+                        if (!check_fn_pointer_decay(fn.is_variadic, fn.decl, v->member, v->location, diag)) {
+                            return ResolvedType{.kind = TypeKind::Invalid};
                         }
                         if (!exp_sig) return function_pointer_type_of(fn, program);
-                        if (function_params_compatible(fn.params, exp_sig->param_types) &&
-                            fn.return_types == exp_sig->return_types &&
-                            !exp_sig->is_variadic) {
-                            return *expected;
-                        }
-                        return error(diag, v->location, std::format("'{}' has a different signature from the expected function type", v->member));
+                        return match_expected_fn_signature(fn.params, fn.return_types, *expected, v->member, v->location, program, diag);
                     }
                     if (const auto *ef = std::get_if<ExtFunctionSymbol>(&sym_it->second)) {
                         if (!ef->is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
@@ -4095,39 +4167,9 @@ namespace sema {
                     return binary_op_result(v->op, lhs, rhs, diag, v->location, program);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
-                    check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
-                    // Typestate narrowing, mirroring IfStmt/WhileStmt in check_stmt: inside
-                    // 'e ? ... : ...' the then-branch knows 'e' is Failed and the else-branch
-                    // knows it is Ok, exactly as the statement form does. Without this the
-                    // typed-error system was invisible in expression position -- 'if e { match e
-                    // {...} }' compiled while the identical 'e ? match e {...} : 0' failed with
-                    // "cannot match on an error value of unknown state".
-                    //
-                    // Each branch gets its own copy of locals, as IfStmt does, so a narrowing
-                    // cannot leak into the sibling branch or outward. No merge afterwards: an
-                    // expression's branches do not join back into the enclosing scope's state
-                    // the way statement branches do.
-                    const auto narrowings = compute_condition_narrowing(v->condition, locals, program);
-                    auto then_locals = locals;
-                    auto else_locals = locals;
-                    apply_condition_narrowing(then_locals, narrowings, true, v->condition, program);
-                    apply_condition_narrowing(else_locals, narrowings, false, v->condition, program);
-
-                    // Check the non-literal branch first when exactly one branch is a coercible
-                    // literal, so the literal unifies against the other branch's real type --
-                    // the same ordering swap BinaryExpr does above. Without it, 'cond ? 5 : x'
-                    // defaulted the literal to i32 (there is usually no outer expected type),
-                    // then checked 'x' with expected=i32, which IdentExpr ignores, and reported
-                    // a spurious mismatch -- while 'cond ? x : 5', the identical expression with
-                    // its operands swapped, compiled fine.
-                    ResolvedType then_ty, else_ty;
-                    if (is_coercible_literal(v->then_expr) && !is_coercible_literal(v->else_expr)) {
-                        else_ty = check_expr(v->else_expr, else_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
-                        then_ty = check_expr(v->then_expr, then_locals, module_path, program, diag, else_ty, loop_depth, defer_loop_base, fn_error_type);
-                    } else {
-                        then_ty = check_expr(v->then_expr, then_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
-                        else_ty = check_expr(v->else_expr, else_locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
-                    }
+                    const auto [then_ty, else_ty] = check_condition_branch_types(
+                        v->condition, v->then_expr, v->else_expr, locals, module_path, program, diag,
+                        expected, loop_depth, defer_loop_base, fn_error_type);
                     // Same rule as the 'when' expression: an Opaque branch matches anything,
                     // and the concrete side (if any) is the more useful result to propagate.
                     if (then_ty.kind == TypeKind::Opaque) return else_ty;
@@ -4144,23 +4186,9 @@ namespace sema {
                     return resolve_env_expr(get_expr_key(expr), *v, expected, module_path, program, diag);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
-                    check_expr(v->condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
-                    // Same literal-coercion ordering and same per-branch typestate narrowing as
-                    // TernaryExpr above.
-                    const auto narrowings = compute_condition_narrowing(v->condition, locals, program);
-                    auto then_locals = locals;
-                    auto else_locals = locals;
-                    apply_condition_narrowing(then_locals, narrowings, true, v->condition, program);
-                    apply_condition_narrowing(else_locals, narrowings, false, v->condition, program);
-
-                    ResolvedType then_ty, else_ty;
-                    if (is_coercible_literal(v->then_expr) && !is_coercible_literal(v->else_expr)) {
-                        else_ty = check_expr(v->else_expr, else_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
-                        then_ty = check_expr(v->then_expr, then_locals, module_path, program, diag, else_ty, loop_depth, defer_loop_base, fn_error_type);
-                    } else {
-                        then_ty = check_expr(v->then_expr, then_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
-                        else_ty = check_expr(v->else_expr, else_locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
-                    }
+                    const auto [then_ty, else_ty] = check_condition_branch_types(
+                        v->condition, v->then_expr, v->else_expr, locals, module_path, program, diag,
+                        expected, loop_depth, defer_loop_base, fn_error_type);
                     // An Opaque branch matches anything: inside a generic declaration
                     // 'when N > 4 { 0 } else { t }' has a concrete 'then' and a generic 'else',
                     // which is not a mismatch until 'N' and 't' are known. Yield the concrete
@@ -4240,91 +4268,10 @@ namespace sema {
                     return resolve_import_bin_type(module_path, v.path, v.location, program, diag);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
-                    // size_of on a (possibly qualified) TYPE name - checked
-                    // first via try_resolve_namespace_chain so `size_of(a.b.T)`
-                    // resolves through arbitrarily many namespace hops, same
-                    // as any other qualified type reference. Falls back to
-                    // evaluating the operand as an ordinary value expression
-                    // (runtime size_of) if it isn't a type-name shape. Operand
-                    // shapes the parser can't spell as an IdentExpr/MemberExpr
-                    // (pointer/array/slice/fn-ptr types, builtin type keywords)
-                    // arrive as a TypeExpr instead and fall through to the
-                    // generic check_expr call below, which resolves them via
-                    // the TypeExpr case further down in this dispatch.
-                    if (auto *ident = std::get_if<ast::IdentExpr>(&v->operand)) {
-                        const auto mod_it = program.modules.find(module_path);
-                        if (mod_it != program.modules.end()) {
-                            if (auto sym_it = mod_it->second.symbols.find(ident->name); sym_it != mod_it->second.symbols.end() && std::holds_alternative<TypeSymbol>(sym_it->second)) {
-                                return ResolvedType{.kind = TypeKind::USize};
-                            }
-                        }
-                    } else if (auto *mem = std::get_if<std::unique_ptr<ast::MemberExpr>>(&v->operand)) {
-                        if (auto target_module = try_resolve_namespace_chain((*mem)->object, module_path, locals, program)) {
-                            auto mod_it = program.modules.find(*target_module);
-                            if (mod_it != program.modules.end()) {
-                                if (auto sym_it = mod_it->second.symbols.find((*mem)->member); sym_it != mod_it->second.symbols.end() && std::holds_alternative<TypeSymbol>(sym_it->second)) {
-                                    return ResolvedType{.kind = TypeKind::USize};
-                                }
-                            }
-                        }
-                    }
-                    if (const auto *inst = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&v->operand)) {
-                        if (const auto instantiated = try_resolve_generic_type_instantiation(**inst, module_path, program, diag)) {
-                            // Record the operand's resolved type so codegen can read it back.
-                            // codegen holds a const Program and cannot instantiate, so its
-                            // 'size_of_operand' falls back to expr_types for anything its own
-                            // ident/member fast paths do not recognize.
-                            expr_tables_for_write(program, module_path).expr_types[get_expr_key(v->operand)] = *instantiated;
-                            return ResolvedType{.kind = TypeKind::USize};
-                        }
-                    }
-                    {
-                        const auto operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                        if (operand_type.kind == TypeKind::Namespace) {
-                            return error(diag, get_expr_location(v->operand),
-                                "'size_of' requires a type or a value; this names an imported module");
-                        }
-                    }
-                    return ResolvedType{.kind = TypeKind::USize};
+                    return check_size_align_operand(v->operand, "size_of", locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) {
-                    // Mirrors SizeOfExpr's case exactly (see comments above) — same type-name
-                    // special lookup, same fallback to a generic expr, same USize result type.
-                    if (auto *ident = std::get_if<ast::IdentExpr>(&v->operand)) {
-                        const auto mod_it = program.modules.find(module_path);
-                        if (mod_it != program.modules.end()) {
-                            if (auto sym_it = mod_it->second.symbols.find(ident->name); sym_it != mod_it->second.symbols.end() && std::holds_alternative<TypeSymbol>(sym_it->second)) {
-                                return ResolvedType{.kind = TypeKind::USize};
-                            }
-                        }
-                    } else if (auto *mem = std::get_if<std::unique_ptr<ast::MemberExpr>>(&v->operand)) {
-                        if (auto target_module = try_resolve_namespace_chain((*mem)->object, module_path, locals, program)) {
-                            auto mod_it = program.modules.find(*target_module);
-                            if (mod_it != program.modules.end()) {
-                                if (auto sym_it = mod_it->second.symbols.find((*mem)->member); sym_it != mod_it->second.symbols.end() && std::holds_alternative<TypeSymbol>(sym_it->second)) {
-                                    return ResolvedType{.kind = TypeKind::USize};
-                                }
-                            }
-                        }
-                    }
-                    if (const auto *inst = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&v->operand)) {
-                        if (const auto instantiated = try_resolve_generic_type_instantiation(**inst, module_path, program, diag)) {
-                            // Record the operand's resolved type so codegen can read it back.
-                            // codegen holds a const Program and cannot instantiate, so its
-                            // 'align_of_operand' falls back to expr_types for anything its own
-                            // ident/member fast paths do not recognize.
-                            expr_tables_for_write(program, module_path).expr_types[get_expr_key(v->operand)] = *instantiated;
-                            return ResolvedType{.kind = TypeKind::USize};
-                        }
-                    }
-                    {
-                        const auto operand_type = check_expr(v->operand, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
-                        if (operand_type.kind == TypeKind::Namespace) {
-                            return error(diag, get_expr_location(v->operand),
-                                "'align_of' requires a type or a value; this names an imported module");
-                        }
-                    }
-                    return ResolvedType{.kind = TypeKind::USize};
+                    return check_size_align_operand(v->operand, "align_of", locals, module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
                     return check_type_of_expr(expr, v, locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
