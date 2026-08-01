@@ -5514,23 +5514,25 @@ namespace sema {
         AsmStmtInfo info = check_asm_instructions(expr.instructions, locals, module_path, program, diag);
 
         ResolvedType result_ty{.kind = TypeKind::Invalid};
-        if (expr.result_type) {
-            result_ty = resolve_type(*expr.result_type, module_path, program, diag);
-            if (result_ty.kind != TypeKind::Invalid && !result_ty.is_scalar()) {
+        // Both result-type sources tolerate Opaque: 'const x: T = asm -> rax { ... }' (or
+        // ': T' explicitly) inside a generic body has no scalar-ness to check yet — the
+        // instantiation re-checks with the concrete type, the same eager-pass posture as
+        // every other Opaque site.
+        const auto reject_non_scalar = [&](ResolvedType ty) -> ResolvedType {
+            if (ty.kind != TypeKind::Invalid && ty.kind != TypeKind::Opaque && !ty.is_scalar()) {
                 diag.report_error(DiagnosticStage::Sema, expr.location,
                     "asm result type must be a scalar or pointer type");
-                result_ty = ResolvedType{.kind = TypeKind::Invalid};
+                return ResolvedType{.kind = TypeKind::Invalid};
             }
+            return ty;
+        };
+        if (expr.result_type) {
+            result_ty = reject_non_scalar(resolve_type(*expr.result_type, module_path, program, diag));
         } else if (expected) {
             // The context-inferred type gets the same rejection as the explicit ': type'
             // path above: 'const s: SomeStruct = asm -> rax { ... }' must not hand a
             // register-sized struct result to codegen.
-            result_ty = *expected;
-            if (result_ty.kind != TypeKind::Invalid && !result_ty.is_scalar()) {
-                diag.report_error(DiagnosticStage::Sema, expr.location,
-                    "asm result type must be a scalar or pointer type");
-                result_ty = ResolvedType{.kind = TypeKind::Invalid};
-            }
+            result_ty = reject_non_scalar(*expected);
         } else {
             diag.report_error(DiagnosticStage::Sema, expr.location,
                 std::format("cannot infer result type for 'asm -> {}'; add an explicit type "

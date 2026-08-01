@@ -57,6 +57,10 @@
     "diag": "examples/example_asm_expr_cannot_infer/main.mir:10:5: error: cannot infer result type for 'asm -> eax'; add an explicit type annotation: 'asm -> eax: i32 { ... }' or annotate the variable receiving the result.",
     "exit": 1
   },
+  "example_asm_expr_generic_result": {
+    "action": "run",
+    "exit": 7
+  },
   "example_asm_expr_mixed_output": {
     "action": "run",
     "exit": 0

@@ -1,0 +1,26 @@
+// example_asm_expr_generic_result — an asm expression whose result type is a generic
+// parameter must pass the eager template pass, from both sources: the surrounding
+// context ('const x: T = asm -> rax { ... }', a regression from the CHECK-15 fix) and
+// the explicit annotation ('asm -> rax: T', a pre-existing gap in the same family) —
+// caught by the verification re-review. The instantiation re-checks with the concrete
+// type, like every other Opaque eager-pass site.
+//
+// Expected: exit code 7 — magic[i64]() (5) + magic2[i64]() (2).
+
+fn magic[T: type]() -> T {
+    const x: T = asm -> rax {
+        mov rax, 5
+    }
+    return x
+}
+
+fn magic2[T: type]() -> T {
+    const y := asm -> rax: T {
+        mov rax, 2
+    }
+    return y
+}
+
+pub fn main() -> i32 {
+    return cast(magic[i64]() + magic2[i64](), i32)
+}
