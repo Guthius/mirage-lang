@@ -724,6 +724,9 @@ namespace lsp {
                         {"uri", uri},
                         {"diagnostics", worker.closure_diagnostics_for(path)},
                     });
+                    // Only after closure_diagnostics_for re-ensured the remaining open
+                    // documents' bundles — see prune_stale_diag_tracking's doc.
+                    worker.documents.prune_stale_diag_tracking();
                 }});
             } else if (method == "textDocument/hover" || method == "textDocument/definition") {
                 enqueue_cancellable_request(message, method, queue, channel, completed, in_flight_,

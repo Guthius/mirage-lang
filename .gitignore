@@ -23,3 +23,4 @@ editors/zed/target/
 
 # Built by tests/ext_abi_test.py
 tests/ext_abi_fixture/helper.o
+__pycache__/

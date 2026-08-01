@@ -92,15 +92,22 @@ namespace lsp::analysis {
         open_texts_.erase(canonical_path);
         invalidate(canonical_path);
         evict_unreferenced_bundles();
+    }
 
+    void DocumentStore::prune_stale_diag_tracking() {
         // Published-diagnostics tracking for an abandoned closure: an entry whose
         // directory no cached bundle reaches and no open file's own directory matches can
         // never appear in a later round's closure_dirs, so files_that_became_clean would
-        // never erase it and the set grew for the life of the session. Pruned here, after
-        // eviction, and nowhere hotter: a transient invalidate (didChange,
-        // didChangeWatchedFiles) also empties bundle_of_dir_ momentarily, but the closure
-        // is about to be re-created there and its entries are still needed to clear
-        // squiggles for files an external change just fixed.
+        // never erase it and the set grew for the life of the session.
+        //
+        // Called at the END of the didClose task — after the remaining open documents'
+        // closures have been re-ensured — and nowhere hotter. Pruning inside close()
+        // itself was a bug the first time around: invalidate(closed) had just evicted
+        // every bundle covering the closed file's directory, INCLUDING bundles owned by
+        // other still-open documents whose closures share it, so their legitimate
+        // entries were dropped in the transient window and an externally fixed file's
+        // squiggle could never be cleared. The same transient exists for didChange and
+        // didChangeWatchedFiles, which is why only the post-re-ensure moment is safe.
         std::set<std::string> open_dirs;
         for (const auto &path : open_texts_ | std::views::keys) {
             open_dirs.insert(std::filesystem::path(path).parent_path().string());

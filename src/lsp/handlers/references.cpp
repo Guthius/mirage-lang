@@ -357,11 +357,14 @@ namespace lsp::handlers {
             // Type annotations on the declarations themselves: param/return/field types,
             // impl targets, aliases, ext-fn signatures. Bodies are walked below with
             // scope-aware visitors; annotations always resolve at module scope.
-            AstVisitor annotation_visitor;
-            annotation_visitor.on_type = [&](const ast::NamedType &named) {
-                match_named_type(named, ctx, mod_path, result.sema_program, target, out);
-            };
+            //
+            // The FULL visitor, not an on_type-only one: walk_type fires on_expr for
+            // expressions embedded in annotations (array sizes, struct-field defaults,
+            // generic value args), so an on_type-only walk silently dropped
+            // 'fn f(buf: [BUF_SIZE]u8)'-style references while the identical annotation
+            // inside a function body was found.
             const auto walk_annotation_types = [&](const ast::Decl &d) {
+                collect_references_with([&](const AstVisitor &annotation_visitor) {
                 if (const auto *fn = std::get_if<ast::FunctionDecl>(&d)) {
                     for (const auto &p : fn->params) {
                         if (p.type) walk_type(*p.type, annotation_visitor);
@@ -395,6 +398,7 @@ namespace lsp::handlers {
                         for (const auto &ret : fn.return_types) walk_type(ret, annotation_visitor);
                     }
                 }
+                }, Scope{}, ctx, mod_path, result.sema_program, target, out);
             };
 
             for (const auto &decl : decls) {

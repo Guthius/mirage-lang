@@ -69,6 +69,10 @@ namespace lsp::analysis {
         void open(const std::string &canonical_path, std::string text);
         void update(const std::string &canonical_path, std::string text);
         void close(const std::string &canonical_path);
+        // Drops published-diagnostics tracking for closures no remaining document reaches.
+        // Only safe AFTER the remaining open documents' bundles have been re-ensured —
+        // see the definition for the didClose transient this must not run inside.
+        void prune_stale_diag_tracking();
 
         [[nodiscard]] auto text_of(const std::string &canonical_path) const -> const std::string *;
 
