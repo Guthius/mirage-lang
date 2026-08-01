@@ -1,0 +1,15 @@
+// example_cross_module_member_assign — assignment through a member chain rooted at a
+// namespace-qualified mut global must type-check. The linear writability probe (CHECK-8)
+// only consulted locals and same-module globals; the namespace-chain base has no
+// expr_types record, so 'other.origin.x = 42' on a 'pub mut' cross-module global was
+// rejected as "not mutable" (caught by the verification re-review).
+//
+// Expected: exit code 43 — origin.x set to 42 plus one counter increment.
+
+const other := import("other")
+
+pub fn main() -> i32 {
+    other.origin.x = 42
+    other.counter++
+    return other.origin.x + other.counter
+}

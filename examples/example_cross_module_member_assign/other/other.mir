@@ -1,0 +1,7 @@
+pub type Point = struct {
+    x: i32 = 0
+    y: i32 = 0
+}
+
+pub mut origin: Point = default
+pub mut counter: i32 = 0

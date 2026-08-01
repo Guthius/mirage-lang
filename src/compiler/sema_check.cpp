@@ -1210,7 +1210,7 @@ namespace sema {
         // level (exponential in chain depth) and stacking a spurious "not an assignable
         // expression" on top of the real diagnostic for 'f().field = x'.
         // nullopt = not an lvalue shape at all.
-        auto probe_lvalue_writability(const ast::Expr &e, LocalScope &locals, const std::string &module_path, const Program &program) -> std::optional<bool> {
+        auto probe_lvalue_writability(const ast::Expr &e, LocalScope &locals, const std::string &module_path, Program &program) -> std::optional<bool> {
             const auto recorded_type = [&](const ast::Expr &node) -> const ResolvedType * {
                 return find_expr_record(program, module_path, &ExprSideTables::expr_types, get_expr_key(node));
             };
@@ -1234,6 +1234,22 @@ namespace sema {
                         // const says nothing about the pointee.
                         return v->op == ast::UnaryOp::Deref ? std::optional(true) : std::nullopt;
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                        // A namespace-qualified global ('other.origin' with 'pub mut origin'
+                        // in module other) has no expr_types record for its bare namespace
+                        // base — check_expr short-circuits that chain — so it must be probed
+                        // via the chain walk, mirroring check_member_cross_module's is_mut
+                        // answer. Without this, 'mod.g.field = x' on a cross-module mut
+                        // global was rejected as not mutable.
+                        if (const auto target_module = try_resolve_namespace_chain(v->object, module_path, locals, program)) {
+                            if (const auto mod_it = program.modules.find(*target_module); mod_it != program.modules.end()) {
+                                if (const auto sym_it = mod_it->second.symbols.find(v->member); sym_it != mod_it->second.symbols.end()) {
+                                    if (const auto *g = std::get_if<GlobalSymbol>(&sym_it->second)) {
+                                        return g->is_mut;
+                                    }
+                                }
+                            }
+                            return std::nullopt;
+                        }
                         const auto *obj_ty = recorded_type(v->object);
                         if (!obj_ty) return std::nullopt;
                         if (obj_ty->kind == TypeKind::Pointer || obj_ty->kind == TypeKind::Opaque) return true;

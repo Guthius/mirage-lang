@@ -288,6 +288,10 @@
     "action": "run",
     "exit": 42
   },
+  "example_cross_module_member_assign": {
+    "action": "run",
+    "exit": 43
+  },
   "example_default_params": {
     "action": "run",
     "exit": 0
