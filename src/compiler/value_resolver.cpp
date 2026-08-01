@@ -112,7 +112,16 @@ namespace sema {
                                                 /*is_shadowed=*/nullptr, /*follow_member_chains=*/false);
         }
 
-        auto is_constant_expr_impl(const ast::Expr &expr, const std::string &module_path, const Program &program, const std::unordered_set<std::string> &treated_as_const) -> bool {
+        // Macro-template expansion cap, shared by the constant classifier and both
+        // evaluators: a reported-but-registered recursive macro must degrade (to "not
+        // constant" / nullopt), not recurse until the stack runs out (SIGSEGV, taking
+        // the LSP worker with it).
+        constexpr int MAX_MACRO_EVAL_DEPTH = 64;
+
+        // 'depth' guards macro-template expansion exactly like the evaluators' caps: a
+        // reported-but-registered recursive macro must classify as "not constant", not
+        // recurse until the stack runs out.
+        auto is_constant_expr_impl(const ast::Expr &expr, const std::string &module_path, const Program &program, const std::unordered_set<std::string> &treated_as_const, const int depth = 0) -> bool {
             // Read through find_expr_record, not the module directly: this runs DURING generic
             // body checking (via is_constant_expr from 'when' conditions, array lengths and
             // default params), where the records live in the instantiation's tables.
@@ -235,7 +244,7 @@ namespace sema {
                                 } else if constexpr (std::is_same_v<BVT, ast::ArrayExpr>) {
                                     for (const auto &elem : bv.values) {
                                         if (std::holds_alternative<ast::UndefinedExpr>(elem)) continue;
-                                        if (!is_constant_expr_impl(elem, module_path, program, treated_as_const)) {
+                                        if (!is_constant_expr_impl(elem, module_path, program, treated_as_const, depth)) {
                                             return false;
                                         }
                                     }
@@ -260,7 +269,7 @@ namespace sema {
                                             provided.insert(sf.name);
                                             continue;
                                         }
-                                        if (!is_constant_expr_impl(sf.expr, module_path, program, treated_as_const)) {
+                                        if (!is_constant_expr_impl(sf.expr, module_path, program, treated_as_const, depth)) {
                                             return false;
                                         }
 
@@ -294,7 +303,7 @@ namespace sema {
                                             if (provided.contains(field.name) || !field.init_expr) {
                                                 continue;
                                             }
-                                            if (!is_constant_expr_impl(*field.init_expr, module_path, program, treated_as_const)) {
+                                            if (!is_constant_expr_impl(*field.init_expr, module_path, program, treated_as_const, depth)) {
                                                 return false;
                                             }
                                         }
@@ -315,24 +324,24 @@ namespace sema {
                             return false;
                         }
 
-                        return is_constant_expr_impl(v->operand, module_path, program, treated_as_const);
+                        return is_constant_expr_impl(v->operand, module_path, program, treated_as_const, depth);
                     }
 
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
-                        return is_constant_expr_impl(v->lhs, module_path, program, treated_as_const) &&
-                               is_constant_expr_impl(v->rhs, module_path, program, treated_as_const);
+                        return is_constant_expr_impl(v->lhs, module_path, program, treated_as_const, depth) &&
+                               is_constant_expr_impl(v->rhs, module_path, program, treated_as_const, depth);
                     }
 
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
-                        return is_constant_expr_impl(v->condition, module_path, program, treated_as_const) &&
-                               is_constant_expr_impl(v->then_expr, module_path, program, treated_as_const) &&
-                               is_constant_expr_impl(v->else_expr, module_path, program, treated_as_const);
+                        return is_constant_expr_impl(v->condition, module_path, program, treated_as_const, depth) &&
+                               is_constant_expr_impl(v->then_expr, module_path, program, treated_as_const, depth) &&
+                               is_constant_expr_impl(v->else_expr, module_path, program, treated_as_const, depth);
                     }
 
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
-                        return is_constant_expr_impl(v->condition, module_path, program, treated_as_const) &&
-                               is_constant_expr_impl(v->then_expr, module_path, program, treated_as_const) &&
-                               is_constant_expr_impl(v->else_expr, module_path, program, treated_as_const);
+                        return is_constant_expr_impl(v->condition, module_path, program, treated_as_const, depth) &&
+                               is_constant_expr_impl(v->then_expr, module_path, program, treated_as_const, depth) &&
+                               is_constant_expr_impl(v->else_expr, module_path, program, treated_as_const, depth);
                     }
 
                     // Always compile-time evaluable (like SizeOfExpr/ImportBinExpr above) — its
@@ -348,7 +357,7 @@ namespace sema {
                     }
 
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
-                        return is_constant_expr_impl(v->value, module_path, program, treated_as_const);
+                        return is_constant_expr_impl(v->value, module_path, program, treated_as_const, depth);
                     }
 
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
@@ -373,17 +382,19 @@ namespace sema {
                         }
 
                         for (const auto &arg : v->args) {
-                            if (!is_constant_expr_impl(arg, module_path, program, treated_as_const)) {
+                            if (!is_constant_expr_impl(arg, module_path, program, treated_as_const, depth)) {
                                 return false;
                             }
                         }
+
+                        if (depth >= MAX_MACRO_EVAL_DEPTH) return false;
 
                         std::unordered_set<std::string> extended = treated_as_const;
                         for (const auto &p : macro->decl->params) {
                             extended.insert(p.name);
                         }
 
-                        return is_constant_expr_impl(macro->decl->expr_template, module_path, program, extended);
+                        return is_constant_expr_impl(macro->decl->expr_template, module_path, program, extended, depth + 1);
                     }
 
                     return false;
@@ -807,7 +818,7 @@ namespace sema {
         // deliberately: binding expressions would let an argument that is itself an
         // identifier collide with the parameter name it is bound to and recurse forever
         // ('macro inc(x) -> x + 1' called as 'inc(x)' with a global 'x').
-        auto evaluate_const_value_impl(const ast::Expr &expr, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::unordered_map<std::string, ConstFoldValue> &macro_args) -> std::optional<ConstFoldValue>;
+        auto evaluate_const_value_impl(const ast::Expr &expr, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::unordered_map<std::string, ConstFoldValue> &macro_args, int depth = 0) -> std::optional<ConstFoldValue>;
     }
 
     auto evaluate_const_value(const ast::Expr &expr, const std::string &module_path, Program &program, DiagnosticEngine &diag) -> std::optional<ConstFoldValue> {
@@ -815,7 +826,7 @@ namespace sema {
     }
 
     namespace {
-        auto evaluate_const_value_impl(const ast::Expr &expr, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::unordered_map<std::string, ConstFoldValue> &macro_args) -> std::optional<ConstFoldValue> {
+        auto evaluate_const_value_impl(const ast::Expr &expr, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::unordered_map<std::string, ConstFoldValue> &macro_args, const int depth) -> std::optional<ConstFoldValue> {
         return std::visit(
             [&]<typename T>(const T &v) -> std::optional<ConstFoldValue> {
                 using V = std::decay_t<T>;
@@ -1066,14 +1077,15 @@ namespace sema {
                     const auto *macro = std::get_if<MacroSymbol>(&sym_it->second);
                     if (!macro || !macro->is_resolved || !macro->decl) return std::nullopt;
                     if (v->args.size() != macro->decl->params.size()) return std::nullopt;
+                    if (depth >= MAX_MACRO_EVAL_DEPTH) return std::nullopt;
 
                     std::unordered_map<std::string, ConstFoldValue> bound;
                     for (size_t i = 0; i < v->args.size(); ++i) {
-                        auto arg_value = evaluate_const_value_impl(v->args[i], module_path, program, diag, macro_args);
+                        auto arg_value = evaluate_const_value_impl(v->args[i], module_path, program, diag, macro_args, depth + 1);
                         if (!arg_value) return std::nullopt;
                         bound.emplace(macro->decl->params[i].name, std::move(*arg_value));
                     }
-                    return evaluate_const_value_impl(macro->decl->expr_template, module_path, program, diag, bound);
+                    return evaluate_const_value_impl(macro->decl->expr_template, module_path, program, diag, bound, depth + 1);
                 }
 
                 return std::nullopt;

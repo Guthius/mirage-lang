@@ -1006,7 +1006,14 @@ namespace sema {
                     expr);
             }
 
-            auto eval_integer_const_expr(const ast::Expr &expr, const std::string &module_path, const std::unordered_map<std::string, uint64_t> &macro_args, uint64_t iota_value = 0) -> std::optional<uint64_t> {
+            // 'depth' counts macro-template expansions only. A self- or mutually-recursive
+            // macro is reported at resolve time ("circular dependency"), but the already-
+            // registered symbol still reaches this evaluator afterwards — without the cap
+            // the template expansion recursed until the stack ran out (SIGSEGV, taking the
+            // LSP worker with it).
+            static constexpr int MAX_MACRO_EVAL_DEPTH = 64;
+
+            auto eval_integer_const_expr(const ast::Expr &expr, const std::string &module_path, const std::unordered_map<std::string, uint64_t> &macro_args, uint64_t iota_value = 0, const int depth = 0) -> std::optional<uint64_t> {
                 return std::visit(
                     [&]<typename T>(const T &v) -> std::optional<uint64_t> {
                         using V = std::decay_t<T>;
@@ -1097,6 +1104,7 @@ namespace sema {
                             // shape that isn't a fully-resolved, correctly-called macro.
                             if (!resolved_macro.decl || !resolved_macro.is_resolved) return std::nullopt;
                             if (v->args.size() != resolved_macro.decl->params.size()) return std::nullopt;
+                            if (depth >= MAX_MACRO_EVAL_DEPTH) return std::nullopt;
 
                             // Arguments are bound as *evaluated values*, not expressions: an
                             // argument that is itself an identifier colliding with the
@@ -1104,11 +1112,11 @@ namespace sema {
                             // resolve to its own binding and recurse without bound.
                             std::unordered_map<std::string, uint64_t> bound;
                             for (size_t i = 0; i < v->args.size(); ++i) {
-                                const auto arg_value = eval_integer_const_expr(v->args[i], module_path, macro_args);
+                                const auto arg_value = eval_integer_const_expr(v->args[i], module_path, macro_args, 0, depth + 1);
                                 if (!arg_value) return std::nullopt;
                                 bound.emplace(resolved_macro.decl->params[i].name, *arg_value);
                             }
-                            return eval_integer_const_expr(resolved_macro.decl->expr_template, module_path, bound);
+                            return eval_integer_const_expr(resolved_macro.decl->expr_template, module_path, bound, 0, depth + 1);
 
                         } else {
                             return std::nullopt;

@@ -1,0 +1,15 @@
+// example_macro_recursive — a self-recursive macro used in a const/type context must be
+// diagnosed and degrade, not crash. Resolution reports the circular dependency but the
+// symbol stays registered, and the constant classifier plus both const evaluators then
+// expanded the template without any depth guard — stack overflow, SIGSEGV, and a dead LSP
+// worker (CODE_REVIEW.md SEMA-5's missing half, caught by the verification re-review).
+//
+// Expected: circular-dependency and non-constant diagnostics, exit code 1 — not a crash.
+
+macro rec(n: i32): i32 -> rec(n)
+
+const buf: [rec(1)]u8 = undefined
+
+pub fn main() -> i32 {
+    return 0
+}

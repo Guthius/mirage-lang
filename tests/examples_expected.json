@@ -672,6 +672,11 @@
     "diag": "examples/example_macro_group_arity/main.mir:18:5: error: group declaration expects 2 return value(s), got 1",
     "exit": 1
   },
+  "example_macro_recursive": {
+    "action": "build",
+    "diag": "examples/example_macro_recursive/main.mir:9:30: error: circular dependency detected resolving 'rec'",
+    "exit": 1
+  },
   "example_match_const_expr_pattern": {
     "action": "run",
     "exit": 6
