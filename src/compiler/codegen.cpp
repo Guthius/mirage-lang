@@ -3764,10 +3764,12 @@ namespace codegen {
                 auto *copy_count = builder_.CreateSelect(builder_.CreateICmpULT(src_len, total_count), src_len, total_count);
                 auto *elem_size = builder_.getInt64(size_of(array_module, array_info.element_type));
                 auto *copy_bytes = builder_.CreateMul(copy_count, elem_size);
-                auto *total_bytes = builder_.getInt64(array_info.size);
+                // Via size_of/align_of (which recompute arrays from their element), not the
+                // baked ArrayInfo fields — see resolved_type_size's Array case.
+                auto *total_bytes = builder_.getInt64(size_of(array_module, array_type));
                 auto *remaining_bytes = builder_.CreateSub(total_bytes, copy_bytes);
 
-                const auto align = llvm::Align(array_info.align);
+                const auto align = llvm::Align(std::max(align_of(array_module, array_type), 1U));
                 builder_.CreateMemCpy(scratch, align, src_ptr, align, copy_bytes);
                 auto *tail_ptr = builder_.CreateGEP(llvm::Type::getInt8Ty(*context_), scratch, copy_bytes);
                 builder_.CreateMemSet(tail_ptr, builder_.getInt8(0), remaining_bytes, align);

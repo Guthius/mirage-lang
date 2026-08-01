@@ -364,6 +364,20 @@ namespace sema {
             // decl's OWN param names, for implicit self-instantiation sugar).
             const std::vector<ast::GenericParam> *enclosing_generic_params = nullptr;
 
+            // Depth of indirection constructors (pointer/slice/function-type) the current
+            // resolve_type_impl recursion sits under. An ARRAY element resolved under
+            // indirection must stay shallow: forcing full layout there turned the valid
+            // 'next: *[4]Node' self-reference into a false by-value-cycle error, while a
+            // by-value array element genuinely needs the layout (sibling ordering,
+            // TYPE-20). resolved_type_size/align recompute array sizes from the element at
+            // query time, so the shallow path cannot bake a stale size.
+            int pointee_depth_ = 0;
+            struct PointeeScope {
+                int &depth;
+                explicit PointeeScope(int &d) : depth(d) { ++depth; }
+                ~PointeeScope() { --depth; }
+            };
+
             auto find_type_symbol(ProgramModule &mod, const std::string &name, const SourceLocation &loc) const -> TypeSymbol * {
                 const auto it = mod.symbols.find(name);
                 if (it == mod.symbols.end()) {
@@ -1764,6 +1778,7 @@ namespace sema {
                             return resolve_builtin(v.kind);
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::PointerType>>) {
+                            const PointeeScope indirect(pointee_depth_);
                             ResolvedType pointee;
                             if (auto *named = std::get_if<ast::NamedType>(&v->pointee)) {
                                 pointee = resolve_named_type_shallow(*named, module_path);
@@ -1797,7 +1812,9 @@ namespace sema {
                             // sibling types depends on symbol-table iteration order and
                             // 'field stores T by value, which is not yet a complete type'
                             // fires spuriously.
-                            auto element = resolve_field_type(module_path, v->base_type, v->location);
+                            auto element = pointee_depth_ > 0
+                                ? resolve_type_impl(v->base_type, module_path)
+                                : resolve_field_type(module_path, v->base_type, v->location);
                             const auto count = array_len_expr_value(*v->size, module_path);
                             // Degrade to plain Opaque when the length or the element is an
                             // unbound generic parameter, rather than interning an array with a
@@ -1820,6 +1837,7 @@ namespace sema {
                             return intern_array(program, element, *count, static_cast<uint32_t>(element_size * *count), align_of(module_path, element));
 
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceType>>) {
+                            const PointeeScope indirect(pointee_depth_);
                             auto element = resolve_type_impl(v->base_type, module_path);
                             return intern_slice(program, element);
 
@@ -1834,6 +1852,7 @@ namespace sema {
                             layout_union(module_path, slot, v);
                             return ResolvedType{.kind = TypeKind::Union, .union_index = slot};
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::FunctionType>>) {
+                            const PointeeScope indirect(pointee_depth_);
                             FunctionTypeInfo sig;
                             sig.is_variadic = v->is_variadic;
                             sig.param_names = v->param_names; // cosmetic only; NOT compared in intern_function_type
@@ -2383,7 +2402,19 @@ namespace sema {
     // included, is a fixed width primitive_size already knows.
     auto resolved_type_size(const ResolvedType &t, const Program &program) -> uint32_t {
         if (t.kind == TypeKind::Struct) { const auto *info = program.struct_at(t.struct_index); return info ? info->size : 0; }
-        if (t.kind == TypeKind::Array) { const auto *info = program.array_at(t.array_index); return info ? info->size : 0; }
+        if (t.kind == TypeKind::Array) {
+            const auto *info = program.array_at(t.array_index);
+            if (!info) return 0;
+            // Recomputed from the element rather than reading the baked ArrayInfo::size: an
+            // array first interned from a pointee position ('next: *[4]Node' inside Node's
+            // own layout) bakes the element's mid-layout size; recomputing means every
+            // later query sees the finished layout. Clamped: by-value paths already reject
+            // >4 GiB arrays at resolution time.
+            const uint64_t bytes = static_cast<uint64_t>(resolved_type_size(info->element_type, program)) * info->count;
+            return bytes > std::numeric_limits<uint32_t>::max()
+                ? std::numeric_limits<uint32_t>::max()
+                : static_cast<uint32_t>(bytes);
+        }
         if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_size(info->underlying_type.kind) : 0; }
         if (t.kind == TypeKind::Union) { const auto *info = program.union_at(t.union_index); return info ? info->size : 0; }
         if (t.kind == TypeKind::Bitset) { const auto *info = program.bitset_at(t.bitset_index); return info ? primitive_size(info->storage_type.kind) : 0; }
@@ -2397,7 +2428,12 @@ namespace sema {
     // function rather than a parameter on the one above.
     auto resolved_type_align(const ResolvedType &t, const Program &program) -> uint32_t {
         if (t.kind == TypeKind::Struct) { const auto *info = program.struct_at(t.struct_index); return info ? info->align : 1; }
-        if (t.kind == TypeKind::Array) { const auto *info = program.array_at(t.array_index); return info ? info->align : 1; }
+        if (t.kind == TypeKind::Array) {
+            // Recomputed from the element for the same mid-layout-staleness reason as
+            // resolved_type_size above.
+            const auto *info = program.array_at(t.array_index);
+            return info ? resolved_type_align(info->element_type, program) : 1;
+        }
         if (t.kind == TypeKind::Slice) return 8;
         if (t.kind == TypeKind::Trait) return 8;
         if (t.kind == TypeKind::Any) return 8;

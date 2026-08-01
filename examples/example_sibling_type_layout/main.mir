@@ -1,12 +1,21 @@
-// example_sibling_type_layout — a by-value array element type declared LATER in the file
-// must lay out correctly regardless of symbol-table iteration order. The array case used
-// resolve_type_impl (shallow), so whether Inner was already laid out when Outer's array
-// computed its size depended on unordered-map iteration order, and 'field stores T by
-// value, which is not yet a complete type' could fire spuriously (found during CHECK-10;
-// logged as TYPE-20). This fixture pins the correct behavior; the pre-fix failure was
-// iteration-order-dependent and not deterministically reproducible.
+// example_sibling_type_layout — two related array-element resolution rules:
 //
-// Expected: exit code 24 — size_of(Outer) = 3 * (4 + 4).
+//  1. a by-value array element type declared LATER in the file must lay out correctly
+//     regardless of symbol-table iteration order (TYPE-20; the pre-fix failure was
+//     iteration-order-dependent);
+//  2. an array element reached only BEHIND a pointer must NOT force full layout —
+//     'next: *[4]Node' inside Node itself is valid (the user did store it behind a
+//     pointer) and was falsely rejected as a by-value cycle by the first TYPE-20 fix.
+//
+// Array sizes are recomputed from the element at query time, so the pointee-position
+// intern cannot bake a stale mid-layout size either.
+//
+// Expected: exit code 40 — size_of(Outer) = 3 * 8, plus size_of([2]Inner) = 16.
+
+type Node = struct {
+    value: i32
+    next: *[4]Node
+}
 
 type Outer = struct {
     items: [3]Inner
@@ -18,6 +27,7 @@ type Inner = struct {
 }
 
 pub fn main() -> i32 {
+    mut n: Node = default
     mut o: Outer = default
-    return cast(size_of(Outer), i32)
+    return cast(size_of(Outer), i32) + cast(size_of([2]Inner), i32)
 }
