@@ -2927,7 +2927,11 @@ namespace codegen {
                 emit_stmt(info.decl->body);
 
                 if (!builder_.GetInsertBlock()->getTerminator()) {
-                    if (info.return_types.empty()) {
+                    if (insert_block_is_unreachable()) {
+                        // e.g. the merge block of an if/else whose branches both
+                        // returned — the fall-through is dead, not a missing return.
+                        builder_.CreateUnreachable();
+                    } else if (info.return_types.empty()) {
                         builder_.CreateRetVoid();
                     } else {
                         report_codegen_error(diag_, info.decl->location, std::format("method '{}' may fall through without returning a value", info.decl->name));
@@ -3056,7 +3060,10 @@ namespace codegen {
                 }
 
                 if (!builder_.GetInsertBlock()->getTerminator()) {
-                    if (instance.return_types.empty()) {
+                    if (insert_block_is_unreachable()) {
+                        // see emit_program's function-level check: dead merge block, not a missing return
+                        builder_.CreateUnreachable();
+                    } else if (instance.return_types.empty()) {
                         builder_.CreateRetVoid();
                     } else {
                         report_codegen_error(diag_, instance.decl ? instance.decl->location : SourceLocation{}, std::format("generic instantiation '{}' may fall through without returning a value", instance.mangled_name));
@@ -3485,13 +3492,26 @@ namespace codegen {
                 emit_stmt(fn.decl->body);
 
                 if (!builder_.GetInsertBlock()->getTerminator()) {
-                    if (fn.return_types.empty()) {
+                    if (insert_block_is_unreachable()) {
+                        // e.g. the merge block of an if/else whose branches both
+                        // returned — the fall-through is dead, not a missing return.
+                        builder_.CreateUnreachable();
+                    } else if (fn.return_types.empty()) {
                         builder_.CreateRetVoid();
                     } else {
                         report_codegen_error(diag_, fn.decl->location, std::format("function '{}' may fall through without returning a value", name));
                         builder_.CreateUnreachable();
                     }
                 }
+            }
+
+            // Whether the builder's current block can never be entered: a merge block
+            // with no predecessors (every branch into it returned) that is not the
+            // function's entry block. Emitting 'unreachable' there is valid IR; the
+            // missing-return diagnostic would be a false positive.
+            auto insert_block_is_unreachable() -> bool {
+                auto *bb = builder_.GetInsertBlock();
+                return bb->hasNPredecessors(0) && &bb->getParent()->getEntryBlock() != bb;
             }
 
             auto coerce_to_bool(llvm::Value *value, const sema::ResolvedType &type) -> llvm::Value * {

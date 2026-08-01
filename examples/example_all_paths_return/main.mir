@@ -1,0 +1,19 @@
+// example_all_paths_return — a function whose if/else branches BOTH return must not be
+// diagnosed as falling through. The missing-return check ran on the if/else's merge block,
+// which has no predecessors when both branches returned — dead, not a missing return —
+// and 'fn pick' below was rejected with "may fall through without returning a value"
+// (found during CHECK-10; logged as CG-20).
+//
+// Expected: exit code 3 — pick(true) + pick(false).
+
+fn pick(flag: bool) -> i32 {
+    if flag {
+        return 1
+    } else {
+        return 2
+    }
+}
+
+pub fn main() -> i32 {
+    return pick(true) + pick(false)
+}

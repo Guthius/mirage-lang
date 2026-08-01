@@ -11,6 +11,10 @@
     "action": "run",
     "exit": 0
   },
+  "example_all_paths_return": {
+    "action": "run",
+    "exit": 3
+  },
   "example_any_bad_cast": {
     "action": "build",
     "diag": "examples/example_any_bad_cast/main.mir:8:20: error: 'any' may only be cast to a pointer type or 'anyptr'.",
@@ -115,7 +119,7 @@
   },
   "example_asm_movzx_bad_src_width": {
     "action": "build",
-    "diag": "examples/example_asm_movzx_bad_src_width/main.mir:16:9: error: 'movzx' source must be 8 or 16 bits (got 32 bits) \u2014 there is no 'movzx' encoding for a 32-bit or 64-bit source; use 'mov' instead, which already zero-extends automatically when writing a 32-bit register",
+    "diag": "examples/example_asm_movzx_bad_src_width/main.mir:16:9: error: 'movzx' source must be 8 or 16 bits (got 32 bits) — there is no 'movzx' encoding for a 32-bit or 64-bit source; use 'mov' instead, which already zero-extends automatically when writing a 32-bit register",
     "exit": 1
   },
   "example_asm_sse_register": {
@@ -318,7 +322,7 @@
   },
   "example_default_params_trait_redeclare": {
     "action": "build",
-    "diag": "examples/example_default_params_trait_redeclare/main.mir:19:20: error: parameter 'loud' in 'Bot.greet' redeclares a default value already declared by the trait 'Greeter'. Remove the default from the implementation \u2014 it is inherited from the trait.",
+    "diag": "examples/example_default_params_trait_redeclare/main.mir:19:20: error: parameter 'loud' in 'Bot.greet' redeclares a default value already declared by the trait 'Greeter'. Remove the default from the implementation — it is inherited from the trait.",
     "exit": 1
   },
   "example_default_params_try_rejected": {
@@ -452,7 +456,7 @@
   },
   "example_generic_self_ref_by_value": {
     "action": "build",
-    "diag": "examples/example_generic_self_ref_by_value/main.mir:22:5: error: field 'next' stores 'node' by value, which is not yet a complete type; a type cannot contain itself by value \u2014 store it behind a pointer",
+    "diag": "examples/example_generic_self_ref_by_value/main.mir:22:5: error: field 'next' stores 'node' by value, which is not yet a complete type; a type cannot contain itself by value — store it behind a pointer",
     "exit": 1
   },
   "example_generic_value_arg_range": {
@@ -547,7 +551,7 @@
   },
   "example_generics_impl_arity_mismatch": {
     "action": "build",
-    "diag": "examples/example_generics_impl_arity_mismatch/main.mir:13:1: error: 'impl Box' has 2 generic parameter(s), but 'Box' is declared with 1 \u2014 impl generic parameter lists must match the target type's own arity exactly",
+    "diag": "examples/example_generics_impl_arity_mismatch/main.mir:13:1: error: 'impl Box' has 2 generic parameter(s), but 'Box' is declared with 1 — impl generic parameter lists must match the target type's own arity exactly",
     "exit": 1
   },
   "example_generics_infer_arg_unify": {
@@ -556,12 +560,12 @@
   },
   "example_generics_infer_fail": {
     "action": "build",
-    "diag": "examples/example_generics_infer_fail/main.mir:17:26: error: could not infer generic parameter 'N' for 'make_fixed' \u2014 provide it explicitly ('make_fixed[...]()') or use it in a context with a known expected type",
+    "diag": "examples/example_generics_infer_fail/main.mir:17:26: error: could not infer generic parameter 'N' for 'make_fixed' — provide it explicitly ('make_fixed[...]()') or use it in a context with a known expected type",
     "exit": 1
   },
   "example_generics_missing_args": {
     "action": "build",
-    "diag": "examples/example_generics_missing_args/main.mir:14:12: error: 'Box' used without generic arguments \u2014 expected 1 ('Box[...]')",
+    "diag": "examples/example_generics_missing_args/main.mir:14:12: error: 'Box' used without generic arguments — expected 1 ('Box[...]')",
     "exit": 1
   },
   "example_generics_mixed": {
@@ -570,7 +574,7 @@
   },
   "example_generics_orphan_impl": {
     "action": "build",
-    "diag": "examples/example_generics_orphan_impl/main.mir:20:1: error: 'impl Drawable for Box' has 2 generic parameter(s), but 'Box' is declared with 1 \u2014 impl generic parameter lists must match the target type's own arity exactly",
+    "diag": "examples/example_generics_orphan_impl/main.mir:20:1: error: 'impl Drawable for Box' has 2 generic parameter(s), but 'Box' is declared with 1 — impl generic parameter lists must match the target type's own arity exactly",
     "exit": 1
   },
   "example_generics_param_name_in_diagnostic": {
@@ -767,7 +771,7 @@
   },
   "example_recursive_array_field": {
     "action": "build",
-    "diag": "examples/example_recursive_array_field/main.mir:21:5: error: field 'kids' stores 'node' by value, which is not yet a complete type; a type cannot contain itself by value \u2014 store it behind a pointer",
+    "diag": "examples/example_recursive_array_field/main.mir:21:5: error: field 'kids' stores 'node' by value, which is not yet a complete type; a type cannot contain itself by value — store it behind a pointer",
     "exit": 1
   },
   "example_reflect_trait_field": {
