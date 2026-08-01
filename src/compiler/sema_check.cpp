@@ -2728,6 +2728,139 @@ namespace sema {
 
         return operand_type;
     }
+
+    // ---- Shared per-arm pattern helpers for 'match' and 'switch' (CHECK-10) ----
+    //
+    // The two constructs deliberately keep SEPARATE arm loops (pinned CHECK-9b
+    // decision: match unifies arm types and requires exhaustiveness, switch does
+    // neither, and merging the loops behind flags would couple semantics that are
+    // different on purpose). What IS identical between them — how one arm's
+    // PATTERN is validated against the operand — lives here, called from both
+    // loops, so pattern rules can never drift between the two again.
+
+    // Literal-pattern validation for a scalar (integer/bool) operand: the
+    // compile-time-constant requirement, type-checking the pattern against the
+    // operand (a plain literal adapts to 'operand_type' via the expected-type
+    // coercion and is range-checked by it; a non-literal constant keeps its own
+    // declared type and is value-fit-checked below, since a u64 constant of 300
+    // used as a pattern on a u8 operand used to reach codegen, where the LLVM
+    // case value silently truncates — the mismatched-type pattern's VALUE must
+    // fit the operand type while the types themselves may differ, see
+    // example_match_const_expr_pattern), the fold-failure report, and
+    // duplicate-value / bool-coverage bookkeeping.
+    //
+    // 'pattern_scope' is whichever LocalScope the caller checks the pattern in.
+    void check_scalar_literal_arm(const ast::MatchExpr::LiteralPattern &lp, const SourceLocation &arm_loc,
+                                   const size_t arm_i, const ResolvedType &operand_type, const std::string_view noun,
+                                   LocalScope &pattern_scope, std::unordered_map<int64_t, size_t> &seen_values,
+                                   bool &true_covered, bool &false_covered,
+                                   const std::string &module_path, Program &program, DiagnosticEngine &diag,
+                                   const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) {
+        const auto pattern_is_constant = is_constant_expr(*lp.expr, module_path, program);
+        if (!pattern_is_constant) {
+            error(diag, arm_loc, std::format("{} arm pattern must be a compile-time constant", noun));
+        }
+        const auto pattern_ty = check_expr(*lp.expr, pattern_scope, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_error_type);
+        // Evaluate for duplicate detection
+        const auto val = evaluate_integer_constant(*lp.expr, module_path, program, diag);
+        if (!val && pattern_is_constant) {
+            // Constant in shape but not evaluatable: a division that overflows
+            // (INT64_MIN / -1), a shift of 64 or more, or a constant that
+            // isn't an integer at all (a string). Reported here because
+            // codegen needs a concrete value for the LLVM switch case and has
+            // nothing to fall back on. Floating-point operands are rejected
+            // earlier, so every pattern reaching here should otherwise fold.
+            //
+            // "an expression this position cannot evaluate" used to be a
+            // fourth cause: arm patterns went through a folder that knew
+            // fewer AST shapes than the one array lengths used, so
+            // 'size_of(i64)' failed here while working there. Both are one
+            // folder now (TYPE-11), so that cause is gone.
+            error(diag, arm_loc, std::format(
+                "{} arm pattern could not be folded to an integer constant "
+                "(an overflowing division, a shift of 64 or more, or a "
+                "constant that is not an integer)", noun));
+        }
+        if (val && operand_type.is_integer() && pattern_ty.is_integer() && pattern_ty != operand_type) {
+            const bool negative = *val < 0;
+            const auto magnitude = negative ? ~static_cast<uint64_t>(*val) + 1 : static_cast<uint64_t>(*val);
+            if (!integer_literal_fits(magnitude, negative, operand_type)) {
+                error(diag, arm_loc, std::format("{} arm pattern of type '{}' has value {}, which does not fit the operand type '{}' (range {})",
+                    noun, describe_type(pattern_ty, program), *val, describe_type(operand_type, program), describe_integer_range(operand_type)));
+            }
+        }
+        if (val) {
+            if (seen_values.count(*val)) {
+                error(diag, arm_loc, std::format("duplicate {} arm: value already covered by arm {}", noun, seen_values.at(*val) + 1));
+            } else {
+                seen_values[*val] = arm_i;
+                if (operand_type.kind == TypeKind::Bool) {
+                    if (*val == 0) false_covered = true;
+                    else if (*val == 1) true_covered = true;
+                }
+            }
+        }
+    }
+
+    // Variant-pattern handling for a tagged-union operand: variant lookup,
+    // duplicate-arm detection, coverage marking, unknown-variant report, and
+    // payload-capture binding into 'arm_locals' — by value, or by ref as a
+    // pointer to the payload with the escape check run via 'check_escape'
+    // (which walks the arm's value or body, the one place the two constructs
+    // differ here). Returns whether the variant exists; the caller checks the
+    // arm's body/value either way (with 'arm_locals' on true).
+    auto check_union_variant_arm(const ast::MatchExpr::VariantPattern &vp, const SourceLocation &arm_loc,
+                                  const UnionInfo &union_info, std::vector<bool> &covered, const std::string_view noun,
+                                  LocalScope &arm_locals, Program &program, DiagnosticEngine &diag,
+                                  const std::function<void(CaptureAliases &)> &check_escape) -> bool {
+        for (size_t i = 0; i < union_info.variants.size(); ++i) {
+            if (union_info.variants[i].name != vp.name) continue;
+            if (covered[i]) {
+                error(diag, arm_loc, std::format("duplicate {} arm for variant '{}'", noun, vp.name));
+            }
+            covered[i] = true;
+
+            const auto &variant = union_info.variants[i];
+            if (vp.capture_name) {
+                if (variant.payload_struct_index < 0) {
+                    error(diag, arm_loc, std::format("variant '{}' has no payload; cannot capture", vp.name));
+                } else {
+                    const ResolvedType payload_ty = variant.payload_type;
+                    if (vp.capture_by_ref) {
+                        arm_locals[*vp.capture_name] = LocalBinding{
+                            .type = intern_pointer(program, payload_ty),
+                            .is_mut = false,
+                        };
+                        CaptureAliases aliases{*vp.capture_name};
+                        check_escape(aliases);
+                    } else {
+                        arm_locals[*vp.capture_name] = LocalBinding{.type = payload_ty, .is_mut = false};
+                    }
+                }
+            }
+            return true;
+        }
+        error(diag, arm_loc, std::format("no variant '{}' on {}", vp.name, union_info.is_error_union ? "error" : "tagged union"));
+        return false;
+    }
+
+    // Variant-pattern handling for an enum operand: field lookup, duplicate-arm
+    // detection, coverage marking, unknown-field report. (The capture rejection
+    // stays at the call sites — the two constructs word it differently.)
+    void check_enum_field_arm(const ast::MatchExpr::VariantPattern &vp, const SourceLocation &arm_loc,
+                               const EnumInfo &enum_info, std::vector<bool> &covered, const std::string_view noun,
+                               DiagnosticEngine &diag) {
+        for (size_t i = 0; i < enum_info.fields.size(); ++i) {
+            if (enum_info.fields[i].name != vp.name) continue;
+            if (covered[i]) {
+                error(diag, arm_loc, std::format("duplicate {} arm for enum field '{}'", noun, vp.name));
+            }
+            covered[i] = true;
+            return;
+        }
+        error(diag, arm_loc, std::format("no enum field named '{}'", vp.name));
+    }
+
     auto check_match_expr(const ast::Expr &expr, const std::unique_ptr<ast::MatchExpr> &v, LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag, const std::optional<ResolvedType> expected, const int loop_depth, const int defer_loop_base, const ResolvedType *fn_error_type) -> ResolvedType {
         std::optional<size_t> default_arm_idx;
         const auto effective_operand = check_match_operand(
@@ -2752,11 +2885,27 @@ namespace sema {
             return ResolvedType{.kind = TypeKind::Opaque};
         }
 
+        // The arm-result accumulator all three families below share: the first arm's
+        // type becomes the expectation every later arm must repeat. This block used
+        // to be pasted after every check_expr(arm.value) in this function — six
+        // copies — and the pair had already drifted once.
+        ResolvedType arm_type{.kind = TypeKind::Invalid};
+        bool first_arm = true;
+        const auto check_and_unify_arm_value = [&](const ast::Expr &value, LocalScope &arm_locals, const SourceLocation &arm_loc) {
+            const auto val_type = check_expr(value, arm_locals, module_path, program, diag,
+                arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
+            if (first_arm) { arm_type = val_type; first_arm = false; }
+            else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
+                error(diag, arm_loc, "all match arms must have the same type");
+            }
+        };
+        const auto result_type = [&]() -> ResolvedType {
+            return arm_type.kind == TypeKind::Invalid ? ResolvedType{.kind = TypeKind::Void} : arm_type;
+        };
+
         // ---- Scalar match (integer or bool operand) ----
         if (operand_type.is_integer() || operand_type.kind == TypeKind::Bool) {
             std::unordered_map<int64_t, size_t> seen_values; // evaluated value -> arm index
-            ResolvedType arm_type{.kind = TypeKind::Invalid};
-            bool first_arm = true;
             bool true_covered = false, false_covered = false;
 
             for (size_t arm_i = 0; arm_i < v->arms.size(); ++arm_i) {
@@ -2770,79 +2919,13 @@ namespace sema {
 
                 auto arm_locals = locals;
 
-                if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
-                    // Default arm value
-                    const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
-                        arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
-                    if (first_arm) { arm_type = val_type; first_arm = false; }
-                    else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
-                        error(diag, arm_loc, "all match arms must have the same type");
-                    }
-                    continue;
+                if (!std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
+                    const auto &lp = std::get<ast::MatchExpr::LiteralPattern>(arm.pattern);
+                    check_scalar_literal_arm(lp, arm_loc, arm_i, operand_type, "match", arm_locals,
+                                              seen_values, true_covered, false_covered,
+                                              module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
                 }
-
-                const auto &lp = std::get<ast::MatchExpr::LiteralPattern>(arm.pattern);
-                // Pattern must be compile-time constant
-                const auto pattern_is_constant = is_constant_expr(*lp.expr, module_path, program);
-                if (!pattern_is_constant) {
-                    error(diag, arm_loc, "match arm pattern must be a compile-time constant");
-                }
-                // Type-check the pattern against the operand type. A plain literal
-                // adapts to 'operand_type' via the expected-type coercion (and is
-                // range-checked by it); a non-literal constant keeps its own declared
-                // type and was never validated at all, so a u64 constant of 300 used as
-                // a pattern in a match on u8 reached codegen, where the LLVM case value
-                // silently truncates. The mismatched-type pattern's VALUE must fit the
-                // operand type; the types themselves may differ ('size_of(i64)' — a
-                // usize — is an accepted pattern for an i64 operand, see
-                // example_match_const_expr_pattern).
-                const auto pattern_ty = check_expr(*lp.expr, arm_locals, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_error_type);
-                // Evaluate for duplicate detection
-                const auto val = evaluate_integer_constant(*lp.expr, module_path, program, diag);
-                if (!val && pattern_is_constant) {
-                    // Constant in shape but not evaluatable: a division that overflows
-                    // (INT64_MIN / -1), a shift of 64 or more, or a constant that
-                    // isn't an integer at all (a string). Reported here because
-                    // codegen needs a concrete value for the LLVM switch case and has
-                    // nothing to fall back on. Floating-point operands are rejected
-                    // earlier, so every pattern reaching here should otherwise fold.
-                    //
-                    // "an expression this position cannot evaluate" used to be a
-                    // fourth cause: arm patterns went through a folder that knew
-                    // fewer AST shapes than the one array lengths used, so
-                    // 'size_of(i64)' failed here while working there. Both are one
-                    // folder now (TYPE-11), so that cause is gone.
-                    error(diag, arm_loc,
-                        "match arm pattern could not be folded to an integer constant "
-                        "(an overflowing division, a shift of 64 or more, or a "
-                        "constant that is not an integer)");
-                }
-                if (val && operand_type.is_integer() && pattern_ty.is_integer() && pattern_ty != operand_type) {
-                    const bool negative = *val < 0;
-                    const auto magnitude = negative ? ~static_cast<uint64_t>(*val) + 1 : static_cast<uint64_t>(*val);
-                    if (!integer_literal_fits(magnitude, negative, operand_type)) {
-                        error(diag, arm_loc, std::format("match arm pattern of type '{}' has value {}, which does not fit the operand type '{}' (range {})",
-                            describe_type(pattern_ty, program), *val, describe_type(operand_type, program), describe_integer_range(operand_type)));
-                    }
-                }
-                if (val) {
-                    if (seen_values.count(*val)) {
-                        error(diag, arm_loc, std::format("duplicate match arm: value already covered by arm {}", seen_values.at(*val) + 1));
-                    } else {
-                        seen_values[*val] = arm_i;
-                        if (operand_type.kind == TypeKind::Bool) {
-                            if (*val == 0) false_covered = true;
-                            else if (*val == 1) true_covered = true;
-                        }
-                    }
-                }
-                // Check arm result value
-                const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
-                    arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
-                if (first_arm) { arm_type = val_type; first_arm = false; }
-                else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
-                    error(diag, arm_loc, "all match arms must have the same type");
-                }
+                check_and_unify_arm_value(arm.value, arm_locals, arm_loc);
             }
 
             // Exhaustiveness
@@ -2860,7 +2943,7 @@ namespace sema {
                 }
             }
 
-            return arm_type.kind == TypeKind::Invalid ? ResolvedType{.kind = TypeKind::Void} : arm_type;
+            return result_type();
         }
 
         // ---- Tagged union match ----
@@ -2886,21 +2969,14 @@ namespace sema {
                 }
             }
 
-            ResolvedType arm_type{.kind = TypeKind::Invalid};
-            bool first_arm = true;
             std::vector<bool> covered(union_info.variants.size(), false);
 
             for (const auto &arm : v->arms) {
+                // Arm-local copy, as in the scalar path: an arm body's error-state
+                // narrowing must not leak into sibling arms.
+                auto arm_locals = locals;
                 if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
-                    // Arm-local copy, as in the scalar path: an arm body's error-state
-                    // narrowing must not leak into sibling arms.
-                    auto arm_locals = locals;
-                    const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
-                        arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
-                    if (first_arm) { arm_type = val_type; first_arm = false; }
-                    else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
-                        error(diag, arm.location, "all match arms must have the same type");
-                    }
+                    check_and_unify_arm_value(arm.value, arm_locals, arm.location);
                     continue;
                 }
                 if (!std::holds_alternative<ast::MatchExpr::VariantPattern>(arm.pattern)) {
@@ -2909,50 +2985,15 @@ namespace sema {
                 }
                 const auto &vp = std::get<ast::MatchExpr::VariantPattern>(arm.pattern);
 
-                bool found = false;
-                for (size_t i = 0; i < union_info.variants.size(); ++i) {
-                    if (union_info.variants[i].name == vp.name) {
-                        if (covered[i]) {
-                            error(diag, arm.location, std::format("duplicate match arm for variant '{}'", vp.name));
-                        }
-                        covered[i] = true;
-                        found = true;
-
-                        const auto &variant = union_info.variants[i];
-                        auto arm_locals = locals;
-
-                        if (vp.capture_name) {
-                            if (variant.payload_struct_index < 0) {
-                                error(diag, arm.location, std::format("variant '{}' has no payload; cannot capture", vp.name));
-                            } else {
-                                const ResolvedType payload_ty = variant.payload_type;
-                                if (vp.capture_by_ref) {
-                                    arm_locals[*vp.capture_name] = LocalBinding{
-                                        .type = intern_pointer(program, payload_ty),
-                                        .is_mut = false,
-                                    };
-                                    CaptureAliases aliases{*vp.capture_name};
-                                    check_payload_capture_escape_expr(arm.value, aliases, diag);
-                                } else {
-                                    arm_locals[*vp.capture_name] = LocalBinding{.type = payload_ty, .is_mut = false};
-                                }
-                            }
-                        }
-
-                        const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
-                                                         arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
-                        if (first_arm) {
-                            arm_type = val_type;
-                            first_arm = false;
-                        } else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
-                            error(diag, arm.location, "all match arms must have the same type");
-                        }
-                        break;
-                    }
-                }
-                if (!found) {
-                    error(diag, arm.location, std::format("no variant '{}' on {}", vp.name, union_info.is_error_union ? "error" : "tagged union"));
-                    auto arm_locals = locals;
+                const bool found = check_union_variant_arm(vp, arm.location, union_info, covered, "match",
+                    arm_locals, program, diag,
+                    [&](CaptureAliases &aliases) { check_payload_capture_escape_expr(arm.value, aliases, diag); });
+                if (found) {
+                    check_and_unify_arm_value(arm.value, arm_locals, arm.location);
+                } else {
+                    // Unknown variant: the arm's value is still checked (with no capture
+                    // bound and no expectation), and deliberately never reports an
+                    // arms-disagree error — the missing variant is the real problem.
                     const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
                     if (first_arm) { arm_type = val_type; first_arm = false; }
                 }
@@ -2970,7 +3011,7 @@ namespace sema {
                 error(diag, v->arms[*default_arm_idx].location, "unreachable default arm: all variants are already covered");
             }
 
-            return arm_type.kind == TypeKind::Invalid ? ResolvedType{.kind = TypeKind::Void} : arm_type;
+            return result_type();
         }
 
         // ---- Enum match ----
@@ -2984,19 +3025,12 @@ namespace sema {
         }
         const auto &enum_info = *enum_info_ptr;
 
-        ResolvedType arm_type{.kind = TypeKind::Invalid};
-        bool first_arm = true;
         std::vector<bool> covered(enum_info.fields.size(), false);
 
         for (const auto &arm : v->arms) {
+            auto arm_locals = locals;
             if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
-                auto arm_locals = locals;
-                const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
-                    arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
-                if (first_arm) { arm_type = val_type; first_arm = false; }
-                else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
-                    error(diag, arm.location, "all match arms must have the same type");
-                }
+                check_and_unify_arm_value(arm.value, arm_locals, arm.location);
                 continue;
             }
             if (!std::holds_alternative<ast::MatchExpr::VariantPattern>(arm.pattern)) {
@@ -3008,28 +3042,8 @@ namespace sema {
             if (vp.capture_name) {
                 error(diag, arm.location, "payload capture is only valid for tagged union match arms");
             }
-            bool found = false;
-            for (size_t i = 0; i < enum_info.fields.size(); ++i) {
-                if (enum_info.fields[i].name == vp.name) {
-                    if (covered[i]) {
-                        error(diag, arm.location, std::format("duplicate match arm for enum field '{}'", vp.name));
-                    }
-                    covered[i] = true;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                error(diag, arm.location, std::format("no enum field named '{}'", vp.name));
-            }
-
-            auto arm_locals = locals;
-            const auto val_type = check_expr(arm.value, arm_locals, module_path, program, diag,
-                arm_type.kind != TypeKind::Invalid ? std::optional<ResolvedType>{arm_type} : expected, loop_depth, defer_loop_base, fn_error_type);
-            if (first_arm) { arm_type = val_type; first_arm = false; }
-            else if (arm_type.kind != TypeKind::Invalid && val_type != arm_type) {
-                error(diag, arm.location, "all match arms must have the same type");
-            }
+            check_enum_field_arm(vp, arm.location, enum_info, covered, "match", diag);
+            check_and_unify_arm_value(arm.value, arm_locals, arm.location);
         }
 
         const bool has_default = default_arm_idx.has_value();
@@ -3042,7 +3056,7 @@ namespace sema {
             error(diag, v->arms[*default_arm_idx].location, "unreachable default arm: all enum fields are already covered");
         }
 
-        return arm_type.kind == TypeKind::Invalid ? ResolvedType{.kind = TypeKind::Void} : arm_type;
+        return result_type();
 
     }
 
@@ -3095,39 +3109,9 @@ namespace sema {
                     continue;
                 }
                 const auto &lp = std::get<ast::MatchExpr::LiteralPattern>(arm.pattern);
-                const auto pattern_is_constant = is_constant_expr(*lp.expr, module_path, program);
-                if (!pattern_is_constant) {
-                    diag.report_error(DiagnosticStage::Sema, arm.location, "switch arm pattern must be a compile-time constant");
-                }
-                // Same value-fit validation as the match path above.
-                const auto pattern_ty = check_expr(*lp.expr, locals, module_path, program, diag, operand_type, loop_depth, defer_loop_base, fn_error_type);
-                const auto val = evaluate_integer_constant(*lp.expr, module_path, program, diag);
-                if (val && operand_type.is_integer() && pattern_ty.is_integer() && pattern_ty != operand_type) {
-                    const bool negative = *val < 0;
-                    const auto magnitude = negative ? ~static_cast<uint64_t>(*val) + 1 : static_cast<uint64_t>(*val);
-                    if (!integer_literal_fits(magnitude, negative, operand_type)) {
-                        diag.report_error(DiagnosticStage::Sema, arm.location, std::format("switch arm pattern of type '{}' has value {}, which does not fit the operand type '{}' (range {})",
-                            describe_type(pattern_ty, program), *val, describe_type(operand_type, program), describe_integer_range(operand_type)));
-                    }
-                }
-                if (!val && pattern_is_constant) {
-                    // See the matching comment in the match-expression path above.
-                    diag.report_error(DiagnosticStage::Sema, arm.location,
-                        "switch arm pattern could not be folded to an integer constant "
-                        "(an overflowing division, a shift of 64 or more, or a "
-                        "constant that is not an integer)");
-                }
-                if (val) {
-                    if (seen_values.count(*val)) {
-                        diag.report_error(DiagnosticStage::Sema, arm.location, std::format("duplicate switch arm: value already covered by arm {}", seen_values.at(*val) + 1));
-                    } else {
-                        seen_values[*val] = arm_i;
-                        if (operand_type.kind == TypeKind::Bool) {
-                            if (*val == 0) false_covered = true;
-                            else if (*val == 1) true_covered = true;
-                        }
-                    }
-                }
+                check_scalar_literal_arm(lp, arm.location, arm_i, operand_type, "switch", locals,
+                                          seen_values, true_covered, false_covered,
+                                          module_path, program, diag, loop_depth, defer_loop_base, fn_error_type);
                 auto arm_locals = locals;
                 check_stmt(arm.body, arm_locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
             }
@@ -3175,40 +3159,15 @@ namespace sema {
                     continue;
                 }
                 const auto &vp = std::get<ast::MatchExpr::VariantPattern>(arm.pattern);
-                bool found = false;
-                for (size_t i = 0; i < union_info.variants.size(); ++i) {
-                    if (union_info.variants[i].name == vp.name) {
-                        if (covered[i]) {
-                            diag.report_error(DiagnosticStage::Sema, arm.location, std::format("duplicate switch arm for variant '{}'", vp.name));
-                        }
-                        covered[i] = true;
-                        found = true;
-                        const auto &variant = union_info.variants[i];
-                        auto arm_locals = locals;
-                        if (vp.capture_name) {
-                            if (variant.payload_struct_index < 0) {
-                                diag.report_error(DiagnosticStage::Sema, arm.location, std::format("variant '{}' has no payload; cannot capture", vp.name));
-                            } else {
-                                const ResolvedType payload_ty = variant.payload_type;
-                                if (vp.capture_by_ref) {
-                                    arm_locals[*vp.capture_name] = LocalBinding{
-                                        .type = intern_pointer(program, payload_ty),
-                                        .is_mut = false,
-                                    };
-                                    CaptureAliases aliases{*vp.capture_name};
-                                    check_payload_capture_escape(arm.body, aliases, diag);
-                                } else {
-                                    arm_locals[*vp.capture_name] = LocalBinding{.type = payload_ty, .is_mut = false};
-                                }
-                            }
-                        }
-                        check_stmt(arm.body, arm_locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
-                        break;
-                    }
-                }
-                if (!found) {
-                    diag.report_error(DiagnosticStage::Sema, arm.location,
-                        std::format("no variant '{}' on {}", vp.name, union_info.is_error_union ? "error" : "tagged union"));
+                auto arm_locals = locals;
+                const bool found = check_union_variant_arm(vp, arm.location, union_info, covered, "switch",
+                    arm_locals, program, diag,
+                    [&](CaptureAliases &aliases) { check_payload_capture_escape(arm.body, aliases, diag); });
+                // An unknown variant's body is deliberately NOT checked (unchanged): with
+                // no capture bindable, its statements would cascade unknown-identifier
+                // noise under the real diagnostic.
+                if (found) {
+                    check_stmt(arm.body, arm_locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
                 }
             }
             if (default_arm_idx && std::ranges::all_of(covered, [](bool b) { return b; })) {
@@ -3243,20 +3202,7 @@ namespace sema {
             if (vp.capture_name) {
                 diag.report_error(DiagnosticStage::Sema, arm.location, "payload capture is only valid for tagged union arms");
             }
-            bool found = false;
-            for (size_t i = 0; i < enum_info.fields.size(); ++i) {
-                if (enum_info.fields[i].name == vp.name) {
-                    if (covered[i]) {
-                        diag.report_error(DiagnosticStage::Sema, arm.location, std::format("duplicate switch arm for enum field '{}'", vp.name));
-                    }
-                    covered[i] = true;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                diag.report_error(DiagnosticStage::Sema, arm.location, std::format("no enum field named '{}'", vp.name));
-            }
+            check_enum_field_arm(vp, arm.location, enum_info, covered, "switch", diag);
             auto arm_locals = locals;
             check_stmt(arm.body, arm_locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
         }
