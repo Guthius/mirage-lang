@@ -1,0 +1,16 @@
+// example_var_decl_not_a_group — a fully-parsed declaration followed by a comma is not a
+// group declaration. The FE-9 refactor re-inspected "is the current token a comma" after
+// parsing, so 'mut a := 7, b := two()' (invalid grammar) silently misparsed as the group
+// 'a, b := two()', discarding ':= 7' with zero diagnostics (caught by the verification
+// re-review). Group headers are now detected only at the comma immediately after the name.
+//
+// Expected: parse error at the comma.
+
+fn two() -> (i32, i32) {
+    return 30, 12
+}
+
+pub fn main() -> i32 {
+    mut a := 7, b := two()
+    return a
+}

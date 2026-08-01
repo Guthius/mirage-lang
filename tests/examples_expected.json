@@ -996,6 +996,11 @@
     "action": "run",
     "exit": 0
   },
+  "example_var_decl_not_a_group": {
+    "action": "build",
+    "diag": "examples/example_var_decl_not_a_group/main.mir:14:15: error: expected expression, got ','",
+    "exit": 1
+  },
   "example_var_group_missing_name": {
     "action": "build",
     "diag": "examples/example_var_group_missing_name/main.mir:19:13: error: expected a name or '_' in a declaration group; use '_' to discard a value",

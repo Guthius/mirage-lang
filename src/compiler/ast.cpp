@@ -2214,6 +2214,13 @@ namespace ast {
             std::optional<Type> type;
             std::optional<Expr> init;
             SourceLocation location;
+            // True only when parsing stopped at a comma IMMEDIATELY after the name — the
+            // group-declaration header shape. The caller must branch on this, not on
+            // "is the current token a comma": a fully-parsed declaration whose
+            // initializer happens to end right before a comma ('mut a := 7, b := f()',
+            // invalid grammar) otherwise silently misparses as a group declaration,
+            // discarding the first initializer.
+            bool is_group_header = false;
         };
 
         // 'allow_group': the statement form supports 'a, b := f()' group declarations;
@@ -2232,6 +2239,7 @@ namespace ast {
 
             parts.name = parser.expect_identifier();
             if (allow_group && parser.check(TokenKind::Comma)) {
+                parts.is_group_header = true;
                 return parts;
             }
 
@@ -2289,7 +2297,7 @@ namespace ast {
 
         auto parse_var_decl_stmt(Parser &parser) -> Stmt {
             auto parts = parse_var_decl_parts(parser, /*allow_group=*/true);
-            if (parser.check(TokenKind::Comma)) {
+            if (parts.is_group_header) {
                 return parse_var_decl_group_stmt(parser, parts.is_mut, parts.location, std::move(parts.name));
             }
 
