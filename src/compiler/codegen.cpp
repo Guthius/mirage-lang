@@ -1201,8 +1201,41 @@ namespace codegen {
                 }
             }
 
+            // Every loaded module, in the order the resolver first reached it (depth-first
+            // from the root, forced '--load' modules appended) rather than in
+            // sema_program_.modules' hash order.
+            //
+            // Emission order becomes a function of the source rather than of string hashes.
+            // Builds were already reproducible either way -- hash order is deterministic for
+            // identical input -- but an unrelated change (adding a module, renaming a path)
+            // reshuffled the whole output, which makes an IR diff between two builds
+            // uninformative. That matters most for the backend port, where diffable output
+            // is the primary debugging surface.
+            //
+            // Anything missing from the trace is appended rather than dropped, so this can
+            // never silently lose a module.
+            auto modules_in_order() const -> std::vector<std::pair<const std::string *, const sema::ProgramModule *>> {
+                std::vector<std::pair<const std::string *, const sema::ProgramModule *>> out;
+                out.reserve(sema_program_.modules.size());
+                std::unordered_set<std::string> seen;
+                for (const auto &path : ast_program_.module_order) {
+                    const auto it = sema_program_.modules.find(path);
+                    if (it == sema_program_.modules.end()) continue;
+                    out.emplace_back(&it->first, &it->second);
+                    seen.insert(path);
+                }
+                for (const auto &entry : sema_program_.modules) {
+                    if (!seen.contains(entry.first)) {
+                        out.emplace_back(&entry.first, &entry.second);
+                    }
+                }
+                return out;
+            }
+
             void declare_globals_and_functions() {
-                for (const auto &[path, mod] : sema_program_.modules) {
+                for (const auto &[path_ptr, mod_ptr] : modules_in_order()) {
+                    const auto &path = *path_ptr;
+                    const auto &mod = *mod_ptr;
                     for (const auto &[name, sym] : mod.symbols) {
                         // A bare-import alias's GlobalSymbol/FunctionSymbol shares its
                         // underlying decl (and, for a function, its already-checked body)
@@ -1307,7 +1340,9 @@ namespace codegen {
                 // global_key(*current_module_path_, name) — i.e. keyed off the CALL SITE'S OWN
                 // module, never off any "true origin" concept — so without this, those lookups
                 // would throw for any reference to a bare-imported fn/global.
-                for (const auto &[path, mod] : sema_program_.modules) {
+                for (const auto &[path_ptr, mod_ptr] : modules_in_order()) {
+                    const auto &path = *path_ptr;
+                    const auto &mod = *mod_ptr;
                     for (const auto &[alias_name, origin] : mod.bare_import_origins) {
                         const auto &origin_path = origin.module_path;
                         const auto &origin_name = origin.symbol_name;
@@ -1920,7 +1955,9 @@ namespace codegen {
             }
 
             void emit_global_initializers() {
-                for (const auto &[path, mod] : sema_program_.modules) {
+                for (const auto &[path_ptr, mod_ptr] : modules_in_order()) {
+                    const auto &path = *path_ptr;
+                    const auto &mod = *mod_ptr;
                     const ScopedEmitModule module_scope(*this, path, mod);
 
                     for (const auto &[name, sym] : mod.symbols) {
@@ -1986,7 +2023,9 @@ namespace codegen {
             }
 
             void emit_functions() {
-                for (const auto &[path, mod] : sema_program_.modules) {
+                for (const auto &[path_ptr, mod_ptr] : modules_in_order()) {
+                    const auto &path = *path_ptr;
+                    const auto &mod = *mod_ptr;
                     const ScopedEmitModule module_scope(*this, path, mod);
 
                     for (const auto &[name, sym] : mod.symbols) {
@@ -2015,7 +2054,9 @@ namespace codegen {
             }
 
             void declare_methods() {
-                for (const auto &[path, mod] : sema_program_.modules) {
+                for (const auto &[path_ptr, mod_ptr] : modules_in_order()) {
+                    const auto &path = *path_ptr;
+                    const auto &mod = *mod_ptr;
                     for (const auto &[type_name, method_map] : mod.methods) {
                         for (const auto &[method_name, info] : method_map) {
                             if (!info.is_resolved) continue;
@@ -3231,7 +3272,9 @@ namespace codegen {
             }
 
             void emit_methods() {
-                for (const auto &[path, mod] : sema_program_.modules) {
+                for (const auto &[path_ptr, mod_ptr] : modules_in_order()) {
+                    const auto &path = *path_ptr;
+                    const auto &mod = *mod_ptr;
                     const ScopedEmitModule module_scope(*this, path, mod);
                     for (const auto &[type_name, method_map] : mod.methods) {
                         for (const auto &info : method_map | std::views::values) {
