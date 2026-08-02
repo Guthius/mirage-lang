@@ -657,10 +657,14 @@ namespace mir {
             return std::format("%{}", value);
         }
 
+        // Block references always carry the block INDEX, not just its label. Labels are a
+        // readability aid chosen by the emitter and are freely duplicated -- nested 'if's
+        // all produce "if.end" -- so a label-only reference makes the text ambiguous exactly
+        // where control flow is hardest to follow.
         auto block_ref(const Function &fn, const uint32_t block) -> std::string {
             if (block >= fn.blocks.size()) return std::format("<bad block {}>", block);
             const auto &label = fn.blocks[block].label;
-            return label.empty() ? std::format("^{}", block) : std::format("^{}", label);
+            return label.empty() ? std::format("^{}", block) : std::format("^{}.{}", label, block);
         }
 
         void print_inst(std::string &out, const Module &module, const Function &fn, const Inst &inst) {

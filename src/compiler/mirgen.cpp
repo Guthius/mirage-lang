@@ -552,6 +552,9 @@ namespace mirgen {
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhileStmt>>) {
                         emit_while(b, *v, returns);
 
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SwitchStmt>>) {
+                        emit_switch(b, *v, returns);
+
                     } else if constexpr (std::is_same_v<V, ast::ReturnOkStmt>) {
                         emit_return_ok(b, v, returns);
 
@@ -748,6 +751,110 @@ namespace mirgen {
                 b.ret();
             }
 
+            // 'switch' over an integer, bool or enum operand. MIR has a Switch terminator
+            // taking (value, block) pairs plus a default, which is exactly this shape.
+            //
+            // A tagged-union operand switches on the TAG rather than the value, and its
+            // payload-capturing arms need the tagged-union work; reported for now.
+            void emit_switch(mir::Builder &b, const ast::SwitchStmt &stmt,
+                              const std::vector<sema::ResolvedType> &returns) {
+                const auto operand_type = expr_type(stmt.operand);
+                if (!is_scalar(operand_type)) {
+                    unsupported("a 'switch' on a tagged union", stmt.location);
+                    return;
+                }
+                const auto scrutinee = emit_expr(b, stmt.operand);
+                if (scrutinee == mir::NO_VALUE) return;
+
+                const auto end_block = b.create_block("switch.end");
+                auto default_block = end_block;
+
+                // Arms are laid out first so every case can name its block before the
+                // terminator that references them is emitted.
+                std::vector<std::pair<int64_t, mir::BlockId>> cases;
+                std::vector<std::pair<mir::BlockId, const ast::Stmt *>> bodies;
+                bool ok = true;
+
+                for (size_t i = 0; i < stmt.arms.size(); ++i) {
+                    const auto &arm = stmt.arms[i];
+                    const auto block = b.create_block(std::format("switch.arm{}", i));
+                    bodies.emplace_back(block, &arm.body);
+
+                    std::visit([&]<typename P>(const P &pattern) {
+                        using PT = std::decay_t<P>;
+                        if constexpr (std::is_same_v<PT, ast::MatchExpr::DefaultPattern>) {
+                            default_block = block;
+                        } else if constexpr (std::is_same_v<PT, ast::MatchExpr::VariantPattern>) {
+                            // '.Variant' on an enum operand is its declared value.
+                            if (operand_type.kind == sema::TypeKind::Enum) {
+                                if (const auto *info = sema_.enum_at(operand_type.enum_index)) {
+                                    for (const auto &field : info->fields) {
+                                        if (field.name == pattern.name) {
+                                            cases.emplace_back(field.value, block);
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            unsupported("a 'switch' arm pattern of this kind", arm.location);
+                            ok = false;
+                        } else {
+                            // A literal pattern: sema guaranteed it is a compile-time
+                            // constant of the operand's type.
+                            if (const auto value = constant_int(*pattern.expr)) {
+                                cases.emplace_back(*value, block);
+                            } else {
+                                unsupported("a non-constant 'switch' arm pattern", arm.location);
+                                ok = false;
+                            }
+                        }
+                    }, arm.pattern);
+                }
+                if (!ok) return;
+
+                b.switch_on(scrutinee, default_block, cases);
+
+                for (const auto &[block, body] : bodies) {
+                    b.set_insert_point(block);
+                    emit_stmt(b, *body, returns);
+                    // 'switch' arms do not fall through.
+                    if (!b.block_is_terminated()) b.jump(end_block);
+                }
+
+                b.set_insert_point(end_block);
+            }
+
+            // A compile-time integer constant, for switch/match arm patterns. Only the
+            // shapes a pattern can actually be: an integer or character literal, a bool, or
+            // an enum variant reference.
+            [[nodiscard]] auto constant_int(const ast::Expr &expr) const -> std::optional<int64_t> {
+                if (const auto *i = std::get_if<ast::LiteralIntegerExpr>(&expr)) {
+                    return static_cast<int64_t>(i->value);
+                }
+                if (const auto *c = std::get_if<ast::LiteralCharExpr>(&expr)) {
+                    return static_cast<int64_t>(c->value);
+                }
+                if (const auto *bl = std::get_if<ast::LiteralBoolExpr>(&expr)) {
+                    return bl->value ? 1 : 0;
+                }
+                if (const auto *u = std::get_if<std::unique_ptr<ast::UnaryExpr>>(&expr)) {
+                    if ((*u)->op == ast::UnaryOp::Negate) {
+                        if (const auto inner = constant_int((*u)->operand)) return -*inner;
+                    }
+                }
+                if (const auto *dot = std::get_if<ast::DotIdentExpr>(&expr)) {
+                    const auto type = expr_type(expr);
+                    if (type.kind == sema::TypeKind::Enum) {
+                        if (const auto *info = sema_.enum_at(type.enum_index)) {
+                            for (const auto &field : info->fields) {
+                                if (field.name == dot->name) return field.value;
+                            }
+                        }
+                    }
+                }
+                return std::nullopt;
+            }
+
             void emit_if(mir::Builder &b, const ast::IfStmt &stmt, const std::vector<sema::ResolvedType> &returns) {
                 const auto cond = emit_condition(b, stmt.condition);
                 if (cond == mir::NO_VALUE) return;
@@ -796,6 +903,20 @@ namespace mirgen {
             // A condition must be I1. Integer conditions (the truthiness 'when' and 'if'
             // accept) become a non-zero comparison.
             auto emit_condition(mir::Builder &b, const ast::Expr &expr) -> mir::ValueId {
+                // An error value in boolean context tests its Ok/Failed tag (spec §16). The
+                // error union is an aggregate, so its "value" is an address and the tag is
+                // the u32 at offset 0 -- 'Failed' being non-zero is what makes 'if err' read
+                // as "if it failed".
+                const auto type = expr_type(expr);
+                if (type.kind == sema::TypeKind::Union) {
+                    if (const auto *info = sema_.union_at(type.union_index); info && info->is_error_union) {
+                        const auto address = emit_expr(b, expr);
+                        if (address == mir::NO_VALUE) return mir::NO_VALUE;
+                        return b.compare(mir::Op::ICmpNe, b.load(mir::Ty::I32, address),
+                                          b.const_int(mir::Ty::I32, 0));
+                    }
+                }
+
                 const auto value = emit_expr(b, expr);
                 if (value == mir::NO_VALUE) return mir::NO_VALUE;
                 const auto ty = b.value_type(value);
@@ -803,7 +924,11 @@ namespace mirgen {
                 if (mir::is_integer(ty)) {
                     return b.compare(mir::Op::ICmpNe, value, b.const_int(ty, 0));
                 }
-                unsupported("a non-integer condition", sema::get_expr_location(expr));
+                if (ty == mir::Ty::Ptr) {
+                    // A pointer in boolean context is a null test.
+                    return b.compare(mir::Op::ICmpNe, value, b.const_null());
+                }
+                unsupported("a condition of this type", sema::get_expr_location(expr));
                 return mir::NO_VALUE;
             }
 
@@ -1050,8 +1175,16 @@ namespace mirgen {
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
                         return emit_call(b, *v, expr);
 
-                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>> ||
-                                          std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
+                        // 'Dir.South' names an enum variant through its TYPE, which is a
+                        // constant -- unlike 'p.kind', which reads a field that happens to
+                        // be enum-typed. The object decides which, so it is what we test.
+                        if (const auto value = enum_member_constant(b, *v, expr); value != mir::NO_VALUE) {
+                            return value;
+                        }
+                        return emit_load_from_address(b, expr, loc, expr_kind_name<V>());
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
                         return emit_load_from_address(b, expr, loc, expr_kind_name<V>());
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
@@ -1227,9 +1360,14 @@ namespace mirgen {
                     return b.unary(mir::is_float(ty) ? mir::Op::FNeg : mir::Op::Neg, ty, operand);
                 case ast::UnaryOp::LogicalNot:
                     // On a bool this is Op::Not, which is width-correct for I1. On an
-                    // integer (the truthiness form) it is "== 0".
+                    // integer (the truthiness form) it is "== 0", and on a pointer it is a
+                    // null test -- comparing a pointer against a const.int would have been
+                    // ill-typed, which is what the MIR verifier caught.
                     if (ty == mir::Ty::I1) return b.unary(mir::Op::Not, ty, operand);
-                    return b.compare(mir::Op::ICmpEq, operand, b.const_int(ty, 0));
+                    if (ty == mir::Ty::Ptr) return b.compare(mir::Op::ICmpEq, operand, b.const_null());
+                    if (mir::is_integer(ty)) return b.compare(mir::Op::ICmpEq, operand, b.const_int(ty, 0));
+                    unsupported("'!' on this operand type", un.location);
+                    return mir::NO_VALUE;
                 case ast::UnaryOp::BitwiseNot:
                     return b.unary(mir::Op::Not, ty, operand);
                 default:
@@ -1664,6 +1802,48 @@ namespace mirgen {
                 // it belongs with the tagged-union work.
                 unsupported(std::format("a '.{}' reference of this type", dot.name), dot.location);
                 return mir::NO_VALUE;
+            }
+
+            // 'Dir.South' / 'mod.Dir.South' -- an enum variant reached through its type
+            // rather than through a value. Returns NO_VALUE when the object is a VALUE (a
+            // struct whose field happens to be enum-typed), which must go through the
+            // ordinary address path instead.
+            auto enum_member_constant(mir::Builder &b, const ast::MemberExpr &member,
+                                       const ast::Expr &expr) -> mir::ValueId {
+                const auto type = expr_type(expr);
+                if (type.kind != sema::TypeKind::Enum) return mir::NO_VALUE;
+                if (!names_a_type(member.object)) return mir::NO_VALUE;
+
+                if (const auto *info = sema_.enum_at(type.enum_index)) {
+                    for (const auto &field : info->fields) {
+                        if (field.name == member.member) {
+                            return b.const_int(scalar_type(type), field.value);
+                        }
+                    }
+                }
+                return mir::NO_VALUE;
+            }
+
+            // Whether an expression names a TYPE rather than a value: a bare identifier
+            // bound to a TypeSymbol, or such a name reached through a module namespace.
+            [[nodiscard]] auto names_a_type(const ast::Expr &expr) const -> bool {
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
+                    if (!module_) return false;
+                    // A local shadows a type name, and a local is always a value.
+                    if (locals_.contains(ident->name)) return false;
+                    const auto it = module_->symbols.find(ident->name);
+                    return it != module_->symbols.end() && std::holds_alternative<sema::TypeSymbol>(it->second);
+                }
+                if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr)) {
+                    if (const auto *target = namespace_target((*member)->object)) {
+                        const auto mod = sema_.modules.find(*target);
+                        if (mod == sema_.modules.end()) return false;
+                        const auto it = mod->second.symbols.find((*member)->member);
+                        return it != mod->second.symbols.end() &&
+                               std::holds_alternative<sema::TypeSymbol>(it->second);
+                    }
+                }
+                return false;
             }
 
             // ---- coercion ----------------------------------------------------------

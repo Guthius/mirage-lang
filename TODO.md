@@ -83,9 +83,23 @@ Done:
   (45), `match` (30), calls through a function pointer (28), trait-handle method calls
   (26), non-integer conditions (23), `type_of` (22), group declarations (21).
 
-  The error-return statements are the next natural step — `return_err`/`return_ok` are the
-  two halves of `error(...)`'s tagged representation and together account for 112
-  occurrences, more than any other pair.
+- **Stage 2, fifth and sixth increments** — sret (any aggregate or multi-return travels
+  through a caller-owned pointer; returning a callee slot's address would dangle),
+  `return_ok`/`return_err` building the `error(...)` tagged blob into it, enum variant
+  references in both `.Variant` and `Type.Variant` spellings, `switch` on integer/bool/enum
+  operands via the MIR switch terminator, and conditions on pointers (null test) and error
+  values (Ok/Failed tag).
+
+  **Coverage: 27 of 271 corpus modules lower fully.**
+
+  Largest remaining blockers: `return_err`/`return_ok` in *multi-return* functions
+  (`-> (T, error(E))`, 72 combined — a different lowering, not the same one unfinished),
+  `switch`/`match` on tagged unions (79), calls through a function pointer (28), trait-handle
+  method calls (26), `try` (23), `type_of` (22), group declarations (21), character
+  literals (20).
+
+  Still entirely absent from stage 2: `defer`, `for-in`, `when` statements, generics
+  (monomorphized instances), inline `asm`, global initializers, trait vtables.
 
 Remaining:
 

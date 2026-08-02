@@ -17,6 +17,7 @@ Not wired into ctest (it needs a built compiler). Run manually:
     python3 tests/mirgen_test.py
 """
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -81,7 +82,10 @@ def case_short_circuit_uses_block_parameters():
     check(r.returncode == 0, "short-circuit '&&' lowers cleanly")
     check("^and.rhs" in r.stdout and "^logic.short" in r.stdout,
           "the right operand is guarded by its own block")
-    check("^and.end(%" in r.stdout, "the merge is a BLOCK PARAMETER, not a phi")
+    # Block references carry the block index, so labels stay unambiguous when nested
+    # control flow produces several blocks with the same name.
+    check(re.search(r"\^and\.end\.\d+\(%", r.stdout) is not None,
+          "the merge is a BLOCK PARAMETER, not a phi")
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
@@ -267,6 +271,28 @@ def case_error_returns():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_switch_and_conditions():
+    r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
+                 "pub fn main() -> i32 {\n"
+                 "  mut hits: i32 = 0\n  const d := Dir.South\n"
+                 "  switch d {\n    .North: { hits = 1 },\n    .South: { hits = 2 },\n    _: { hits = 9 },\n  }\n"
+                 "  mut p: *i32 = nil\n"
+                 "  if p == nil { hits = hits + 10 }\n  if !p { hits = hits + 100 }\n"
+                 "  return hits\n}\n")
+    check(r.returncode == 0, f"'switch' and pointer conditions lower ({r.stderr.strip()[:140]})")
+    check("switch %" in r.stdout and "default ^" in r.stdout,
+          "'switch' lowers to the MIR switch terminator with a default")
+    # A pointer in boolean context is a null test; comparing one against a const.int would
+    # be ill-typed, which the MIR verifier catches.
+    check("const.null" in r.stdout, "'!p' and 'p == nil' compare against null")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+    # Block labels are an emitter aid and repeat; references carry the index so nested
+    # control flow stays readable.
+    check(len(re.findall(r"\^if\.end\.\d+:", r.stdout)) >= 2,
+          "duplicate block labels are disambiguated by index")
+
+
 def case_mir_goes_to_stdout():
     """'--emit-mir > out.mir' has to produce a valid file, as '--emit-ir' does."""
     r = emit_mir("pub fn main() -> i32 { return 0 }\n")
@@ -293,6 +319,7 @@ def main() -> int:
     case_braced_initializers()
     case_aggregate_returns_use_sret()
     case_error_returns()
+    case_switch_and_conditions()
     case_unsupported_is_reported_not_skipped()
     case_mir_goes_to_stdout()
 

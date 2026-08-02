@@ -114,8 +114,12 @@ namespace {
 
         const auto errors = mir::verify(fixture.module);
         check(errors.empty(), "a block-parameter merge verifies clean:" + describe(errors));
-        check(mir::print(fixture.module).find("^join(%") != std::string::npos,
-              "the printer renders block parameters");
+        // Block references carry the block INDEX as well as the label, because labels are
+        // an emitter-chosen readability aid and are freely duplicated (every nested 'if'
+        // produces an "if.end"). A label-only reference is ambiguous exactly where control
+        // flow is hardest to follow.
+        check(mir::print(fixture.module).find("^join.3(%") != std::string::npos,
+              "the printer renders block parameters, with an unambiguous block reference");
     }
 
     void test_slots_and_memory() {
