@@ -10,6 +10,8 @@ examples/example_compile_only_if is a module with two platform files declaring t
   - an excluded file's symbols and strings never reach the emitted IR;
   - an excluded file is STILL fully type-checked — a deliberate type error injected
     into it fails the build even when the build excludes it (the anti-rot design);
+  - an excluded file's trait impls are registered while IT is checked, so a platform
+    file can return its own type as the trait it implements (example_..._trait);
   - the directive's own error shapes: duplicate directive, statement position,
     non-constant condition, 'pub' on the directive.
 
@@ -103,6 +105,25 @@ def test_excluded_file_is_still_type_checked() -> None:
         check("undefined_identifier_xyz" in result.stderr, "the injected error's identifier is named")
 
 
+def test_excluded_file_trait_impl() -> None:
+    """example_compile_only_if_trait: each platform file implements one trait for its own
+    type and returns that type AS the trait. Both directions must build, which is only
+    possible if the EXCLUDED file's impl is registered while that file is type-checked —
+    it is what its own 'return &platform_reporter' coerces through."""
+    example = EXAMPLES / "example_compile_only_if_trait"
+
+    result = mirage("run", example)
+    check(result.returncode == 5, f"Linux build runs linux_impl's Reporter (exit {result.returncode} == 5)")
+
+    result = mirage("run", example, "--opt", "build/target_os=Wasm32")
+    check(result.returncode == 4, f"Wasm32 build runs wasm_impl's Reporter (exit {result.returncode} == 4)")
+
+    result = mirage("build", example, "--emit-ir")
+    check(result.returncode == 0, "Linux build emits IR cleanly")
+    check("Wasm_Reporter" not in result.stdout,
+          "the excluded file's impl reaches no vtable or symbol in the emitted IR")
+
+
 def test_directive_error_shapes() -> None:
     result = mirage("build", EXAMPLES / "example_compile_only_if_duplicate", "-o", "/dev/null")
     check(result.returncode != 0 and "a file may only have one '#compile_only_if' directive." in result.stderr,
@@ -137,6 +158,7 @@ def main() -> int:
     test_excluded_file_contributes_no_links()
     test_excluded_file_absent_from_ir()
     test_excluded_file_is_still_type_checked()
+    test_excluded_file_trait_impl()
     test_directive_error_shapes()
 
     print()

@@ -215,7 +215,7 @@ namespace sema {
 
     // Declared in sema.hpp. Public (rather than file-local, as it was) so codegen.cpp can
     // drop its own byte-identical copy and share this one.
-    auto primitive_size(const TypeKind kind) -> uint32_t {
+    auto primitive_size(const TypeKind kind, const uint32_t pointer_size) -> uint32_t {
         switch (kind) {
         case TypeKind::U8:
         case TypeKind::I8:
@@ -234,16 +234,24 @@ namespace sema {
         case TypeKind::U64:
         case TypeKind::I64:
         case TypeKind::F64:
+        case TypeKind::Type: // compile-time-unique type identifier, backed by u64
+            return 8;
+
         case TypeKind::USize:
         case TypeKind::Pointer:
         case TypeKind::Anyptr:
-        case TypeKind::Function: // code pointer, 8 bytes
-        case TypeKind::Type:     // compile-time-unique type identifier, backed by u64
-            return 8;
+        case TypeKind::Function: // code pointer
+            return pointer_size;
 
-        case TypeKind::Slice:
-        case TypeKind::Trait: // fat pointer: {data: anyptr, vtable: *const VTable}, 16 bytes
-        case TypeKind::Any:   // fat pointer: {id: type, data: anyptr}, 16 bytes
+        case TypeKind::Slice: // fat pointer: {data: anyptr, len: usize}, two words
+        case TypeKind::Trait: // fat pointer: {data: anyptr, vtable: *const VTable}, two words
+            return 2 * pointer_size;
+
+        // Fat pointer: {id: type, data: anyptr}. Unlike the two above, its first half is a
+        // u64 type id rather than a word, so on a 32-bit target the pointer sits at offset 8
+        // (the id's own alignment) and the trailing padding keeps the whole thing 16 bytes —
+        // the same layout LLVM gives '{i64, ptr}' on every target codegen supports.
+        case TypeKind::Any:
             return 16;
 
         // Not a value type and so has no size. Reaching here means a stage above failed to
@@ -265,7 +273,7 @@ namespace sema {
         }
     }
 
-    auto primitive_align(const TypeKind kind) -> uint32_t { return primitive_size(kind); }
+    auto primitive_align(const TypeKind kind, const uint32_t pointer_size) -> uint32_t { return primitive_size(kind, pointer_size); }
 
     // See sema.hpp's doc comment. External linkage: sema_declare.cpp's trait-impl
     // registration used to carry its own copy of this walk, which drifted on the
@@ -1267,7 +1275,9 @@ namespace sema {
                     diag.report_error(DiagnosticStage::Sema, decl->location, "bitset storage type must be one of u8, u16, u32, u64");
                     storage = ResolvedType{.kind = TypeKind::U32};
                 }
-                const uint32_t storage_bits = primitive_size(storage.kind) * 8;
+                // Storage is one of u8/u16/u32/u64 (checked just above), so the pointer width
+                // passed here can never affect the answer.
+                const uint32_t storage_bits = primitive_size(storage.kind, program.options.pointer_size) * 8;
 
                 if (const auto *enum_info = program.enum_at(member_ty.enum_index)) {
                     for (const auto &field : enum_info->fields) {
@@ -2423,17 +2433,18 @@ namespace sema {
                 ? std::numeric_limits<uint32_t>::max()
                 : static_cast<uint32_t>(bytes);
         }
-        if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_size(info->underlying_type.kind) : 0; }
+        const auto ptr_size = program.options.pointer_size;
+        if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_size(info->underlying_type.kind, ptr_size) : 0; }
         if (t.kind == TypeKind::Union) { const auto *info = program.union_at(t.union_index); return info ? info->size : 0; }
-        if (t.kind == TypeKind::Bitset) { const auto *info = program.bitset_at(t.bitset_index); return info ? primitive_size(info->storage_type.kind) : 0; }
-        return primitive_size(t.kind);
+        if (t.kind == TypeKind::Bitset) { const auto *info = program.bitset_at(t.bitset_index); return info ? primitive_size(info->storage_type.kind, ptr_size) : 0; }
+        return primitive_size(t.kind, ptr_size);
     }
 
     // Mirrors resolved_type_size() above, substituting alignment for size - with one real
-    // difference, not a formatting one: Slice/Trait/Any are 16 bytes but only 8-byte aligned,
-    // so they must NOT fall through to primitive_align (which forwards to primitive_size and
-    // would answer 16). Those three overrides are the entire reason this is a separate
-    // function rather than a parameter on the one above.
+    // difference, not a formatting one: Slice/Trait/Any are multi-word but only single-word
+    // aligned, so they must NOT fall through to primitive_align (which forwards to
+    // primitive_size and would answer the whole width). Those three overrides are the entire
+    // reason this is a separate function rather than a parameter on the one above.
     auto resolved_type_align(const ResolvedType &t, const Program &program) -> uint32_t {
         if (t.kind == TypeKind::Struct) { const auto *info = program.struct_at(t.struct_index); return info ? info->align : 1; }
         if (t.kind == TypeKind::Array) {
@@ -2442,12 +2453,15 @@ namespace sema {
             const auto *info = program.array_at(t.array_index);
             return info ? resolved_type_align(info->element_type, program) : 1;
         }
-        if (t.kind == TypeKind::Slice) return 8;
-        if (t.kind == TypeKind::Trait) return 8;
+        const auto ptr_size = program.options.pointer_size;
+        if (t.kind == TypeKind::Slice) return ptr_size;
+        if (t.kind == TypeKind::Trait) return ptr_size;
+        // Any leads with a u64 type id on every target, so its alignment stays 8 even where
+        // a word is 4 — see primitive_size's Any case.
         if (t.kind == TypeKind::Any) return 8;
-        if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_align(info->underlying_type.kind) : 1; }
+        if (t.kind == TypeKind::Enum) { const auto *info = program.enum_at(t.enum_index); return info ? primitive_align(info->underlying_type.kind, ptr_size) : 1; }
         if (t.kind == TypeKind::Union) { const auto *info = program.union_at(t.union_index); return info ? info->align : 1; }
-        if (t.kind == TypeKind::Bitset) { const auto *info = program.bitset_at(t.bitset_index); return info ? primitive_align(info->storage_type.kind) : 1; }
-        return primitive_align(t.kind);
+        if (t.kind == TypeKind::Bitset) { const auto *info = program.bitset_at(t.bitset_index); return info ? primitive_align(info->storage_type.kind, ptr_size) : 1; }
+        return primitive_align(t.kind, ptr_size);
     }
 }

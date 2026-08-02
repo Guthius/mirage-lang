@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SysV x86-64 ABI test for by-value aggregates crossing an 'ext fn' boundary.
+"""Per-target ABI test for by-value aggregates crossing an 'ext fn' boundary.
 
 Unlike the other suites, this one links Mirage code against C compiled by the system clang,
 so the values the callee sees are produced by an independent implementation of the ABI rather
@@ -80,6 +80,23 @@ def main() -> int:
         )
         check(result.returncode == EXPECTED_EXIT,
               f"aggregates cross the C boundary intact: exit {result.returncode} == {EXPECTED_EXIT}")
+
+        # The same fixture under the WebAssembly ABI, which has no register-packing tier:
+        # every one of these is a multi-element aggregate, so all four go indirectly. The
+        # expected shapes were read off emcc for the equivalent C (a 'long long' struct,
+        # since C 'long' is 4 bytes on wasm32), not derived from the same rules twice.
+        # '--emit-ir' stops before the link, so the x86 helper.o above is irrelevant here.
+        wasm_ir = subprocess.run(
+            [str(MIRAGE_BINARY), "build", str(FIXTURE), "--target=wasm32-unknown-emscripten", "--emit-ir"],
+            capture_output=True, text=True, timeout=60, cwd=REPO_ROOT,
+        )
+        check(wasm_ir.returncode == 0, "wasm32 build of the ABI fixture emits IR cleanly")
+        check("declare float @sum_arr(ptr byval([2 x float]) align 4)" in wasm_ir.stdout,
+              "wasm32: by-value [2]f32 goes indirectly, NOT coerced to <2 x float> as on x86-64")
+        check("@sum_big(ptr byval" in wasm_ir.stdout and "@sum_two_words(ptr byval" in wasm_ir.stdout,
+              "wasm32: multi-field structs are passed byval")
+        check("@sum_straddle(ptr byval" in wasm_ir.stdout and "align 1)" in wasm_ir.stdout,
+              "wasm32: a packed struct keeps its natural align 1 (no 8-byte stack-slot minimum)")
     finally:
         helper_o.unlink(missing_ok=True)
 

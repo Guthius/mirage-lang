@@ -78,7 +78,7 @@ namespace codegen {
         };
 
         // A scalar leaf field within a struct, used only for System V x86-64 eightbyte
-        // classification (see classify_aggregate_eightbytes) — offset is relative to the
+        // classification (see classify_aggregate_eightbytes) - offset is relative to the
         // classified struct's own start, not any enclosing type.
         struct AbiLeaf {
             uint32_t offset = 0;
@@ -87,10 +87,10 @@ namespace codegen {
         };
 
         // Result of classifying a struct type for passing/returning by value across an
-        // 'ext fn' boundary, per the System V x86-64 ABI: either it must be passed
-        // indirectly via a hidden pointer (MEMORY class - struct larger than 16 bytes, or
-        // containing a union we don't attempt to merge-classify), or it fits in one or two
-        // coerced scalar/vector registers ('parts').
+        // 'ext fn' boundary: either it must be passed indirectly via a hidden pointer, or it
+        // travels as one or two coerced scalars ('parts'). What lands in which bucket is
+        // per-target — SysV x86-64's eightbyte rules, or WebAssembly's much simpler
+        // single-element-struct rule; see classify_aggregate.
         struct AbiClassification {
             bool indirect = false;
             llvm::Type *raw_type = nullptr; // the existing Mirage aggregate type (struct or array)
@@ -131,7 +131,10 @@ namespace codegen {
             return out;
         }
 
-        auto int_bits(const sema::ResolvedType &type) -> unsigned {
+        // 'pointer_bits' is the target's word width (Generator::pointer_bits()): 'usize' and
+        // the integer form of a pointer are 32 bits on wasm32, 64 on x86-64, and a cast
+        // between 'usize' and 'u64' is a real widening/narrowing on the former.
+        auto int_bits(const sema::ResolvedType &type, const unsigned pointer_bits) -> unsigned {
             switch (type.kind) {
             case sema::TypeKind::U8:
             case sema::TypeKind::I8:
@@ -145,10 +148,11 @@ namespace codegen {
                 return 32;
             case sema::TypeKind::U64:
             case sema::TypeKind::I64:
+                return 64;
             case sema::TypeKind::USize:
             case sema::TypeKind::Pointer:
             case sema::TypeKind::Anyptr:
-                return 64;
+                return pointer_bits;
             default:
                 return 0;
             }
@@ -230,18 +234,27 @@ namespace codegen {
             }
 
             auto run() -> GeneratedModule {
-                // Hosted '_start' glue, the panic writer, freestanding syscalls, and the
-                // SysV eightbyte classifier are all x86-64 Linux specific. The driver
-                // targets the HOST triple, so on any other host this refused cleanly —
-                // previously it emitted x86 inline asm into an aarch64 module and failed
-                // at assembly time (hosted) or produced wrong syscalls (freestanding).
-                if (const auto &triple = module_->getTargetTriple();
-                    !options_.target_triple.empty() &&
-                    (triple.getArch() != llvm::Triple::x86_64 || !triple.isOSLinux())) {
-                    report_codegen_error(diag_, {}, std::format(
-                        "target '{}' is not supported: code generation currently targets x86-64 Linux only",
-                        options_.target_triple));
-                    return {};
+                // Two supported shapes, each with its own entry glue and 'ext fn' ABI:
+                // x86-64 Linux (a synthesized '_start', SysV eightbyte classification) and
+                // wasm32 (a synthesized C 'main', the WebAssembly ABI). Anything else is
+                // refused here rather than mis-emitted — before this gate existed the driver
+                // put x86 inline asm into an aarch64 module and failed at assembly time.
+                if (const auto &triple = module_->getTargetTriple(); !options_.target_triple.empty()) {
+                    const bool x86_64_linux = triple.getArch() == llvm::Triple::x86_64 && triple.isOSLinux();
+                    if (!x86_64_linux && !is_wasm_target()) {
+                        report_codegen_error(diag_, {}, std::format(
+                            "target '{}' is not supported: code generation currently targets x86-64 Linux and wasm32 only",
+                            options_.target_triple));
+                        return {};
+                    }
+                    // Freestanding means "no libc": the exit and panic-write paths fall back to
+                    // raw Linux syscalls written in x86-64 inline asm, which wasm has no
+                    // equivalent of, and there is no '_start' convention to hand-write either.
+                    if (is_wasm_target() && options_.freestanding) {
+                        report_codegen_error(diag_, {}, std::format(
+                            "'--freestanding' is not supported for target '{}'", options_.target_triple));
+                        return {};
+                    }
                 }
 
                 declare_unions();
@@ -269,7 +282,11 @@ namespace codegen {
                     emit_init();
                 }
                 if (!options_.freestanding && entry_main) {
-                    emit_start(*entry_main);
+                    if (is_wasm_target()) {
+                        emit_wasm_main(*entry_main);
+                    } else {
+                        emit_start(*entry_main);
+                    }
                 }
 
                 if (diag_.has_errors()) {
@@ -522,6 +539,32 @@ namespace codegen {
                 return sema::resolved_type_align(type, sema_program_);
             }
 
+            // Whether this module targets WebAssembly. Three things branch on it: the entry
+            // glue (a C 'main' rather than a synthesized '_start'), the 'ext fn' ABI (the
+            // WebAssembly rules rather than SysV eightbytes), and the freestanding refusal in
+            // run(). An empty target triple (the unit tests' shape) reads as not-wasm.
+            [[nodiscard]] auto is_wasm_target() const -> bool {
+                return module_->getTargetTriple().isWasm();
+            }
+
+            // The target's word width, and the integer type/constants of that width. 'usize',
+            // a slice's length, an array index, a byte offset and the integer form of a
+            // pointer are all THIS wide — 64 bits on x86-64, 32 on wasm32 — while 'u64'/'i64'
+            // stay 64 everywhere. Every length/size/offset constant below goes through
+            // usize_const rather than builder_.getInt64 for that reason; a genuine i64 (a
+            // 'type' id, a GEP subscript, an errno) still uses getInt64.
+            [[nodiscard]] auto pointer_bits() const -> unsigned {
+                return sema_program_.options.pointer_size * 8;
+            }
+
+            auto usize_ty() -> llvm::IntegerType * {
+                return llvm::Type::getIntNTy(*context_, pointer_bits());
+            }
+
+            auto usize_const(const uint64_t value) -> llvm::ConstantInt * {
+                return llvm::ConstantInt::get(usize_ty(), value);
+            }
+
             auto llvm_type(const std::string &module_path, const sema::ResolvedType &type) -> llvm::Type * {
                 switch (type.kind) {
                 case sema::TypeKind::Void:    return llvm::Type::getVoidTy(*context_);
@@ -533,8 +576,8 @@ namespace codegen {
                 case sema::TypeKind::U32:
                 case sema::TypeKind::I32:     return llvm::Type::getInt32Ty(*context_);
                 case sema::TypeKind::U64:
-                case sema::TypeKind::I64:
-                case sema::TypeKind::USize:   return llvm::Type::getInt64Ty(*context_);
+                case sema::TypeKind::I64:     return llvm::Type::getInt64Ty(*context_);
+                case sema::TypeKind::USize:   return usize_ty();
                 case sema::TypeKind::F32:     return llvm::Type::getFloatTy(*context_);
                 case sema::TypeKind::F64:     return llvm::Type::getDoubleTy(*context_);
                 case sema::TypeKind::Pointer:
@@ -546,7 +589,7 @@ namespace codegen {
                         return llvm::ArrayType::get(llvm_type(module_path, array.element_type), array.count);
                     }
                 case sema::TypeKind::Slice:
-                    return llvm::StructType::get(*context_, {llvm::PointerType::getUnqual(*context_), llvm::Type::getInt64Ty(*context_)});
+                    return llvm::StructType::get(*context_, {llvm::PointerType::getUnqual(*context_), usize_ty()});
                 case sema::TypeKind::Trait:
                     // Fat pointer handle: {data: anyptr, vtable: *const VTable}. Same "literal
                     // anonymous struct, no forward-declare needed" pattern as Slice above — only
@@ -810,7 +853,7 @@ namespace codegen {
                     return;
                 default:
                     {
-                        const uint32_t size = primitive_size(type.kind);
+                        const uint32_t size = primitive_size(type.kind, sema_program_.options.pointer_size);
                         if (size == 0) {
                             return;
                         }
@@ -924,6 +967,67 @@ namespace codegen {
                 return cls;
             }
 
+            // The "single element struct" of the C ABIs: an aggregate that, after peeling away
+            // one-field structs and one-element arrays, contains exactly one scalar. Returns
+            // that scalar, or nullopt for anything else. Mirrors clang's isSingleElementStruct,
+            // which is what decides whether the WebAssembly ABI passes an aggregate directly.
+            //
+            // Unions answer nullopt: a Mirage union lowers to an opaque byte array with no
+            // field list to walk, and indirect is always a legal answer for an aggregate.
+            auto single_element_type(const sema::ResolvedType &type) const -> std::optional<sema::ResolvedType> {
+                switch (type.kind) {
+                case sema::TypeKind::Struct: {
+                    const auto *info = sema_program_.struct_at(type.struct_index);
+                    if (!info || info->fields.size() != 1) return std::nullopt;
+                    const auto &field = info->fields.front().type;
+                    if (field.kind == sema::TypeKind::Struct || field.kind == sema::TypeKind::Array) {
+                        return single_element_type(field);
+                    }
+                    return field;
+                }
+                case sema::TypeKind::Array: {
+                    const auto *info = sema_program_.array_at(type.array_index);
+                    if (!info || info->count != 1) return std::nullopt;
+                    const auto &element = info->element_type;
+                    if (element.kind == sema::TypeKind::Struct || element.kind == sema::TypeKind::Array) {
+                        return single_element_type(element);
+                    }
+                    return element;
+                }
+                default:
+                    return std::nullopt;
+                }
+            }
+
+            // The WebAssembly ABI's whole rule for by-value aggregates, per clang's
+            // WebAssemblyABIInfo: a single-element struct is passed as that element, and
+            // everything else goes indirectly — 'ptr byval(T) align N' as an argument, a
+            // hidden sret pointer as a return. There is no register-packing tier as on
+            // x86-64, which is why raylib's Vector2/Color/Rectangle all travel by pointer
+            // here while the same declarations are coerced into registers natively.
+            //
+            // Unlike the SysV path, the alignment is left at the type's natural alignment:
+            // that is what clang emits, and there is no stack-slot minimum to respect.
+            auto classify_aggregate_wasm(const sema::ResolvedType &type, const std::string &module_path) -> AbiClassification {
+                AbiClassification cls;
+                cls.raw_type = llvm_type(module_path, type);
+                cls.raw_align = std::max<uint32_t>(1, align_of(module_path, type));
+
+                if (const auto element = single_element_type(type); element && size_of(module_path, type) > 0) {
+                    cls.parts.push_back(llvm_type(module_path, *element));
+                    return cls;
+                }
+                cls.indirect = true;
+                return cls;
+            }
+
+            // The one entry point every 'ext fn' declaration and call site goes through, so
+            // that adding a target's ABI is a change in exactly one place.
+            auto classify_aggregate(const sema::ResolvedType &type, const std::string &module_path) -> AbiClassification {
+                return is_wasm_target() ? classify_aggregate_wasm(type, module_path)
+                                        : classify_aggregate_eightbytes(type, module_path);
+            }
+
             // The number of pointer slots in a trait's vtable: one per declared method, plus one
             // trailing back-pointer per component trait (trait composition). Sizing the array
             // type and filling its initializer used to recompute this formula independently; a
@@ -965,7 +1069,7 @@ namespace codegen {
                 if (!needs_ext_abi_coercion(type)) {
                     return llvm_type(module_path, type);
                 }
-                const auto cls = classify_aggregate_eightbytes(type, module_path);
+                const auto cls = classify_aggregate(type, module_path);
                 if (cls.indirect) {
                     return llvm::PointerType::getUnqual(*context_);
                 }
@@ -988,7 +1092,7 @@ namespace codegen {
 
                 if (ret) {
                     if (needs_ext_abi_coercion(*ret)) {
-                        const auto cls = classify_aggregate_eightbytes(*ret, module_path);
+                        const auto cls = classify_aggregate(*ret, module_path);
                         if (cls.indirect) {
                             param_types.push_back(llvm::PointerType::getUnqual(*context_)); // sret
                         } else if (cls.parts.size() == 1) {
@@ -1080,7 +1184,11 @@ namespace codegen {
                             // instantiation gets its own llvm::Function via
                             // declare_generic_functions() instead.
                             if (fn->decl && !fn->decl->generic_params.empty()) continue;
-                            const bool entry_symbol = path == ast_program_.root_module_path && (name == "main" || (options_.freestanding && name == "_start"));
+                            // On wasm the C runtime owns the 'main' symbol and calls it with
+                            // (argc, argv) — emit_wasm_main takes that name for its glue, so the
+                            // user's own 'main' is mangled like any other function there.
+                            const bool entry_symbol = path == ast_program_.root_module_path && !is_wasm_target() &&
+                                (name == "main" || (options_.freestanding && name == "_start"));
                             const auto fname = symbol_name(path, name, entry_symbol);
                             auto *llvm_fn = llvm::Function::Create(
                                 function_type(path, fn->params, fn->return_types),
@@ -1105,7 +1213,7 @@ namespace codegen {
 
                                 unsigned param_idx = 0;
                                 if (ef->return_type && needs_ext_abi_coercion(*ef->return_type)) {
-                                    const auto cls = classify_aggregate_eightbytes(*ef->return_type, path);
+                                    const auto cls = classify_aggregate(*ef->return_type, path);
                                     if (cls.indirect) {
                                         llvm_fn->addParamAttr(0, llvm::Attribute::getWithStructRetType(*context_, cls.raw_type));
                                         llvm_fn->addParamAttr(0, llvm::Attribute::getWithAlignment(*context_, llvm::Align(cls.raw_align)));
@@ -1114,7 +1222,7 @@ namespace codegen {
                                 }
                                 for (const auto &param : ef->params) {
                                     if (needs_ext_abi_coercion(param)) {
-                                        const auto cls = classify_aggregate_eightbytes(param, path);
+                                        const auto cls = classify_aggregate(param, path);
                                         if (cls.indirect) {
                                             llvm_fn->addParamAttr(param_idx, llvm::Attribute::getWithByValType(*context_, cls.raw_type));
                                             llvm_fn->addParamAttr(param_idx, llvm::Attribute::getWithAlignment(*context_, llvm::Align(cls.raw_align)));
@@ -2188,7 +2296,7 @@ namespace codegen {
             // DataLayout isn't installed until after codegen returns (see main.cpp), so this
             // walks the few shapes these builders actually produce rather than asking LLVM.
             auto constant_store_size(llvm::Type *type) const -> uint32_t {
-                if (type->isPointerTy()) return 8;
+                if (type->isPointerTy()) return sema_program_.options.pointer_size;
                 if (type->isIntegerTy()) return (type->getIntegerBitWidth() + 7) / 8;
                 if (type->isFloatTy()) return 4;
                 if (type->isDoubleTy()) return 8;
@@ -2233,7 +2341,7 @@ namespace codegen {
             // the DECLARED element type (see emit_index_lvalue's slice path), never by whatever
             // the backing global's own type happens to be.
             auto emit_constant_slice(const std::vector<llvm::Constant *> &elements, uint32_t element_size, uint32_t element_align, const char *global_name_prefix) -> llvm::Constant * {
-                auto *slice_ty = llvm::StructType::get(*context_, {llvm::PointerType::getUnqual(*context_), llvm::Type::getInt64Ty(*context_)});
+                auto *slice_ty = llvm::StructType::get(*context_, {llvm::PointerType::getUnqual(*context_), usize_ty()});
                 if (elements.empty()) {
                     return llvm::ConstantAggregateZero::get(slice_ty);
                 }
@@ -2271,7 +2379,7 @@ namespace codegen {
                 global->setAlignment(llvm::Align(std::max(element_align, 1U)));
                 llvm::Constant *indices[] = {builder_.getInt32(0), builder_.getInt32(0)};
                 auto *ptr = llvm::ConstantExpr::getInBoundsGetElementPtr(storage_ty, global, llvm::ArrayRef(indices));
-                auto *len = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), elements.size());
+                auto *len = usize_const(elements.size());
                 return llvm::ConstantStruct::get(slice_ty, {ptr, len});
             }
 
@@ -2285,7 +2393,8 @@ namespace codegen {
 
             // emit_constant_slice for a '[]*Type_Info' — a slice of plain pointers.
             auto emit_type_info_ptr_slice(const std::vector<llvm::Constant *> &elements, const char *global_name_prefix) -> llvm::Constant * {
-                return emit_constant_slice(elements, 8, 8, global_name_prefix);
+                const auto ptr_size = sema_program_.options.pointer_size;
+                return emit_constant_slice(elements, ptr_size, ptr_size, global_name_prefix);
             }
 
             auto build_type_info_field_entry(const std::string &module_path, const std::string &name, const sema::ResolvedType &type, uint64_t offset) -> llvm::Constant * {
@@ -2294,7 +2403,7 @@ namespace codegen {
                 auto values = build_type_info_payload_values(sema_program_.structs.at(ty->struct_index), {
                     {"name", emit_string_literal(name)},
                     {"base_type", build_type_kind_or_info_constant(type)},
-                    {"offset", builder_.getInt64(offset)},
+                    {"offset", usize_const(offset)},
                 });
                 return build_struct_constant(ty->struct_index, values);
             }
@@ -2597,7 +2706,7 @@ namespace codegen {
                     variant_name = "Array";
                     const auto &arr = sema_program_.arrays.at(ty.array_index);
                     assignments.push_back({"base_type", build_type_kind_or_info_constant(arr.element_type)});
-                    assignments.push_back({"length", builder_.getInt64(arr.count)});
+                    assignments.push_back({"length", usize_const(arr.count)});
                     break;
                 }
                 case sema::TypeKind::Struct: {
@@ -2610,8 +2719,8 @@ namespace codegen {
                     }
                     assignments.push_back({"name", emit_string_literal(tname)});
                     assignments.push_back({"fields", emit_named_element_slice(module_path, "Type_Info_Field", field_entries, ".type_info_fields")});
-                    assignments.push_back({"size", builder_.getInt64(info.size)});
-                    assignments.push_back({"align", builder_.getInt64(info.align)});
+                    assignments.push_back({"size", usize_const(info.size)});
+                    assignments.push_back({"align", usize_const(info.align)});
                     assignments.push_back({"packed", builder_.getInt1(info.is_packed)});
                     push_generic_args_assignments(module_path, info.generic_instance, assignments);
                     break;
@@ -2627,7 +2736,7 @@ namespace codegen {
                     assignments.push_back({"name", emit_string_literal(tname)});
                     assignments.push_back({"variants", emit_named_element_slice(module_path, "Type_Info_Enum_Variant", variant_entries, ".type_info_variants")});
                     assignments.push_back({"storage_kind", builder_.getInt32(mirage_type_kind_value(info.underlying_type))});
-                    assignments.push_back({"size", builder_.getInt64(primitive_size(info.underlying_type.kind))});
+                    assignments.push_back({"size", usize_const(primitive_size(info.underlying_type.kind, sema_program_.options.pointer_size))});
                     push_generic_args_assignments(module_path, info.generic_instance, assignments);
                     break;
                 }
@@ -2661,8 +2770,8 @@ namespace codegen {
                         }
                         assignments.push_back({"name", emit_string_literal(tname)});
                         assignments.push_back({"variants", emit_named_element_slice(module_path, "Type_Info_Tagged_Variant", variant_entries, ".type_info_tagged_variants")});
-                        assignments.push_back({"size", builder_.getInt64(info.size)});
-                        assignments.push_back({"align", builder_.getInt64(info.align)});
+                        assignments.push_back({"size", usize_const(info.size)});
+                        assignments.push_back({"align", usize_const(info.align)});
                         push_generic_args_assignments(module_path, info.generic_instance, assignments);
                     } else {
                         variant_name = "Union";
@@ -2672,8 +2781,8 @@ namespace codegen {
                         }
                         assignments.push_back({"name", emit_string_literal(tname)});
                         assignments.push_back({"members", emit_named_element_slice(module_path, "Type_Info_Field", member_entries, ".type_info_umembers")});
-                        assignments.push_back({"size", builder_.getInt64(info.size)});
-                        assignments.push_back({"align", builder_.getInt64(info.align)});
+                        assignments.push_back({"size", usize_const(info.size)});
+                        assignments.push_back({"align", usize_const(info.align)});
                         push_generic_args_assignments(module_path, info.generic_instance, assignments);
                     }
                     break;
@@ -2687,7 +2796,7 @@ namespace codegen {
                     // type_info_ptr_for never returns nil here.
                     assignments.push_back({"member_type", type_info_ptr_for(info.member_enum_type)});
                     assignments.push_back({"storage_kind", builder_.getInt32(mirage_type_kind_value(info.storage_type))});
-                    assignments.push_back({"size", builder_.getInt64(primitive_size(info.storage_type.kind))});
+                    assignments.push_back({"size", usize_const(primitive_size(info.storage_type.kind, sema_program_.options.pointer_size))});
                     push_generic_args_assignments(module_path, info.generic_instance, assignments);
                     break;
                 }
@@ -3110,8 +3219,11 @@ namespace codegen {
             // (which link -nostdlib and so have no libc at all) and libc write() otherwise.
             void emit_write_stderr(llvm::Value *ptr, llvm::Value *len) {
                 auto *i64_ty = llvm::Type::getInt64Ty(*context_);
-                if (!len->getType()->isIntegerTy(64)) {
-                    len = builder_.CreateZExt(len, i64_ty);
+                // libc's write() takes a size_t — one word, not always eight bytes — while the
+                // freestanding syscall path below wants every operand in a 64-bit register.
+                auto *count_ty = options_.freestanding ? i64_ty : usize_ty();
+                if (len->getType() != count_ty) {
+                    len = builder_.CreateZExtOrTrunc(len, count_ty);
                 }
 
                 if (options_.freestanding) {
@@ -3130,8 +3242,8 @@ namespace codegen {
                     builder_.CreateCall(syscall, {builder_.getInt64(1), builder_.getInt64(2), ptr, len});
                 } else {
                     auto *write_ty = llvm::FunctionType::get(
-                        i64_ty,
-                        {llvm::Type::getInt32Ty(*context_), llvm::PointerType::getUnqual(*context_), i64_ty},
+                        usize_ty(), // ssize_t
+                        {llvm::Type::getInt32Ty(*context_), llvm::PointerType::getUnqual(*context_), count_ty},
                         false);
                     const auto write_fn = module_->getOrInsertFunction("write", write_ty);
                     builder_.CreateCall(write_fn, {builder_.getInt32(2), ptr, len});
@@ -3218,8 +3330,10 @@ namespace codegen {
                 const auto &wrapper = sema_program_.unions.at(union_index);
                 auto *ptr_ty = llvm::PointerType::getUnqual(*context_);
                 auto *i32_ty = llvm::Type::getInt32Ty(*context_);
-                auto *i64_ty = llvm::Type::getInt64Ty(*context_);
-                auto *fn_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), {ptr_ty, ptr_ty, i64_ty}, false);
+                // Message lengths here come from constant_string_parts, i.e. out of a string
+                // literal's slice aggregate — so they are usize-wide, not always i64.
+                auto *len_ty = usize_ty();
+                auto *fn_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), {ptr_ty, ptr_ty, len_ty}, false);
                 auto *fn = llvm::Function::Create(fn_ty, llvm::GlobalValue::InternalLinkage,
                                                   std::format("__mirage_panic_unhandled_error.{}", union_index), *module_);
                 fn->setDoesNotReturn();
@@ -3239,7 +3353,7 @@ namespace codegen {
                 auto *site_len = fn->getArg(2);
 
                 auto *name_ptr_slot = builder_.CreateAlloca(ptr_ty, nullptr, "name.ptr");
-                auto *name_len_slot = builder_.CreateAlloca(i64_ty, nullptr, "name.len");
+                auto *name_len_slot = builder_.CreateAlloca(len_ty, nullptr, "name.len");
                 auto *write_bb = llvm::BasicBlock::Create(*context_, "panic.write", fn);
 
                 // The Failed payload: the member type itself for a single-member error union,
@@ -3271,7 +3385,7 @@ namespace codegen {
                 builder_.SetInsertPoint(write_bb);
                 const auto [prefix_ptr, prefix_len] = constant_string_parts("panic: unhandled ");
                 emit_write_stderr(prefix_ptr, prefix_len);
-                emit_write_stderr(builder_.CreateLoad(ptr_ty, name_ptr_slot), builder_.CreateLoad(i64_ty, name_len_slot));
+                emit_write_stderr(builder_.CreateLoad(ptr_ty, name_ptr_slot), builder_.CreateLoad(len_ty, name_len_slot));
                 emit_write_stderr(site_ptr, site_len);
                 emit_process_exit(builder_.getInt32(PANIC_EXIT_CODE)); // ends the block with 'unreachable'
                 return fn;
@@ -3408,6 +3522,49 @@ namespace codegen {
                 emit_process_exit(exit_code_i32);
             }
 
+            // The wasm counterpart of emit_start: 'int main(int argc, char **argv)', which is
+            // what emscripten's startup calls once the runtime is up. Three differences from
+            // the x86-64 path, all forced by the platform rather than chosen:
+            //
+            //   - no stack realignment asm — wasm has no exposed stack pointer to align, and
+            //     the caller is ordinary C code rather than the kernel;
+            //   - the exit code is RETURNED, not passed to exit(). Returning lets emscripten
+            //     shut the runtime down normally; calling exit() from here would tear down a
+            //     page that is usually still running its raylib main loop;
+            //   - the signature is fixed by C. A wasm call whose signature disagrees with the
+            //     callee traps at runtime, so the user's 'main' (any of the three shapes
+            //     validate_hosted_main allows) is called through its own mangled symbol and
+            //     this glue converts the result.
+            void emit_wasm_main(const sema::FunctionSymbol &main_fn) {
+                auto *i32_ty = llvm::Type::getInt32Ty(*context_);
+                auto *main_ty = llvm::FunctionType::get(
+                    i32_ty, {i32_ty, llvm::PointerType::getUnqual(*context_)}, false);
+                auto *entry_fn = llvm::Function::Create(main_ty, llvm::GlobalValue::ExternalLinkage, "main", *module_);
+
+                auto *entry = llvm::BasicBlock::Create(*context_, "entry", entry_fn);
+                builder_.SetInsertPoint(entry);
+
+                if (!options_.noinit && !sema_program_.init_call_order.empty()) {
+                    builder_.CreateCall(functions_.at(FunctionKey{"", "_init"}));
+                }
+
+                auto *user_main = functions_.at(FunctionKey{ast_program_.root_module_path, "main"});
+                llvm::Value *exit_code_i32 = nullptr;
+                if (main_fn.return_types.empty()) {
+                    builder_.CreateCall(user_main);
+                    exit_code_i32 = builder_.getInt32(0);
+                } else if (main_fn.return_types.front().kind == sema::TypeKind::Union &&
+                           sema_program_.unions.at(main_fn.return_types.front().union_index).is_error_union) {
+                    auto *result_val = builder_.CreateCall(user_main);
+                    auto *is_failed = builder_.CreateICmpNE(extract_error_tag(result_val), builder_.getInt32(0));
+                    exit_code_i32 = builder_.CreateZExt(is_failed, i32_ty);
+                } else {
+                    exit_code_i32 = builder_.CreateCall(user_main);
+                }
+
+                builder_.CreateRet(exit_code_i32);
+            }
+
             // Allocates in 'fn's entry block so the slot is one fixed frame object, rather than
             // a stack adjustment repeated on every execution of an enclosing loop.
             //
@@ -3474,7 +3631,7 @@ namespace codegen {
                     return builder_.CreateFCmpONE(value, llvm::ConstantFP::get(llvm_type(*current_module_path_, type), 0.0));
                 }
                 if (is_pointer_like(type)) {
-                    return builder_.CreateICmpNE(builder_.CreatePtrToInt(value, llvm::Type::getInt64Ty(*context_)), builder_.getInt64(0));
+                    return builder_.CreateICmpNE(builder_.CreatePtrToInt(value, usize_ty()), usize_const(0));
                 }
                 return builder_.CreateICmpNE(value, llvm::ConstantInt::get(llvm_type(*current_module_path_, type), 0));
             }
@@ -3537,10 +3694,10 @@ namespace codegen {
                     return signedness(to) ? builder_.CreateFPToSI(value, to_ty) : builder_.CreateFPToUI(value, to_ty);
                 }
                 if (is_pointer_like(from) && to.is_integer()) {
-                    return integer_cast(builder_.CreatePtrToInt(value, llvm::Type::getInt64Ty(*context_)), to_ty, sema::ResolvedType{.kind = sema::TypeKind::USize});
+                    return integer_cast(builder_.CreatePtrToInt(value, usize_ty()), to_ty, sema::ResolvedType{.kind = sema::TypeKind::USize});
                 }
                 if (from.is_integer() && is_pointer_like(to)) {
-                    auto *wide = integer_cast(value, llvm::Type::getInt64Ty(*context_), from);
+                    auto *wide = integer_cast(value, usize_ty(), from);
                     return builder_.CreateIntToPtr(wide, to_ty);
                 }
                 if (is_pointer_like(from) && is_pointer_like(to)) {
@@ -3593,8 +3750,8 @@ namespace codegen {
                 }
 
                 if (is_pointer_like(type) || type.kind == sema::TypeKind::Function) {
-                    lhs = builder_.CreatePtrToInt(lhs, llvm::Type::getInt64Ty(*context_));
-                    rhs = builder_.CreatePtrToInt(rhs, llvm::Type::getInt64Ty(*context_));
+                    lhs = builder_.CreatePtrToInt(lhs, usize_ty());
+                    rhs = builder_.CreatePtrToInt(rhs, usize_ty());
                 }
 
                 switch (op) {
@@ -3621,12 +3778,13 @@ namespace codegen {
             // the integer round-trip discards for every 'p + n' — pessimizing alias
             // analysis in any optimization pipeline downstream.
             auto emit_pointer_offset(llvm::Value *ptr, llvm::Value *amount, const sema::ResolvedType &ptr_type, bool subtract) -> llvm::Value * {
-                auto *i64 = llvm::Type::getInt64Ty(*context_);
-                if (amount->getType()->getIntegerBitWidth() != 64) {
-                    amount = integer_cast(amount, i64, sema::ResolvedType{.kind = sema::TypeKind::USize});
+                // Index in the target's own pointer width: a GEP subscript wider than the
+                // address space is legal but the backend just truncates it back down again.
+                if (amount->getType() != usize_ty()) {
+                    amount = integer_cast(amount, usize_ty(), sema::ResolvedType{.kind = sema::TypeKind::USize});
                 }
                 if (const auto step = pointer_step(ptr_type); step != 1) {
-                    amount = builder_.CreateMul(amount, builder_.getInt64(step));
+                    amount = builder_.CreateMul(amount, usize_const(step));
                 }
                 if (subtract) {
                     amount = builder_.CreateNeg(amount);
@@ -3745,7 +3903,7 @@ namespace codegen {
                     {builder_.getInt32(0), builder_.getInt64(0)});
                 llvm::Value *slice = llvm::UndefValue::get(llvm_type(array_module, slice_type));
                 slice = builder_.CreateInsertValue(slice, ptr, {0});
-                slice = builder_.CreateInsertValue(slice, builder_.getInt64(array.count), {1});
+                slice = builder_.CreateInsertValue(slice, usize_const(array.count), {1});
                 return slice;
             }
 
@@ -3760,13 +3918,13 @@ namespace codegen {
                 auto *ll_arr_ty = llvm_type(array_module, array_type);
                 auto *scratch = create_entry_alloca(builder_.GetInsertBlock()->getParent(), ll_arr_ty);
 
-                auto *total_count = builder_.getInt64(array_info.count);
+                auto *total_count = usize_const(array_info.count);
                 auto *copy_count = builder_.CreateSelect(builder_.CreateICmpULT(src_len, total_count), src_len, total_count);
-                auto *elem_size = builder_.getInt64(size_of(array_module, array_info.element_type));
+                auto *elem_size = usize_const(size_of(array_module, array_info.element_type));
                 auto *copy_bytes = builder_.CreateMul(copy_count, elem_size);
                 // Via size_of/align_of (which recompute arrays from their element), not the
                 // baked ArrayInfo fields — see resolved_type_size's Array case.
-                auto *total_bytes = builder_.getInt64(size_of(array_module, array_type));
+                auto *total_bytes = usize_const(size_of(array_module, array_type));
                 auto *remaining_bytes = builder_.CreateSub(total_bytes, copy_bytes);
 
                 const auto align = llvm::Align(std::max(align_of(array_module, array_type), 1U));
@@ -3814,7 +3972,7 @@ namespace codegen {
 
             // Like emit_value_as(), but for 'ext fn' call arguments: struct-typed arguments
             // are coerced to their System V x86-64 ABI representation (see
-            // classify_aggregate_eightbytes) instead of being passed as a raw aggregate, which is
+            // classify_aggregate) instead of being passed as a raw aggregate, which is
             // what a real C callee (raylib, libc, ...) actually expects. Non-struct arguments
             // are unaffected. When the argument is a struct, its classification is written to
             // '*out_cls' so the caller can attach matching byval/sret attributes to the actual
@@ -3825,7 +3983,7 @@ namespace codegen {
                     return emit_value_as(expr, param_type, param_module);
                 }
 
-                const auto cls = classify_aggregate_eightbytes(param_type, *current_module_path_);
+                const auto cls = classify_aggregate(param_type, *current_module_path_);
                 if (out_cls) {
                     *out_cls = cls;
                 }
@@ -4053,8 +4211,8 @@ namespace codegen {
                 const auto operand_type = current_exprs_->expr_types.at(sema::get_expr_key(index.operand));
                 const auto type_module = expr_type_module_hint(index.operand);
                 auto *idx = emit_expr(index_expr);
-                if (!idx->getType()->isIntegerTy(64)) {
-                    idx = integer_cast(idx, llvm::Type::getInt64Ty(*context_), current_exprs_->expr_types.at(sema::get_expr_key(index_expr)));
+                if (idx->getType() != usize_ty()) {
+                    idx = integer_cast(idx, usize_ty(), current_exprs_->expr_types.at(sema::get_expr_key(index_expr)));
                 }
 
                 if (operand_type.kind == sema::TypeKind::Pointer) {
@@ -4456,7 +4614,7 @@ namespace codegen {
                 }
                 if (const auto *ef = std::get_if<sema::ExtFunctionSymbol>(&sym_it->second)) {
                     // Aggregate-by-value args/return crossing into real C code need System V
-                    // x86-64 ABI coercion (see classify_aggregate_eightbytes) - LLVM's default
+                    // target ABI coercion (see classify_aggregate) - LLVM's default
                     // lowering of a raw aggregate argument doesn't match what a real C callee
                     // (raylib, libc, ...) reads. byval/sret attributes must be attached to the
                     // CallInst itself, not just the callee's declaration, so track which
@@ -4484,7 +4642,7 @@ namespace codegen {
                     };
 
                     if (ef->return_type && needs_ext_abi_coercion(*ef->return_type)) {
-                        const auto ret_cls = classify_aggregate_eightbytes(*ef->return_type, *current_module_path_);
+                        const auto ret_cls = classify_aggregate(*ef->return_type, *current_module_path_);
                         if (ret_cls.indirect) {
                             auto *ret_slot = create_entry_alloca(current_function_, ret_cls.raw_type, "ext.ret");
                             std::vector<llvm::Value *> full_args;
@@ -4881,9 +5039,9 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) {
                             return emit_incr_decr(*v);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
-                            return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), sizeof_operand(*v));
+                            return usize_const(sizeof_operand(*v));
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) {
-                            return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), align_of_operand(*v));
+                            return usize_const(align_of_operand(*v));
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
                             // Unlike a generic value operand, an operand that names a TYPE (e.g.
                             // 'type_of(Point)') never went through check_expr (see sema's mirrored
@@ -4920,7 +5078,7 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) {
                             const auto operand_type = current_exprs_->expr_types.at(sema::get_expr_key(v->operand));
                             if (operand_type.kind == sema::TypeKind::Array) {
-                                return builder_.getInt64(sema_program_.arrays.at(operand_type.array_index).count);
+                                return usize_const(sema_program_.arrays.at(operand_type.array_index).count);
                             }
                             auto *slice = emit_expr(v->operand);
                             return builder_.CreateExtractValue(slice, {1});
@@ -5087,17 +5245,17 @@ namespace codegen {
                 llvm::Constant *indices[] = {builder_.getInt32(0), builder_.getInt32(0)};
                 auto *ptr = llvm::ConstantExpr::getInBoundsGetElementPtr(
                     init->getType(), global, llvm::ArrayRef(indices));
-                auto *len = llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), value.size());
+                auto *len = usize_const(value.size());
                 auto *slice_ty = llvm::StructType::get(*context_,
-                    {llvm::PointerType::getUnqual(*context_), llvm::Type::getInt64Ty(*context_)});
+                    {llvm::PointerType::getUnqual(*context_), usize_ty()});
                 auto *slice = llvm::ConstantStruct::get(slice_ty, {ptr, len});
                 string_literals_.emplace(value, slice);
                 return slice;
             }
 
             auto build_slice_value(llvm::Value *ptr, llvm::Value *count, const sema::ResolvedType &slice_type, const std::string &type_module) -> llvm::Value * {
-                if (!count->getType()->isIntegerTy(64)) {
-                    count = integer_cast(count, llvm::Type::getInt64Ty(*context_), sema::ResolvedType{.kind = sema::TypeKind::USize});
+                if (count->getType() != usize_ty()) {
+                    count = integer_cast(count, usize_ty(), sema::ResolvedType{.kind = sema::TypeKind::USize});
                 }
                 llvm::Value *slice = llvm::UndefValue::get(llvm_type(type_module, slice_type));
                 slice = builder_.CreateInsertValue(slice, ptr, {0});
@@ -5136,7 +5294,7 @@ namespace codegen {
                 auto *slot = create_entry_alloca(current_function_, arr_ll, "variadic.tmp");
                 builder_.CreateStore(agg, slot);
                 auto *ptr = builder_.CreateInBoundsGEP(arr_ll, slot, {builder_.getInt32(0), builder_.getInt32(0)});
-                return build_slice_value(ptr, builder_.getInt64(n), slice_ty, callee_module);
+                return build_slice_value(ptr, usize_const(n), slice_ty, callee_module);
             }
 
             auto emit_slice_cast(const ast::CastExpr &expr, const sema::ResolvedType &from, const sema::ResolvedType &to) -> llvm::Value * {
@@ -5165,7 +5323,7 @@ namespace codegen {
                     return build_slice_value(base, emit_expr(*expr.len_expr), to, type_module);
                 }
                 auto *ptr = emit_expr(expr.value);
-                auto *count = expr.len_expr ? emit_expr(*expr.len_expr) : builder_.getInt64(0);
+                auto *count = expr.len_expr ? emit_expr(*expr.len_expr) : static_cast<llvm::Value *>(usize_const(0));
                 return build_slice_value(ptr, count, to, type_module);
             }
 
@@ -5179,8 +5337,8 @@ namespace codegen {
                 const auto emit_bound = [&](const std::optional<ast::Expr> &bound) -> llvm::Value * {
                     if (!bound) return nullptr;
                     auto *value = emit_expr(*bound);
-                    if (!value->getType()->isIntegerTy(64)) {
-                        value = integer_cast(value, llvm::Type::getInt64Ty(*context_),
+                    if (value->getType() != usize_ty()) {
+                        value = integer_cast(value, usize_ty(),
                                              current_exprs_->expr_types.at(sema::get_expr_key(*bound)));
                     }
                     return value;
@@ -5188,12 +5346,12 @@ namespace codegen {
 
                 auto *start = emit_bound(expr.start);
                 auto *end = emit_bound(expr.end);
-                if (!start) start = builder_.getInt64(0);
+                if (!start) start = usize_const(0);
 
                 if (operand_type.kind == sema::TypeKind::Array) {
                     if (!end) {
                         const auto *array_info = sema_program_.array_at(operand_type.array_index);
-                        end = builder_.getInt64(array_info ? array_info->count : 0);
+                        end = usize_const(array_info ? array_info->count : 0);
                     }
                     auto *count = builder_.CreateSub(end, start);
                     auto base = emit_lvalue(expr.operand);
@@ -5571,7 +5729,7 @@ namespace codegen {
                 auto *old = builder_.CreateLoad(lv.storage_type, lv.ptr);
                 llvm::Value *next = nullptr;
                 if (is_pointer_like(lv.type)) {
-                    next = emit_pointer_offset(old, builder_.getInt64(1), lv.type, !expr.is_increment);
+                    next = emit_pointer_offset(old, usize_const(1), lv.type, !expr.is_increment);
                 } else {
                     auto *one = llvm::ConstantInt::get(lv.storage_type, 1);
                     next = expr.is_increment ? builder_.CreateAdd(old, one) : builder_.CreateSub(old, one);
@@ -5773,9 +5931,9 @@ namespace codegen {
                                 }
                             }
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
-                            return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), sizeof_operand(*v));
+                            return usize_const(sizeof_operand(*v));
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) {
-                            return llvm::ConstantInt::get(llvm::Type::getInt64Ty(*context_), align_of_operand(*v));
+                            return usize_const(align_of_operand(*v));
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
                             // constant=true here means sema already confirmed this is eligible as
                             // a compile-time constant (is_constant_expr), which for TypeOfExpr
@@ -5939,17 +6097,17 @@ namespace codegen {
                     expr);
             }
 
-            static auto cast_opcode(const sema::ResolvedType &from, const sema::ResolvedType &to) -> unsigned {
+            auto cast_opcode(const sema::ResolvedType &from, const sema::ResolvedType &to) const -> unsigned {
                 if (from.is_integer() && to.is_integer()) {
-                    const auto from_bits = int_bits(from);
-                    const auto to_bits = int_bits(to);
+                    const auto from_bits = int_bits(from, pointer_bits());
+                    const auto to_bits = int_bits(to, pointer_bits());
                     if (from_bits == to_bits) return llvm::Instruction::BitCast;
                     if (from_bits > to_bits) return llvm::Instruction::Trunc;
                     return signedness(from) ? llvm::Instruction::SExt : llvm::Instruction::ZExt;
                 }
                 if (from.is_integer() && to.is_float()) return signedness(from) ? llvm::Instruction::SIToFP : llvm::Instruction::UIToFP;
                 if (from.is_float() && to.is_integer()) return signedness(to) ? llvm::Instruction::FPToSI : llvm::Instruction::FPToUI;
-                if (from.is_float() && to.is_float()) return int_bits(from) > int_bits(to) ? llvm::Instruction::FPTrunc : llvm::Instruction::FPExt;
+                if (from.is_float() && to.is_float()) return int_bits(from, pointer_bits()) > int_bits(to, pointer_bits()) ? llvm::Instruction::FPTrunc : llvm::Instruction::FPExt;
                 if (is_pointer_like(from) && to.is_integer()) return llvm::Instruction::PtrToInt;
                 if (from.is_integer() && is_pointer_like(to)) return llvm::Instruction::IntToPtr;
                 return llvm::Instruction::BitCast;
@@ -6436,10 +6594,11 @@ namespace codegen {
                     auto *int_ty = llvm_type_for(upper_sema_type, *current_module_path_);
                     const bool is_signed = upper_sema_type.is_signed();
 
-                    // The counter runs in i64: sema binds the index as 'usize', so a body
-                    // read loads 8 bytes — an i32 slot (the bound type of 'for i in 0..4')
-                    // put 4 bytes of adjacent stack garbage in the high half of 'i'.
-                    auto *idx_ty = llvm::Type::getInt64Ty(*context_);
+                    // The counter runs at the width of 'usize', which is what sema binds the
+                    // index as: a body read loads a whole word, and an i32 slot (the bound type
+                    // of 'for i in 0..4') put 4 bytes of adjacent stack garbage in the high half
+                    // of 'i' on a 64-bit target.
+                    auto *idx_ty = usize_ty();
                     auto *idx_slot = create_entry_alloca(current_function_, idx_ty, "for.idx");
                     llvm::Value *lower_val = range.lower
                         ? emit_expr(*range.lower)
@@ -6506,7 +6665,7 @@ namespace codegen {
                     const auto &array_info = sema_program_.arrays.at(iterable_type.array_index);
                     elem_type = array_info.element_type;
                     base = emit_lvalue(stmt.iterable).ptr;
-                    len_val = builder_.getInt64(array_info.count);
+                    len_val = usize_const(array_info.count);
                 } else {
                     auto *slice_val = emit_expr(stmt.iterable);
                     elem_type = sema_program_.slices.at(iterable_type.slice_index).element_type;
@@ -6514,8 +6673,8 @@ namespace codegen {
                     len_val = builder_.CreateExtractValue(slice_val, {1}, "for.len");
                 }
 
-                auto *idx_slot = create_entry_alloca(current_function_, llvm::Type::getInt64Ty(*context_), "for.idx");
-                builder_.CreateStore(builder_.getInt64(0), idx_slot);
+                auto *idx_slot = create_entry_alloca(current_function_, usize_ty(), "for.idx");
+                builder_.CreateStore(usize_const(0), idx_slot);
                 if (stmt.index_name != "_") {
                     locals_[stmt.index_name] = LocalValue{.alloca = idx_slot, .type = sema::ResolvedType{.kind = sema::TypeKind::USize}, .type_module = *current_module_path_};
                 }
@@ -6552,7 +6711,7 @@ namespace codegen {
                 builder_.CreateBr(cond_bb);
 
                 builder_.SetInsertPoint(cond_bb);
-                auto *idx = builder_.CreateLoad(llvm::Type::getInt64Ty(*context_), idx_slot, "for.idx");
+                auto *idx = builder_.CreateLoad(usize_ty(), idx_slot, "for.idx");
                 builder_.CreateCondBr(builder_.CreateICmpULT(idx, len_val, "for.cond"), body_bb, end_bb);
 
                 builder_.SetInsertPoint(body_bb);
@@ -6581,8 +6740,8 @@ namespace codegen {
                 if (!builder_.GetInsertBlock()->getTerminator()) builder_.CreateBr(step_bb);
 
                 builder_.SetInsertPoint(step_bb);
-                auto *idx2 = builder_.CreateLoad(llvm::Type::getInt64Ty(*context_), idx_slot);
-                builder_.CreateStore(builder_.CreateAdd(idx2, builder_.getInt64(1)), idx_slot);
+                auto *idx2 = builder_.CreateLoad(usize_ty(), idx_slot);
+                builder_.CreateStore(builder_.CreateAdd(idx2, usize_const(1)), idx_slot);
                 builder_.CreateBr(cond_bb);
 
                 builder_.SetInsertPoint(end_bb);
@@ -6698,7 +6857,7 @@ namespace codegen {
                         const auto *info = sema_program_.array_at(from.array_index);
                         llvm::Value *fat = llvm::UndefValue::get(to_ty);
                         fat = builder_.CreateInsertValue(fat, slot, {0});
-                        fat = builder_.CreateInsertValue(fat, builder_.getInt64(info ? info->count : 0), {1});
+                        fat = builder_.CreateInsertValue(fat, usize_const(info ? info->count : 0), {1});
                         return fat;
                     }
                     return slot; // array -> pointer/anyptr
@@ -6712,7 +6871,7 @@ namespace codegen {
                 if (to.kind == sema::TypeKind::Slice) { // anyptr -> slice
                     llvm::Value *fat = llvm::UndefValue::get(to_ty);
                     fat = builder_.CreateInsertValue(fat, value, {0});
-                    fat = builder_.CreateInsertValue(fat, builder_.getInt64(0), {1});
+                    fat = builder_.CreateInsertValue(fat, usize_const(0), {1});
                     return fat;
                 }
 

@@ -502,6 +502,12 @@ namespace sema {
         // default; '--no-eager-generic-check' turns it off so a false positive in that pass
         // can never hard-block a build.
         bool eager_generic_check = true;
+        // Byte width of a pointer — and therefore of 'usize', of a code pointer, and of
+        // each half of a slice/trait fat pointer — on the target being compiled for. 8 for
+        // x86-64, 4 for wasm32; the driver derives it from the selected triple. Every layout
+        // decision in the front end funnels through primitive_size/resolved_type_size, which
+        // read it from here, so nothing else needs to know the target's word size.
+        uint32_t pointer_size = 8;
     };
 
     enum class LinkCategory : uint8_t { Lib, System, Flag };
@@ -986,11 +992,17 @@ namespace sema {
     // without their Program entry; use resolved_type_size/align below for a general type.
     //
     // Note primitive_align forwards to primitive_size, which is right for every scalar but
-    // NOT for the two 16-byte fat pointers (Slice/Trait/Any are 16 bytes but 8-byte
-    // aligned) - resolved_type_align overrides those, and is why nothing should call
-    // primitive_align on a fat pointer directly. Defined in type_resolver.cpp.
-    auto primitive_size(TypeKind kind) -> uint32_t;
-    auto primitive_align(TypeKind kind) -> uint32_t;
+    // NOT for the fat pointers (Slice/Trait are two words but one word aligned; Any is 16
+    // bytes but 8-byte aligned) - resolved_type_align overrides those, and is why nothing
+    // should call primitive_align on a fat pointer directly. Defined in type_resolver.cpp.
+    //
+    // 'pointer_size' is Options::pointer_size, the target's word width: every pointer-shaped
+    // kind (Pointer/Anyptr/USize/Function, and both halves of Slice/Trait) scales with it.
+    // Passed explicitly rather than read from a Program because the callers that have only a
+    // TypeKind in hand are exactly the ones deep inside layout, where a wrong default would
+    // silently produce a mislaid-out struct rather than fail.
+    auto primitive_size(TypeKind kind, uint32_t pointer_size) -> uint32_t;
+    auto primitive_align(TypeKind kind, uint32_t pointer_size) -> uint32_t;
 
     // Byte size/alignment of an already-resolved type - exactly what 'size_of(T)'/
     // 'align_of(T)' evaluate to at compile time, and THE definition of it. Three copies of

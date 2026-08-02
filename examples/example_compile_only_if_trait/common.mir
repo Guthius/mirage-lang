@@ -1,0 +1,18 @@
+// example_compile_only_if_trait — a '#compile_only_if' platform split where each
+// platform file IMPLEMENTS A TRAIT for its own type and hands that type back as the
+// trait handle. This is the shape every real platform backend has (core/os's File,
+// core/net's Socket), and the one that pins the rule that an excluded file's trait
+// impls are registered for the duration of its own type-check: without that, the
+// excluded file's 'return &platform_reporter' cannot be checked at all, since the
+// coercion needs an impl the program-wide registry deliberately does not carry.
+//
+// Expected: 'mirage run' exits with len(reporter().report()) — 5 ("linux") under the
+// default/Linux options, 4 ("wasm") under '--opt build/target_os=Wasm32'. Both files
+// must type-check in both configurations.
+//
+// Sorts before both platform files, so their conditions can reference 'target_os'.
+const target_os := import("opts").target_os
+
+pub type Reporter = trait {
+    fn report(self) -> []u8
+}

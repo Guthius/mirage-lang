@@ -1092,17 +1092,9 @@ namespace sema {
         }
     }
 
-    void register_trait_impls_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag) {
-        for (auto &[module_path, files] : ast_program.modules) {
-            for (const auto &file : files) {
-                // A '#compile_only_if'-excluded file's trait impls are never registered:
-                // exclusion exists precisely so two platform files can implement the same
-                // trait for the same type under opposite conditions, which the program-wide
-                // duplicate-impl check below would otherwise reject on every build.
-                if (const auto mod_it = sema_program.modules.find(module_path);
-                    mod_it != sema_program.modules.end() && mod_it->second.excluded_files.contains(file.file_path)) {
-                    continue;
-                }
+    void register_trait_impls_for_file(const ast::Program &ast_program, const std::string &module_path,
+                                       const ast::FileAST &file, Program &sema_program, DiagnosticEngine &diag) {
+        {
                 for (auto &decl : file.declarations) {
                     const auto *timpl = std::get_if<ast::TraitImplDecl>(&decl);
                     if (!timpl) continue;
@@ -1154,12 +1146,25 @@ namespace sema {
                         continue;
                     }
 
-                    // Duplicate-impl check.
+                    // Duplicate-impl check — except while an excluded file is being checked
+                    // against the rest of the program, where its own impl SHADOWS the
+                    // included one for the same (trait, type) instead of colliding with it.
+                    // That is the same rule the overlay applies to same-named symbols, and
+                    // it is what lets two platform files implement one trait for one type.
                     auto dedup_key = std::make_tuple(trait_ref->module_path, trait_ref->name, type_ref->module_path, type_ref->name);
                     if (sema_program.trait_impl_registry.contains(dedup_key)) {
-                        diag.report_error(DiagnosticStage::Sema, timpl->location,
-                            std::format("duplicate impl of trait '{}' for type '{}'", trait_ref->name, type_ref->name));
-                        continue;
+                        if (!sema_program.checking_excluded_file) {
+                            diag.report_error(DiagnosticStage::Sema, timpl->location,
+                                std::format("duplicate impl of trait '{}' for type '{}'", trait_ref->name, type_ref->name));
+                            continue;
+                        }
+                        sema_program.trait_impl_registry.erase(dedup_key);
+                        if (const auto it = sema_program.trait_impls_by_type.find({type_ref->module_path, type_ref->name});
+                            it != sema_program.trait_impls_by_type.end()) {
+                            std::erase_if(it->second, [&](const TraitImplInfo &existing) {
+                                return existing.trait_module == trait_ref->module_path && existing.trait_name == trait_ref->name;
+                            });
+                        }
                     }
                     sema_program.trait_impl_registry[dedup_key] = timpl->location;
 
@@ -1237,6 +1242,23 @@ namespace sema {
 
                     sema_program.trait_impls_by_type[{type_ref->module_path, type_ref->name}].push_back(std::move(impl_info));
                 }
+        }
+    }
+
+    void register_trait_impls_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag) {
+        for (const auto &[module_path, files] : ast_program.modules) {
+            for (const auto &file : files) {
+                // A '#compile_only_if'-excluded file's trait impls are not registered
+                // program-wide: exclusion exists precisely so two platform files can
+                // implement the same trait for the same type under opposite conditions,
+                // which the duplicate-impl check would otherwise reject on every build.
+                // They ARE registered, scoped and shadowing, while that file is itself
+                // being checked — see check_one_excluded_file (sema.cpp).
+                if (const auto mod_it = sema_program.modules.find(module_path);
+                    mod_it != sema_program.modules.end() && mod_it->second.excluded_files.contains(file.file_path)) {
+                    continue;
+                }
+                register_trait_impls_for_file(ast_program, module_path, file, sema_program, diag);
             }
         }
     }

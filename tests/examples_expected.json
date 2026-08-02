@@ -326,6 +326,10 @@
     "diag": "examples/example_compile_only_if_stmt/main.mir:7:5: error: '#compile_only_if' is a file-level directive and may only appear at module scope.",
     "exit": 1
   },
+  "example_compile_only_if_trait": {
+    "action": "run",
+    "exit": 5
+  },
   "example_const_fold_overflow": {
     "action": "build",
     "diag": "examples/example_const_fold_overflow/main.mir:26:9: error: match arm pattern could not be folded to an integer constant (an overflowing division, a shift of 64 or more, or a constant that is not an integer)",

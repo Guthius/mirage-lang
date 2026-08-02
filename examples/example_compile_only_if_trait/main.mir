@@ -1,0 +1,4 @@
+pub fn main() -> i32 {
+    const name := reporter().report()
+    return cast(len(name), i32)
+}

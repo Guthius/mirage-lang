@@ -43,6 +43,7 @@ namespace {
         std::string output = "a.out";
         std::string std_path;
         std::string cc; // linker driver; see resolve_cc()
+        std::string target; // '--target=' triple; empty means the host triple
         std::vector<std::string> libs;
         std::unordered_map<std::string, std::string> opt_values;
     };
@@ -59,6 +60,7 @@ namespace {
                      << "  -l <lib>             Link with additional library (may be repeated)\n"
                      << "  --std=<path>         Override the standard library path (takes precedence over MIRAGE_PATH)\n"
                      << "  --cc=<program>       Linker driver to invoke (default: clang, or $MIRAGE_CC)\n"
+                     << "  --target=<triple>    Cross-compile for <triple> (default: the host triple)\n"
                      << "  --emit-ir            Print LLVM IR to stdout instead of compiling\n"
                      << "  --freestanding       Compile without standard library\n"
                      << "  --noinit             Skip generating/calling the synthesized '@init'-runner '_init'\n"
@@ -115,6 +117,8 @@ namespace {
                 options.std_path = arg.substr(6);
             } else if (arg.starts_with("--cc=")) {
                 options.cc = arg.substr(5);
+            } else if (arg.starts_with("--target=")) {
+                options.target = arg.substr(9);
             } else if (arg == "-l") {
                 if (i + 1 >= argc) {
                     llvm::errs() << "mirage: '-l' requires a library name\n";
@@ -175,15 +179,37 @@ namespace {
         return std::filesystem::path(tmpl);
     }
 
-    // Creates the native-target TargetMachine. Called once BEFORE codegen (so the module
+    // The triple everything downstream is compiled for: '--target=' if given, else the host.
+    // Normalized, so the shorthands a user actually types ('wasm32-emscripten') become the
+    // canonical triples LLVM's TargetRegistry and the ABI predicates below expect.
+    //
+    // Computed before sema, not just before codegen: the '$option' target defaults AND the
+    // pointer width the front end lays types out with both come from it.
+    auto selected_triple(const Options &options) -> llvm::Triple {
+        return llvm::Triple(options.target.empty()
+            ? llvm::sys::getDefaultTargetTriple()
+            : llvm::Triple::normalize(options.target));
+    }
+
+    // Creates the TargetMachine for 'target_triple'. Called once BEFORE codegen (so the module
     // is built under the real DataLayout — implicit alignments and constant folds during
     // IR construction depend on it) and reused for object emission.
-    auto create_native_target_machine() -> std::unique_ptr<llvm::TargetMachine> {
-        llvm::InitializeNativeTarget();
-        llvm::InitializeNativeTargetAsmPrinter();
-        llvm::InitializeNativeTargetAsmParser();
+    auto create_target_machine(const llvm::Triple &target_triple, const bool is_cross) -> std::unique_ptr<llvm::TargetMachine> {
+        // Only a cross build needs the whole registry; the host path stays on the three
+        // native initializers it always used, which is both cheaper and keeps a broken
+        // non-native backend out of the way of ordinary builds.
+        if (is_cross) {
+            llvm::InitializeAllTargetInfos();
+            llvm::InitializeAllTargets();
+            llvm::InitializeAllTargetMCs();
+            llvm::InitializeAllAsmPrinters();
+            llvm::InitializeAllAsmParsers();
+        } else {
+            llvm::InitializeNativeTarget();
+            llvm::InitializeNativeTargetAsmPrinter();
+            llvm::InitializeNativeTargetAsmParser();
+        }
 
-        const llvm::Triple target_triple(llvm::sys::getDefaultTargetTriple());
         std::string error;
         const auto *target = llvm::TargetRegistry::lookupTarget(target_triple, error);
         if (!target) {
@@ -258,29 +284,38 @@ namespace {
         }
     }
 
-    // The linker driver, in precedence order: '--cc=', then $MIRAGE_CC, then clang. Mirrors
-    // how '--std=' overrides MIRAGE_PATH, which previously had no equivalent here -- the
-    // driver was hardcoded, so a cross-compile or a non-default toolchain had no way in.
-    auto resolve_cc(const Options &options) -> std::string {
+    // The linker driver, in precedence order: '--cc=', then $MIRAGE_CC, then a default read
+    // off the target — 'emcc' for wasm (it is what knows how to turn a wasm object plus the
+    // emscripten runtime into a loadable .js/.html), 'clang' otherwise. Mirrors how '--std='
+    // overrides MIRAGE_PATH, which previously had no equivalent here -- the driver was
+    // hardcoded, so a cross-compile or a non-default toolchain had no way in.
+    auto resolve_cc(const Options &options, const llvm::Triple &target_triple) -> std::string {
         if (!options.cc.empty()) {
             return options.cc;
         }
         if (const char *env_value = std::getenv("MIRAGE_CC"); env_value != nullptr && *env_value != '\0') {
             return env_value;
         }
-        return "clang";
+        return target_triple.isWasm() ? "emcc" : "clang";
     }
 
     auto link_executable(const std::filesystem::path &object_path, const std::filesystem::path &output_path,
-                          const Options &options, const std::vector<sema::LinkDirective> &link_directives) -> bool {
-        std::vector<std::string> args{resolve_cc(options)};
-        if (options.freestanding) {
+                          const Options &options, const llvm::Triple &target_triple,
+                          const std::vector<sema::LinkDirective> &link_directives) -> bool {
+        std::vector<std::string> args{resolve_cc(options, target_triple)};
+        // wasm links through emscripten's own startup (it owns 'main' and brings up the
+        // runtime before calling it), and neither of the two position-independence flags
+        // means anything to a wasm module — emcc rejects '-no-pie' outright.
+        if (target_triple.isWasm()) {
+            // Nothing to add: every wasm-specific link input arrives as a '#link' directive.
+        } else if (options.freestanding) {
             args.emplace_back("-ffreestanding");
             args.emplace_back("-nostdlib");
+            args.emplace_back("-no-pie");
         } else {
             args.emplace_back("-nostartfiles");
+            args.emplace_back("-no-pie");
         }
-        args.emplace_back("-no-pie");
 
         args.push_back(object_path.string());
         for (const auto &lib : options.libs) {
@@ -495,12 +530,23 @@ auto main(const int argc, char *argv[]) -> int {
         return 1;
     }
 
-    // Host-platform '$option' defaults ('build/target_os'/'build/target_arch'), used only
-    // where the user didn't already pass an explicit '--opt' override.
-    {
-        const llvm::Triple host_triple(llvm::sys::getDefaultTargetTriple());
-        options.opt_values.try_emplace("build/target_os", default_target_os(host_triple));
-        options.opt_values.try_emplace("build/target_arch", default_target_arch(host_triple));
+    // Target-platform '$option' defaults ('build/target_os'/'build/target_arch'), used only
+    // where the user didn't already pass an explicit '--opt' override. Derived from the
+    // SELECTED triple, so '--target=wasm32-unknown-emscripten' alone flips every
+    // '#compile_only_if(target_os == .Wasm32)' file in the standard library without the
+    // caller having to restate it as a '--opt'.
+    const auto target_triple = selected_triple(options);
+    options.opt_values.try_emplace("build/target_os", default_target_os(target_triple));
+    options.opt_values.try_emplace("build/target_arch", default_target_arch(target_triple));
+
+    // 'run' forks and execs the linked output. A wasm build's output is a page (plus a .wasm
+    // beside it) that only a browser can start, so say that up front rather than after a
+    // full compile — and before the link step, where emcc would reject the extensionless
+    // temp file 'run' hands it with a message about suffixes.
+    if (options.action == Action::Run && target_triple.isWasm()) {
+        llvm::errs() << "mirage: 'run' is not supported for target '" << target_triple.str()
+                     << "'; use 'build -o <file>.html' and open the result in a browser\n";
+        return 1;
     }
 
     const auto start_time = std::chrono::steady_clock::now();
@@ -528,6 +574,7 @@ auto main(const int argc, char *argv[]) -> int {
     const auto sema = sema::check_program(ast, diag, sema::Options{
         .opt_values = options.opt_values,
         .eager_generic_check = options.eager_generic_check,
+        .pointer_size = target_triple.getArchPointerBitWidth() / 8,
     });
     if (!sema.ok) {
         return 1;
@@ -544,7 +591,7 @@ auto main(const int argc, char *argv[]) -> int {
     }
 
     const auto codegen_start = std::chrono::steady_clock::now();
-    const auto target_machine = create_native_target_machine();
+    const auto target_machine = create_target_machine(target_triple, !options.target.empty());
     if (!target_machine) {
         return 1;
     }
@@ -607,7 +654,7 @@ auto main(const int argc, char *argv[]) -> int {
     }
 
     const auto link_start = std::chrono::steady_clock::now();
-    if (!link_executable(object_path, exe_path, options, sema.link_directives)) {
+    if (!link_executable(object_path, exe_path, options, target_triple, sema.link_directives)) {
         // link_executable already printed a detailed diagnostic; no second banner. For
         // 'run', the executable path is an mkstemp placeholder that would otherwise be
         // orphaned in $TMPDIR on every failed link.

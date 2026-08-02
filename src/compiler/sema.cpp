@@ -9,6 +9,8 @@ namespace sema {
     void declare_excluded_file_decls(const ast::Program &program, const std::string &module_path, const ast::FileAST &file, Program &sema_program, DiagnosticEngine &diag);
     void eager_check_generic_template_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag);
     void register_trait_impls_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag);
+    void register_trait_impls_for_file(const ast::Program &ast_program, const std::string &module_path,
+                                       const ast::FileAST &file, Program &sema_program, DiagnosticEngine &diag);
     void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const SourceLocation &trigger_location = {});
     void validate_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
     void validate_method_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
@@ -760,6 +762,15 @@ namespace sema {
         // (suppressed via Program::checking_excluded_file).
         void check_one_excluded_file(const ast::Program &ast_program, const std::string &module_path, const ast::FileAST &file, Program &program, DiagnosticEngine &diag) {
             auto module_snapshot = program.modules.at(module_path);
+            // The two program-wide trait-impl tables are snapshotted for the same reason
+            // the module is: this file's own 'impl TRAIT for TYPE' blocks are registered
+            // for the duration of its check and then taken back out. Registering them at
+            // all is what lets a platform backend hand its type out AS the trait it
+            // implements — 'fn accept(self) -> (Socket, ?Net_Error)' cannot be written any
+            // other way — while keeping them out of the program-wide coherence and
+            // duplicate-impl checks, which is the reason exclusion exists.
+            auto trait_impl_registry_snapshot = program.trait_impl_registry;
+            auto trait_impls_by_type_snapshot = program.trait_impls_by_type;
             const size_t instances_before = program.generic_fn_instances.size();
 
             program.checking_excluded_file = true;
@@ -767,12 +778,16 @@ namespace sema {
             program.overlay_declared_methods.clear();
 
             declare_excluded_file_decls(ast_program, module_path, file, program, diag);
+            register_trait_impls_for_file(ast_program, module_path, file, program, diag);
 
             // The same *_for_module passes check_program already ran over this module.
             // Every per-symbol resolution is memoized (is_resolved / layout_done guards),
             // so the re-run only does new work: the overlay's own symbols.
             resolve_signatures_for_module(module_path, program.modules.at(module_path), program, diag);
             resolve_impl_signatures_for_module(module_path, program.modules.at(module_path), program, diag);
+            // Program-wide, but memoized per impl method (is_resolved), so this only
+            // resolves — and conformance-checks — the impl blocks just registered above.
+            resolve_trait_impl_signatures_for_program(program, diag);
             resolve_values_for_module(module_path, program.modules.at(module_path), program, diag);
             check_struct_field_defaults_for_module(module_path, program.modules.at(module_path), program, diag);
 
@@ -829,6 +844,8 @@ namespace sema {
             program.overlay_declared_names.clear();
             program.overlay_declared_methods.clear();
             program.modules.at(module_path) = std::move(module_snapshot);
+            program.trait_impl_registry = std::move(trait_impl_registry_snapshot);
+            program.trait_impls_by_type = std::move(trait_impls_by_type_snapshot);
 
             // Generic instances requested only by the excluded file's code must not be
             // emitted. Instances are append-only, and every legitimate instance already

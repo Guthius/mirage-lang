@@ -1,0 +1,19 @@
+#compile_only_if(target_os == .Linux)
+
+pub type Linux_Reporter = struct {
+    id: i32
+}
+
+mut linux_reporter: Linux_Reporter = { .id = 1 }
+
+impl Reporter for Linux_Reporter {
+    fn report(self) -> []u8 {
+        return "linux"
+    }
+}
+
+// The coercion this fixture exists for: '*Linux_Reporter' -> 'Reporter', written inside
+// the very file that declares the impl.
+pub fn reporter() -> Reporter {
+    return &linux_reporter
+}

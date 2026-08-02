@@ -4,6 +4,17 @@
 
 Mirage is a compiled, statically-typed systems language that targets native code via LLVM IR. It is designed for low-level programming with a clean, expression-oriented syntax. Mirage compiles to native executables and can interoperate with C libraries via `ext fn` declarations.
 
+**Targets.** The driver compiles for the host by default and cross-compiles with
+`--target=<triple>`. Two targets are supported: `x86_64-*-linux-*` and
+`wasm32-unknown-emscripten`; anything else is refused by codegen rather than
+mis-emitted. The selected triple decides three things a program can observe — the
+`build/target_os` / `build/target_arch` `$option` defaults (so `#compile_only_if` and
+`when` see the right platform without restating it), the width of `usize`, a pointer,
+and each half of a slice or trait handle (8 bytes on x86-64, 4 on wasm32), and the C
+ABI used at `ext fn` boundaries (System V eightbyte packing vs. WebAssembly's
+single-element-struct rule). The linker driver follows too: `clang` natively, `emcc`
+for wasm, overridable with `--cc=`.
+
 ### Comments
 
 ```mirage
@@ -73,7 +84,7 @@ A `type` value is produced with `type_of` (below); its runtime shape is otherwis
 
 ### The `any` Type
 
-`any` is a fat pointer erasing a value's type: `{ id: type, data: anyptr }`, 16 bytes, 8-byte aligned. A value of any other type is implicitly coerced to `any` wherever `any` is the expected type (call arguments, return statements, `var`/`const` initializers, struct/array/union field initializers — the same expected-type channel used by tagged-union and trait-handle coercion):
+`any` is a fat pointer erasing a value's type: `{ id: type, data: anyptr }`, 16 bytes, 8-byte aligned on every target (its leading `type` id is a `u64` regardless of the target's word size). A value of any other type is implicitly coerced to `any` wherever `any` is the expected type (call arguments, return statements, `var`/`const` initializers, struct/array/union field initializers — the same expected-type channel used by tagged-union and trait-handle coercion):
 
 ```mirage
 mut x: i32 = 42
@@ -220,7 +231,7 @@ An array whose size is inferred from its initializer. Valid only as the declared
 []T
 ```
 
-A fat pointer: a (data pointer, length) pair. Slices do not own memory. A slice into an array or pointer is created with `cast(ptr, []T, length)` or via `expr[start..end]`, whose bounds are both optional — `expr[..]` views the whole operand. Length is read with `len(slice)`. Slices are 16 bytes on 64-bit targets.
+A fat pointer: a (data pointer, length) pair. Slices do not own memory. A slice into an array or pointer is created with `cast(ptr, []T, length)` or via `expr[start..end]`, whose bounds are both optional — `expr[..]` views the whole operand. Length is read with `len(slice)`. A slice is two words — 16 bytes on x86-64, 8 on wasm32 — since its length is a `usize`.
 
 ### Struct Types
 
@@ -363,7 +374,7 @@ fn(*u8, ...) -> i32
 fn() -> void   // written as: fn()
 ```
 
-Function pointer types represent callable values. They are opaque pointers internally (8 bytes). The `nil` literal is assignable to any function pointer type; `default` produces a null function pointer.
+Function pointer types represent callable values. They are opaque pointers internally (one word: 8 bytes on x86-64, 4 on wasm32). The `nil` literal is assignable to any function pointer type; `default` produces a null function pointer.
 
 Multi-return function pointer types use `-> (T1, T2)` syntax.
 
@@ -1252,6 +1263,13 @@ pub fn main() -> error(E)   // exits 0 on Ok, 1 on Failed
 
 For freestanding builds (`--freestanding`), use `fn _start()` instead.
 
+The same three shapes are accepted on every target; what differs is the glue the
+compiler wraps around them. On x86-64 Linux it synthesizes a `_start` that calls `main`
+and then `exit`. On wasm it synthesizes a C `int main(int, char **)`, which is what
+emscripten's runtime calls, and *returns* the exit code rather than calling `exit` —
+so the page's runtime shuts down normally instead of being torn down mid-frame.
+Either way `_init` runs first (see [`@init`](#init)).
+
 ### Function Pointers
 
 ```mirage
@@ -1917,11 +1935,17 @@ RTTI in codegen, no `#link` directives, no `#error`/`#warn` firings, and no
 processed), and its `when` blocks still fold — but as dead, check-only
 branches.
 
-One deliberate depth gap: `impl TRAIT for TYPE` blocks in an excluded file
-are *not* deep-checked — trait impls are registered program-wide with
-coherence and duplicate-impl checks an excluded file must not participate in
-(the whole point is that two platform files may implement the same trait for
-the same type), so they are only fully checked when their file is included.
+**Trait impls in an excluded file** are registered only for the duration of
+that file's own check, then taken back out. Within that check they *shadow*
+an included file's impl of the same trait for the same type, exactly as the
+file's symbols shadow same-named ones. Registering them is what lets a
+platform backend hand its own type out AS the trait it implements — a trait
+method declared `fn accept(self) -> (Socket, ?Net_Error)` can be written no
+other way — while keeping excluded impls out of the program-wide coherence
+and duplicate-impl checks, which is the whole point of exclusion (two
+platform files may implement the same trait for the same type). One depth
+gap remains: an excluded impl's method signatures are resolved and
+conformance-checked, but its method *bodies* are not.
 
 **`#compile_only_if` and `when` are complementary, not redundant**: the
 directive gates an entire file (coarse-grained; skips codegen for the whole

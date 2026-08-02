@@ -1,0 +1,19 @@
+#compile_only_if(target_os == .Wasm32)
+
+// Deliberately implements the SAME trait as linux_impl.mir, for a different type, and
+// declares the same 'reporter()' entry point — the two shadow each other, one per build.
+pub type Wasm_Reporter = struct {
+    id: i32
+}
+
+mut wasm_reporter: Wasm_Reporter = { .id = 2 }
+
+impl Reporter for Wasm_Reporter {
+    fn report(self) -> []u8 {
+        return "wasm"
+    }
+}
+
+pub fn reporter() -> Reporter {
+    return &wasm_reporter
+}
