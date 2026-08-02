@@ -37,6 +37,7 @@ namespace {
         bool freestanding = false;
         bool noinit = false;
         bool print_link_directives = false;
+        bool print_module_search = false;
         bool dump_ast = false;
         bool eager_generic_check = true;
         std::string module_path;
@@ -58,7 +59,7 @@ namespace {
                      << "Options:\n"
                      << "  -o, --output <file>  Output file name (default: a.out)\n"
                      << "  -l <lib>             Link with additional library (may be repeated)\n"
-                     << "  --std=<path>         Override the standard library path (takes precedence over MIRAGE_PATH)\n"
+                     << "  --std=<path>         Override the module root (takes precedence over MIRAGE_MODULES_ROOT)\n"
                      << "  --cc=<program>       Linker driver to invoke (default: clang, or $MIRAGE_CC)\n"
                      << "  --target=<triple>    Cross-compile for <triple> (default: the host triple)\n"
                      << "  --emit-ir            Print LLVM IR to stdout instead of compiling\n"
@@ -66,6 +67,7 @@ namespace {
                      << "  --noinit             Skip generating/calling the synthesized '@init'-runner '_init'\n"
                      << "  --opt key=value      Set a compile-time '$option' value (may be repeated)\n"
                      << "  --print-link-directives  Print collected '#link' directives and exit\n"
+                     << "  --print-module-search    Print how each import was resolved and exit\n"
                      << "  --dump-ast           Print the parsed AST shape and exit\n"
                      << "  --no-eager-generic-check  Only type-check a generic's body once it is instantiated\n"
                      << "  --help               Show this help message\n";
@@ -91,6 +93,8 @@ namespace {
                 options.noinit = true;
             } else if (arg == "--print-link-directives") {
                 options.print_link_directives = true;
+            } else if (arg == "--print-module-search") {
+                options.print_module_search = true;
             } else if (arg == "--dump-ast") {
                 options.dump_ast = true;
             } else if (arg == "--no-eager-generic-check") {
@@ -555,11 +559,33 @@ auto main(const int argc, char *argv[]) -> int {
     DiagnosticEngine diag(source_manager);
 
     const auto parse_start = std::chrono::steady_clock::now();
-    const auto ast = ast::resolve(options.module_path, source_manager, diag, options.std_path);
+    const auto ast = ast::resolve(options.module_path, source_manager, diag, ast::ResolveOptions{
+        .std_path_override = options.std_path,
+        // Search root 4. Computed here rather than inside the resolver so that module
+        // resolution stays free of process introspection and the LSP (which shares the
+        // resolver) can supply its own answer or none at all.
+        .compiler_dir = ast::executable_directory(argv[0]),
+    });
     if (!ast.ok) {
+        // The search trace is still worth printing on failure -- it shows which imports DID
+        // resolve and where, which is usually what narrows down the one that didn't.
+        if (options.print_module_search) {
+            for (const auto &record : ast.module_search_trace) {
+                llvm::outs() << std::format("{} -> '{}' -> {}  [{}]\n",
+                    record.importer, record.import_path, record.resolved_path, record.root_label);
+            }
+        }
         return 1;
     }
     const auto parse_elapsed = std::chrono::steady_clock::now() - parse_start;
+
+    if (options.print_module_search) {
+        for (const auto &record : ast.module_search_trace) {
+            llvm::outs() << std::format("{} -> '{}' -> {}  [{}]\n",
+                record.importer, record.import_path, record.resolved_path, record.root_label);
+        }
+        return 0;
+    }
 
     if (options.dump_ast) {
         if (const auto root_it = ast.modules.find(ast.root_module_path); root_it != ast.modules.end()) {

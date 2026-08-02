@@ -54,16 +54,31 @@ Options:
 ```
 -o, --output <file>       Output file name (default: a.out)
 -l <lib>                  Link with additional library (may be repeated)
---std=<path>              Override the standard library path (takes precedence over MIRAGE_PATH)
+--std=<path>              Override the module root (takes precedence over MIRAGE_MODULES_ROOT)
 --cc=<program>            Linker driver to invoke (default: clang, or $MIRAGE_CC)
+--target=<triple>         Cross-compile for <triple> (default: the host triple)
 --emit-ir                 Print LLVM IR to stdout instead of compiling
 --freestanding            Compile without standard library
 --noinit                  Skip generating/calling the synthesized '@init'-runner '_init'
 --opt key=value           Set a compile-time '$option' value (may be repeated)
 --print-link-directives   Print collected '#link' directives and exit
+--print-module-search     Print how each import was resolved and exit
 --dump-ast                Print the parsed AST shape and exit
 --no-eager-generic-check  Only type-check a generic's body once it is instantiated
 ```
+
+### Module resolution
+
+An `import("path")` is tried against five roots in order, first hit wins: the **importing
+module's** directory, the **root module's** directory, the **current working directory**,
+the **compiler executable's** directory (then `<compiler-dir>/../lib/mirage`), and finally
+`--std=<path>` or the `MIRAGE_MODULES_ROOT` environment variable. Roots 2–5 reject a path
+that escapes the root it was found under; root 1 does not, so `import("../sibling")`
+works. `--print-module-search` shows which root satisfied each import.
+
+> `MIRAGE_PATH` is no longer consulted — it was replaced by `MIRAGE_MODULES_ROOT` and is
+> not a fallback. If it is set while `MIRAGE_MODULES_ROOT` is not, an unresolved import
+> says so.
 
 ## Language Tour
 

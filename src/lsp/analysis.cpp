@@ -14,7 +14,15 @@ namespace lsp::analysis {
             source_manager->set_source(path, text);
         }
 
-        auto ast_program = ast::resolve(root_module_path, *source_manager, diag);
+        // Search root 4 points at mirage-lsp's own directory, which is where 'just
+        // install-all' also puts 'mirage' -- so an editor session resolves the standard
+        // library from the same install layout the compiler does, without needing
+        // MIRAGE_MODULES_ROOT exported into the editor's environment. Computed once: the
+        // answer cannot change while the process lives.
+        static const std::string compiler_dir = ast::executable_directory(nullptr);
+
+        auto ast_program = ast::resolve(root_module_path, *source_manager, diag,
+                                        ast::ResolveOptions{.compiler_dir = compiler_dir});
 
         // sema::check_program() short-circuits when ast_program.ok is false.
         // We want hover/definition/diagnostics to keep working on whatever

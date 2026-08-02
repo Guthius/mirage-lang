@@ -1738,24 +1738,44 @@ const target_arch := import("path/to/module").target_arch
 
 See [Import Expression](#import-expression) and [Compile-Time Configuration](#12-compile-time-configuration) for a full example.
 
-The path is resolved in two steps:
-1. **Relative to the importing module's own directory** — `<importing-module-dir>/<path>` — if that directory exists, it's used.
-2. Otherwise, relative to the directory named by the **`MIRAGE_PATH` environment variable**, if set. The resolved path must stay inside `MIRAGE_PATH` (no escaping it with `../`); if it doesn't resolve to a directory inside `MIRAGE_PATH`, the import fails.
+An **absolute** import path is rejected outright. A relative path is tried against five
+search roots, in order; the first root under which it names an existing directory wins:
 
-This lets a project keep local, closely-related modules as subdirectories of the importing module, while sharing a common library root via `MIRAGE_PATH` for anything meant to be reused across unrelated parts of a project.
+1. **The importing module's own directory** — `<importing-module-dir>/<path>`.
+2. **The root module's directory** — the module named on the command line.
+3. **The current working directory** the compiler was invoked from.
+4. **The compiler executable's directory**, then `<compiler-dir>/../lib/mirage`. The second
+   probe is what makes a `<prefix>/bin/mirage` + `<prefix>/lib/mirage/...` install resolve
+   the standard library with nothing configured.
+5. **`--std=<path>`** if given, otherwise the **`MIRAGE_MODULES_ROOT` environment
+   variable**.
 
-**The containment rule applies only to step 2.** The `MIRAGE_PATH` fallback is confined to
-`MIRAGE_PATH`; the importer-relative branch has no containment check at all, and the only
-path form rejected outright is an absolute one. `import("../../elsewhere")` resolves
-happily to anywhere on the filesystem the importing file can reach.
+This lets a project keep local, closely-related modules as subdirectories of the importing
+module; reach shared modules from anywhere in the project by their root-relative path; and
+share a common library root across unrelated projects, without every invocation having to
+name it.
 
-That is deliberate rather than an oversight: upward traversal is how sibling modules
-import each other, which the corpus itself depends on — `examples/example_reflection`
-imports `"../../runtime/type_info"`. Constraining it would break working multi-directory
-projects. But there is no project-root boundary, so an import path is bounded only by the
-filesystem.
+**The containment rule applies to roots 2–5, but not to root 1.** Under roots 2–5 a path
+that canonicalizes *outside* the root it was found under is rejected, so a module reached
+through the standard-library root cannot walk out of it with `../..` and pick up something
+unrelated. Root 1 has no containment check at all.
 
-The `mirage build`/`mirage run` CLI also accepts a `--std=<path>` flag, which overrides `MIRAGE_PATH` for that invocation.
+That asymmetry is deliberate rather than an oversight: upward traversal is how sibling
+modules import each other, which the corpus itself depends on —
+`examples/example_reflection` imports `"../../runtime/type_info"`. Constraining it would
+break working multi-directory projects. But there is no project-root boundary, so an
+importer-relative path is bounded only by the filesystem.
+
+When no root satisfies a path, the error lists every root that was tried, including the
+ones that were unset. `mirage build --print-module-search <module>` prints how each import
+in the program *did* resolve, and under which root — first-hit-wins ambiguity between two
+roots is otherwise invisible.
+
+> **`MIRAGE_PATH` is no longer consulted.** It was the pre-2026-08 spelling of root 5 and
+> has been replaced by `MIRAGE_MODULES_ROOT`. It is not a fallback: a program whose imports
+> only resolve under `MIRAGE_PATH` now fails. If the variable is set while
+> `MIRAGE_MODULES_ROOT` is not, the resolution error carries a note saying so, purely so
+> the failure is legible.
 
 ### Accessing Module Symbols
 
