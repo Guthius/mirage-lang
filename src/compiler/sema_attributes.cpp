@@ -52,9 +52,19 @@ namespace sema {
             return nullptr;
         }
 
-        void validate_no_return_attribute(const ast::Attribute &attr, const std::vector<ResolvedType> &return_types, const Program &program, DiagnosticEngine &diag) {
+        // 'return_types_known' is false for a generic declaration, whose FunctionSymbol's
+        // return_types are deliberately never populated -- a template has one signature per
+        // instantiation and none exists yet (see is_generic_function's doc comment). Every
+        // check that reads the return shape must therefore be skipped there, or it reads an
+        // empty list as "returns nothing" and reports nonsense. The argument-count checks
+        // are unaffected and still run.
+        void validate_no_return_attribute(const ast::Attribute &attr, const std::vector<ResolvedType> &return_types,
+                                           const bool return_types_known, const Program &program, DiagnosticEngine &diag) {
             if (!attr.args.empty()) {
                 diag.report_error(DiagnosticStage::Sema, attr.location, "'@no_return' takes no arguments");
+            }
+            if (!return_types_known) {
+                return;
             }
             if (!is_void_or_error_return(return_types, program)) {
                 diag.warn(DiagnosticStage::Sema, attr.location,
@@ -137,9 +147,16 @@ namespace sema {
             return true;
         }
 
-        void validate_no_discard_attribute(const ast::Attribute &attr, const std::vector<ResolvedType> &return_types, DiagnosticEngine &diag) {
+        // See validate_no_return_attribute for what 'return_types_known' means and why it
+        // exists. Without it this rejected every '@no_discard' generic with "on a function
+        // with no return value has no effect", on functions that plainly returned one.
+        void validate_no_discard_attribute(const ast::Attribute &attr, const std::vector<ResolvedType> &return_types,
+                                            const bool return_types_known, DiagnosticEngine &diag) {
             if (!attr.args.empty()) {
                 diag.report_error(DiagnosticStage::Sema, attr.location, "'@no_discard' takes no arguments");
+            }
+            if (!return_types_known) {
+                return;
             }
             // Nothing to discard, so the attribute could only ever mislead a reader into
             // thinking a result exists.
@@ -293,11 +310,11 @@ namespace sema {
             const auto *export_attr = find_attribute(attrs, "export");
             const auto *import_attr = find_attribute(attrs, "import");
 
-            if (no_return) validate_no_return_attribute(*no_return, return_types, program, diag);
+            if (no_return) validate_no_return_attribute(*no_return, return_types, /*return_types_known=*/!is_generic, program, diag);
             if (naked) validate_naked_attribute(*naked, body, diag);
             if (always_inline) validate_always_inline_attribute(*always_inline, diag);
             if (section) validate_section_attribute(*section, module_path, program, diag);
-            if (no_discard) validate_no_discard_attribute(*no_discard, return_types, diag);
+            if (no_discard) validate_no_discard_attribute(*no_discard, return_types, /*return_types_known=*/!is_generic, diag);
             if (naked && always_inline) {
                 diag.report_error(DiagnosticStage::Sema, naked->location,
                     "'@naked' and '@always_inline' cannot be combined: a naked function has no body to inline");

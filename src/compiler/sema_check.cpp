@@ -782,12 +782,28 @@ namespace sema {
                     expr_tables_for_write(program, module_path).call_no_discard[instance_key] = callee_name;
                 }
             };
+            // Declared after note_no_discard because it uses it.
             const auto record_instance = [&](const size_t idx) -> std::vector<ResolvedType> {
                 const auto &instance = *program.generic_fn_instances[idx];
                 check_call_args(call.args, instance.param_types, false, locals, module_path, program, diag,
                                  call.location, instance.decl ? instance.decl->name : std::string{},
                                  loop_depth, defer_loop_base, fn_error_type, instance.is_variadic, instance.required_params);
                 expr_tables_for_write(program, module_path).expr_generic_fn_instance[instance_key] = idx;
+                // Every generic call -- inferred or explicitly instantiated, same module or
+                // cross-module -- funnels through here, so this is the one place '@no_discard'
+                // on a generic can be recorded. Read off the template's own attributes: the
+                // instance carries no attribute list of its own.
+                if (instance.decl) {
+                    note_no_discard(find_attribute(instance.decl->attributes, "no_discard") != nullptr,
+                                     instance.decl->name);
+                    // A generic '@test' is already rejected at its declaration, so this only
+                    // ever fires for a template that slipped through with errors already
+                    // reported; harmless either way and keeps the two call-site diagnostics
+                    // together.
+                    if (find_attribute(instance.decl->attributes, "test")) {
+                        report_test_function_reference(instance.decl->name, call.location, program, diag);
+                    }
+                }
                 return instance.return_types;
             };
 

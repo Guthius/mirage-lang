@@ -102,6 +102,22 @@ def case_no_discard():
     expect_error("@no_discard(1)\nfn f() -> i32 { return 1 }\npub fn main() -> i32 { return f() }\n",
                  "takes no arguments", "'@no_discard' takes no arguments")
 
+    # Generics: a template's return_types are never populated (one signature per
+    # instantiation, none of which exists yet), so every check that reads the return shape
+    # has to be skipped there. Without that, this rejected EVERY '@no_discard' generic with
+    # "on a function with no return value has no effect" -- on functions that plainly
+    # returned one.
+    expect_ok("@no_discard\nfn checked[T: type](v: T) -> T { return v }\n"
+              "pub fn main() -> i32 { return checked(1) }\n",
+              "'@no_discard' on a generic function is accepted")
+    expect_error("@no_discard\nfn checked[T: type](v: T) -> T { return v }\n"
+                 "pub fn main() -> i32 { checked(1)  return 0 }\n",
+                 "return value of 'checked' must be used",
+                 "and still fires when a generic call's result is dropped")
+    expect_ok("@no_discard\nfn checked[T: type](v: T) -> T { return v }\n"
+              "pub fn main() -> i32 { const _ := checked(1)  return 0 }\n",
+              "'_' silences it for a generic call too")
+
     # Methods carry it too, and the diagnostic names the method.
     expect_error("pub type T = struct { x: i32 }\n"
                  "impl T {\n  @no_discard\n  pub fn get(self) -> i32 { return self.x }\n}\n"
