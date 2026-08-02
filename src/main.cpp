@@ -1,4 +1,5 @@
 #include "compiler/codegen.hpp"
+#include "compiler/mirgen.hpp"
 #include "compiler/module_resolver.hpp"
 #include "compiler/sema.hpp"
 #include "compiler/source_manager.hpp"
@@ -40,6 +41,9 @@ namespace {
     struct Options {
         Action action = Action::None;
         bool emit_ir = false;
+        // '--emit-mir': lower to Mirage IR and print it. The native backend's primary
+        // debugging surface until it can produce objects (docs/backend.md, stage 2).
+        bool emit_mir = false;
         bool freestanding = false;
         bool noinit = false;
         bool nortti = false;
@@ -77,6 +81,7 @@ namespace {
                      << "  --cc=<program>       Linker driver to invoke (default: clang, or $MIRAGE_CC)\n"
                      << "  --target=<triple>    Cross-compile for <triple> (default: the host triple)\n"
                      << "  --emit-ir            Print LLVM IR to stdout instead of compiling\n"
+                     << "  --emit-mir           Print Mirage IR to stdout instead of compiling (native backend)\n"
                      << "  --freestanding       Compile without standard library\n"
                      << "  --noinit             Skip generating/calling the synthesized '@init'-runner '_init'\n"
                      << "  --nortti             Disable runtime type information ('type_info_of'); sets '$rtti_enabled' to false\n"
@@ -103,6 +108,8 @@ namespace {
                 std::exit(0);
             } else if (arg == "--emit-ir") {
                 options.emit_ir = true;
+            } else if (arg == "--emit-mir") {
+                options.emit_mir = true;
             } else if (arg == "--freestanding") {
                 options.freestanding = true;
             } else if (arg == "--noinit") {
@@ -712,6 +719,25 @@ auto main(const int argc, char *argv[]) -> int {
                             "        required for 'mirage test'\n";
             return 1;
         }
+    }
+
+    // '--emit-mir' stops here: the native backend cannot produce an object yet, so there is
+    // nothing downstream to hand the module to. Printing is the whole point — reading MIR is
+    // how stage 2 is validated (docs/backend.md).
+    if (options.emit_mir) {
+        auto lowered = mirgen::generate(ast, sema, diag, mirgen::Options{
+            .pointer_bits = target_triple.getArchPointerBitWidth(),
+        });
+        llvm::outs() << mir::print(lowered.module);
+        if (!lowered.unsupported.empty()) {
+            // A coverage report, not a failure list: mirgen is grown construct by construct,
+            // and this says exactly how far it has got on THIS program.
+            llvm::errs() << "\nnot yet lowered by the native backend:\n";
+            for (const auto &what : lowered.unsupported) {
+                llvm::errs() << "  - " << what << "\n";
+            }
+        }
+        return lowered.ok ? 0 : 1;
     }
 
     const auto codegen_start = std::chrono::steady_clock::now();

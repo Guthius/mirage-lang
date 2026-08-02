@@ -1,0 +1,798 @@
+#include "mirgen.hpp"
+
+#include <algorithm>
+#include <format>
+#include <ranges>
+#include <unordered_map>
+
+namespace mirgen {
+    namespace {
+        // Mangling must agree with codegen.cpp's symbol_name: while both backends exist, a
+        // program compiled either way has to produce the same symbols, and the eventual
+        // differential test compares them directly.
+        auto symbol_name(const std::string_view module_path, const std::string_view name,
+                          const bool is_entry_symbol = false) -> std::string {
+            if (is_entry_symbol) {
+                return std::string(name);
+            }
+            std::string out = "__mir_";
+            for (const char c : module_path) {
+                out += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
+            }
+            out += "_";
+            out += name;
+            return out;
+        }
+
+        class Generator {
+          public:
+            Generator(const ast::Program &ast_program, const sema::Program &sema_program,
+                       DiagnosticEngine &diag, const Options &options)
+                : ast_(ast_program), sema_(sema_program), diag_(diag), options_(options) {
+                result_.module.name = "mirage";
+                result_.module.pointer_bits = options.pointer_bits;
+            }
+
+            auto run() -> Result {
+                declare_globals();
+                declare_functions();
+                emit_function_bodies();
+
+                // The verifier is the analogue of llvm::verifyModule, which the LLVM path
+                // runs on every compile. Running it here means a lowering bug is reported
+                // against the construct that produced it rather than surfacing as wrong code
+                // several stages later.
+                //
+                // Skipped once anything has already been diagnosed: emission bails out of a
+                // construct it cannot lower, so a module built in an error state is EXPECTED
+                // to be incomplete, and verifying it would bury the real diagnostic under
+                // consequences of it.
+                if (!diag_.has_errors()) {
+                    for (const auto &error : mir::verify(result_.module)) {
+                        diag_.report_error(DiagnosticStage::Codegen, {},
+                            std::format("internal error: generated MIR is malformed: {}", error.message));
+                    }
+                }
+
+                result_.ok = !diag_.has_errors();
+                return std::move(result_);
+            }
+
+          private:
+            const ast::Program &ast_;
+            const sema::Program &sema_;
+            DiagnosticEngine &diag_;
+            Options options_;
+            Result result_;
+
+            // (module path, name) -> index into mir::Module::functions / ::globals.
+            std::unordered_map<std::string, uint32_t> function_index_;
+            std::unordered_map<std::string, uint32_t> global_index_;
+
+            // Per-function lowering state.
+            const std::string *module_path_ = nullptr;
+            const sema::ProgramModule *module_ = nullptr;
+            const sema::ExprSideTables *exprs_ = nullptr;
+            // Local name -> the slot holding it. Every local is a slot; promote_slots
+            // (stage 3) turns the ones whose address never escapes back into values.
+            std::unordered_map<std::string, uint32_t> locals_;
+            std::unordered_map<std::string, sema::ResolvedType> local_types_;
+
+            static auto key(const std::string_view module_path, const std::string_view name) -> std::string {
+                return std::string(module_path) + "\n" + std::string(name);
+            }
+
+            void unsupported(const std::string &what, const SourceLocation &loc) {
+                result_.unsupported.insert(what);
+                diag_.report_error(DiagnosticStage::Codegen, loc, std::format(
+                    "the native backend cannot lower {} yet; use '--backend=llvm' for this program", what));
+            }
+
+            // ---- types -------------------------------------------------------------
+
+            [[nodiscard]] auto size_of(const sema::ResolvedType &type) const -> uint32_t {
+                return sema::resolved_type_size(type, sema_);
+            }
+            [[nodiscard]] auto align_of(const sema::ResolvedType &type) const -> uint32_t {
+                return sema::resolved_type_align(type, sema_);
+            }
+
+            // The MIR type a sema type lowers to, or Void for anything that lives in memory.
+            // Aggregates deliberately have no MIR type: a MIR value is one machine scalar,
+            // and everything wider is reached through a pointer (see mir.hpp).
+            [[nodiscard]] auto scalar_type(const sema::ResolvedType &type) const -> mir::Ty {
+                using K = sema::TypeKind;
+                switch (type.kind) {
+                case K::Bool:   return mir::Ty::I1;
+                case K::U8: case K::I8:   return mir::Ty::I8;
+                case K::U16: case K::I16: return mir::Ty::I16;
+                case K::U32: case K::I32: return mir::Ty::I32;
+                case K::U64: case K::I64: return mir::Ty::I64;
+                case K::USize:  return options_.pointer_bits == 64 ? mir::Ty::I64 : mir::Ty::I32;
+                case K::F32:    return mir::Ty::F32;
+                case K::F64:    return mir::Ty::F64;
+                case K::Pointer: case K::Anyptr: case K::Function: return mir::Ty::Ptr;
+                case K::Type:   return mir::Ty::I64;
+                case K::Enum: {
+                    const auto *info = sema_.enum_at(type.enum_index);
+                    return info ? scalar_type(info->underlying_type) : mir::Ty::Void;
+                }
+                case K::Bitset: {
+                    const auto *info = sema_.bitset_at(type.bitset_index);
+                    return info ? scalar_type(info->storage_type) : mir::Ty::Void;
+                }
+                default:
+                    // Struct, Array, Slice, Trait, Union, Any, Void, Opaque, ...
+                    return mir::Ty::Void;
+                }
+            }
+
+            [[nodiscard]] auto is_scalar(const sema::ResolvedType &type) const -> bool {
+                return scalar_type(type) != mir::Ty::Void;
+            }
+
+            [[nodiscard]] auto signed_type(const sema::ResolvedType &type) const -> bool {
+                using K = sema::TypeKind;
+                switch (type.kind) {
+                case K::I8: case K::I16: case K::I32: case K::I64: return true;
+                case K::Enum: {
+                    const auto *info = sema_.enum_at(type.enum_index);
+                    return info && signed_type(info->underlying_type);
+                }
+                default: return false;
+                }
+            }
+
+            [[nodiscard]] auto expr_type(const ast::Expr &expr) const -> sema::ResolvedType {
+                if (!exprs_) return sema::ResolvedType{.kind = sema::TypeKind::Invalid};
+                const auto it = exprs_->expr_types.find(sema::get_expr_key(expr));
+                return it == exprs_->expr_types.end()
+                    ? sema::ResolvedType{.kind = sema::TypeKind::Invalid}
+                    : it->second;
+            }
+
+            // ---- declarations ------------------------------------------------------
+
+            // Modules in resolver order, matching codegen's modules_in_order(): emission
+            // order is a function of the source rather than of an unordered_map's hashes, so
+            // MIR text is diffable between builds.
+            [[nodiscard]] auto modules_in_order() const
+                -> std::vector<std::pair<const std::string *, const sema::ProgramModule *>> {
+                std::vector<std::pair<const std::string *, const sema::ProgramModule *>> out;
+                std::set<std::string> seen;
+                for (const auto &path : ast_.module_order) {
+                    const auto it = sema_.modules.find(path);
+                    if (it == sema_.modules.end()) continue;
+                    out.emplace_back(&it->first, &it->second);
+                    seen.insert(path);
+                }
+                for (const auto &entry : sema_.modules) {
+                    if (!seen.contains(entry.first)) out.emplace_back(&entry.first, &entry.second);
+                }
+                return out;
+            }
+
+            void declare_globals() {
+                for (const auto &[path_ptr, mod_ptr] : modules_in_order()) {
+                    const auto &path = *path_ptr;
+                    for (const auto &[name, sym] : mod_ptr->symbols) {
+                        if (mod_ptr->bare_import_origins.contains(name)) continue;
+                        const auto *global = std::get_if<sema::GlobalSymbol>(&sym);
+                        if (!global) continue;
+
+                        mir::Global g;
+                        g.name = global->export_name ? *global->export_name : symbol_name(path, name);
+                        g.linkage = global->is_pub || global->export_name
+                            ? mir::Linkage::External : mir::Linkage::Internal;
+                        g.size = size_of(global->type);
+                        g.align = std::max(1u, align_of(global->type));
+                        g.is_constant = !global->is_mut;
+                        // Initializers are lowered in a later increment; a zero-initialized
+                        // global is correct for everything sema accepted as 'default'.
+                        result_.module.globals.push_back(std::move(g));
+                        global_index_[key(path, name)] = static_cast<uint32_t>(result_.module.globals.size() - 1);
+                    }
+                }
+            }
+
+            // The MIR signature for a Mirage function. Aggregates are passed and returned by
+            // pointer, which is what "values are scalars" means at a call boundary; the C
+            // ABI's own coercion rules are a backend concern applied later, not here.
+            [[nodiscard]] auto signature_for(const std::vector<sema::ResolvedType> &params,
+                                              const std::vector<sema::ResolvedType> &returns,
+                                              const bool is_variadic) -> uint32_t {
+                mir::Signature sig;
+                sig.is_variadic = is_variadic;
+                for (const auto &p : params) {
+                    sig.params.push_back(is_scalar(p) ? scalar_type(p) : mir::Ty::Ptr);
+                }
+                if (returns.size() == 1) {
+                    sig.result = is_scalar(returns.front()) ? scalar_type(returns.front()) : mir::Ty::Ptr;
+                } else if (returns.size() > 1) {
+                    // Multi-return lowers to an sret pointer parameter. Recorded as such so
+                    // the signature is honest even before bodies use it.
+                    sig.params.insert(sig.params.begin(), mir::Ty::Ptr);
+                }
+                return result_.module.intern_signature(std::move(sig));
+            }
+
+            void declare_functions() {
+                for (const auto &[path_ptr, mod_ptr] : modules_in_order()) {
+                    const auto &path = *path_ptr;
+                    for (const auto &[name, sym] : mod_ptr->symbols) {
+                        if (mod_ptr->bare_import_origins.contains(name)) continue;
+
+                        if (const auto *fn = std::get_if<sema::FunctionSymbol>(&sym)) {
+                            if (fn->decl && !fn->decl->generic_params.empty()) continue;
+                            if (fn->is_test) continue;
+
+                            const bool entry = path == ast_.root_module_path && name == "main";
+                            mir::Function f;
+                            f.name = fn->export_name ? *fn->export_name : symbol_name(path, name, entry);
+                            f.linkage = fn->is_pub || entry || fn->export_name
+                                ? mir::Linkage::External : mir::Linkage::Internal;
+                            f.conv = fn->call_conv == sema::CallConv::C ? mir::CallConv::C : mir::CallConv::Mirage;
+                            f.signature = signature_for(fn->params, fn->return_types, fn->is_variadic);
+                            f.has_body = true;
+                            result_.module.functions.push_back(std::move(f));
+                            function_index_[key(path, name)] =
+                                static_cast<uint32_t>(result_.module.functions.size() - 1);
+
+                        } else if (const auto *ext = std::get_if<sema::ExtFunctionSymbol>(&sym)) {
+                            // 'ext fn's are process-globally deduplicated by bare name, as in
+                            // codegen: two modules declaring the same one must not produce two
+                            // MIR functions, or the linker sees a duplicate.
+                            if (const auto seen = std::ranges::find(result_.module.functions, ext->decl->name,
+                                                                      &mir::Function::name);
+                                seen != result_.module.functions.end()) {
+                                function_index_[key(path, name)] =
+                                    static_cast<uint32_t>(std::distance(result_.module.functions.begin(), seen));
+                                continue;
+                            }
+                            mir::Function f;
+                            f.name = ext->decl->name;
+                            f.linkage = mir::Linkage::External;
+                            f.conv = mir::CallConv::C;
+                            std::vector<sema::ResolvedType> returns;
+                            if (ext->return_type) returns.push_back(*ext->return_type);
+                            f.signature = signature_for(ext->params, returns, ext->is_variadic);
+                            f.has_body = false;
+                            f.import_module = ext->import_module;
+                            f.import_name = ext->import_name;
+                            result_.module.functions.push_back(std::move(f));
+                            function_index_[key(path, name)] =
+                                static_cast<uint32_t>(result_.module.functions.size() - 1);
+                        }
+                    }
+                }
+            }
+
+            // ---- bodies ------------------------------------------------------------
+
+            void emit_function_bodies() {
+                for (const auto &[path_ptr, mod_ptr] : modules_in_order()) {
+                    const auto &path = *path_ptr;
+                    module_path_ = &path;
+                    module_ = mod_ptr;
+                    exprs_ = &mod_ptr->exprs;
+
+                    for (const auto &[name, sym] : mod_ptr->symbols) {
+                        if (mod_ptr->bare_import_origins.contains(name)) continue;
+                        const auto *fn = std::get_if<sema::FunctionSymbol>(&sym);
+                        if (!fn || !fn->decl) continue;
+                        if (!fn->decl->generic_params.empty() || fn->is_test) continue;
+
+                        const auto it = function_index_.find(key(path, name));
+                        if (it == function_index_.end()) continue;
+                        emit_body(it->second, *fn);
+                    }
+                }
+                module_path_ = nullptr;
+                module_ = nullptr;
+                exprs_ = nullptr;
+            }
+
+            void emit_body(const uint32_t fn_index, const sema::FunctionSymbol &fn) {
+                mir::Builder b(result_.module, fn_index);
+                locals_.clear();
+                local_types_.clear();
+
+                const auto entry = b.create_block("entry");
+                b.set_insert_point(entry);
+
+                // Parameters arrive as block parameters of the entry block and are
+                // immediately spilled to slots, matching the memory form the front end
+                // emits. promote_slots undoes this for the ones that never escape.
+                const auto &sig = result_.module.signatures[result_.module.functions[fn_index].signature];
+                for (size_t i = 0; i < fn.params.size() && i < sig.params.size(); ++i) {
+                    const auto param_value = b.add_block_param(entry, sig.params[i]);
+                    result_.module.functions[fn_index].params.push_back(param_value);
+
+                    const auto &decl_param = fn.decl->params[i];
+                    const auto slot = b.add_slot(std::max(1u, size_of(fn.params[i])),
+                                                  std::max(1u, align_of(fn.params[i])), decl_param.name);
+                    b.store(b.slot_addr(slot), param_value);
+                    locals_[decl_param.name] = slot;
+                    local_types_[decl_param.name] = fn.params[i];
+                }
+
+                emit_stmt(b, fn.decl->body, fn);
+
+                if (!b.block_is_terminated()) {
+                    if (fn.return_types.empty()) {
+                        b.ret();
+                    } else {
+                        // sema already reports a genuinely missing return; reaching here means
+                        // the fall-through is unreachable (both branches returned) or a
+                        // construct mirgen skipped left the block open.
+                        b.unreachable();
+                    }
+                }
+            }
+
+            void emit_stmt(mir::Builder &b, const ast::Stmt &stmt, const sema::FunctionSymbol &fn) {
+                if (b.block_is_terminated()) {
+                    return;
+                }
+                std::visit([&]<typename T>(const T &v) {
+                    using V = std::decay_t<T>;
+
+                    if constexpr (std::is_same_v<V, std::unique_ptr<ast::BlockStmt>>) {
+                        // Locals are function-scoped slots, so a block needs no scope of its
+                        // own beyond restoring shadowed names.
+                        const auto saved_locals = locals_;
+                        const auto saved_types = local_types_;
+                        for (const auto &s : v->stmts) {
+                            emit_stmt(b, s, fn);
+                            if (b.block_is_terminated()) break;
+                        }
+                        locals_ = saved_locals;
+                        local_types_ = saved_types;
+
+                    } else if constexpr (std::is_same_v<V, ast::VarDeclStmt>) {
+                        emit_var_decl(b, v);
+
+                    } else if constexpr (std::is_same_v<V, ast::ExprStmt>) {
+                        (void) emit_expr(b, v.expr);
+
+                    } else if constexpr (std::is_same_v<V, ast::ReturnStmt>) {
+                        emit_return(b, v, fn);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IfStmt>>) {
+                        emit_if(b, *v, fn);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhileStmt>>) {
+                        emit_while(b, *v, fn);
+
+                    } else {
+                        unsupported(std::format("the '{}' statement", stmt_kind_name<V>()), stmt_location(stmt));
+                    }
+                }, stmt);
+            }
+
+            template <typename V>
+            static auto stmt_kind_name() -> const char * {
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::ForInStmt>>) return "for-in";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SwitchStmt>>) return "switch";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::DeferStmt>>) return "defer";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenStmt>>) return "when";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmStmt>>) return "asm";
+                else if constexpr (std::is_same_v<V, ast::BreakStmt>) return "break";
+                else if constexpr (std::is_same_v<V, ast::ContinueStmt>) return "continue";
+                else return "statement";
+            }
+
+            static auto stmt_location(const ast::Stmt &stmt) -> SourceLocation {
+                return std::visit([](const auto &v) -> SourceLocation {
+                    if constexpr (requires { v->location; }) return v->location;
+                    else return v.location;
+                }, stmt);
+            }
+
+            void emit_var_decl(mir::Builder &b, const ast::VarDeclStmt &decl) {
+                const auto type = decl.init ? expr_type(*decl.init) : sema::ResolvedType{};
+                const auto resolved = local_declared_type(decl, type);
+                const auto slot = b.add_slot(std::max(1u, size_of(resolved)),
+                                              std::max(1u, align_of(resolved)), decl.name);
+                locals_[decl.name] = slot;
+                local_types_[decl.name] = resolved;
+
+                if (!decl.init) {
+                    return;
+                }
+                if (!is_scalar(resolved)) {
+                    unsupported("an aggregate variable initializer", decl.location);
+                    return;
+                }
+                const auto value = emit_expr(b, *decl.init);
+                if (value != mir::NO_VALUE) {
+                    b.store(b.slot_addr(slot), value);
+                }
+            }
+
+            // sema recorded the initializer's type; a declaration with an explicit type but
+            // no initializer has none, in which case fall back to whatever sema resolved for
+            // the local. Kept in one place so the "which type is this local" question has one
+            // answer.
+            [[nodiscard]] auto local_declared_type(const ast::VarDeclStmt &decl,
+                                                    const sema::ResolvedType &init_type) const -> sema::ResolvedType {
+                if (init_type.kind != sema::TypeKind::Invalid && init_type.kind != sema::TypeKind::Void) {
+                    return init_type;
+                }
+                return sema::ResolvedType{.kind = sema::TypeKind::I64};
+            }
+
+            void emit_return(mir::Builder &b, const ast::ReturnStmt &stmt, const sema::FunctionSymbol &fn) {
+                if (stmt.return_values.empty()) {
+                    b.ret();
+                    return;
+                }
+                if (stmt.return_values.size() > 1 || fn.return_types.size() > 1) {
+                    unsupported("a multi-return 'return'", stmt.location);
+                    b.unreachable();
+                    return;
+                }
+                if (!fn.return_types.empty() && !is_scalar(fn.return_types.front())) {
+                    unsupported("returning an aggregate by value", stmt.location);
+                    b.unreachable();
+                    return;
+                }
+                const auto value = emit_expr(b, stmt.return_values.front());
+                if (value == mir::NO_VALUE) {
+                    b.unreachable();
+                    return;
+                }
+                b.ret(coerce(b, value, fn.return_types.front()));
+            }
+
+            void emit_if(mir::Builder &b, const ast::IfStmt &stmt, const sema::FunctionSymbol &fn) {
+                const auto cond = emit_condition(b, stmt.condition);
+                if (cond == mir::NO_VALUE) return;
+
+                const auto then_block = b.create_block("if.then");
+                const auto else_block = b.create_block(stmt.else_stmt ? "if.else" : "if.end");
+                // Without an 'else', the false edge IS the join, so no third block is made.
+                const auto end_block = stmt.else_stmt ? b.create_block("if.end") : else_block;
+
+                b.branch(cond, then_block, else_block);
+
+                b.set_insert_point(then_block);
+                emit_stmt(b, stmt.then_stmt, fn);
+                if (!b.block_is_terminated()) b.jump(end_block);
+
+                if (stmt.else_stmt) {
+                    b.set_insert_point(else_block);
+                    emit_stmt(b, *stmt.else_stmt, fn);
+                    if (!b.block_is_terminated()) b.jump(end_block);
+                }
+
+                b.set_insert_point(end_block);
+            }
+
+            void emit_while(mir::Builder &b, const ast::WhileStmt &stmt, const sema::FunctionSymbol &fn) {
+                const auto header = b.create_block("while.cond");
+                const auto body = b.create_block("while.body");
+                const auto exit = b.create_block("while.end");
+
+                b.jump(header);
+                b.set_insert_point(header);
+                const auto cond = emit_condition(b, stmt.condition);
+                if (cond == mir::NO_VALUE) {
+                    b.jump(exit);
+                } else {
+                    b.branch(cond, body, exit);
+                }
+
+                b.set_insert_point(body);
+                emit_stmt(b, stmt.body, fn);
+                if (!b.block_is_terminated()) b.jump(header);
+
+                b.set_insert_point(exit);
+            }
+
+            // A condition must be I1. Integer conditions (the truthiness 'when' and 'if'
+            // accept) become a non-zero comparison.
+            auto emit_condition(mir::Builder &b, const ast::Expr &expr) -> mir::ValueId {
+                const auto value = emit_expr(b, expr);
+                if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                const auto ty = b.value_type(value);
+                if (ty == mir::Ty::I1) return value;
+                if (mir::is_integer(ty)) {
+                    return b.compare(mir::Op::ICmpNe, value, b.const_int(ty, 0));
+                }
+                unsupported("a non-integer condition", sema::get_expr_location(expr));
+                return mir::NO_VALUE;
+            }
+
+            // ---- expressions -------------------------------------------------------
+
+            auto emit_expr(mir::Builder &b, const ast::Expr &expr) -> mir::ValueId {
+                const auto loc = sema::get_expr_location(expr);
+                b.set_location(loc.line, loc.column);
+
+                return std::visit([&]<typename T>(const T &v) -> mir::ValueId {
+                    using V = std::decay_t<T>;
+
+                    if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr>) {
+                        const auto ty = expr_type(expr);
+                        const auto mir_ty = is_scalar(ty) ? scalar_type(ty) : mir::Ty::I64;
+                        return b.const_int(mir_ty, static_cast<int64_t>(v.value));
+
+                    } else if constexpr (std::is_same_v<V, ast::LiteralBoolExpr>) {
+                        return b.const_int(mir::Ty::I1, v.value ? 1 : 0);
+
+                    } else if constexpr (std::is_same_v<V, ast::LiteralFloatExpr>) {
+                        const auto ty = expr_type(expr);
+                        return b.const_float(is_scalar(ty) ? scalar_type(ty) : mir::Ty::F64, v.value);
+
+                    } else if constexpr (std::is_same_v<V, ast::LiteralNilExpr>) {
+                        return b.const_null();
+
+                    } else if constexpr (std::is_same_v<V, ast::IdentExpr>) {
+                        return emit_ident(b, v, expr);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BinaryExpr>>) {
+                        return emit_binary(b, *v, expr);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::UnaryExpr>>) {
+                        return emit_unary(b, *v, expr);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AssignExpr>>) {
+                        return emit_assign(b, *v);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
+                        return emit_call(b, *v, expr);
+
+                    } else {
+                        unsupported(std::format("the expression form at this position"), loc);
+                        return mir::NO_VALUE;
+                    }
+                }, expr);
+            }
+
+            auto emit_ident(mir::Builder &b, const ast::IdentExpr &ident, const ast::Expr &expr) -> mir::ValueId {
+                if (const auto it = locals_.find(ident.name); it != locals_.end()) {
+                    const auto type = local_types_.at(ident.name);
+                    if (!is_scalar(type)) {
+                        // An aggregate local IS its address; loading it would need a type MIR
+                        // does not have.
+                        return b.slot_addr(it->second);
+                    }
+                    return b.load(scalar_type(type), b.slot_addr(it->second));
+                }
+
+                if (module_path_) {
+                    if (const auto it = global_index_.find(key(*module_path_, ident.name));
+                        it != global_index_.end()) {
+                        const auto type = expr_type(expr);
+                        const auto addr = b.global_addr(it->second);
+                        return is_scalar(type) ? b.load(scalar_type(type), addr) : addr;
+                    }
+                    if (const auto it = function_index_.find(key(*module_path_, ident.name));
+                        it != function_index_.end()) {
+                        return b.func_addr(it->second);
+                    }
+                }
+
+                unsupported(std::format("a reference to '{}'", ident.name), ident.location);
+                return mir::NO_VALUE;
+            }
+
+            auto emit_binary(mir::Builder &b, const ast::BinaryExpr &bin, const ast::Expr &expr) -> mir::ValueId {
+                using Bop = ast::BinaryOp;
+
+                // Short-circuit operators are control flow, not arithmetic: the right operand
+                // must not be evaluated when the left decides the answer. Block parameters
+                // carry the result, which is the case phi nodes existed for.
+                if (bin.op == Bop::LogicalAnd || bin.op == Bop::LogicalOr) {
+                    const auto lhs = emit_condition(b, bin.lhs);
+                    if (lhs == mir::NO_VALUE) return mir::NO_VALUE;
+
+                    const auto rhs_block = b.create_block(bin.op == Bop::LogicalAnd ? "and.rhs" : "or.rhs");
+                    const auto join = b.create_block(bin.op == Bop::LogicalAnd ? "and.end" : "or.end");
+                    const auto merged = b.add_block_param(join, mir::Ty::I1);
+                    const auto shortcut = b.create_block("logic.short");
+
+                    if (bin.op == Bop::LogicalAnd) {
+                        b.branch(lhs, rhs_block, shortcut);
+                    } else {
+                        b.branch(lhs, shortcut, rhs_block);
+                    }
+
+                    b.set_insert_point(shortcut);
+                    b.jump(join, {b.const_int(mir::Ty::I1, bin.op == Bop::LogicalAnd ? 0 : 1)});
+
+                    b.set_insert_point(rhs_block);
+                    const auto rhs = emit_condition(b, bin.rhs);
+                    // Even when the right operand could not be lowered (an unsupported
+                    // construct, already diagnosed), this block must still be TERMINATED and
+                    // must still pass the join its parameter -- otherwise the failure leaves
+                    // a malformed module behind and every later diagnostic is about that
+                    // instead of about the real cause.
+                    b.jump(join, {rhs == mir::NO_VALUE ? b.const_int(mir::Ty::I1, 0) : rhs});
+                    if (rhs == mir::NO_VALUE) {
+                        b.set_insert_point(join);
+                        return merged;
+                    }
+
+                    b.set_insert_point(join);
+                    return merged;
+                }
+
+                const auto lhs_type = expr_type(bin.lhs);
+                const auto lhs = emit_expr(b, bin.lhs);
+                const auto rhs = emit_expr(b, bin.rhs);
+                if (lhs == mir::NO_VALUE || rhs == mir::NO_VALUE) return mir::NO_VALUE;
+
+                const auto ty = b.value_type(lhs);
+                const bool is_signed = signed_type(lhs_type);
+                const bool is_float = mir::is_float(ty);
+
+                const auto arith = [&](const mir::Op int_op, const mir::Op float_op) {
+                    return b.binary(is_float ? float_op : int_op, ty, lhs, rhs);
+                };
+
+                switch (bin.op) {
+                case Bop::Add: return arith(mir::Op::Add, mir::Op::FAdd);
+                case Bop::Sub: return arith(mir::Op::Sub, mir::Op::FSub);
+                case Bop::Mul: return arith(mir::Op::Mul, mir::Op::FMul);
+                case Bop::Div:
+                    return b.binary(is_float ? mir::Op::FDiv : (is_signed ? mir::Op::SDiv : mir::Op::UDiv), ty, lhs, rhs);
+                case Bop::Mod:
+                    return b.binary(is_float ? mir::Op::FRem : (is_signed ? mir::Op::SRem : mir::Op::URem), ty, lhs, rhs);
+                case Bop::BitwiseAnd: return b.binary(mir::Op::And, ty, lhs, rhs);
+                case Bop::BitwiseOr:  return b.binary(mir::Op::Or, ty, lhs, rhs);
+                case Bop::BitwiseXor: return b.binary(mir::Op::Xor, ty, lhs, rhs);
+                case Bop::ShiftLeft:  return b.binary(mir::Op::Shl, ty, lhs, rhs);
+                case Bop::ShiftRight:
+                    return b.binary(is_signed ? mir::Op::AShr : mir::Op::LShr, ty, lhs, rhs);
+                case Bop::Equal:
+                    return b.compare(is_float ? mir::Op::FCmpOeq : mir::Op::ICmpEq, lhs, rhs);
+                case Bop::NotEqual:
+                    return b.compare(is_float ? mir::Op::FCmpOne : mir::Op::ICmpNe, lhs, rhs);
+                case Bop::Less:
+                    return b.compare(is_float ? mir::Op::FCmpOlt : (is_signed ? mir::Op::ICmpSlt : mir::Op::ICmpUlt), lhs, rhs);
+                case Bop::LessEqual:
+                    return b.compare(is_float ? mir::Op::FCmpOle : (is_signed ? mir::Op::ICmpSle : mir::Op::ICmpUle), lhs, rhs);
+                case Bop::Greater:
+                    return b.compare(is_float ? mir::Op::FCmpOgt : (is_signed ? mir::Op::ICmpSgt : mir::Op::ICmpUgt), lhs, rhs);
+                case Bop::GreaterEqual:
+                    return b.compare(is_float ? mir::Op::FCmpOge : (is_signed ? mir::Op::ICmpSge : mir::Op::ICmpUge), lhs, rhs);
+                default:
+                    unsupported("this binary operator", bin.location);
+                    return mir::NO_VALUE;
+                }
+            }
+
+            auto emit_unary(mir::Builder &b, const ast::UnaryExpr &un, const ast::Expr &expr) -> mir::ValueId {
+                if (un.op == ast::UnaryOp::AddressOf) {
+                    if (const auto *ident = std::get_if<ast::IdentExpr>(&un.operand)) {
+                        if (const auto it = locals_.find(ident->name); it != locals_.end()) {
+                            // Taking a local's address is exactly what stops promote_slots
+                            // from touching it.
+                            b.mark_slot_escaping(it->second);
+                            return b.slot_addr(it->second);
+                        }
+                        if (module_path_) {
+                            if (const auto g = global_index_.find(key(*module_path_, ident->name));
+                                g != global_index_.end()) {
+                                return b.global_addr(g->second);
+                            }
+                        }
+                    }
+                    unsupported("taking the address of this expression", un.location);
+                    return mir::NO_VALUE;
+                }
+
+                const auto operand = emit_expr(b, un.operand);
+                if (operand == mir::NO_VALUE) return mir::NO_VALUE;
+                const auto ty = b.value_type(operand);
+
+                switch (un.op) {
+                case ast::UnaryOp::Negate:
+                    return b.unary(mir::is_float(ty) ? mir::Op::FNeg : mir::Op::Neg, ty, operand);
+                case ast::UnaryOp::LogicalNot:
+                    // On a bool this is Op::Not, which is width-correct for I1. On an
+                    // integer (the truthiness form) it is "== 0".
+                    if (ty == mir::Ty::I1) return b.unary(mir::Op::Not, ty, operand);
+                    return b.compare(mir::Op::ICmpEq, operand, b.const_int(ty, 0));
+                case ast::UnaryOp::BitwiseNot:
+                    return b.unary(mir::Op::Not, ty, operand);
+                default:
+                    unsupported("this unary operator", un.location);
+                    return mir::NO_VALUE;
+                }
+            }
+
+            auto emit_assign(mir::Builder &b, const ast::AssignExpr &assign) -> mir::ValueId {
+                const auto *ident = std::get_if<ast::IdentExpr>(&assign.target);
+                if (!ident) {
+                    unsupported("assignment to this target", assign.location);
+                    return mir::NO_VALUE;
+                }
+                const auto value = emit_expr(b, assign.value);
+                if (value == mir::NO_VALUE) return mir::NO_VALUE;
+
+                if (const auto it = locals_.find(ident->name); it != locals_.end()) {
+                    b.store(b.slot_addr(it->second), coerce(b, value, local_types_.at(ident->name)));
+                    return value;
+                }
+                if (module_path_) {
+                    if (const auto g = global_index_.find(key(*module_path_, ident->name));
+                        g != global_index_.end()) {
+                        b.store(b.global_addr(g->second), value);
+                        return value;
+                    }
+                }
+                unsupported(std::format("assignment to '{}'", ident->name), assign.location);
+                return mir::NO_VALUE;
+            }
+
+            auto emit_call(mir::Builder &b, const ast::CallExpr &call, const ast::Expr &expr) -> mir::ValueId {
+                const auto *callee = std::get_if<ast::IdentExpr>(&call.callee);
+                if (!callee || !module_path_) {
+                    unsupported("this call form", call.location);
+                    return mir::NO_VALUE;
+                }
+                const auto it = function_index_.find(key(*module_path_, callee->name));
+                if (it == function_index_.end()) {
+                    unsupported(std::format("a call to '{}'", callee->name), call.location);
+                    return mir::NO_VALUE;
+                }
+
+                const auto &sig = result_.module.signatures[result_.module.functions[it->second].signature];
+                std::vector<mir::ValueId> args;
+                args.reserve(call.args.size());
+                for (size_t i = 0; i < call.args.size(); ++i) {
+                    const auto value = emit_expr(b, call.args[i]);
+                    if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                    args.push_back(i < sig.params.size() ? coerce_to(b, value, sig.params[i]) : value);
+                }
+                if (!sig.is_variadic && args.size() != sig.params.size()) {
+                    unsupported("a call with defaulted arguments", call.location);
+                    return mir::NO_VALUE;
+                }
+                return b.call(it->second, sig.result, args);
+            }
+
+            // ---- coercion ----------------------------------------------------------
+
+            auto coerce(mir::Builder &b, const mir::ValueId value, const sema::ResolvedType &target) -> mir::ValueId {
+                return is_scalar(target) ? coerce_to(b, value, scalar_type(target)) : value;
+            }
+
+            // Width/representation adjustment between two MIR scalars. sema already accepted
+            // the conversion; this only makes the representations agree.
+            auto coerce_to(mir::Builder &b, const mir::ValueId value, const mir::Ty target) -> mir::ValueId {
+                const auto from = b.value_type(value);
+                if (from == target || target == mir::Ty::Void) return value;
+
+                const auto from_bits = mir::type_bits(from, options_.pointer_bits);
+                const auto to_bits = mir::type_bits(target, options_.pointer_bits);
+
+                if (mir::is_integer(from) && mir::is_integer(target)) {
+                    if (to_bits < from_bits) return b.convert(mir::Op::Trunc, target, value);
+                    // Widening an I1 is always a zero-extend; the front end has no signed
+                    // one-bit type.
+                    return b.convert(from == mir::Ty::I1 ? mir::Op::ZExt : mir::Op::SExt, target, value);
+                }
+                if (mir::is_float(from) && mir::is_float(target)) {
+                    return b.convert(to_bits < from_bits ? mir::Op::FPTrunc : mir::Op::FPExt, target, value);
+                }
+                if (mir::is_integer(from) && target == mir::Ty::Ptr) {
+                    return b.convert(mir::Op::IntToPtr, target, value);
+                }
+                if (from == mir::Ty::Ptr && mir::is_integer(target)) {
+                    return b.convert(mir::Op::PtrToInt, target, value);
+                }
+                return b.convert(mir::Op::Bitcast, target, value);
+            }
+        };
+    }
+
+    auto generate(const ast::Program &ast_program, const sema::Program &sema_program,
+                   DiagnosticEngine &diag, const Options &options) -> Result {
+        Generator generator(ast_program, sema_program, diag, options);
+        return generator.run();
+    }
+}

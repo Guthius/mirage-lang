@@ -68,6 +68,7 @@ Options:
 --cc=<program>            Linker driver to invoke (default: clang, or $MIRAGE_CC)
 --target=<triple>         Cross-compile for <triple> (default: the host triple)
 --emit-ir                 Print LLVM IR to stdout instead of compiling
+--emit-mir                Print Mirage IR to stdout instead of compiling (native backend)
 --freestanding            Compile without standard library
 --load <path>             Compile a module nothing imports (may be repeated)
 --noinit                  Skip generating/calling the synthesized '@init'-runner '_init'

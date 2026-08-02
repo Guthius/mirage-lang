@@ -40,6 +40,8 @@ add_library(mirage_core OBJECT
         src/compiler/lexer.hpp
         src/compiler/mir.cpp
         src/compiler/mir.hpp
+        src/compiler/mirgen.cpp
+        src/compiler/mirgen.hpp
         src/compiler/module_resolver.cpp
         src/compiler/module_resolver.hpp
         src/compiler/resolved_type.hpp
