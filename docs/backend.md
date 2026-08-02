@@ -1,0 +1,261 @@
+# Backend: replacing LLVM
+
+The compiler currently generates code through LLVM (`src/compiler/codegen.cpp`, ~6,900
+lines, plus the object-emission and target-selection code in `src/main.cpp`). It is being
+replaced by a Mirage-specific IR and native object generation for `x86_64` and `wasm`, so
+that the compiler is standalone — no LLVM, no external toolchain beyond a linker.
+
+**Status.** The IR foundation exists and is tested (`src/compiler/mir.{hpp,cpp}`,
+`tests/mir_test.cpp`, wired into ctest). Nothing consumes it yet: LLVM is still the only
+code path. The stages below are what remain.
+
+This document is the design record for that work. It exists because the reasoning behind
+the IR's shape is not recoverable from the code, and because the remaining stages have a
+sequencing that matters.
+
+---
+
+## Why the IR looks the way it does
+
+Two facts about this compiler decide almost every choice in `mir.hpp`, and neither is
+obvious from outside.
+
+**Sema already owns layout.** `sema::resolved_type_size` / `resolved_type_align` and
+`StructInfo::fields[].offset` are computed in the front end from `Options::pointer_size`;
+`codegen::size_of`/`align_of` are thin forwarders into sema, and no data-layout query
+influences a single layout decision. So MIR needs no structural type system and no layout
+engine — a type is a size, an alignment and a scalar kind. This is why `mir::Ty` is eight
+scalars, and why there is no `getelementptr`: every address computation is plain pointer
+arithmetic (`ptr.add.const` / `ptr.add`), which is a genuine simplification rather than a
+workaround.
+
+**The front end emits memory form, not SSA.** Every local is a stack slot written and read
+through load/store; the LLVM emitter needed `phi` in exactly three places. So no SSA
+construction is required, and a straightforward register allocator suffices. Those three
+cases use **block parameters** instead of phi — simpler to allocate registers for, and
+closer to what wasm's structured control flow wants.
+
+**Aggregates are memory; values are scalars.** A MIR value is always one machine scalar.
+This keeps instruction selection, register allocation and the wasm encoder simple, and it
+costs nothing in expressiveness given the layout fact above.
+
+**Coding style is a constraint, not a preference.** This compiler is going to be rewritten
+in Mirage, so MIR is data-oriented and index-based — flat vectors with `u32` handles, no
+inheritance, no variant-of-`unique_ptr`, no templates — to make that port a
+transliteration rather than a redesign. `sema::Program`'s parallel arenas are the model.
+
+**The builder mirrors `llvm::IRBuilder`'s method surface deliberately**, so porting the
+6,900-line emitter is a mechanical rename rather than a rewrite. The three places where it
+*cannot* be mechanical — GEP, aggregates, and inline asm — are exactly the three worth
+concentrating review on.
+
+### What the LLVM path actually uses
+
+Worth knowing before porting, because it is much less than LLVM offers: about 70 distinct
+`IRBuilder` operations across all 6,900 lines — scalar arithmetic, load/store, GEP,
+insert/extractvalue, branches, calls, inline asm. No vector types except `<2 x float>`
+(produced solely by System V eightbyte classification), no atomics, no intrinsics beyond
+`memcpy`/`memset`, **no debug info at all** (zero `DIBuilder` references — DWARF is not a
+porting obligation), and no IR optimization passes are ever run.
+
+---
+
+## Remaining stages
+
+Each is independently verifiable. Do not start the next until the current one is green.
+
+**2. Port `codegen.cpp` → `mirgen.cpp`** against `mir::Builder`. Validate by *reading* MIR
+for the corpus; no object is produced yet. This is the mechanical-but-large step.
+
+The one part that is not mechanical is aggregates. `codegen.cpp` uses
+`insertvalue`/`extractvalue` on first-class aggregates in ~67 places (struct literals,
+slices, trait handles, `any`, error unions, multi-return). Mitigate with a value wrapper in
+*mirgen*, not in MIR: an aggregate-typed `Val` carries the slot's base pointer, and
+`insert_value(agg, offset, scalar)` mutates in place when the slot was created by this
+builder and has not yet been read, otherwise copies first. The in-place fast path covers
+the whole `null → insert → insert → insert` construction pattern that produces nearly all
+of those sites; the copy path is slower but always correct.
+
+**3. `promote_slots` + peephole.** `promote_slots` is a mem2reg-lite: a slot whose address
+never escapes, accessed only by full-width loads/stores of one scalar type, becomes a
+value. Because the front end puts *every* local in a slot, this is what recovers most of
+what LLVM's -O0 pipeline was giving for free. Target-independent, benefits both backends.
+`Slot::address_escapes` already exists for it.
+
+**4. x86-64: legalize → ISel → *trivial* regalloc → frame layout → encoder → ELF.** First
+goal: `examples/start` runs. Then the whole corpus under differential test.
+
+Build **trivial** register allocation first — spill every value to a frame slot, reload
+around every use. It is slow and enormous but almost impossible to get wrong, and it lets
+ISel, frame layout, the encoder and the ELF writer all be validated end-to-end before a
+single line of linear scan exists.
+
+**5. Inline asm through that encoder.** Without LLVM there is no integrated assembler.
+Fortunately the accepted language is already tiny and enumerated: the 30 Tier-1 mnemonics
+(`sema_check.cpp`'s `asm_tier1_directions`), the 64 GPRs in `asm_registers.hpp`, and
+register/immediate/variable/simple-memory operands — SSE, x87, segment and control
+registers are already rejected as "not supported in v1". Only one stdlib file uses `asm`
+(`core/sys/linux/syscalls.mir`).
+
+This also *simplifies* the operand model: today operands are LLVM constraint strings and
+LLVM allocates. With our own allocator an asm block becomes a machine instruction with
+pre-coloured operands and an explicit clobber set — which sema already computes. The three
+compiler-internal asm blobs (freestanding `exit` and `write` syscalls, `_start`'s stack
+realign) stop being asm at all and become machine instructions directly.
+
+**6. Linear-scan register allocator + machine verifier.** Differential-test against
+trivial. Hard requirements, all of which real programs exercise: 14 allocatable GPRs
+(`rsp`/`rbp` reserved) and 16 XMMs from separate classes; caller/callee-saved split;
+fixed-register constraints (`div`/`idiv` clobber `rdx:rax`, variable shifts need `cl`,
+System V argument and return registers); spilling and interval splitting around calls.
+
+This is the component most likely to harbour a subtle miscompile — code that runs and is
+wrong. Two defences: a machine-level verifier re-checking live-range interference after
+allocation, and keeping `--regalloc=trivial` permanently as the triage tool ("if it also
+misbehaves under trivial, the bug is not in the allocator").
+
+**7. wasm, standalone.** Structurally easier than x86-64 in two ways and harder in one.
+
+*Easier:* no register allocation at all — wasm functions have unlimited typed locals, so
+each MIR value becomes a local. And opcodes are one or two bytes with LEB128 immediates.
+
+*Harder:* wasm has `block`/`loop`/`if`/`br`/`br_table` and **no** `goto`, while MIR has an
+arbitrary CFG. Ship the **dispatch loop** first: wrap the function in
+`loop { block { … br_table $state } }`, one arm per basic block, every branch assigning
+`$state`. It works for any CFG including irreducible ones, is ~400 lines, and is trivially
+checkable. Do *not* start with Relooper — a CFG-structuring bug and a codegen bug look
+identical from outside, and you want one new variable at a time.
+
+Also needed: a shadow stack (a mutable `__stack_pointer` global, since wasm's operand stack
+is not addressable, for any slot that survives `promote_slots`); data segments for
+`.rodata`/`.data` with `.bss` needing none (linear memory is zero-initialized); and a
+`funcref` table, because **a wasm function reference is a table index, not an address**.
+That last one has consequences: `call_indirect` needs a *type index* (hence
+`Module::signatures` interning), trait vtables become constant arrays of `i32` table
+indices rather than pointers, and casting between a function pointer and `anyptr` cannot
+work on wasm. Make that a target-conditional sema error rather than a silent miscompile,
+and record it in the spec — it is a real semantic difference between the two targets.
+
+Target `wasm32-unknown-unknown` first: no libc, all host interaction via `ext fn` imports
+(`@import` already names the import module), so the backend is the only variable. Then
+`wasm32-wasi`, which needs a `core/sys/wasi/` stdlib backend beside the existing
+`core/sys/linux/` — roughly the same surface, and mechanically simpler since every WASI
+call is an ordinary import rather than inline asm.
+
+Because Mirage compiles whole-program into a single object, emit the **final `.wasm`
+directly**: no relocatable-object format, no linking section, no `wasm-ld`.
+
+**8. wasm, relocatable** (for emscripten). A second output shape over the *same* encoder:
+the `linking` custom section, `reloc.CODE`/`reloc.DATA`, the `R_WASM_*` relocation kinds
+actually used, unresolved-symbol placeholders where the standalone path resolves indices
+directly, and memory layout deferred to `wasm-ld` rather than chosen by us. ~900 lines.
+
+Built *second*, deliberately: attempting it alongside stage 7 means debugging CFG
+structuring and relocation bugs through the same symptom.
+
+**9. Relooper.** Recover natural `if`/`loop`/`block` structure for reducible regions
+(essentially all of them, since Mirage has no `goto`), falling back to dispatch for
+anything that resists. Purely an optimization; ship stages 7–8 without it.
+
+**10. Flip the default** to `--backend=native`, run everything, delete `codegen.cpp` and
+the LLVM dependency. `emcc` stays in the matrix as a linker for stage 8. Removing
+`find_package(LLVM)` should collapse build time and dependency footprint measurably — worth
+recording.
+
+---
+
+## Driver changes
+
+- `--backend=llvm|native`, defaulting to `llvm` until stage 10. Keeping both alive is what
+  makes differential testing possible; it is the primary validation mechanism for the
+  whole effort.
+- `--emit-mir` replaces `--emit-ir` on the native path. Eight corpus fixtures pin
+  `emit-ir`; re-baseline them when the flag lands.
+- `--emit-asm` (native x86-64, debug): textual assembly from machine IR. The fastest way to
+  eyeball a suspected encoder bug.
+- `--regalloc=trivial|linear` (debug), per stage 6.
+- Target selection stops going through `llvm::Triple`. Replace with
+  `Target { X86_64_Linux, Wasm32_Unknown, Wasm32_Wasi, Wasm32_Emscripten }` and a parser for
+  the `--target=` spellings currently accepted.
+
+  **Keep the `$option` value strings byte-identical** (`"Linux"`, `"Wasm32"`, `"X86_64"`, …).
+  `default_target_os`/`default_target_arch` feed `build/target_os` and `build/target_arch`,
+  which every `#compile_only_if` in the standard library switches on; drifting them would
+  silently change which platform files are included. Pin them in a test.
+
+  Note `Wasm32_Unknown` (the *target* `wasm32-unknown-unknown`) is a different axis from the
+  existing `--freestanding` flag (which means "no Mirage stdlib, hand-written `_start`").
+  Keep the two spellings distinct in help text and diagnostics.
+
+---
+
+## Validation
+
+This is what determines whether the effort succeeds.
+
+1. **Differential compilation.** Build every fixture under `--backend=llvm` and
+   `--backend=native`; compare exit code and stdout. `examples_smoke_test.py` already walks
+   the corpus and can take a `--backend` argument. Write this harness *before* the backend.
+2. **`mirage test`** on both backends. `tests/mir/` is a real assertion-carrying suite
+   rather than an exit-code comparison, which is exactly what a backend swap needs.
+3. **Encoder differential**: assemble every instruction-table entry with both this encoder
+   and `as`, byte-compare. This catches the class of bug that produces working-but-wrong
+   code, and pays for itself within a day.
+4. **Machine-level verifier** after register allocation, checking interference.
+5. **`mirage303`** (90 files, ~2s, links raylib) as the integration smoke test. It
+   exercises `ext fn` struct ABI, function pointers, traits and `#link` together, which no
+   fixture does.
+6. **`--regalloc=trivial` bisection** as the standing triage tool.
+
+---
+
+## Standalone wasm without emscripten
+
+The current emscripten dependency is not fundamental. It exists because LLVM emits a
+*relocatable* wasm object that something else must link, and because the wasm stdlib was
+written against emscripten's libc.
+
+| What emscripten supplies | Replacement | Cost |
+|---|---|---|
+| Linking | Emit the final `.wasm` directly — whole-program compile, nothing to link | Free; *less* work than a relocatable object |
+| Memory, `__stack_pointer`, data segments, `__heap_base` | We own the module; declare them | ~100 lines |
+| Entry glue | Export `_start` (WASI) or `main`; optionally emit a small `.js`/`.html` loader | Small |
+| libc | `wasm32-unknown-unknown` needs none; `wasm32-wasi` needs a `core/sys/wasi/` backend | Real, but stdlib work rather than compiler work |
+| SDL/GL/filesystem ports | **Not replaced** | See below |
+
+**What is genuinely lost:** prebuilt C library ports. raylib's web build depends on
+emscripten's GL/SDL/HTML5 glue and its asyncify main-loop transform. Nothing here
+reproduces that, and nothing should try — which is why stage 8 keeps the emscripten target
+alive rather than dropping it. `mirage303`-on-web needs `emcc` for as long as it needs
+raylib.
+
+`setjmp`/`longjmp`, C++ exceptions, dynamic linking and threads are also unavailable —
+none of which Mirage has.
+
+---
+
+## Decisions already settled
+
+Recorded so they are not silently re-litigated. Each is implemented and documented in
+`spec.md` unless marked as pending.
+
+| # | Decision |
+|---|---|
+| **D1** | `@export` and `@callconv` stay **orthogonal**; `@export` does not imply `@cdecl`. An exported symbol is also how two separately-compiled Mirage objects will find each other, and that path must keep the Mirage ABI. A warning covers the easy mistake (aggregate-by-value in an `@export` signature with no `@cdecl`). |
+| **D2** | Taking the **address of a `@callconv("c")` function is an error** in v1; function-pointer types carry no convention. Direct calls remain legal. Lifting this means adding a convention field to function types and to §15's structural-equality rule. |
+| **D3** | Under `--nortti`, the `type_info_of` error **does not fire in a statically-dead `when` branch**. Deliberately narrow: one diagnostic, one flag, and it must also skip `type_ids` registration or the flag fails to shrink the binary. |
+| **D4** | wasm import modules are named by `@import("module", "name")` on `ext fn`, defaulting to `("env", <decl name>)`. |
+| **D5** | **Emscripten is retained** as a relocatable-object target after `codegen.cpp` is deleted, preserving the raylib web build — hence stage 8. |
+| **D6** | Search root 4 probes both `<exe_dir>` and `<exe_dir>/../lib/mirage`. |
+| **D7** | Negative compile-fail fixtures **keep `examples_expected.json`**; only positive fixtures migrate to `@test` (`tests/mir/`). A program that does not compile cannot be a test function, so `@test` cannot express them. |
+| **D8** | **`MIRAGE_PATH` is dropped outright** — not consulted, no fallback. A note appears on an unresolved import when it is set and `MIRAGE_MODULES_ROOT` is not, purely for discoverability. |
+| **pending** | Function-pointer ↔ `anyptr` casts must become a target-conditional sema error on wasm (stage 7). |
+
+---
+
+## Rough size
+
+MIR core (done) ~1.5k; passes ~0.5k; x86 legalize/ISel ~1.5k; regalloc ~1.2k; frame +
+encoder ~2.5k; ELF ~0.8k; wasm standalone ~2k; wasm relocatable ~0.9k; driver rework ~0.4k.
+Call it **11–13k lines of new code**, plus rewriting `codegen.cpp`'s 6.9k into `mirgen.cpp`
+— comparable in scale to the existing sema layer.

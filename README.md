@@ -20,6 +20,15 @@ Mirage is a compiled, statically-typed systems language that targets native code
 - **Modules** via the filesystem; `import(...)` brings in namespaces
 - **C interop** via `ext fn` declarations — no FFI layer needed
 
+## Documentation
+
+- [`docs/spec.md`](docs/spec.md) — the language specification.
+- [`docs/grammar.md`](docs/grammar.md) — the full grammar, with notes on the places the
+  parser deliberately defers a decision to sema.
+- [`docs/backend.md`](docs/backend.md) — the design record for replacing LLVM with a
+  Mirage-specific IR and native `x86_64`/`wasm` object generation. The IR foundation exists
+  (`src/compiler/mir.{hpp,cpp}`); LLVM is still the only code path.
+
 ## Building
 
 **Requirements:** CMake, Ninja, Clang, LLVM 15+
