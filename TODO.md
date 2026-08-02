@@ -110,8 +110,28 @@ Done:
   covers all of them), `switch`/`match` on tagged unions (80), `try` (31), trait-handle
   method calls (26).
 
-  Still entirely absent from stage 2: `defer`, `for-in`, `when` statements, generics
-  (monomorphized instances), inline `asm`, global initializers, trait vtables.
+- **Stage 2, tenth increment** — multi-return. One blob layout (`multi_return_layout`:
+  each value at its naturally-aligned offset in the caller-owned sret slot) shared by
+  every writer (`return a, b`, `return_ok` with value slots, `return_err` from a
+  multi-return function, exact-match forwarded `return f()`) and every reader (group
+  declarations, all three call forms — direct, method, indirect — sized from the callee's
+  sema return list, since a multi-return call expression has no recorded `expr_type`).
+  The error-wrapping half moved into a shared `emit_error_value_into` that also handles
+  the 2+-member inner dispatch union (the previous single-member-only path wrote the
+  member where the inner TAG belongs) and the trailing-error-slot sugar in a plain
+  `return`. Calls dropping a trailing `?error(...)` are now diagnosed by name — the
+  runtime unhandled-error panic path does not exist in MIR yet, and silently returning
+  the blob where the surviving value belongs would miscompile.
+
+  **Coverage: 33 of 271 corpus modules lower fully.** Cleared: `return_err` 49→0,
+  `return_ok` with value slots 29→0, multi-return `return` 22→0, group declarations 21→0.
+
+  Largest remaining blockers: `switch`/`match` on tagged unions (82), `try` (35, now
+  including the group-declaration form), trait-handle method calls (27), ternaries (20),
+  `type_info_of` (18), `defer` (17).
+
+  Still entirely absent from stage 2: `defer`, generics (monomorphized instances),
+  inline `asm`, global initializers, trait vtables.
 
 Remaining:
 

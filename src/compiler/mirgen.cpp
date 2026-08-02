@@ -245,6 +245,86 @@ namespace mirgen {
                 return returns.size() > 1 || !is_scalar(returns.front());
             }
 
+            // Byte layout of a return list inside the caller-owned sret blob: each value at
+            // its naturally-aligned offset, in declaration order. Sema has no tuple type for
+            // a return list, so this is the ONE place that decides the layout; every writer
+            // ('return', 'return_ok', 'return_err') and every reader (group declarations,
+            // forwarded returns, 'try') must go through it or they disagree silently.
+            struct ReturnLayout {
+                std::vector<uint32_t> offsets;
+                uint32_t size = 0;
+                uint32_t align = 1;
+            };
+            [[nodiscard]] auto multi_return_layout(const std::vector<sema::ResolvedType> &returns) const -> ReturnLayout {
+                ReturnLayout out;
+                uint32_t cursor = 0;
+                for (const auto &ret : returns) {
+                    const auto align = std::max(1u, align_of(ret));
+                    cursor = (cursor + align - 1) & ~(align - 1);
+                    out.offsets.push_back(cursor);
+                    cursor += std::max(1u, size_of(ret));
+                    out.align = std::max(out.align, align);
+                }
+                out.size = std::max(1u, (cursor + out.align - 1) & ~(out.align - 1));
+                return out;
+            }
+
+            // The sema return list of a named function or 'ext fn' in 'path', or nullopt when
+            // the name resolves to neither. An 'ext fn' declares at most one return.
+            [[nodiscard]] auto symbol_return_types(const std::string &path, const std::string &name) const
+                -> std::optional<std::vector<sema::ResolvedType>> {
+                const auto mod = sema_.modules.find(path);
+                if (mod == sema_.modules.end()) return std::nullopt;
+                const auto it = mod->second.symbols.find(name);
+                if (it == mod->second.symbols.end()) return std::nullopt;
+                if (const auto *fn = std::get_if<sema::FunctionSymbol>(&it->second)) {
+                    return fn->return_types;
+                }
+                if (const auto *ext = std::get_if<sema::ExtFunctionSymbol>(&it->second)) {
+                    std::vector<sema::ResolvedType> returns;
+                    if (ext->return_type) returns.push_back(*ext->return_type);
+                    return returns;
+                }
+                return std::nullopt;
+            }
+
+            // The callee's sema return list, resolved the same way emit_call routes the call:
+            // a bare name (with local function-pointer shadowing), 'mod.fn', a method, or a
+            // function-pointer value. Needed because a MULTI-return call expression has no
+            // recorded expr_type -- only group declarations, forwarded returns and 'try'
+            // consume one -- so the sret blob's size cannot come from expr_type there.
+            [[nodiscard]] auto callee_return_types(const ast::CallExpr &call) const
+                -> std::optional<std::vector<sema::ResolvedType>> {
+                const auto through_pointer = [&]() -> std::optional<std::vector<sema::ResolvedType>> {
+                    const auto callee_type = lvalue_type(call.callee);
+                    if (callee_type.kind != sema::TypeKind::Function) return std::nullopt;
+                    const auto *info = sema_.fn_signature_at(callee_type.fn_index);
+                    if (!info) return std::nullopt;
+                    return info->return_types;
+                };
+
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&call.callee)) {
+                    if (locals_.contains(ident->name)) return through_pointer();
+                    return module_path_ ? symbol_return_types(*module_path_, ident->name) : std::nullopt;
+                }
+                if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
+                    if (const auto *target = namespace_target((*member)->object)) {
+                        return symbol_return_types(*target, (*member)->member);
+                    }
+                    const auto receiver_type = expr_type((*member)->object);
+                    if (receiver_type.kind == sema::TypeKind::Trait) return std::nullopt;
+                    const auto *info = sema::find_method(receiver_type, (*member)->member, sema_);
+                    if (!info || !info->is_resolved) return std::nullopt;
+                    return info->return_types;
+                }
+                return through_pointer();
+            }
+
+            [[nodiscard]] auto is_error_union(const sema::ResolvedType &type) const -> bool {
+                const auto *info = type.kind == sema::TypeKind::Union ? sema_.union_at(type.union_index) : nullptr;
+                return info && info->is_error_union;
+            }
+
             void declare_functions() {
                 for (const auto &[path_ptr, mod_ptr] : modules_in_order()) {
                     const auto &path = *path_ptr;
@@ -546,6 +626,9 @@ namespace mirgen {
                     } else if constexpr (std::is_same_v<V, ast::VarDeclStmt>) {
                         emit_var_decl(b, v);
 
+                    } else if constexpr (std::is_same_v<V, ast::VarDeclGroupStmt>) {
+                        emit_var_decl_group(b, v);
+
                     } else if constexpr (std::is_same_v<V, ast::ExprStmt>) {
                         (void) emit_expr(b, v.expr);
 
@@ -602,7 +685,6 @@ namespace mirgen {
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmStmt>>) return "an 'asm' block";
                 else if constexpr (std::is_same_v<V, ast::BreakStmt>) return "'break'";
                 else if constexpr (std::is_same_v<V, ast::ContinueStmt>) return "'continue'";
-                else if constexpr (std::is_same_v<V, ast::VarDeclGroupStmt>) return "a group declaration";
                 else if constexpr (std::is_same_v<V, ast::LinkDecl>) return "'#link'";
                 else if constexpr (std::is_same_v<V, ast::ReturnErrStmt>) return "'return_err'";
                 else if constexpr (std::is_same_v<V, ast::ReturnOkStmt>) return "'return_ok'";
@@ -653,6 +735,48 @@ namespace mirgen {
                 }
             }
 
+            // 'const a, b := f()' -- the callee's sret blob is destructured into fresh
+            // locals, one copy per bound name, at the layout offsets. '_' slots are simply
+            // not bound; the blob still holds them. 'try a, b := f()' also branches on the
+            // error slot, which is the 'try' lowering's business and reported until it lands.
+            void emit_var_decl_group(mir::Builder &b, const ast::VarDeclGroupStmt &decl) {
+                const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&decl.init);
+                if (!call) {
+                    unsupported("'try'", decl.location);
+                    return;
+                }
+                if (exprs_ && exprs_->call_dropped_optional_error.contains(call->get())) {
+                    unsupported("a call dropping an ignorable error", decl.location);
+                    return;
+                }
+                const auto callee_returns = callee_return_types(**call);
+                if (!callee_returns || callee_returns->size() != decl.names.size()) {
+                    unsupported("a group declaration", decl.location);
+                    return;
+                }
+
+                const auto blob = emit_expr(b, decl.init);
+                if (blob == mir::NO_VALUE) return;
+
+                const auto layout = multi_return_layout(*callee_returns);
+                for (size_t i = 0; i < decl.names.size(); ++i) {
+                    const auto &name = decl.names[i];
+                    if (name.empty() || name == "_") continue;
+                    const auto &type = (*callee_returns)[i];
+                    const auto slot = b.add_slot(std::max(1u, size_of(type)),
+                                                  std::max(1u, align_of(type)), name);
+                    const auto source = layout.offsets[i] == 0
+                        ? blob : b.ptr_add_const(blob, layout.offsets[i]);
+                    if (is_scalar(type)) {
+                        b.store(b.slot_addr(slot), b.load(scalar_type(type), source));
+                    } else {
+                        b.mem_copy(b.slot_addr(slot), source, b.const_int(usize_ty(), size_of(type)));
+                    }
+                    locals_[name] = slot;
+                    local_types_[name] = type;
+                }
+            }
+
             // sema recorded the initializer's type; a declaration with an explicit type but
             // no initializer has none, in which case fall back to whatever sema resolved for
             // the local. Kept in one place so the "which type is this local" question has one
@@ -670,15 +794,56 @@ namespace mirgen {
                     b.ret();
                     return;
                 }
-                if (stmt.return_values.size() > 1 || returns.size() > 1) {
-                    unsupported("a multi-return 'return'", stmt.location);
-                    b.unreachable();
-                    return;
-                }
 
-                const auto value = emit_expr(b, stmt.return_values.front());
-                if (value == mir::NO_VALUE) {
-                    b.unreachable();
+                // Multi-return: every slot is written into the caller-owned sret blob at its
+                // layout offset and the function returns void.
+                if (returns.size() > 1) {
+                    if (sret_ == mir::NO_VALUE || stmt.return_values.size() > returns.size()) {
+                        unsupported("a multi-return 'return'", stmt.location);
+                        b.unreachable();
+                        return;
+                    }
+                    const auto layout = multi_return_layout(returns);
+
+                    // 'return f()' forwards the callee's whole return list. Only the
+                    // exact-match forward is one blob copy; a forward whose individual slots
+                    // coerce (array->slice, subset error unions) rebuilds slot by slot,
+                    // which is reported until that lowering exists. A dropped trailing
+                    // '?error(...)' needs the runtime unhandled-error check, which does not
+                    // exist in MIR yet either.
+                    if (stmt.return_values.size() == 1) {
+                        const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&stmt.return_values.front());
+                        if (!call) {
+                            unsupported("a multi-return 'return'", stmt.location);
+                            b.unreachable();
+                            return;
+                        }
+                        const auto callee_returns = callee_return_types(**call);
+                        if (!callee_returns || *callee_returns != returns) {
+                            unsupported("a forwarded multi-return with slot coercions", (*call)->location);
+                            b.unreachable();
+                            return;
+                        }
+                        const auto blob = emit_expr(b, stmt.return_values.front());
+                        if (blob == mir::NO_VALUE) {
+                            b.unreachable();
+                            return;
+                        }
+                        b.mem_copy(sret_, blob, b.const_int(usize_ty(), layout.size));
+                        b.ret();
+                        return;
+                    }
+
+                    for (size_t i = 0; i < returns.size(); ++i) {
+                        const auto dest = layout.offsets[i] == 0
+                            ? sret_ : b.ptr_add_const(sret_, layout.offsets[i]);
+                        if (!store_return_slot(b, dest, returns[i], stmt.return_values[i],
+                                                i + 1 == returns.size(), stmt.location)) {
+                            b.unreachable();
+                            return;
+                        }
+                    }
+                    b.ret();
                     return;
                 }
 
@@ -690,11 +855,39 @@ namespace mirgen {
                         b.unreachable();
                         return;
                     }
-                    b.mem_copy(sret_, value, b.const_int(usize_ty(), size_of(returns.front())));
+                    if (!store_return_slot(b, sret_, returns.front(), stmt.return_values.front(),
+                                            true, stmt.location)) {
+                        b.unreachable();
+                        return;
+                    }
                     b.ret();
                     return;
                 }
+
+                const auto value = emit_expr(b, stmt.return_values.front());
+                if (value == mir::NO_VALUE) {
+                    b.unreachable();
+                    return;
+                }
                 b.ret(coerce(b, value, returns.front(), expr_type(stmt.return_values.front())));
+            }
+
+            // One slot of a 'return' list. The LAST slot of a fallible function accepts the
+            // error-member sugar ('return n, .NotFound'), whose operand sema typed as the
+            // concrete MEMBER type -- that needs Ok/Failed wrapping, not a plain store.
+            auto store_return_slot(mir::Builder &b, const mir::ValueId dest, const sema::ResolvedType &slot_type,
+                                    const ast::Expr &value, const bool is_last, const SourceLocation &loc) -> bool {
+                if (is_last && is_error_union(slot_type)) {
+                    return emit_error_value_into(b, dest, slot_type, value, loc);
+                }
+                const auto emitted = emit_expr(b, value);
+                if (emitted == mir::NO_VALUE) return false;
+                if (is_scalar(slot_type)) {
+                    b.store(dest, coerce(b, emitted, slot_type, expr_type(value)));
+                } else {
+                    b.mem_copy(dest, emitted, b.const_int(usize_ty(), size_of(slot_type)));
+                }
+                return true;
             }
 
             // 'error(...)' is a tagged union laid out as a byte blob: a u32 tag at offset 0
@@ -702,19 +895,13 @@ namespace mirgen {
             // UnionInfo::payload_offset. Both halves below build it in the caller's sret
             // slot, since an error union is an aggregate and travels that way.
 
-            // 'return_ok' / 'return_ok v'. Ok is tag 0 and carries no payload, so the zero
-            // fill IS the value -- nothing else needs writing.
+            // 'return_ok' / 'return_ok a, b'. Ok is tag 0 and carries no payload, so zeroing
+            // the blob IS the Ok value; the leading value slots are then written over it at
+            // their layout offsets.
             void emit_return_ok(mir::Builder &b, const ast::ReturnOkStmt &stmt,
                                  const std::vector<sema::ResolvedType> &returns) {
                 if (returns.empty()) {
                     unsupported("'return_ok' in a function with no error return", stmt.location);
-                    b.unreachable();
-                    return;
-                }
-                // 'return_ok a, b' fills leading value slots as well; that is multi-return,
-                // which needs its own lowering.
-                if (!stmt.return_values.empty() || returns.size() > 1) {
-                    unsupported("'return_ok' with value slots (multi-return)", stmt.location);
                     b.unreachable();
                     return;
                 }
@@ -723,58 +910,126 @@ namespace mirgen {
                     b.unreachable();
                     return;
                 }
-                b.mem_set(sret_, b.const_int(mir::Ty::I8, 0),
-                           b.const_int(usize_ty(), size_of(returns.front())));
+                const auto layout = multi_return_layout(returns);
+                b.mem_set(sret_, b.const_int(mir::Ty::I8, 0), b.const_int(usize_ty(), layout.size));
+                for (size_t i = 0; i < stmt.return_values.size() && i + 1 < returns.size(); ++i) {
+                    const auto dest = layout.offsets[i] == 0
+                        ? sret_ : b.ptr_add_const(sret_, layout.offsets[i]);
+                    if (!store_return_slot(b, dest, returns[i], stmt.return_values[i],
+                                            false, stmt.location)) {
+                        b.unreachable();
+                        return;
+                    }
+                }
                 b.ret();
             }
 
-            // 'return_err .Variant'. Zero the blob, write the Failed tag, then the payload.
+            // 'return_err .Variant'. The error goes in the LAST slot; leading value slots
+            // are zeroed -- codegen leaves them undef, but a deterministic blob costs one
+            // memset and keeps '--emit-mir' output stable.
             void emit_return_err(mir::Builder &b, const ast::ReturnErrStmt &stmt,
                                   const std::vector<sema::ResolvedType> &returns) {
-                if (returns.empty() || returns.size() > 1 || sret_ == mir::NO_VALUE) {
+                if (returns.empty() || sret_ == mir::NO_VALUE) {
                     unsupported("'return_err' from this function", stmt.location);
                     b.unreachable();
                     return;
                 }
-                const auto &error_type = returns.front();
-                const auto *info = error_type.kind == sema::TypeKind::Union
-                    ? sema_.union_at(error_type.union_index) : nullptr;
-                if (!info || !info->is_error_union) {
-                    unsupported("'return_err' on this return type", stmt.location);
+                const auto layout = multi_return_layout(returns);
+                if (layout.offsets.back() > 0) {
+                    b.mem_set(sret_, b.const_int(mir::Ty::I8, 0),
+                               b.const_int(usize_ty(), layout.offsets.back()));
+                }
+                const auto dest = layout.offsets.back() == 0
+                    ? sret_ : b.ptr_add_const(sret_, layout.offsets.back());
+                if (!emit_error_value_into(b, dest, returns.back(), stmt.error_value, stmt.location)) {
                     b.unreachable();
                     return;
                 }
+                b.ret();
+            }
 
-                b.mem_set(sret_, b.const_int(mir::Ty::I8, 0),
-                           b.const_int(usize_ty(), size_of(error_type)));
+            // The one-field '{v: T}' wrapper struct convention puts the wrapped value at its
+            // single field's sema offset (0 in practice, but read rather than assumed).
+            [[nodiscard]] auto wrapper_field_offset(const int struct_index) const -> uint32_t {
+                const auto *info = sema_.struct_at(struct_index);
+                return info && !info->fields.empty() ? info->fields.front().offset : 0;
+            }
 
-                // The Failed variant's tag. Located by name rather than assumed to be 1, so
-                // a change to how the wrapper is synthesized cannot silently invert the
-                // Ok/Failed sense.
-                int64_t failed_tag = 1;
-                for (const auto &variant : info->variants) {
-                    if (variant.name != "Ok") {
-                        failed_tag = variant.tag_value;
-                        break;
+            // Writes an 'error(...)' value into 'dest' (the blob's base address). Zeroes the
+            // blob first, so Ok-state padding and short payloads are deterministic. Operand
+            // shapes, per sema's resolve_return_err_member_type:
+            //   - a value already of this union type (or a '?error' twin with the same
+            //     member list, which is byte-identical): one blob copy
+            //   - a concrete error MEMBER value: Failed tag, then the member at the payload
+            //     offset -- through the inner dispatch union's tag when there are 2+ members
+            //   - a SUBSET error union, which would need runtime tag translation: reported
+            auto emit_error_value_into(mir::Builder &b, const mir::ValueId dest, const sema::ResolvedType &error_type,
+                                        const ast::Expr &operand, const SourceLocation &loc) -> bool {
+                const auto *info = error_type.kind == sema::TypeKind::Union
+                    ? sema_.union_at(error_type.union_index) : nullptr;
+                if (!info || !info->is_error_union || info->variants.size() < 2) {
+                    unsupported("an error return of this type", loc);
+                    return false;
+                }
+
+                b.mem_set(dest, b.const_int(mir::Ty::I8, 0), b.const_int(usize_ty(), size_of(error_type)));
+
+                const auto operand_type = expr_type(operand);
+                if (operand_type.kind == sema::TypeKind::Union) {
+                    const auto *operand_info = sema_.union_at(operand_type.union_index);
+                    if (operand_info && operand_info->is_error_union) {
+                        // Same member list means byte-identical representation ('error(E)'
+                        // vs '?error(E)' included) -- see codegen's
+                        // error_unions_interchangeable for why this is load-bearing.
+                        if (operand_info->error_member_types != info->error_member_types) {
+                            unsupported("an error propagation between different 'error(...)' types", loc);
+                            return false;
+                        }
+                        const auto value = emit_expr(b, operand);
+                        if (value == mir::NO_VALUE) return false;
+                        b.mem_copy(dest, value, b.const_int(usize_ty(), size_of(operand_type)));
+                        return true;
                     }
                 }
-                b.store(sret_, b.const_int(mir::Ty::I32, failed_tag));
 
-                // The error member itself, at the payload offset. A scalar member (the
-                // common 'enum(i32)' case) is stored; anything wider is copied.
-                const auto member_type = expr_type(stmt.error_value);
-                const auto value = emit_expr(b, stmt.error_value);
-                if (value == mir::NO_VALUE) {
-                    b.ret();
-                    return;
+                // A concrete member. 'Failed' is always variants[1] by construction
+                // (synthesize_error_union in type_resolver.cpp).
+                const auto &failed = info->variants[1];
+                b.store(dest, b.const_int(mir::Ty::I32, failed.tag_value));
+
+                auto at = info->payload_offset + wrapper_field_offset(failed.payload_struct_index);
+                if (info->error_member_types.size() > 1) {
+                    // 2+ members: the Failed payload is an inner dispatch union; write ITS
+                    // tag for this member, then aim at the inner payload.
+                    const auto *inner = failed.payload_type.kind == sema::TypeKind::Union
+                        ? sema_.union_at(failed.payload_type.union_index) : nullptr;
+                    const sema::TaggedUnionVariant *member_variant = nullptr;
+                    if (inner) {
+                        for (const auto &variant : inner->variants) {
+                            if (variant.payload_type == operand_type) {
+                                member_variant = &variant;
+                                break;
+                            }
+                        }
+                    }
+                    if (!member_variant) {
+                        unsupported("an error return of this member type", loc);
+                        return false;
+                    }
+                    b.store(at == 0 ? dest : b.ptr_add_const(dest, at),
+                             b.const_int(mir::Ty::I32, member_variant->tag_value));
+                    at += inner->payload_offset + wrapper_field_offset(member_variant->payload_struct_index);
                 }
-                const auto payload = b.ptr_add_const(sret_, info->payload_offset);
-                if (is_scalar(member_type)) {
+
+                const auto value = emit_expr(b, operand);
+                if (value == mir::NO_VALUE) return false;
+                const auto payload = at == 0 ? dest : b.ptr_add_const(dest, at);
+                if (is_scalar(operand_type)) {
                     b.store(payload, value);
                 } else {
-                    b.mem_copy(payload, value, b.const_int(usize_ty(), size_of(member_type)));
+                    b.mem_copy(payload, value, b.const_int(usize_ty(), size_of(operand_type)));
                 }
-                b.ret();
+                return true;
             }
 
             // 'switch' over an integer, bool or enum operand. MIR has a Switch terminator
@@ -1610,6 +1865,7 @@ namespace mirgen {
                 // function pointer still need their own handling.
                 auto it = function_index_.end();
                 std::string callee_name;
+                const std::string *callee_module = module_path_;
                 if (const auto *ident = std::get_if<ast::IdentExpr>(&call.callee)) {
                     // A LOCAL of function-pointer type shadows any same-named function, and
                     // is an indirect call -- 'const f: fn(i32) -> i32 = add; f(1)'.
@@ -1621,6 +1877,7 @@ namespace mirgen {
                 } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
                     if (const auto *target = namespace_target((*member)->object)) {
                         callee_name = (*member)->member;
+                        callee_module = target;
                         it = function_index_.find(key(*target, callee_name));
                     } else {
                         return emit_method_call(b, call, **member);
@@ -1634,21 +1891,27 @@ namespace mirgen {
                     return mir::NO_VALUE;
                 }
 
+                // A dropped trailing '?error(...)' slot needs the runtime unhandled-error
+                // check; without it the blob would silently stand in for the surviving value.
+                if (exprs_ && exprs_->call_dropped_optional_error.contains(&call)) {
+                    unsupported("a call dropping an ignorable error", call.location);
+                    return mir::NO_VALUE;
+                }
+
                 const auto &sig = result_.module.signatures[result_.module.functions[it->second].signature];
 
-                // An aggregate result comes back through a slot the CALLER owns and passes
-                // in; the call's value is that slot's address. Must agree with
-                // returns_via_sret, which decided the signature.
+                // An aggregate or multi-return result comes back through a slot the CALLER
+                // owns and passes in; the call's value is that slot's address. The slot is
+                // sized from the callee's sema return list -- a multi-return call expression
+                // has no recorded expr_type, so expr_type cannot answer here -- and must
+                // agree with returns_via_sret, which decided the signature.
                 std::vector<mir::ValueId> args;
                 mir::ValueId sret_slot = mir::NO_VALUE;
-                const auto result_type = expr_type(expr);
-                const bool via_sret = sig.result == mir::Ty::Void && !sig.params.empty() &&
-                                       result_type.kind != sema::TypeKind::Void &&
-                                       result_type.kind != sema::TypeKind::Invalid &&
-                                       !is_scalar(result_type);
+                const auto callee_returns = symbol_return_types(*callee_module, callee_name);
+                const bool via_sret = callee_returns && returns_via_sret(*callee_returns);
                 if (via_sret) {
-                    const auto slot = b.add_slot(std::max(1u, size_of(result_type)),
-                                                  std::max(1u, align_of(result_type)), "ret");
+                    const auto layout = multi_return_layout(*callee_returns);
+                    const auto slot = b.add_slot(layout.size, layout.align, "ret");
                     sret_slot = b.slot_addr(slot);
                     args.push_back(sret_slot);
                 }
@@ -1875,14 +2138,20 @@ namespace mirgen {
                     return mir::NO_VALUE;
                 }
 
+                if (exprs_ && exprs_->call_dropped_optional_error.contains(&call)) {
+                    unsupported("a call dropping an ignorable error", call.location);
+                    return mir::NO_VALUE;
+                }
+
                 const auto &sig = result_.module.signatures[result_.module.functions[it->second].signature];
 
                 std::vector<mir::ValueId> args;
                 mir::ValueId sret_slot = mir::NO_VALUE;
                 if (returns_via_sret(info->return_types)) {
-                    const auto &ret_type = info->return_types.front();
-                    const auto slot = b.add_slot(std::max(1u, size_of(ret_type)),
-                                                  std::max(1u, align_of(ret_type)), "ret");
+                    // Sized from the whole return list, not its first entry -- a
+                    // multi-return method's blob is wider than its first slot.
+                    const auto layout = multi_return_layout(info->return_types);
+                    const auto slot = b.add_slot(layout.size, layout.align, "ret");
                     sret_slot = b.slot_addr(slot);
                     args.push_back(sret_slot);
                 }
@@ -2078,8 +2347,8 @@ namespace mirgen {
                     unsupported("a call through a function pointer", call.location);
                     return mir::NO_VALUE;
                 }
-                if (returns_via_sret(info->return_types)) {
-                    unsupported("an indirect call returning an aggregate", call.location);
+                if (exprs_ && exprs_->call_dropped_optional_error.contains(&call)) {
+                    unsupported("a call dropping an ignorable error", call.location);
                     return mir::NO_VALUE;
                 }
 
@@ -2089,19 +2358,32 @@ namespace mirgen {
                 const auto callee = emit_expr(b, call.callee);
                 if (callee == mir::NO_VALUE) return mir::NO_VALUE;
 
+                // An aggregate or multi-return result travels through a caller-owned sret
+                // slot, exactly as in a direct call; signature_for already put the hidden
+                // pointer parameter first.
                 std::vector<mir::ValueId> args;
+                mir::ValueId sret_slot = mir::NO_VALUE;
+                if (returns_via_sret(info->return_types)) {
+                    const auto layout = multi_return_layout(info->return_types);
+                    const auto slot = b.add_slot(layout.size, layout.align, "ret");
+                    sret_slot = b.slot_addr(slot);
+                    args.push_back(sret_slot);
+                }
+
                 for (size_t i = 0; i < call.args.size(); ++i) {
                     const auto value = emit_expr(b, call.args[i]);
                     if (value == mir::NO_VALUE) return mir::NO_VALUE;
-                    args.push_back(i < sig.params.size()
-                        ? coerce_to(b, value, sig.params[i], signed_type(expr_type(call.args[i])))
+                    const auto slot = args.size();
+                    args.push_back(slot < sig.params.size()
+                        ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
                         : value);
                 }
                 if (!sig.is_variadic && args.size() != sig.params.size()) {
                     unsupported("an indirect call with defaulted arguments", call.location);
                     return mir::NO_VALUE;
                 }
-                return b.call_indirect(callee, signature, sig.result, args);
+                const auto result = b.call_indirect(callee, signature, sig.result, args);
+                return sret_slot != mir::NO_VALUE ? sret_slot : result;
             }
 
             // 'xs[..]', 'xs[a..b]' -- builds a two-word (data, length) slice in a slot, since

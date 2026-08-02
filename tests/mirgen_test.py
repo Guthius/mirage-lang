@@ -271,6 +271,36 @@ def case_error_returns():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_multi_return():
+    """A return list travels through ONE caller-owned sret blob, each value at its
+    naturally-aligned offset. Writers (return / return_ok / return_err) and readers
+    (group declarations, forwarded returns) must agree on that layout exactly, so this
+    pins both sides of it."""
+    r = emit_mir("pub type E = enum(i32) { Bad = 1 }\n"
+                 "fn divmod(a: i32, b: i32) -> (i32, i32, error(E)) {\n"
+                 "  if b == 0 { return_err .Bad }\n"
+                 "  return_ok a / b, a % b\n}\n"
+                 "fn pair() -> (i32, i64) { return 7, 9 }\n"
+                 "fn forward() -> (i32, i64) { return pair() }\n"
+                 "pub fn main() -> i32 {\n"
+                 "  const q, r, err := divmod(17, 5)\n"
+                 "  if err { return 1 }\n"
+                 "  const a, _ := forward()\n"
+                 "  return q + r + a\n}\n")
+    check(r.returncode == 0, f"multi-return lowers ({r.stderr.strip()[:140]})")
+    # divmod's blob is (i32@0, i32@4, error@8): the callee writes the second value at
+    # offset 4 and the error slot at 8; the caller destructures at the same offsets.
+    check("ptr.add.const %0, 4" in r.stdout, "the second value slot sits at its layout offset")
+    check("ptr.add.const %0, 8" in r.stdout, "and the error slot after it")
+    # pair's blob is (i32@0, i64@8): alignment padding, not packing.
+    check("ptr.add.const %0, 8" in r.stdout, "an i64 slot is naturally aligned, not packed")
+    # 'return pair()' with identical return lists is one blob copy, not a rebuild.
+    check("mem.copy" in r.stdout, "an exact-match forwarded return is one blob copy")
+    # '_' binds nothing: no slot named '_' exists.
+    check("; _" not in r.stdout, "a '_' group slot is not bound")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_switch_and_conditions():
     r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
                  "pub fn main() -> i32 {\n"
@@ -368,6 +398,7 @@ def main() -> int:
     case_braced_initializers()
     case_aggregate_returns_use_sret()
     case_error_returns()
+    case_multi_return()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()
