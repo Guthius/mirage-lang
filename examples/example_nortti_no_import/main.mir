@@ -1,0 +1,21 @@
+// example_nortti_no_import — under '--nortti' a program need not have 'runtime/type_info'
+// in its import graph at all. The RTTI branch references it only through 'type_info_of',
+// whose 'Type_Info'-locating scan is skipped entirely when reflection is off.
+//
+// Note this one CANNOT build with rtti enabled (the guarded branch would then be live and
+// 'Type_Info' is nowhere in the graph), which is the point: the two configurations have
+// genuinely different import requirements.
+//
+// Expected: errors by default, exit 0 under '--nortti'.
+pub fn describe() -> usize {
+    when $rtti_enabled {
+        const info := type_info_of(type_of(i32))
+        return 1
+    } else {
+        return 0
+    }
+}
+
+pub fn main() -> i32 {
+    return cast(describe(), i32)
+}

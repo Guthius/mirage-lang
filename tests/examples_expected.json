@@ -754,6 +754,23 @@
     "diag": "examples/example_member_chain_writability/main.mir:30:19: error: left-hand side of assignment is not mutable",
     "exit": 1
   },
+  "example_nortti_const": {
+    "action": "run",
+    "exit": 1
+  },
+  "example_nortti_error": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_nortti_guarded": {
+    "action": "run",
+    "exit": 4
+  },
+  "example_nortti_no_import": {
+    "action": "build",
+    "diag": "examples/example_nortti_no_import/main.mir:12:23: error: 'type_info_of' requires importing a module that defines 'pub type Type_Info = union(enum) {...}' (see runtime/type_info)",
+    "exit": 1
+  },
   "example_option_in_mut": {
     "action": "run",
     "exit": 0

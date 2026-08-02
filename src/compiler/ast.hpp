@@ -176,6 +176,19 @@ namespace ast {
         SourceLocation location;
     };
 
+    // '$rtti_enabled' — a nullary compile-time constant of type 'bool', true unless the
+    // driver was given '--nortti'. Lets one source file carry both a reflection-based and a
+    // reflection-free implementation of the same function, selected by 'when'.
+    //
+    // Deliberately its own node rather than sugar for '$option("build/rtti")': the value is
+    // a fact about how the compiler is running, and routing it through '$option' would let
+    // a '--opt build/rtti=true' on the command line claim RTTI is on while codegen emits
+    // none. Nullary and always 'bool', so unlike OptionExpr it needs no key, no default and
+    // no target-type coercion — it folds exactly like a 'true'/'false' literal.
+    struct RttiEnabledExpr {
+        SourceLocation location;
+    };
+
     struct DotIdentExpr {
         std::string name;
         SourceLocation location;
@@ -250,6 +263,7 @@ namespace ast {
         std::unique_ptr<TypeInfoOfExpr>,
         std::unique_ptr<OptionExpr>,
         std::unique_ptr<EnvExpr>,
+        RttiEnabledExpr,
         std::unique_ptr<TypeExpr>,
         std::unique_ptr<LenExpr>,
         std::unique_ptr<StackAllocExpr>,

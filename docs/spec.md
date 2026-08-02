@@ -1978,14 +1978,15 @@ independently.
 
 ## 12. Compile-Time Configuration
 
-Seven coupled features let a module read compile-time-supplied
+Eight coupled features let a module read compile-time-supplied
 configuration, conditionally compile declarations, statements, and linker
 inputs based on it, and surface configuration problems as sema
-diagnostics: `$option`, `$env`, `#link`, `#error`, `#warn`, the `when`
-statement, and the `when` expression. `$option`/`$env` produce a value and
-use the `$` sigil; `#link`/`#error`/`#warn` are directives with no value
-and use the `#` sigil — together these five form one coupled "Compile-Time
-Configuration" family despite the two different sigils. The `#` sigil is
+diagnostics: `$option`, `$env`, `$rtti_enabled`, `#link`, `#error`,
+`#warn`, the `when` statement, and the `when` expression.
+`$option`/`$env`/`$rtti_enabled` produce a value and use the `$` sigil;
+`#link`/`#error`/`#warn` are directives with no value and use the `#`
+sigil — together these six form one coupled "Compile-Time Configuration"
+family despite the two different sigils. The `#` sigil is
 also used by the file-level `#compile_only_if` directive, which gates whole
 files rather than individual declarations — see
 [Conditional File Inclusion](#conditional-file-inclusion-compile_only_if)
@@ -2050,6 +2051,63 @@ error: required environment variable 'MIRAGE_TARGET_ARCH' was not set.
 pub const target_os:   OperatingSystem = $env("MIRAGE_TARGET_OS",   .Linux)
 pub const target_arch: Architecture    = $env("MIRAGE_TARGET_ARCH", .X86_64)
 ```
+
+### `$rtti_enabled`
+
+```mirage
+$rtti_enabled
+```
+
+A nullary compile-time constant of type `bool`: `true` normally, `false`
+when the compiler was invoked with `--nortti`. It takes no arguments — the
+value is a fact about how the compiler is running, not something a module
+supplies — and unlike `$option`/`$env` it has one type by construction, so
+there is no target-type resolution and no value coercion.
+
+`rtti_enabled` is a plain identifier after the `$` sigil, exactly like
+`option` and `env`; it is not a reserved word and remains usable as an
+ordinary identifier everywhere else.
+
+**What `--nortti` disables.** The compiler emits no `Type_Info` constants
+and no runtime type-id lookup table, and `type_info_of` becomes a sema
+error:
+
+```
+error: 'type_info_of' requires runtime type information; this build was
+       compiled with '--nortti'. Guard the call with
+       'when $rtti_enabled { ... } else { ... }' to provide a
+       reflection-free variant.
+```
+
+A `--nortti` program need not have `runtime/type_info` in its import graph
+at all — the `Type_Info`-locating scan is skipped entirely.
+
+**`any` is unaffected.** An `any` value is a `(type id, data pointer)` pair
+and an `any` cast is an integer comparison; neither needs the reflection
+tables. Only `type_info_of` does.
+
+**Interaction with `when`.** `when` type-checks *both* branches (see
+[Statements](#6-statements)), which would defeat the whole point here: the
+branch written specifically to be dead under `--nortti` would still be
+checked, and its `type_info_of` call would still error. So the
+`--nortti` `type_info_of` error — and only that error — is suppressed
+inside a `when` branch the folded condition already proved unreachable:
+
+```mirage
+pub fn describe[T: type](value: T) -> []u8 {
+    when $rtti_enabled {
+        return format_from(type_info_of(type_of(T)))   // checked; not an error under --nortti
+    } else {
+        return "<no rtti>"
+    }
+}
+```
+
+This is a deliberately narrow exception, not a general "dead `when`
+branches go unchecked" rule: everything else about the dead branch is
+type-checked exactly as before, and the same suppression applies inside a
+`#compile_only_if`-excluded file for the same reason. A `type_info_of` in
+the *live* branch under `--nortti` is still an error.
 
 ### `#link`
 
@@ -2830,9 +2888,10 @@ The following identifiers are reserved by the language:
 `align_of` `any` `asm` `bitset` `break` `byte` `cast` `const` `continue` `default` `defer` `else` `enum` `error` `ext` `false` `fn` `for` `if` `impl` `import` `import_bin` `in` `iota` `len` `macro` `match` `mut` `nil` `pub` `return` `return_err` `return_ok` `size_of` `stackalloc` `struct` `switch` `trait` `true` `try` `type` `type_of` `type_info_of` `undefined` `union` `when` `while`
 
 `ext` is parsed as an identifier, not a keyword; it is used as the prefix
-for extern function declarations. `option` and `env` are likewise parsed
-as plain identifiers, not keywords — they're only meaningful immediately
-after the `$` sigil (`$option(...)`, `$env(...)`, see
+for extern function declarations. `option`, `env` and `rtti_enabled` are
+likewise parsed as plain identifiers, not keywords — they're only
+meaningful immediately after the `$` sigil (`$option(...)`, `$env(...)`,
+`$rtti_enabled`, see
 [Compile-Time Configuration](#12-compile-time-configuration)) and remain
 ordinary, unreserved identifiers everywhere else. `link` and `warn` are
 likewise plain identifiers, meaningful only immediately after the `#`

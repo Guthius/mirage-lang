@@ -3673,26 +3673,63 @@ namespace sema {
     // the literal to i32 and report a spurious mismatch while its mirror image compiled).
     // The callers keep their own Opaque/mismatch/result handling, which is where the two
     // constructs genuinely differ.
+    struct ConditionBranchTypes {
+        ResolvedType then_ty;
+        ResolvedType else_ty;
+        // Which branch the folded condition selected, for a compile-time condition that
+        // folded to an integer. Never set for TernaryExpr, whose condition is a runtime one.
+        std::optional<bool> selected;
+    };
+
+    // 'fold_compile_time_condition' is set by WhenExpr and not by TernaryExpr. It makes the
+    // fold happen HERE, between checking the condition and checking the branches, rather
+    // than at the caller afterwards -- which is the only ordering in which the unselected
+    // branch can be marked dead while it is being checked (see DeadBranchGuard). The caller
+    // reads the result back out of ConditionBranchTypes::selected instead of folding again.
     auto check_condition_branch_types(const ast::Expr &condition, const ast::Expr &then_expr, const ast::Expr &else_expr,
                                        LocalScope &locals, const std::string &module_path, Program &program, DiagnosticEngine &diag,
                                        const std::optional<ResolvedType> &expected, const int loop_depth, const int defer_loop_base,
-                                       const ResolvedType *fn_error_type) -> std::pair<ResolvedType, ResolvedType> {
+                                       const ResolvedType *fn_error_type,
+                                       const bool fold_compile_time_condition = false) -> ConditionBranchTypes {
         check_expr(condition, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::Bool}, loop_depth, defer_loop_base, fn_error_type);
+
+        std::optional<bool> selected;
+        if (fold_compile_time_condition && is_constant_expr(condition, module_path, program)) {
+            if (const auto folded = evaluate_const_value(condition, module_path, program, diag)) {
+                if (const auto *iv = std::get_if<int64_t>(&*folded)) {
+                    selected = (*iv != 0);
+                }
+            }
+        }
+
         const auto narrowings = compute_condition_narrowing(condition, locals, program);
         auto then_locals = locals;
         auto else_locals = locals;
         apply_condition_narrowing(then_locals, narrowings, true, condition, program);
         apply_condition_narrowing(else_locals, narrowings, false, condition, program);
 
+        // A branch is dead only when the condition actually folded and chose the other one;
+        // an unfolded or runtime condition leaves both live, as before.
+        const bool then_dead = selected.has_value() && !*selected;
+        const bool else_dead = selected.has_value() && *selected;
+
         ResolvedType then_ty, else_ty;
         if (is_coercible_literal(then_expr) && !is_coercible_literal(else_expr)) {
-            else_ty = check_expr(else_expr, else_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+            {
+                DeadBranchGuard dead(program, else_dead);
+                else_ty = check_expr(else_expr, else_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+            }
+            DeadBranchGuard dead(program, then_dead);
             then_ty = check_expr(then_expr, then_locals, module_path, program, diag, else_ty, loop_depth, defer_loop_base, fn_error_type);
         } else {
-            then_ty = check_expr(then_expr, then_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+            {
+                DeadBranchGuard dead(program, then_dead);
+                then_ty = check_expr(then_expr, then_locals, module_path, program, diag, expected, loop_depth, defer_loop_base, fn_error_type);
+            }
+            DeadBranchGuard dead(program, else_dead);
             else_ty = check_expr(else_expr, else_locals, module_path, program, diag, then_ty, loop_depth, defer_loop_base, fn_error_type);
         }
-        return {then_ty, else_ty};
+        return {.then_ty = then_ty, .else_ty = else_ty, .selected = selected};
     }
 
     // Shared by every function-name-to-function-pointer decay site (same-module idents,
@@ -3832,12 +3869,9 @@ namespace sema {
             // handed to type_info_of indirectly (or reach it via any other runtime
             // control flow), and the runtime binary-search table has no other way to
             // learn about this type. See declare_type_info_globals in codegen.cpp.
-            // Unless this expression sits in a '#compile_only_if'-excluded file's scratch
-            // check — an excluded file must never cause a Type_Info global to be emitted.
-            if (!program.checking_excluded_file) {
-                program.types_needing_info.insert(id);
-                program.types_needing_info_types[id] = operand_type;
-            }
+            // Declines under '#compile_only_if' exclusion and under '--nortti'; see
+            // register_type_for_reflection, which is the single gate for all three sites.
+            register_type_for_reflection(program, id, operand_type);
         }
         expr_tables_for_write(program, module_path).expr_type_of_operand_type[get_expr_key(expr)] = operand_type;
         return ResolvedType{.kind = TypeKind::Type};
@@ -4219,9 +4253,12 @@ namespace sema {
                     return binary_op_result(v->op, lhs, rhs, diag, v->location, program);
 
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
-                    const auto [then_ty, else_ty] = check_condition_branch_types(
+                    // No condition fold: a ternary's condition is a runtime one, so neither
+                    // branch is ever dead and 'selected' is always empty here.
+                    const auto [then_ty, else_ty, ternary_selected] = check_condition_branch_types(
                         v->condition, v->then_expr, v->else_expr, locals, module_path, program, diag,
                         expected, loop_depth, defer_loop_base, fn_error_type);
+                    (void) ternary_selected;
                     // Same rule as the 'when' expression: an Opaque branch matches anything,
                     // and the concrete side (if any) is the more useful result to propagate.
                     if (then_ty.kind == TypeKind::Opaque) return else_ty;
@@ -4237,10 +4274,18 @@ namespace sema {
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
                     return resolve_env_expr(get_expr_key(expr), *v, expected, module_path, program, diag);
 
+                } else if constexpr (std::is_same_v<V, ast::RttiEnabledExpr>) {
+                    // Always 'bool', never target-type-coerced: unlike '$option'/'$env' the
+                    // value has one type by construction. is_constant_expr/
+                    // evaluate_const_value fold it like a bool literal, so it composes with
+                    // 'when', '#compile_only_if' and 'const' with no further plumbing.
+                    return ResolvedType{.kind = TypeKind::Bool};
+
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
-                    const auto [then_ty, else_ty] = check_condition_branch_types(
+                    const auto [then_ty, else_ty, selected] = check_condition_branch_types(
                         v->condition, v->then_expr, v->else_expr, locals, module_path, program, diag,
-                        expected, loop_depth, defer_loop_base, fn_error_type);
+                        expected, loop_depth, defer_loop_base, fn_error_type,
+                        /*fold_compile_time_condition=*/true);
                     // An Opaque branch matches anything: inside a generic declaration
                     // 'when N > 4 { 0 } else { t }' has a concrete 'then' and a generic 'else',
                     // which is not a mismatch until 'N' and 't' are known. Yield the concrete
@@ -4254,16 +4299,14 @@ namespace sema {
                     // The condition/branches may freely contain '$option(...)' (or anything
                     // else) — '$option' is always a compile-time-constant expression (see
                     // OptionExpr's doc comment in ast.hpp), so no special-casing is needed
-                    // here beyond the ordinary is_constant_expr/evaluate_const_value fold
-                    // below. The restriction to compile-time-constant conditions specifically
-                    // inside '#link' contexts is enforced at that call site instead
+                    // beyond the ordinary is_constant_expr/evaluate_const_value fold, which
+                    // check_condition_branch_types performed above (it has to fold BEFORE
+                    // checking the branches, so it can mark the unselected one dead). The
+                    // restriction to compile-time-constant conditions specifically inside
+                    // '#link' contexts is enforced at that call site instead
                     // (declare_link_decl's is_constant_expr check).
-                    if (is_constant_expr(v->condition, module_path, program)) {
-                        if (const auto folded = evaluate_const_value(v->condition, module_path, program, diag)) {
-                            if (const auto *iv = std::get_if<int64_t>(&*folded)) {
-                                expr_tables_for_write(program, module_path).expr_when_selected[get_expr_key(expr)] = (*iv != 0);
-                            }
-                        }
+                    if (selected) {
+                        expr_tables_for_write(program, module_path).expr_when_selected[get_expr_key(expr)] = *selected;
                     }
 
                     return then_ty;
@@ -4334,6 +4377,26 @@ namespace sema {
                             std::format("type_info_of() requires an argument of type 'type' or 'any'; got '{}'. Use 'type_of(expr)' to get the type ID first.",
                                 describe_type(operand_ty, program)));
                     }
+                    // '--nortti': no Type_Info globals are emitted, so a call that can
+                    // actually run has nothing to return and must be rejected.
+                    //
+                    // Two contexts are exempt, both meaning "checked but never emitted": a
+                    // 'when' branch the condition already proved dead (the '$rtti_enabled'
+                    // idiom -- 'when' type-checks BOTH branches, so without this the branch
+                    // written specifically to be dead would still error), and a
+                    // '#compile_only_if'-excluded file's overlay check. In both, fall
+                    // through returning the ordinary '*Type_Info' result type -- returning
+                    // Invalid instead would cascade unrelated errors through the rest of the
+                    // branch -- but skip the id registration below, or '--nortti' would
+                    // still emit the globals it exists to suppress.
+                    if (!program.options.rtti_enabled) {
+                        if (program.dead_branch_depth == 0 && !program.checking_excluded_file) {
+                            return error(diag, v->location,
+                                "'type_info_of' requires runtime type information; this build was compiled with '--nortti'. "
+                                "Guard the call with 'when $rtti_enabled { ... } else { ... }' to provide a reflection-free variant.");
+                        }
+                        return ResolvedType{.kind = TypeKind::Anyptr};
+                    }
                     if (!find_type_info_union(program, diag)) {
                         return error(diag, v->location,
                             "'type_info_of' requires importing a module that defines 'pub type Type_Info = union(enum) {...}' (see runtime/type_info)");
@@ -4354,10 +4417,7 @@ namespace sema {
                         if (!contains_opaque(inner_ty, program)) { // see the TypeOfExpr case above
                             const auto id = intern_type_id(program, inner_ty);
                             expr_tables_for_write(program, module_path).expr_type_info_const_id[get_expr_key(expr)] = id;
-                            if (!program.checking_excluded_file) { // see the TypeOfExpr case above
-                                program.types_needing_info.insert(id);
-                                program.types_needing_info_types[id] = inner_ty;
-                            }
+                            register_type_for_reflection(program, id, inner_ty);
                         }
                     }
                     return ResolvedType{.kind = TypeKind::Anyptr};
@@ -4746,10 +4806,7 @@ namespace sema {
             const bool source_is_constant = is_constant_expr(expr, module_path, program);
 
             const auto id = intern_type_id(program, ty);
-            if (!program.checking_excluded_file) { // see the TypeOfExpr case above
-                program.types_needing_info.insert(id);
-                program.types_needing_info_types[id] = ty;
-            }
+            register_type_for_reflection(program, id, ty);
             expr_tables_for_write(program, module_path).expr_any_coercions[get_expr_key(expr)] =
                 AnyCoercion{.source_type = ty, .source_is_constant = source_is_constant};
             return *expected_in;
@@ -5304,12 +5361,20 @@ namespace sema {
 
         expr_tables_for_write(program, module_path).when_stmt_selected[&when_stmt] = selected;
 
-        auto then_locals = locals;
-        for (auto &s : when_stmt.then_block.stmts) {
-            check_stmt(s, then_locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
+        // Both branches are type-checked regardless (a pinned language decision), but the
+        // unselected one is marked unreachable so the handful of diagnostics that only make
+        // sense for code that can actually run stay quiet there. See
+        // Program::dead_branch_depth for the deliberately-short list of readers.
+        {
+            DeadBranchGuard dead(program, !selected);
+            auto then_locals = locals;
+            for (auto &s : when_stmt.then_block.stmts) {
+                check_stmt(s, then_locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
+            }
         }
 
         if (when_stmt.else_branch) {
+            DeadBranchGuard dead(program, selected);
             auto else_locals = locals;
             std::visit(
                 [&]<typename EV>(const EV &else_v) {
@@ -5319,6 +5384,8 @@ namespace sema {
                             check_stmt(s, else_locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base);
                         }
                     } else { // std::unique_ptr<ast::WhenStmt>
+                        // An 'else when' chain under a taken 'then' is wholly dead; the guard
+                        // above already covers it, and the nested call's own guard nests.
                         check_when_stmt(*else_v, else_locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base, fn_error_type);
                     }
                 },

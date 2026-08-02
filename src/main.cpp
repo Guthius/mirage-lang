@@ -36,6 +36,7 @@ namespace {
         bool emit_ir = false;
         bool freestanding = false;
         bool noinit = false;
+        bool nortti = false;
         bool print_link_directives = false;
         bool print_module_search = false;
         bool dump_ast = false;
@@ -65,6 +66,7 @@ namespace {
                      << "  --emit-ir            Print LLVM IR to stdout instead of compiling\n"
                      << "  --freestanding       Compile without standard library\n"
                      << "  --noinit             Skip generating/calling the synthesized '@init'-runner '_init'\n"
+                     << "  --nortti             Disable runtime type information ('type_info_of'); sets '$rtti_enabled' to false\n"
                      << "  --opt key=value      Set a compile-time '$option' value (may be repeated)\n"
                      << "  --print-link-directives  Print collected '#link' directives and exit\n"
                      << "  --print-module-search    Print how each import was resolved and exit\n"
@@ -91,6 +93,8 @@ namespace {
                 options.freestanding = true;
             } else if (arg == "--noinit") {
                 options.noinit = true;
+            } else if (arg == "--nortti") {
+                options.nortti = true;
             } else if (arg == "--print-link-directives") {
                 options.print_link_directives = true;
             } else if (arg == "--print-module-search") {
@@ -447,6 +451,8 @@ namespace {
                     out << ")";
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                     dump_expr(v->object, out); out << "." << v->member;
+                } else if constexpr (std::is_same_v<V, ast::RttiEnabledExpr>) {
+                    out << "$rtti_enabled";
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) {
                     out << "$option(\"" << v->key << "\")";
                 } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
@@ -601,6 +607,7 @@ auto main(const int argc, char *argv[]) -> int {
         .opt_values = options.opt_values,
         .eager_generic_check = options.eager_generic_check,
         .pointer_size = target_triple.getArchPointerBitWidth() / 8,
+        .rtti_enabled = !options.nortti,
     });
     if (!sema.ok) {
         return 1;

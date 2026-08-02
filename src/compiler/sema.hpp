@@ -508,6 +508,16 @@ namespace sema {
         // decision in the front end funnels through primitive_size/resolved_type_size, which
         // read it from here, so nothing else needs to know the target's word size.
         uint32_t pointer_size = 8;
+        // False under the driver's '--nortti'. Two effects, both decided here rather than in
+        // codegen so that a program which never wants reflection need not resolve
+        // 'runtime/type_info' at all: 'type_info_of' becomes an error (except where
+        // dead_branch_depth or checking_excluded_file says the call can never run — see
+        // check_expr's TypeInfoOfExpr case), and no type id is registered in
+        // types_needing_info, which is what actually keeps the Type_Info globals out of the
+        // binary.
+        //
+        // Also the value the '$rtti_enabled' compile-time constant folds to.
+        bool rtti_enabled = true;
     };
 
     enum class LinkCategory : uint8_t { Lib, System, Flag };
@@ -599,6 +609,19 @@ namespace sema {
         // is either rolled back wholesale (the module's ProgramModule is snapshot-restored)
         // or truncated (generic function instances) when the file's check finishes.
         bool checking_excluded_file = false;
+        // Nesting depth of 'when' branches that the folded condition proved unreachable.
+        // Non-zero means "this code is being type-checked, per the spec's both-branches
+        // rule, but can never be emitted".
+        //
+        // Read at exactly one site: check_expr's TypeInfoOfExpr case under '--nortti', where
+        // it turns the hard "reflection is disabled" error into silence. That narrowness is
+        // the point — 'when' type-checking both branches is a pinned language decision, and
+        // this is a hole for one diagnostic under one flag, NOT a general "dead branches are
+        // unchecked" relaxation. Do not add readers without deciding that question again.
+        //
+        // A counter rather than a bool so nested 'when's restore correctly; use
+        // DeadBranchGuard rather than touching it directly.
+        int dead_branch_depth = 0;
         // Symbol names / (type name, method name) pairs declared by the CURRENT excluded
         // file's scratch batch. Lets declare_symbol (and declare_one_decl's impl-method
         // registration) distinguish the excluded file shadowing an included file's
@@ -793,6 +816,29 @@ namespace sema {
         [[nodiscard]] auto slice_at(int index) const -> const SliceInfo * {
             return index >= 0 && static_cast<size_t>(index) < slices.size() ? &slices[index] : nullptr;
         }
+    };
+
+    // Marks the enclosing scope as type-checking a 'when' branch the folded condition
+    // already proved unreachable. See Program::dead_branch_depth for what reads it and why
+    // that reader list must stay at one. Restores on scope exit, so an early return or a
+    // diagnostic-driven bail cannot leak the state into sibling code.
+    class DeadBranchGuard {
+      public:
+        // 'active' false makes this a no-op, so callers can write
+        // 'DeadBranchGuard g(program, !selected)' without branching around the guard.
+        DeadBranchGuard(Program &program, const bool active)
+            : program_(program), active_(active) {
+            if (active_) ++program_.dead_branch_depth;
+        }
+        ~DeadBranchGuard() {
+            if (active_) --program_.dead_branch_depth;
+        }
+        DeadBranchGuard(const DeadBranchGuard &) = delete;
+        auto operator=(const DeadBranchGuard &) -> DeadBranchGuard & = delete;
+
+      private:
+        Program &program_;
+        bool active_;
     };
 
     // Typestate for an error(...)-typed local: whether it's currently known to be in the
@@ -1046,6 +1092,22 @@ namespace sema {
     // the builtin scalar kinds. See Program::type_ids' doc comment for the sema-decides/
     // codegen-only-reads contract.
     auto intern_type_id(Program &program, const ResolvedType &t) -> uint64_t;
+    // The single gate every Program::types_needing_info registration goes through, and
+    // therefore the single decision about whether codegen emits a Type_Info global for a
+    // type. Three call sites reach it — 'type_of', 'type_info_of(type_of(T))'s constant
+    // fast path, and 'any' coercion — and they previously each carried their own copy of
+    // the exclusion test, with the second and third deferring to the first by comment.
+    //
+    // Declines in two cases:
+    //   - checking_excluded_file: a '#compile_only_if'-excluded file is type-checked but
+    //     contributes nothing, so it must never cause a global to be emitted.
+    //   - !options.rtti_enabled ('--nortti'): no Type_Info globals and no lookup table are
+    //     emitted at all, so registering a type would keep exactly the data the flag exists
+    //     to remove. Safe because 'any' does not need reflection — an 'any' value carries a
+    //     bare u64 id and an 'any' cast is an integer comparison — and the one construct
+    //     that does, 'type_info_of', is already an error under '--nortti' wherever it can
+    //     actually run.
+    void register_type_for_reflection(Program &program, uint64_t id, const ResolvedType &type);
     // Pre-registers compiler-internal type ids 1-15 for the builtin scalar TypeKinds, called
     // once at the top of check_program before any 'type_of' expression can be visited.
     void seed_builtin_type_ids(Program &program);

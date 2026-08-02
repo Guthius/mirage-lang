@@ -278,6 +278,7 @@ namespace sema {
                               std::is_same_v<V, ast::ImportBinExpr> ||
                               std::is_same_v<V, ast::IotaExpr> || std::is_same_v<V, ast::DotIdentExpr> ||
                               std::is_same_v<V, ast::DefaultExpr> || std::is_same_v<V, ast::UndefinedExpr> ||
+                              std::is_same_v<V, ast::RttiEnabledExpr> ||
                               std::is_same_v<V, std::unique_ptr<ast::TypeExpr>> || std::is_same_v<V, std::unique_ptr<ast::AsmExpr>>) {
                     // Leaves w.r.t. foreign-reference detection: no nested Expr fields relevant
                     // here (TypeExpr wraps a Type, not a value; AsmExpr's operands are

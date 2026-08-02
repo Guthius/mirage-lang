@@ -357,7 +357,11 @@ namespace sema {
             if (const auto *vd = std::get_if<ast::VarDecl>(&decl)) {
                 return !vd->is_mut && vd->init &&
                        (std::holds_alternative<std::unique_ptr<ast::OptionExpr>>(*vd->init) ||
-                        std::holds_alternative<std::unique_ptr<ast::EnvExpr>>(*vd->init));
+                        std::holds_alternative<std::unique_ptr<ast::EnvExpr>>(*vd->init) ||
+                        // '$rtti_enabled' belongs with '$option'/'$env' here for the same
+                        // reason they do: a compile-time constant with no runtime component,
+                        // which is exactly what a module-scope 'when' branch may declare.
+                        std::holds_alternative<ast::RttiEnabledExpr>(*vd->init));
             }
             return false;
         }
@@ -511,6 +515,7 @@ namespace sema {
                                          std::is_same_v<V, ast::ImportExpr> || std::is_same_v<V, ast::ImportBinExpr> ||
                                          std::is_same_v<V, ast::IotaExpr> || std::is_same_v<V, ast::DotIdentExpr> ||
                                          std::is_same_v<V, ast::DefaultExpr> || std::is_same_v<V, ast::UndefinedExpr> ||
+                                         std::is_same_v<V, ast::RttiEnabledExpr> ||
                                          std::is_same_v<V, std::unique_ptr<ast::TypeExpr>> ||
                                          std::is_same_v<V, std::unique_ptr<ast::AsmExpr>>) {
                         // A bare ImportExpr with no '.field' is handled by the MemberExpr case

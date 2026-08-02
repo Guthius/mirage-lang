@@ -181,6 +181,21 @@ namespace sema {
         return id;
     }
 
+    void register_type_for_reflection(Program &program, const uint64_t id, const ResolvedType &type) {
+        // See the header declaration for why each of these declines. Both were previously
+        // open-coded at the three call sites; the '--nortti' half was missed at two of them
+        // when it was added, which left the Type_Info globals in the binary while only their
+        // uses disappeared.
+        if (program.checking_excluded_file) {
+            return;
+        }
+        if (!program.options.rtti_enabled) {
+            return;
+        }
+        program.types_needing_info.insert(id);
+        program.types_needing_info_types[id] = type;
+    }
+
     void seed_builtin_type_ids(Program &program) {
         // Fixed, compiler-internal numbering for the 15 builtin scalar kinds that can never
         // carry a struct/union/enum-style layout worth reflecting on — distinct from (and

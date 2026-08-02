@@ -1,0 +1,10 @@
+// example_nortti_const — '$rtti_enabled' as an ordinary compile-time constant, outside
+// any 'when': in a 'const' initializer and in a ternary. It is a plain 'bool', so it
+// composes with the constant folder like a literal.
+//
+// Expected: exit 1 by default, exit 0 under '--nortti'.
+const has_rtti: bool = $rtti_enabled
+
+pub fn main() -> i32 {
+    return has_rtti ? 1 : 0
+}

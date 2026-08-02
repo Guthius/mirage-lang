@@ -5220,6 +5220,10 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>> ||
                                               std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
                             return emit_option_value(expr, ty);
+                        } else if constexpr (std::is_same_v<V, ast::RttiEnabledExpr>) {
+                            // A plain i1: sema fixed the value before any source was read, so
+                            // there is nothing to look up per expression.
+                            return builder_.getInt1(sema_program_.options.rtti_enabled);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
                             return emit_when_expr(*v, expr, ty);
                         } else {
@@ -5968,6 +5972,8 @@ namespace codegen {
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>> ||
                                               std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
                             return llvm::cast<llvm::Constant>(emit_option_value(expr, ty));
+                        } else if constexpr (std::is_same_v<V, ast::RttiEnabledExpr>) {
+                            return builder_.getInt1(sema_program_.options.rtti_enabled);
                         } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
                             // Only reachable for a compile-time-constant condition — sema's
                             // is_constant_expr_impl requires the condition (along with both

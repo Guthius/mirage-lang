@@ -647,11 +647,15 @@ primary_expr  ::= INT_LITERAL
                | contextual_tagged_variant
                | option_expr
                | env_expr
+               | rtti_enabled_expr
                | asm_expr
 
 option_expr   ::= '$option' '(' STRING [ ',' expr ] ')'
 
 env_expr      ::= '$env' '(' STRING [ ',' expr ] ')'
+
+// Nullary: no argument list at all, unlike option_expr/env_expr above.
+rtti_enabled_expr ::= '$rtti_enabled'
 
 size_of_expr  ::= 'size_of' '(' size_of_operand ')'
 

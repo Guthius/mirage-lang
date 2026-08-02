@@ -60,6 +60,7 @@ Options:
 --emit-ir                 Print LLVM IR to stdout instead of compiling
 --freestanding            Compile without standard library
 --noinit                  Skip generating/calling the synthesized '@init'-runner '_init'
+--nortti                  Disable runtime type information; sets '$rtti_enabled' to false
 --opt key=value           Set a compile-time '$option' value (may be repeated)
 --print-link-directives   Print collected '#link' directives and exit
 --print-module-search     Print how each import was resolved and exit

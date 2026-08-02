@@ -922,7 +922,7 @@ namespace ast {
             parser.expect(TokenKind::Dollar, "'$'");
 
             if (!parser.check(TokenKind::Identifier) || parser.current_lexeme() != "option") {
-                parser.report_error(location, std::format("expected 'option' or 'env' after '$', got '{}'", parser.current_lexeme()));
+                parser.report_error(location, std::format("expected 'option', 'env' or 'rtti_enabled' after '$', got '{}'", parser.current_lexeme()));
 
                 return LiteralIntegerExpr{.value = 0, .location = location};
             }
@@ -941,6 +941,25 @@ namespace ast {
         // instead of a '--opt key=value' driver flag. Parsed identically to '$option'
         // above (see its comment); the caller (parse_primary) has already peeked past '$'
         // to confirm the identifier is 'env' before dispatching here.
+        // '$rtti_enabled' — nullary, no argument list at all. Like 'option'/'env', the name
+        // after the '$' sigil is a plain identifier rather than a keyword, so it stays
+        // spellable as an ordinary identifier everywhere else. The caller (parse_primary)
+        // has already peeked past '$' to confirm the identifier before dispatching here.
+        auto parse_rtti_enabled_expr(Parser &parser) -> Expr {
+            const auto location = parser.current_location();
+            parser.expect(TokenKind::Dollar, "'$'");
+            parser.advance(); // consume 'rtti_enabled'
+
+            // A '(' here is someone reaching for '$option'-shaped syntax that does not
+            // exist. Say so, rather than letting postfix parsing read it as a call on a bool
+            // and report something further from the cause.
+            if (parser.check(TokenKind::LParen)) {
+                parser.report_error(parser.current_location(), "'$rtti_enabled' takes no arguments");
+            }
+
+            return RttiEnabledExpr{.location = location};
+        }
+
         auto parse_env_expr(Parser &parser) -> Expr {
             const auto location = parser.current_location();
             parser.expect(TokenKind::Dollar, "'$'");
@@ -1411,6 +1430,9 @@ namespace ast {
             if (parser.check(TokenKind::Dollar)) {
                 if (parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "env") {
                     return parse_env_expr(parser);
+                }
+                if (parser.peek().kind == TokenKind::Identifier && parser.peek().lexeme == "rtti_enabled") {
+                    return parse_rtti_enabled_expr(parser);
                 }
                 return parse_option_expr(parser);
             }

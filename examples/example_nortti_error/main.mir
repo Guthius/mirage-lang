@@ -1,0 +1,12 @@
+// example_nortti_error — an UNGUARDED 'type_info_of' under '--nortti'. The call is live,
+// so there is nothing to return and the build must be refused rather than silently
+// producing a null Type_Info pointer.
+//
+// Expected: builds cleanly by default; errors under '--nortti' with a message naming
+// '$rtti_enabled' as the way to write a reflection-free variant.
+const rt := import("../../runtime/type_info")
+
+pub fn main() -> i32 {
+    const info := type_info_of(type_of(i32))
+    return 0
+}

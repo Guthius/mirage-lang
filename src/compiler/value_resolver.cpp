@@ -356,6 +356,12 @@ namespace sema {
                         return true;
                     }
 
+                    // '$rtti_enabled' is a fact about how the compiler was invoked, fixed
+                    // before any source is read.
+                    if constexpr (std::is_same_v<V, ast::RttiEnabledExpr>) {
+                        return true;
+                    }
+
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                         return is_constant_expr_impl(v->value, module_path, program, treated_as_const, depth);
                     }
@@ -1039,6 +1045,13 @@ namespace sema {
                     const auto it = mod_it->second.expr_option_values.find(get_expr_key(expr));
                     if (it == mod_it->second.expr_option_values.end()) return std::nullopt;
                     return it->second;
+                }
+
+                if constexpr (std::is_same_v<V, ast::RttiEnabledExpr>) {
+                    // Folds like a bool literal: 0/1, straight off the driver flag. No
+                    // expr_option_values lookup, because there is no per-expression value to
+                    // cache — every '$rtti_enabled' in the program answers the same thing.
+                    return static_cast<int64_t>(program.options.rtti_enabled ? 1 : 0);
                 }
 
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {

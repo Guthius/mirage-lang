@@ -1,0 +1,34 @@
+// example_nortti_guarded — the '$rtti_enabled' idiom: one function carrying both a
+// reflection-based and a reflection-free implementation, selected by 'when'.
+//
+// 'when' type-checks BOTH branches (a deliberate language rule, unlike generics), so under
+// '--nortti' the reflection branch is still checked even though it can never be emitted.
+// The '--nortti' "reflection is disabled" error is suppressed there for exactly that
+// reason -- see spec.md §12.
+//
+// The reflection branch USES the Type_Info pointer (a nil comparison), so the
+// '@.type_info.N' global and '@__mirage_type_info_table' are genuinely emitted with rtti
+// on. That is what lets tests/nortti_test.py show '--nortti' suppressing them.
+//
+// Expected: exit 4 by default, exit 0 under '--nortti'.
+const rt := import("../../runtime/type_info")
+
+pub type Point = struct {
+    x: i32
+    y: i32
+}
+
+pub fn describe() -> i32 {
+    when $rtti_enabled {
+        // A STRUCT, not a primitive: a named aggregate is what forces a real
+        // '@.type_info.N' global (a builtin scalar's kind is encoded inline).
+        const info := type_info_of(type_of(Point))
+        return info == nil ? 0 : 4
+    } else {
+        return 0
+    }
+}
+
+pub fn main() -> i32 {
+    return describe()
+}
