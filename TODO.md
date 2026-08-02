@@ -99,7 +99,11 @@ Done:
 - **Stage 2, eighth increment** — `when` statements, which sema has already folded: only
   the selected branch is emitted, and no runtime control flow at all.
 
-  **Coverage: 31 of 271 corpus modules lower fully.**
+- **Stage 2, ninth increment** — `for-in` over arrays and slices (all three binding forms:
+  value, `i, value`, and `&value`), `break`/`continue`, and slice expressions (`xs[..]`,
+  `xs[a..b]`).
+
+  **Coverage: 32 of 271 corpus modules lower fully.**
 
   Largest remaining blockers: multi-return in all its forms (`-> (T, error(E))` returns,
   `return_ok` with value slots, group declarations — ~99 combined, and one lowering that

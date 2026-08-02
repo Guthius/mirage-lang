@@ -320,6 +320,28 @@ def case_when_emits_only_the_live_branch():
     check("branch" not in r.stdout, "no runtime control flow is emitted at all")
 
 
+def case_loops():
+    """'for-in' over a slice, in all three binding forms, with break and continue.
+
+    'continue' targets the loop's STEP block, not its condition -- targeting the condition
+    would skip the increment and spin forever, which is the classic desugaring bug.
+    """
+    r = emit_mir("pub fn main() -> i32 {\n"
+                 "  mut xs: [5]i32 = { 1, 2, 3, 4, 5 }\n  mut total: i32 = 0\n"
+                 "  for v in xs[..] {\n    if v == 4 { break }\n    if v == 2 { continue }\n"
+                 "    total = total + v\n  }\n"
+                 "  for i, w in xs[..] { total = total + cast(i, i32) + w }\n"
+                 "  for &r in xs[..] { r.* = r.* * 2 }\n"
+                 "  return total\n}\n")
+    check(r.returncode == 0, f"'for-in' lowers in all three forms ({r.stderr.strip()[:140]})")
+    for block in ("^for.cond", "^for.body", "^for.step", "^for.end"):
+        check(block in r.stdout, f"'{block}' block is emitted")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+    # A slice expression builds the two-word (data, length) pair in a slot.
+    check("slice" in r.stdout, "'xs[..]' materializes a slice")
+
+
 def case_mir_goes_to_stdout():
     """'--emit-mir > out.mir' has to produce a valid file, as '--emit-ir' does."""
     r = emit_mir("pub fn main() -> i32 { return 0 }\n")
@@ -349,6 +371,7 @@ def main() -> int:
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()
+    case_loops()
     case_unsupported_is_reported_not_skipped()
     case_mir_goes_to_stdout()
 

@@ -93,6 +93,10 @@ namespace mirgen {
             // The hidden sret pointer of the body being emitted, or NO_VALUE when the
             // return is a plain scalar. Every 'return' of an aggregate writes through it.
             mir::ValueId sret_ = mir::NO_VALUE;
+            // Enclosing loops, innermost last. 'continue' targets the loop's STEP block, not
+            // its condition -- targeting the condition would skip the increment and spin.
+            struct LoopTargets { mir::BlockId header; mir::BlockId exit; };
+            std::vector<LoopTargets> loop_stack_;
 
             static auto key(const std::string_view module_path, const std::string_view name) -> std::string {
                 return std::string(module_path) + "\n" + std::string(name);
@@ -381,6 +385,7 @@ namespace mirgen {
                 local_types_.clear();
                 slots_escaping_.clear();
                 sret_ = mir::NO_VALUE;
+                loop_stack_.clear();
 
                 const auto entry = b.create_block("entry");
                 b.set_insert_point(entry);
@@ -472,6 +477,7 @@ namespace mirgen {
                 local_types_.clear();
                 slots_escaping_.clear();
                 sret_ = mir::NO_VALUE;
+                loop_stack_.clear();
 
                 const auto entry = b.create_block("entry");
                 b.set_insert_point(entry);
@@ -551,6 +557,23 @@ namespace mirgen {
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhileStmt>>) {
                         emit_while(b, *v, returns);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::ForInStmt>>) {
+                        emit_for_in(b, *v, returns);
+
+                    } else if constexpr (std::is_same_v<V, ast::BreakStmt>) {
+                        if (loop_stack_.empty()) {
+                            unsupported("'break' outside a loop", v.location);
+                        } else {
+                            b.jump(loop_stack_.back().exit);
+                        }
+
+                    } else if constexpr (std::is_same_v<V, ast::ContinueStmt>) {
+                        if (loop_stack_.empty()) {
+                            unsupported("'continue' outside a loop", v.location);
+                        } else {
+                            b.jump(loop_stack_.back().header);
+                        }
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenStmt>>) {
                         emit_when(b, *v, returns);
@@ -940,10 +963,120 @@ namespace mirgen {
                 }
 
                 b.set_insert_point(body);
+                loop_stack_.push_back({header, exit});
                 emit_stmt(b, stmt.body, returns);
+                loop_stack_.pop_back();
                 if (!b.block_is_terminated()) b.jump(header);
 
                 b.set_insert_point(exit);
+            }
+
+            // 'for elem in xs' / 'for i, elem in xs' over an array or a slice, lowered to a
+            // counted loop: an index slot, a bound, and a per-iteration element address.
+            //
+            // 'continue' jumps to the STEP block rather than the condition, or the index
+            // would never advance and the loop would spin -- the classic desugaring bug.
+            void emit_for_in(mir::Builder &b, const ast::ForInStmt &stmt,
+                              const std::vector<sema::ResolvedType> &returns) {
+                const auto iterable_type = expr_type(stmt.iterable);
+                const auto usize = usize_ty();
+
+                sema::ResolvedType element{};
+                mir::ValueId data = mir::NO_VALUE;
+                mir::ValueId count = mir::NO_VALUE;
+
+                if (iterable_type.kind == sema::TypeKind::Array) {
+                    const auto *info = sema_.array_at(iterable_type.array_index);
+                    if (!info) { unsupported("a 'for-in' over this operand", stmt.location); return; }
+                    element = info->element_type;
+                    data = emit_address(b, stmt.iterable);
+                    count = b.const_int(usize, static_cast<int64_t>(info->count));
+                } else if (iterable_type.kind == sema::TypeKind::Slice) {
+                    const auto *info = sema_.slice_at(iterable_type.slice_index);
+                    if (!info) { unsupported("a 'for-in' over this operand", stmt.location); return; }
+                    element = info->element_type;
+                    // A slice's two words: data pointer, then length.
+                    auto slice_addr = emit_address(b, stmt.iterable);
+                    if (slice_addr == mir::NO_VALUE) slice_addr = emit_expr(b, stmt.iterable);
+                    if (slice_addr == mir::NO_VALUE) { unsupported("a 'for-in' over this operand", stmt.location); return; }
+                    data = b.load(mir::Ty::Ptr, slice_addr);
+                    count = b.load(usize, b.ptr_add_const(slice_addr, pointer_bytes()));
+                } else {
+                    unsupported("a 'for-in' over this operand", stmt.location);
+                    return;
+                }
+                if (data == mir::NO_VALUE) { unsupported("a 'for-in' over this operand", stmt.location); return; }
+
+                const auto index_slot = b.add_slot(pointer_bytes(), pointer_bytes(),
+                                                    stmt.index_name == "_" ? "for.i" : stmt.index_name);
+                b.store(b.slot_addr(index_slot), b.const_int(usize, 0));
+
+                // The element binding is a slot holding either the value or its address, per
+                // '&val'. Both are ordinary locals from the body's point of view.
+                const auto element_is_ref = stmt.element_by_ref;
+                const auto element_type = element_is_ref ? pointer_to(element) : element;
+                const auto element_slot = b.add_slot(
+                    std::max(1u, element_is_ref ? pointer_bytes() : size_of(element)),
+                    std::max(1u, element_is_ref ? pointer_bytes() : align_of(element)),
+                    stmt.element_name);
+
+                const auto header = b.create_block("for.cond");
+                const auto body = b.create_block("for.body");
+                const auto step = b.create_block("for.step");
+                const auto exit = b.create_block("for.end");
+
+                b.jump(header);
+                b.set_insert_point(header);
+                const auto i = b.load(usize, b.slot_addr(index_slot));
+                b.branch(b.compare(mir::Op::ICmpUlt, i, count), body, exit);
+
+                b.set_insert_point(body);
+                const auto offset = b.binary(mir::Op::Mul, usize, b.load(usize, b.slot_addr(index_slot)),
+                                              b.const_int(usize, size_of(element)));
+                const auto element_address = b.ptr_add(data, offset);
+                if (element_is_ref || !is_scalar(element)) {
+                    b.store(b.slot_addr(element_slot), element_address);
+                } else {
+                    b.store(b.slot_addr(element_slot), b.load(scalar_type(element), element_address));
+                }
+
+                const auto saved_locals = locals_;
+                const auto saved_types = local_types_;
+                if (stmt.index_name != "_") {
+                    locals_[stmt.index_name] = index_slot;
+                    local_types_[stmt.index_name] = sema::ResolvedType{.kind = sema::TypeKind::USize};
+                }
+                locals_[stmt.element_name] = element_slot;
+                local_types_[stmt.element_name] = element_type;
+
+                loop_stack_.push_back({step, exit});
+                emit_stmt(b, stmt.body, returns);
+                loop_stack_.pop_back();
+                locals_ = saved_locals;
+                local_types_ = saved_types;
+
+                if (!b.block_is_terminated()) b.jump(step);
+
+                b.set_insert_point(step);
+                b.store(b.slot_addr(index_slot),
+                         b.binary(mir::Op::Add, usize, b.load(usize, b.slot_addr(index_slot)),
+                                   b.const_int(usize, 1)));
+                b.jump(header);
+
+                b.set_insert_point(exit);
+            }
+
+            // The interned '*T' for an element type, used for a '&val' binding. Falls back to
+            // a bare Anyptr when nothing in the program interned that pointer type -- only
+            // the ADDRESS is ever used, so the pointee is informational here.
+            [[nodiscard]] auto pointer_to(const sema::ResolvedType &pointee) const -> sema::ResolvedType {
+                for (size_t i = 0; i < sema_.pointer_pointees.size(); ++i) {
+                    if (sema_.pointer_pointees[i] == pointee) {
+                        return sema::ResolvedType{.kind = sema::TypeKind::Pointer,
+                                                   .pointee_index = static_cast<int>(i)};
+                    }
+                }
+                return sema::ResolvedType{.kind = sema::TypeKind::Anyptr};
             }
 
             // A condition must be I1. Integer conditions (the truthiness 'when' and 'if'
@@ -1254,6 +1387,9 @@ namespace mirgen {
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) {
                         return emit_incr_decr(b, *v);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) {
+                        return emit_slice_expr(b, *v);
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) {
                         return emit_len(b, *v);
@@ -1966,6 +2102,62 @@ namespace mirgen {
                     return mir::NO_VALUE;
                 }
                 return b.call_indirect(callee, signature, sig.result, args);
+            }
+
+            // 'xs[..]', 'xs[a..b]' -- builds a two-word (data, length) slice in a slot, since
+            // a slice is an aggregate and has no MIR value form. Bounds are NOT checked here:
+            // that is a runtime concern the LLVM backend also leaves to the operand's own
+            // guarantees, and adding it silently would change semantics between backends.
+            auto emit_slice_expr(mir::Builder &b, const ast::SliceExpr &slice) -> mir::ValueId {
+                const auto usize = usize_ty();
+                const auto operand_type = expr_type(slice.operand);
+
+                sema::ResolvedType element{};
+                mir::ValueId data = mir::NO_VALUE;
+                mir::ValueId total = mir::NO_VALUE;
+
+                if (operand_type.kind == sema::TypeKind::Array) {
+                    const auto *info = sema_.array_at(operand_type.array_index);
+                    if (!info) { unsupported("a slice of this operand", slice.location); return mir::NO_VALUE; }
+                    element = info->element_type;
+                    data = emit_address(b, slice.operand);
+                    total = b.const_int(usize, static_cast<int64_t>(info->count));
+                } else if (operand_type.kind == sema::TypeKind::Slice) {
+                    const auto *info = sema_.slice_at(operand_type.slice_index);
+                    if (!info) { unsupported("a slice of this operand", slice.location); return mir::NO_VALUE; }
+                    element = info->element_type;
+                    auto address = emit_address(b, slice.operand);
+                    if (address == mir::NO_VALUE) address = emit_expr(b, slice.operand);
+                    if (address == mir::NO_VALUE) { unsupported("a slice of this operand", slice.location); return mir::NO_VALUE; }
+                    data = b.load(mir::Ty::Ptr, address);
+                    total = b.load(usize, b.ptr_add_const(address, pointer_bytes()));
+                } else {
+                    unsupported("a slice of this operand", slice.location);
+                    return mir::NO_VALUE;
+                }
+                if (data == mir::NO_VALUE) { unsupported("a slice of this operand", slice.location); return mir::NO_VALUE; }
+
+                // Omitted bounds mean the whole operand: start 0, end == its length.
+                mir::ValueId start = b.const_int(usize, 0);
+                if (slice.start) {
+                    const auto value = emit_expr(b, *slice.start);
+                    if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                    start = coerce_to(b, value, usize, signed_type(expr_type(*slice.start)));
+                }
+                mir::ValueId end = total;
+                if (slice.end) {
+                    const auto value = emit_expr(b, *slice.end);
+                    if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                    end = coerce_to(b, value, usize, signed_type(expr_type(*slice.end)));
+                }
+
+                const auto stride = b.const_int(usize, size_of(element));
+                const auto slot = b.add_slot(pointer_bytes() * 2, pointer_bytes(), "slice");
+                const auto base = b.slot_addr(slot);
+                b.store(base, b.ptr_add(data, b.binary(mir::Op::Mul, usize, start, stride)));
+                b.store(b.ptr_add_const(base, pointer_bytes()),
+                         b.binary(mir::Op::Sub, usize, end, start));
+                return base;
             }
 
             // ---- coercion ----------------------------------------------------------
