@@ -3464,8 +3464,12 @@ is a compile-time constant `[]u8`.
 
 Export names live in one flat namespace shared with `ext fn` declarations, so two
 declarations claiming the same name is an error naming both sites — including a collision
-between an `@export` and an `ext fn` of that name. Not allowed on a generic function: each
-instantiation would need a distinct name and nothing supplies one.
+between an `@export` and an `ext fn` of that name. Not allowed on a generic function, or on
+a method of a generic type: each instantiation would need a distinct name and nothing
+supplies one.
+
+The `__mir_` and `__mirage_` prefixes are **reserved** — the compiler emits its own mangled
+and synthesized symbols there, and an export in that space could shadow one.
 
 `@export` fixes the *name* only, not the ABI — see `@callconv` below.
 

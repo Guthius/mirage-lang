@@ -162,6 +162,18 @@ def case_export():
                  "pub fn main() -> i32 { return f() }\n",
                  "is not a valid symbol name", "an export name with a space is rejected")
 
+    # The compiler generates symbols under '__mir_' (mangled module symbols) and
+    # '__mirage_' (synthesized ones: test wrappers, Test_Info, the type-info table, the
+    # panic helper). An export in that space could shadow one.
+    for reserved in ("__mir_something", "__mirage_test_wrapper_0"):
+        expect_error(f'@export("{reserved}")\npub fn f() -> i32 {{ return 1 }}\n'
+                     "pub fn main() -> i32 { return f() }\n",
+                     "compiler-reserved prefix", f"'{reserved}' is rejected as compiler-reserved")
+    # Only those exact prefixes; a name that merely starts similarly is fine.
+    expect_ok('@export("__mirror")\npub fn f() -> i32 { return 1 }\n'
+              "pub fn main() -> i32 { return f() }\n",
+              "'__mirror' is not caught by the prefix check")
+
     # Orthogonality warning: '@export' alone on an aggregate-by-value signature.
     r = compile_source("pub type P = struct { x: i32  y: i32 }\n@export\n"
                        "pub fn f(p: P) -> i32 { return p.x }\n"
@@ -244,16 +256,19 @@ def case_callconv():
     # A GENERIC type's methods are never signature-resolved, so they used to escape
     # attribute validation entirely -- '@export' there compiled silently and emitted the
     # ordinary mangled monomorphization, which is neither validated nor honoured.
-    GENERIC_BOX = ("pub type Box[T: type] = struct { v: T }\n"
-                   "impl Box[T: type] {{\n  {attr}\n  pub fn get(self) -> T {{ return self.v }}\n}}\n"
-                   "pub fn main() -> i32 {{ mut b: Box[i32] = default  return b.get() }}\n")
-    expect_error(GENERIC_BOX.format(attr='@export("boxget")'),
+    # str.replace rather than str.format: the source is full of braces.
+    def generic_box(attr: str) -> str:
+        return ("pub type Box[T: type] = struct { v: T }\n"
+                "impl Box[T: type] {\n  ATTR\n  pub fn get(self) -> T { return self.v }\n}\n"
+                "pub fn main() -> i32 { mut b: Box[i32] = default  return b.get() }\n").replace("ATTR", attr)
+
+    expect_error(generic_box('@export("boxget")'),
                  "'@export' is not allowed on a method of a generic type",
                  "'@export' on a generic type's method is rejected")
-    expect_error(GENERIC_BOX.format(attr="@cdecl"),
+    expect_error(generic_box("@cdecl"),
                  "'@callconv' is not allowed on a method of a generic type",
                  "'@callconv' on a generic type's method is rejected")
-    expect_ok(GENERIC_BOX.format(attr="@always_inline"),
+    expect_ok(generic_box("@always_inline"),
               "an attribute that IS meaningful on a template still works there")
 
     expect_error("pub type Show = trait { fn show(self) -> i32 }\n"

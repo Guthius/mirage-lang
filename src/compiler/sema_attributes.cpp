@@ -130,6 +130,16 @@ namespace sema {
             (void) fold_string_attribute_arg(attr.args[0], "@section", attr.location, module_path, program, diag);
         }
 
+        // Prefixes the compiler generates symbols under: '__mir_' for every mangled
+        // module-scoped symbol (codegen.cpp's symbol_name), and '__mirage_' for the
+        // synthesized ones (the test wrappers and Test_Info, the type-info table, the
+        // unhandled-error panic helper). An '@export' name in either space could shadow a
+        // real generated symbol, so the whole space is reserved rather than trying to
+        // enumerate what is currently in it.
+        auto uses_reserved_symbol_prefix(const std::string &name) -> bool {
+            return name.starts_with("__mir_") || name.starts_with("__mirage_");
+        }
+
         // Whether 'name' can be a linker symbol at all. Deliberately permissive -- '$' and
         // '.' appear in real mangled names, and this is not the place to relitigate what a
         // platform accepts -- but a name with whitespace, a NUL, or a leading digit is
@@ -196,6 +206,12 @@ namespace sema {
             if (!is_plausible_symbol_name(name)) {
                 diag.report_error(DiagnosticStage::Sema, attr.location,
                     std::format("'@export' name '{}' is not a valid symbol name", name));
+                return std::nullopt;
+            }
+            if (uses_reserved_symbol_prefix(name)) {
+                diag.report_error(DiagnosticStage::Sema, attr.location, std::format(
+                    "'@export' name '{}' uses a compiler-reserved prefix ('__mir_' / '__mirage_'); "
+                    "an export in that space could shadow a generated symbol", name));
                 return std::nullopt;
             }
             return name;
