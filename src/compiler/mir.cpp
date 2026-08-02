@@ -611,7 +611,7 @@ namespace mir {
                                                  site, type_name(lhs)));
                             }
                         }
-                    } else if (is_int_binary(inst.op) && inst.op != Op::Not && inst.op != Op::Neg) {
+                    } else if (is_int_binary(inst.op)) {
                         check_operand_type(fn, inst.a, inst.type, site);
                         check_operand_type(fn, inst.b, inst.type, site);
                         if (!is_integer(inst.type)) {

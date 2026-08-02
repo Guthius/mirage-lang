@@ -3496,7 +3496,14 @@ use case the attribute exists for. Lifting this means adding a convention field 
 types and to the structural-equality rule in [Type Compatibility](#15-type-compatibility-and-assignability).
 
 `@callconv("c")` is also not allowed on a multi-return function (C has no multi-return
-convention) or on a generic one.
+convention), on a generic one, or on an `impl` method — a method's receiver would have to
+cross the boundary under the C ABI too, and method call sites do not go through the C-ABI
+marshalling path in v1. Declare a module-scope function instead.
+
+`@export`, by contrast, **is** honoured on methods, including trait-impl methods: it changes
+only the symbol's name and linkage, not how anything is passed. A bare `@export` on a method
+uses the method's own unqualified name, so two same-named methods on different types both
+claim it and collide — reported with both locations.
 
 **`@export` and `@callconv` are orthogonal**, and exposing a function to C wants both:
 

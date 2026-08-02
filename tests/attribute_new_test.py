@@ -158,6 +158,25 @@ def case_export():
     check("does not declare '@cdecl'" not in r2.stderr,
           "a scalar-only '@export' signature does not warn (the conventions coincide)")
 
+    # Methods: '@export' changes only the symbol's name and linkage, so it IS honoured
+    # there (a codegen path that was silently ignoring it until this was checked).
+    ir = emit_ir("pub type T = struct { x: i32 }\n"
+                 "impl T {\n  @export(\"method_get\")\n  pub fn get(self) -> i32 { return self.x }\n}\n"
+                 "pub fn main() -> i32 { mut t: T = default  return t.get() }\n")
+    check("define i32 @method_get(ptr" in ir.stdout, "'@export' on an impl method emits that symbol")
+
+    ir2 = emit_ir("pub type Shape = trait { fn area(self) -> i32 }\n"
+                  "pub type Sq = struct { s: i32 }\n"
+                  "impl Shape for Sq {\n  @export(\"trait_area\")\n  fn area(self) -> i32 { return self.s * self.s }\n}\n"
+                  "pub fn main() -> i32 { mut q: Sq = default  const h: Shape = &q  return h.area() }\n")
+    check("define i32 @trait_area(ptr" in ir2.stdout, "'@export' on a trait-impl method emits that symbol")
+
+    expect_error("pub type T = struct { x: i32 }\n"
+                 "impl T {\n  @export(\"dup\")\n  pub fn get(self) -> i32 { return self.x }\n}\n"
+                 "@export(\"dup\")\npub fn other() -> i32 { return 1 }\n"
+                 "pub fn main() -> i32 { mut t: T = default  return t.get() + other() }\n",
+                 "duplicate export name 'dup'", "a method and a function cannot claim one export name")
+
 
 # ---------------------------------------------------------------- @callconv / @cdecl
 
@@ -198,6 +217,13 @@ def case_callconv():
     expect_error("@cdecl\npub fn f[T: type](v: T) -> i32 { return 1 }\n"
                  "pub fn main() -> i32 { return f(1) }\n",
                  "not allowed on a generic function", "'@cdecl' on a generic is an error")
+
+    # A method's receiver would also have to cross the C boundary, and method call sites do
+    # not go through the C-ABI path -- so this is refused rather than accepted and ignored.
+    expect_error("pub type T = struct { x: i32 }\n"
+                 "impl T {\n  @cdecl\n  pub fn get(self) -> i32 { return self.x }\n}\n"
+                 "pub fn main() -> i32 { mut t: T = default  return t.get() }\n",
+                 "not supported on impl methods in v1", "'@callconv' on an impl method is rejected")
 
 
 # ---------------------------------------------------------------- @import

@@ -2003,9 +2003,17 @@ namespace codegen {
                             }
 
                             auto *fn_type = llvm::FunctionType::get(return_type(path, info.return_types), param_types, false);
-                            const auto fname = symbol_name(path, method_fn_key(type_name, method_name));
+                            // '@export' replaces the mangled name and forces external
+                            // linkage here exactly as it does for a free function; only
+                            // '@callconv' is method-unsupported (sema rejects it), because
+                            // that would also have to marshal the receiver.
+                            const auto fname = info.export_name
+                                ? *info.export_name
+                                : symbol_name(path, method_fn_key(type_name, method_name));
                             auto *llvm_fn = llvm::Function::Create(
-                                fn_type, llvm::GlobalValue::InternalLinkage, fname, *module_);
+                                fn_type,
+                                info.export_name ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::InternalLinkage,
+                                fname, *module_);
                             functions_[FunctionKey{path, method_fn_key(type_name, method_name)}] = llvm_fn;
 
                             if (info.decl) {
@@ -2035,9 +2043,15 @@ namespace codegen {
 
                             auto *fn_type = llvm::FunctionType::get(return_type(impl_info.impl_module, info.return_types), param_types, false);
                             const auto key = method_fn_key_for(info);
-                            const auto fname = symbol_name(impl_info.impl_module, key);
+                            // See declare_methods() for why '@export' is honoured here but
+                            // '@callconv' is not.
+                            const auto fname = info.export_name
+                                ? *info.export_name
+                                : symbol_name(impl_info.impl_module, key);
                             auto *llvm_fn = llvm::Function::Create(
-                                fn_type, llvm::GlobalValue::InternalLinkage, fname, *module_);
+                                fn_type,
+                                info.export_name ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::InternalLinkage,
+                                fname, *module_);
                             functions_[FunctionKey{impl_info.impl_module, key}] = llvm_fn;
 
                             if (info.decl) {

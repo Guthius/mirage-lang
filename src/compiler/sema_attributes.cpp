@@ -279,7 +279,8 @@ namespace sema {
         // inline at validate_attributes_for_module's call site below.
         auto validate_common_attributes(const std::vector<ast::Attribute> &attrs, const std::vector<ResolvedType> &params,
                                          const std::vector<ResolvedType> &return_types, const std::string &decl_name,
-                                         const bool is_generic, const ast::Stmt &body, const std::string &module_path,
+                                         const bool is_generic, const bool is_method, const ast::Stmt &body,
+                                         const std::string &module_path,
                                          Program &program, DiagnosticEngine &diag) -> AttributeFacts {
             // Bound once and reused: 'naked' and 'always_inline' were each looked up twice
             // more for the combination check below, which re-scanned the attribute list to
@@ -311,6 +312,18 @@ namespace sema {
             AttributeFacts facts;
             facts.no_discard = no_discard != nullptr;
             facts.call_conv = validate_callconv_attributes(attrs, is_generic, module_path, program, diag);
+            // A method's receiver would also have to cross the boundary under the C ABI, and
+            // method call sites do not go through the C-ABI marshalling path. Rejected in v1
+            // rather than accepted and silently ignored, which is the failure mode that
+            // actually costs someone a day. '@export' on a method IS honoured -- it only
+            // changes the symbol's name and linkage, not how anything is passed.
+            if (is_method && facts.call_conv == CallConv::C) {
+                const auto *conv_attr = find_attribute(attrs, "callconv");
+                const auto *loc_attr = conv_attr ? conv_attr : find_attribute(attrs, "cdecl");
+                diag.report_error(DiagnosticStage::Sema, loc_attr ? loc_attr->location : SourceLocation{},
+                    "'@callconv' is not supported on impl methods in v1; declare a module-scope function instead");
+                facts.call_conv = CallConv::Mirage;
+            }
             // C has no multi-return, and the C-ABI lowering (ext_function_type) accepts at
             // most one return type -- silently lowering only the first would produce a
             // function C callers read wrongly.
@@ -435,8 +448,8 @@ namespace sema {
             const auto &attrs = fn->decl->attributes;
 
             const auto facts = validate_common_attributes(attrs, fn->params, fn->return_types, name,
-                                                          is_generic_function(*fn), fn->decl->body,
-                                                          module_path, program, diag);
+                                                          is_generic_function(*fn), /*is_method=*/false,
+                                                          fn->decl->body, module_path, program, diag);
             fn->no_discard = facts.no_discard;
             fn->export_name = facts.export_name;
             fn->call_conv = facts.call_conv;
@@ -507,8 +520,8 @@ namespace sema {
                 // instantiations -- so '@export'/'@callconv' are refused for the same reason.
                 const auto is_generic = info.impl_generic_params != nullptr && !info.impl_generic_params->empty();
                 const auto facts = validate_common_attributes(info.decl->attributes, info.param_types, info.return_types,
-                                                              info.decl->name, is_generic, info.decl->body,
-                                                              module_path, program, diag);
+                                                              info.decl->name, is_generic, /*is_method=*/true,
+                                                              info.decl->body, module_path, program, diag);
                 info.no_discard = facts.no_discard;
                 info.export_name = facts.export_name;
                 info.call_conv = facts.call_conv;
@@ -640,8 +653,8 @@ namespace sema {
                     if (!info.is_resolved || !info.decl || info.decl->attributes.empty()) continue;
                     const auto is_generic = info.impl_generic_params != nullptr && !info.impl_generic_params->empty();
                     const auto facts = validate_common_attributes(info.decl->attributes, info.param_types, info.return_types,
-                                                                   info.decl->name, is_generic, info.decl->body,
-                                                                   impl_info.impl_module, program, diag);
+                                                                   info.decl->name, is_generic, /*is_method=*/true,
+                                                                   info.decl->body, impl_info.impl_module, program, diag);
                     info.no_discard = facts.no_discard;
                     info.export_name = facts.export_name;
                     info.call_conv = facts.call_conv;
