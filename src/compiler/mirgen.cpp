@@ -534,11 +534,7 @@ namespace mirgen {
                     const auto value = b.add_block_param(entry, sig.params[i + first_param + 1]);
                     result_.module.functions[fn_index].params.push_back(value);
                     const auto &decl_param = info.decl->params[i];
-                    const auto slot = b.add_slot(std::max(1u, size_of(info.param_types[i])),
-                                                  std::max(1u, align_of(info.param_types[i])), decl_param.name);
-                    b.store(b.slot_addr(slot), value);
-                    locals_[decl_param.name] = slot;
-                    local_types_[decl_param.name] = info.param_types[i];
+                    bind_param(b, decl_param.name, info.param_types[i], value);
                 }
 
                 current_returns_ = &info.return_types;
@@ -626,13 +622,7 @@ namespace mirgen {
                 for (size_t i = 0; i < fn.params.size() && i + first_param < sig.params.size(); ++i) {
                     const auto param_value = b.add_block_param(entry, sig.params[i + first_param]);
                     result_.module.functions[fn_index].params.push_back(param_value);
-
-                    const auto &decl_param = fn.decl->params[i];
-                    const auto slot = b.add_slot(std::max(1u, size_of(fn.params[i])),
-                                                  std::max(1u, align_of(fn.params[i])), decl_param.name);
-                    b.store(b.slot_addr(slot), param_value);
-                    locals_[decl_param.name] = slot;
-                    local_types_[decl_param.name] = fn.params[i];
+                    bind_param(b, fn.decl->params[i].name, fn.params[i], param_value);
                 }
 
                 current_returns_ = &fn.return_types;
@@ -653,6 +643,24 @@ namespace mirgen {
                         b.unreachable();
                     }
                 }
+            }
+
+            // Binds one incoming parameter to a fresh local slot. A scalar arrives as its
+            // value and is stored; an aggregate arrives as a POINTER to the caller's copy
+            // (see signature_for) and its BYTES are copied in -- storing the pointer itself
+            // into an aggregate-sized slot left every later read (which treats the slot as
+            // holding the aggregate) reading the pointer's bytes as data.
+            void bind_param(mir::Builder &b, const std::string &name, const sema::ResolvedType &type,
+                             const mir::ValueId value) {
+                const auto slot = b.add_slot(std::max(1u, size_of(type)),
+                                              std::max(1u, align_of(type)), name);
+                if (is_scalar(type)) {
+                    b.store(b.slot_addr(slot), value);
+                } else {
+                    b.mem_copy(b.slot_addr(slot), value, b.const_int(usize_ty(), size_of(type)));
+                }
+                locals_[name] = slot;
+                local_types_[name] = type;
             }
 
             void emit_stmt(mir::Builder &b, const ast::Stmt &stmt, const std::vector<sema::ResolvedType> &returns) {

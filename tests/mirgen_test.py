@@ -319,6 +319,12 @@ def case_tagged_unions():
                  "  mut c: Shape = .Circle{.r = 5}\n"
                  "  return area(c) + describe(c)\n}\n")
     check(r.returncode == 0, f"tagged-union switch/match lower ({r.stderr.strip()[:140]})")
+    # An aggregate parameter arrives as a pointer to the caller's copy; its BYTES are
+    # copied into the local slot. Storing the pointer itself made every later read of
+    # the parameter read the pointer's bytes as data.
+    check(re.search(r"; s\n\s+%\d+: i64 = const\.int 12\n\s+mem\.copy", r.stdout) is not None
+          or "mem.copy %1, %0" in r.stdout,
+          "an aggregate parameter is copied by value into its slot")
     check("switch.union" in r.stdout, "the switch operand is copied into a dispatch slot")
     check(re.search(r"switch %\d+, default", r.stdout) is not None, "and dispatched on its tag")
     check("switch.arm.Circle" in r.stdout and "switch.arm.Pair" in r.stdout,
