@@ -98,7 +98,10 @@ def case_unsigned_and_float_operators():
 
 def case_unsupported_is_reported_not_skipped():
     """The property that matters while coverage is partial."""
-    r = emit_mir("pub fn main() -> i32 {\n  mut xs: [4]i32 = default\n  return xs[0]\n}\n")
+    # A string literal needs constant global data, which is still to come. Kept as the
+    # probe here BECAUSE it is still unlowered -- when that changes, this test should be
+    # pointed at whatever is unlowered then, not deleted.
+    r = emit_mir('pub fn main() -> i32 {\n  const s := "hello"\n  return 0\n}\n')
     check(r.returncode != 0, "a construct mirgen cannot lower fails the build")
     check("native backend cannot lower" in r.stderr,
           "and says so, naming the native backend")
@@ -107,6 +110,48 @@ def case_unsupported_is_reported_not_skipped():
     # Never a crash, and never silently-wrong output.
     check("terminate" not in r.stderr and "Aborted" not in r.stderr,
           "an unsupported construct does not abort the compiler")
+
+
+def case_lvalues():
+    """Struct fields, array indexing, pointer auto-deref and address-of.
+
+    All four are the SAME address computation followed by a load or a store, which is why
+    mirgen has one emit_address rather than a read path and a write path that can drift.
+    Every offset comes from sema, so no layout logic is involved.
+    """
+    r = emit_mir("pub type Point = struct { x: i32  y: i32 }\n"
+                 "pub fn main() -> i32 {\n"
+                 "  mut p: Point = default\n  p.x = 3\n  p.y = 4\n"
+                 "  mut arr: [4]i32 = default\n  arr[2] = arr[0] + p.x\n"
+                 "  const ptr := &p\n  ptr.y = ptr.y * 2\n"
+                 "  return cast(arr[2] + p.y, i32)\n}\n")
+    check(r.returncode == 0, f"struct fields, indexing and pointer members lower ({r.stderr.strip()[:140]})")
+    check("ptr.add.const" in r.stdout, "a struct field is a constant byte offset from the base")
+    check("ptr.add " in r.stdout and "mul" in r.stdout, "an array index is a scaled offset")
+    check("mem.set" in r.stdout, "'default' on an aggregate is a zero fill of the slot")
+    check(", escapes ; p" in r.stdout,
+          "taking a local's address marks its slot escaping (promote_slots must skip it)")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
+def case_casts():
+    r = emit_mir("pub fn main() -> i32 {\n"
+                 "  mut a: i32 = -5\n  const w := cast(a, i64)\n"
+                 "  mut u: u8 = 200\n  const z := cast(u, i64)\n"
+                 "  return cast(w + z, i32)\n}\n")
+    check(r.returncode == 0, f"scalar casts lower ({r.stderr.strip()[:140]})")
+    check("sext" in r.stdout, "a signed widening cast is a sign-extend")
+    check("zext" in r.stdout, "an unsigned widening cast is a zero-extend")
+    check("trunc" in r.stdout, "a narrowing cast truncates")
+    # MIR integers are sign-agnostic (I8 is eight bits, not 'i8' or 'u8'), so the SOURCE
+    # language type has to decide sext vs zext. Getting this wrong silently miscompiled
+    # every unsigned widening: cast(u8(200), i64) produced -56.
+    check(r.stdout.count("sext") == 1 and r.stdout.count("zext") == 1,
+          "signed and unsigned widening pick different extensions")
+
+    rb = emit_mir("pub fn main() -> i32 {\n  mut f: bool = true\n  return cast(f, i32)\n}\n")
+    check("zext" in rb.stdout and "sext" not in rb.stdout,
+          "a bool always zero-extends ('true' must widen to 1, never -1)")
 
 
 def case_mir_goes_to_stdout():
@@ -126,6 +171,8 @@ def main() -> int:
     case_control_flow()
     case_short_circuit_uses_block_parameters()
     case_unsigned_and_float_operators()
+    case_lvalues()
+    case_casts()
     case_unsupported_is_reported_not_skipped()
     case_mir_goes_to_stdout()
 

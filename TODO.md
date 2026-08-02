@@ -55,8 +55,19 @@ Done:
   block parameters, the case phi existed for). `--emit-mir` prints it; the verifier runs on
   every lowering. Anything unlowered is diagnosed by name and summarised, never skipped.
 
-  **Coverage today: 18 of 271 corpus modules lower fully.** That number is the stage-2
-  progress metric.
+- **Stage 2, second increment** — the lvalue path (`emit_address`): struct field access,
+  array/slice/pointer indexing, pointer auto-deref and address-of all became one address
+  computation shared by reads, writes and `&`. With it: member reads, assignment to any
+  lvalue, scalar casts, `default` on an aggregate (a slot memset), and named coverage
+  reporting.
+
+  **Coverage: 19 of 271 corpus modules lower fully** (from 18). Module-level coverage lags
+  because most modules hit several blockers; the per-construct histogram is the better
+  signal — casts 103→0, member access 70→0, indexing 30→0, assignment targets 71→48.
+
+  Largest remaining blockers, by occurrence: aggregate variable initializers (156), call
+  forms beyond same-module direct calls (109), string literals (91), `switch`/`match` (73),
+  `len` (51), aggregate assignment (48).
 
 Remaining:
 

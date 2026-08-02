@@ -77,6 +77,10 @@ namespace mirgen {
             // (stage 3) turns the ones whose address never escapes back into values.
             std::unordered_map<std::string, uint32_t> locals_;
             std::unordered_map<std::string, sema::ResolvedType> local_types_;
+            // Slots whose address was taken somewhere in the body. Collected during emission
+            // and applied once at the end rather than marked inline, because the marking
+            // walk (mark_root_slot_escaping) has no builder to hand.
+            std::set<uint32_t> slots_escaping_;
 
             static auto key(const std::string_view module_path, const std::string_view name) -> std::string {
                 return std::string(module_path) + "\n" + std::string(name);
@@ -296,6 +300,7 @@ namespace mirgen {
                 mir::Builder b(result_.module, fn_index);
                 locals_.clear();
                 local_types_.clear();
+                slots_escaping_.clear();
 
                 const auto entry = b.create_block("entry");
                 b.set_insert_point(entry);
@@ -317,6 +322,10 @@ namespace mirgen {
                 }
 
                 emit_stmt(b, fn.decl->body, fn);
+
+                for (const auto slot : slots_escaping_) {
+                    b.mark_slot_escaping(slot);
+                }
 
                 if (!b.block_is_terminated()) {
                     if (fn.return_types.empty()) {
@@ -379,7 +388,9 @@ namespace mirgen {
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmStmt>>) return "asm";
                 else if constexpr (std::is_same_v<V, ast::BreakStmt>) return "break";
                 else if constexpr (std::is_same_v<V, ast::ContinueStmt>) return "continue";
-                else return "statement";
+                else if constexpr (std::is_same_v<V, ast::VarDeclGroupStmt>) return "a group declaration";
+                else if constexpr (std::is_same_v<V, ast::LinkDecl>) return "'#link'";
+                else return "an unnamed statement";
             }
 
             static auto stmt_location(const ast::Stmt &stmt) -> SourceLocation {
@@ -401,6 +412,14 @@ namespace mirgen {
                     return;
                 }
                 if (!is_scalar(resolved)) {
+                    // 'default' on an aggregate is a zero fill of the slot: a memset of a
+                    // size sema already computed, needing no aggregate value form.
+                    if (std::holds_alternative<ast::DefaultExpr>(*decl.init)) {
+                        const auto usize = options_.pointer_bits == 64 ? mir::Ty::I64 : mir::Ty::I32;
+                        b.mem_set(b.slot_addr(slot), b.const_int(mir::Ty::I8, 0),
+                                   b.const_int(usize, size_of(resolved)));
+                        return;
+                    }
                     unsupported("an aggregate variable initializer", decl.location);
                     return;
                 }
@@ -442,7 +461,7 @@ namespace mirgen {
                     b.unreachable();
                     return;
                 }
-                b.ret(coerce(b, value, fn.return_types.front()));
+                b.ret(coerce(b, value, fn.return_types.front(), expr_type(stmt.return_values.front())));
             }
 
             void emit_if(mir::Builder &b, const ast::IfStmt &stmt, const sema::FunctionSymbol &fn) {
@@ -504,7 +523,211 @@ namespace mirgen {
                 return mir::NO_VALUE;
             }
 
+            // ---- lvalues -----------------------------------------------------------
+
+            // The type an lvalue denotes. sema records expr_types for values, but an
+            // assignment TARGET is not one -- so 'v = ...' would otherwise read Invalid and
+            // be mistaken for an aggregate. Mirrors emit_address's shape exactly; the two
+            // must agree about what each form denotes.
+            [[nodiscard]] auto lvalue_type(const ast::Expr &expr) const -> sema::ResolvedType {
+                if (const auto recorded = expr_type(expr); recorded.kind != sema::TypeKind::Invalid) {
+                    return recorded;
+                }
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
+                    if (const auto it = local_types_.find(ident->name); it != local_types_.end()) {
+                        return it->second;
+                    }
+                }
+                if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr)) {
+                    auto object_type = lvalue_type((*member)->object);
+                    if (object_type.kind == sema::TypeKind::Pointer) {
+                        if (const auto *pointee = sema_.pointee_at(object_type.pointee_index)) {
+                            object_type = *pointee;
+                        }
+                    }
+                    if (object_type.kind == sema::TypeKind::Struct) {
+                        if (const auto *info = sema_.struct_at(object_type.struct_index)) {
+                            for (const auto &field : info->fields) {
+                                if (field.name == (*member)->member) return field.type;
+                            }
+                        }
+                    }
+                }
+                if (const auto *index = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&expr)) {
+                    const auto operand_type = lvalue_type((*index)->operand);
+                    if (operand_type.kind == sema::TypeKind::Array) {
+                        if (const auto *info = sema_.array_at(operand_type.array_index)) return info->element_type;
+                    } else if (operand_type.kind == sema::TypeKind::Slice) {
+                        if (const auto *info = sema_.slice_at(operand_type.slice_index)) return info->element_type;
+                    } else if (operand_type.kind == sema::TypeKind::Pointer) {
+                        if (const auto *pointee = sema_.pointee_at(operand_type.pointee_index)) return *pointee;
+                    }
+                }
+                if (const auto *unary = std::get_if<std::unique_ptr<ast::UnaryExpr>>(&expr)) {
+                    if ((*unary)->op == ast::UnaryOp::Deref) {
+                        const auto operand_type = lvalue_type((*unary)->operand);
+                        if (operand_type.kind == sema::TypeKind::Pointer) {
+                            if (const auto *pointee = sema_.pointee_at(operand_type.pointee_index)) return *pointee;
+                        }
+                    }
+                }
+                return sema::ResolvedType{.kind = sema::TypeKind::Invalid};
+            }
+
+
+            // The ADDRESS of an expression, or NO_VALUE if it has none (a temporary).
+            //
+            // This is the foundation the aggregate work sits on: because MIR values are
+            // scalars and everything wider lives in memory, "read a struct field" and
+            // "assign to a struct field" are the same address computation followed by a load
+            // or a store. Keeping that in one place is what stops the two from drifting.
+            //
+            // Every offset here comes from sema (StructInfo::fields[].offset, ArrayInfo),
+            // which is why no layout logic is needed — see mir.hpp's opening note.
+            auto emit_address(mir::Builder &b, const ast::Expr &expr) -> mir::ValueId {
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
+                    if (const auto it = locals_.find(ident->name); it != locals_.end()) {
+                        return b.slot_addr(it->second);
+                    }
+                    if (module_path_) {
+                        if (const auto g = global_index_.find(key(*module_path_, ident->name));
+                            g != global_index_.end()) {
+                            return b.global_addr(g->second);
+                        }
+                    }
+                    return mir::NO_VALUE;
+                }
+
+                if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr)) {
+                    return emit_member_address(b, **member);
+                }
+
+                if (const auto *index = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&expr)) {
+                    return emit_index_address(b, **index);
+                }
+
+                if (const auto *unary = std::get_if<std::unique_ptr<ast::UnaryExpr>>(&expr)) {
+                    // 'p.*' — the address IS the pointer value.
+                    if ((*unary)->op == ast::UnaryOp::Deref) {
+                        return emit_expr(b, (*unary)->operand);
+                    }
+                }
+
+                return mir::NO_VALUE;
+            }
+
+            // 'obj.field', where 'obj' may be a struct value, a struct behind a pointer, or a
+            // module namespace. Auto-deref matches the language: 'p.x' on a '*Point' reads
+            // through the pointer without an explicit '.*'.
+            auto emit_member_address(mir::Builder &b, const ast::MemberExpr &member) -> mir::ValueId {
+                auto object_type = expr_type(member.object);
+
+                mir::ValueId base = mir::NO_VALUE;
+                if (object_type.kind == sema::TypeKind::Pointer) {
+                    // A pointer object: its VALUE is the base address.
+                    base = emit_expr(b, member.object);
+                    if (const auto *pointee = sema_.pointee_at(object_type.pointee_index)) {
+                        object_type = *pointee;
+                    }
+                } else {
+                    base = emit_address(b, member.object);
+                }
+                if (base == mir::NO_VALUE || object_type.kind != sema::TypeKind::Struct) {
+                    return mir::NO_VALUE;
+                }
+
+                const auto *info = sema_.struct_at(object_type.struct_index);
+                if (!info) return mir::NO_VALUE;
+                for (const auto &field : info->fields) {
+                    if (field.name == member.member) {
+                        return b.ptr_add_const(base, field.offset);
+                    }
+                }
+                return mir::NO_VALUE;
+            }
+
+            // 'arr[i]' on an array or a pointer. A slice's data pointer lives at offset 0 of
+            // its two-word representation, so indexing one loads that first.
+            auto emit_index_address(mir::Builder &b, const ast::IndexOrInstantiateExpr &index) -> mir::ValueId {
+                if (index.args.size() != 1) return mir::NO_VALUE;
+                const auto *arg = std::get_if<ast::Expr>(&index.args.front().value);
+                if (!arg) return mir::NO_VALUE;
+
+                const auto operand_type = expr_type(index.operand);
+                const auto usize = options_.pointer_bits == 64 ? mir::Ty::I64 : mir::Ty::I32;
+
+                mir::ValueId base = mir::NO_VALUE;
+                sema::ResolvedType element{};
+                if (operand_type.kind == sema::TypeKind::Array) {
+                    const auto *info = sema_.array_at(operand_type.array_index);
+                    if (!info) return mir::NO_VALUE;
+                    element = info->element_type;
+                    base = emit_address(b, index.operand);
+                } else if (operand_type.kind == sema::TypeKind::Pointer) {
+                    const auto *pointee = sema_.pointee_at(operand_type.pointee_index);
+                    if (!pointee) return mir::NO_VALUE;
+                    element = *pointee;
+                    base = emit_expr(b, index.operand);
+                } else if (operand_type.kind == sema::TypeKind::Slice) {
+                    const auto *info = sema_.slice_at(operand_type.slice_index);
+                    if (!info) return mir::NO_VALUE;
+                    element = info->element_type;
+                    const auto slice_addr = emit_address(b, index.operand);
+                    if (slice_addr == mir::NO_VALUE) return mir::NO_VALUE;
+                    base = b.load(mir::Ty::Ptr, slice_addr); // data pointer at offset 0
+                } else {
+                    return mir::NO_VALUE;
+                }
+                if (base == mir::NO_VALUE) return mir::NO_VALUE;
+
+                const auto idx = emit_expr(b, *arg);
+                if (idx == mir::NO_VALUE) return mir::NO_VALUE;
+                const auto scaled = b.binary(mir::Op::Mul, usize,
+                                              coerce_to(b, idx, usize, signed_type(expr_type(*arg))),
+                                              b.const_int(usize, size_of(element)));
+                return b.ptr_add(base, scaled);
+            }
+
             // ---- expressions -------------------------------------------------------
+
+            // Names an expression form for the coverage summary. Worth spelling out rather
+            // than reporting "an expression": the summary is how stage 2's remaining work is
+            // prioritised, and an undifferentiated bucket hides which construct is actually
+            // blocking the corpus.
+            template <typename V>
+            static auto expr_kind_name() -> const char * {
+                if constexpr (std::is_same_v<V, ast::LiteralStringExpr>) return "a string literal";
+                else if constexpr (std::is_same_v<V, ast::LiteralCharExpr>) return "a character literal";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) return "a member access";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) return "an index or instantiation";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) return "a cast";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) return "a braced initializer";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) return "'size_of'";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) return "'align_of'";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) return "'type_of'";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeInfoOfExpr>>) return "'type_info_of'";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) return "'len'";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) return "a slice expression";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) return "a 'match' expression";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TryExpr>>) return "'try'";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) return "a ternary";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) return "a 'when' expression";
+                else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) return "a '.variant' reference";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TaggedVariantExpr>>) return "a tagged-variant constructor";
+                else if constexpr (std::is_same_v<V, ast::DefaultExpr>) return "'default'";
+                else if constexpr (std::is_same_v<V, ast::UndefinedExpr>) return "'undefined'";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) return "'++' / '--'";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StackAllocExpr>>) return "'stackalloc'";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmExpr>>) return "an 'asm' expression";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) return "'$option'";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) return "'$env'";
+                else if constexpr (std::is_same_v<V, ast::RttiEnabledExpr>) return "'$rtti_enabled'";
+                else if constexpr (std::is_same_v<V, ast::IotaExpr>) return "'iota'";
+                else if constexpr (std::is_same_v<V, ast::ImportExpr> || std::is_same_v<V, ast::ImportBinExpr>) return "an import expression";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SpreadExpr>>) return "an argument spread";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeExpr>>) return "a type in expression position";
+                else return "an expression";
+            }
 
             auto emit_expr(mir::Builder &b, const ast::Expr &expr) -> mir::ValueId {
                 const auto loc = sema::get_expr_location(expr);
@@ -543,8 +766,15 @@ namespace mirgen {
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
                         return emit_call(b, *v, expr);
 
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>> ||
+                                          std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
+                        return emit_load_from_address(b, expr, loc, expr_kind_name<V>());
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
+                        return emit_cast(b, *v, expr);
+
                     } else {
-                        unsupported(std::format("the expression form at this position"), loc);
+                        unsupported(expr_kind_name<V>(), loc);
                         return mir::NO_VALUE;
                     }
                 }, expr);
@@ -666,22 +896,27 @@ namespace mirgen {
 
             auto emit_unary(mir::Builder &b, const ast::UnaryExpr &un, const ast::Expr &expr) -> mir::ValueId {
                 if (un.op == ast::UnaryOp::AddressOf) {
-                    if (const auto *ident = std::get_if<ast::IdentExpr>(&un.operand)) {
-                        if (const auto it = locals_.find(ident->name); it != locals_.end()) {
-                            // Taking a local's address is exactly what stops promote_slots
-                            // from touching it.
-                            b.mark_slot_escaping(it->second);
-                            return b.slot_addr(it->second);
-                        }
-                        if (module_path_) {
-                            if (const auto g = global_index_.find(key(*module_path_, ident->name));
-                                g != global_index_.end()) {
-                                return b.global_addr(g->second);
-                            }
-                        }
+                    // Taking a local's address is exactly what stops promote_slots from
+                    // touching it, so mark it before computing anything.
+                    mark_root_slot_escaping(un.operand);
+                    if (const auto address = emit_address(b, un.operand); address != mir::NO_VALUE) {
+                        return address;
                     }
                     unsupported("taking the address of this expression", un.location);
                     return mir::NO_VALUE;
+                }
+
+                if (un.op == ast::UnaryOp::Deref) {
+                    // 'p.*' is a load through the pointer, not an operation on it.
+                    const auto result_type = expr_type(expr);
+                    const auto address = emit_expr(b, un.operand);
+                    if (address == mir::NO_VALUE) return mir::NO_VALUE;
+                    if (!is_scalar(result_type)) {
+                        // An aggregate behind a pointer IS its address; there is no wider
+                        // MIR value to load it into.
+                        return address;
+                    }
+                    return b.load(scalar_type(result_type), address);
                 }
 
                 const auto operand = emit_expr(b, un.operand);
@@ -705,27 +940,25 @@ namespace mirgen {
             }
 
             auto emit_assign(mir::Builder &b, const ast::AssignExpr &assign) -> mir::ValueId {
-                const auto *ident = std::get_if<ast::IdentExpr>(&assign.target);
-                if (!ident) {
+                const auto target_type = lvalue_type(assign.target);
+                if (!is_scalar(target_type)) {
+                    // An aggregate assignment is a memcpy of a sema-known size; the value
+                    // side needs the aggregate work that is still to come.
+                    unsupported("assigning an aggregate", assign.location);
+                    return mir::NO_VALUE;
+                }
+
+                const auto address = emit_address(b, assign.target);
+                if (address == mir::NO_VALUE) {
                     unsupported("assignment to this target", assign.location);
                     return mir::NO_VALUE;
                 }
                 const auto value = emit_expr(b, assign.value);
                 if (value == mir::NO_VALUE) return mir::NO_VALUE;
 
-                if (const auto it = locals_.find(ident->name); it != locals_.end()) {
-                    b.store(b.slot_addr(it->second), coerce(b, value, local_types_.at(ident->name)));
-                    return value;
-                }
-                if (module_path_) {
-                    if (const auto g = global_index_.find(key(*module_path_, ident->name));
-                        g != global_index_.end()) {
-                        b.store(b.global_addr(g->second), value);
-                        return value;
-                    }
-                }
-                unsupported(std::format("assignment to '{}'", ident->name), assign.location);
-                return mir::NO_VALUE;
+                const auto stored = coerce(b, value, target_type, expr_type(assign.value));
+                b.store(address, stored);
+                return stored;
             }
 
             auto emit_call(mir::Builder &b, const ast::CallExpr &call, const ast::Expr &expr) -> mir::ValueId {
@@ -746,7 +979,9 @@ namespace mirgen {
                 for (size_t i = 0; i < call.args.size(); ++i) {
                     const auto value = emit_expr(b, call.args[i]);
                     if (value == mir::NO_VALUE) return mir::NO_VALUE;
-                    args.push_back(i < sig.params.size() ? coerce_to(b, value, sig.params[i]) : value);
+                    args.push_back(i < sig.params.size()
+                        ? coerce_to(b, value, sig.params[i], signed_type(expr_type(call.args[i])))
+                        : value);
                 }
                 if (!sig.is_variadic && args.size() != sig.params.size()) {
                     unsupported("a call with defaulted arguments", call.location);
@@ -755,15 +990,77 @@ namespace mirgen {
                 return b.call(it->second, sig.result, args);
             }
 
+            // Reads through an lvalue. An aggregate has no MIR value form, so its "value" IS
+            // its address; a scalar is loaded.
+            auto emit_load_from_address(mir::Builder &b, const ast::Expr &expr,
+                                         const SourceLocation &loc, const char *what) -> mir::ValueId {
+                const auto address = emit_address(b, expr);
+                if (address == mir::NO_VALUE) {
+                    unsupported(what, loc);
+                    return mir::NO_VALUE;
+                }
+                const auto type = expr_type(expr);
+                return is_scalar(type) ? b.load(scalar_type(type), address) : address;
+            }
+
+            // Walks to the identifier an lvalue is rooted at and marks its slot escaping.
+            // '&p.field[i]' pins the whole local, not just the byte range: promote_slots
+            // works per slot, and a pointer into one keeps all of it in memory.
+            void mark_root_slot_escaping(const ast::Expr &expr) {
+                const ast::Expr *cursor = &expr;
+                while (true) {
+                    if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(cursor)) {
+                        cursor = &(*member)->object;
+                    } else if (const auto *index = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(cursor)) {
+                        cursor = &(*index)->operand;
+                    } else {
+                        break;
+                    }
+                }
+                if (const auto *ident = std::get_if<ast::IdentExpr>(cursor)) {
+                    if (const auto it = locals_.find(ident->name); it != locals_.end()) {
+                        slots_escaping_.insert(it->second);
+                    }
+                }
+            }
+
+            // 'cast(value, T)'. sema already decided the conversion is legal; this only makes
+            // the representations agree. The three-argument slice form needs the aggregate
+            // work and is reported rather than silently producing a bare pointer.
+            auto emit_cast(mir::Builder &b, const ast::CastExpr &cast, const ast::Expr &expr) -> mir::ValueId {
+                if (cast.len_expr) {
+                    unsupported("a slice-forming 'cast'", cast.location);
+                    return mir::NO_VALUE;
+                }
+                const auto target = expr_type(expr);
+                if (!is_scalar(target)) {
+                    unsupported("a cast to an aggregate type", cast.location);
+                    return mir::NO_VALUE;
+                }
+                const auto value = emit_expr(b, cast.value);
+                if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                return coerce_to(b, value, scalar_type(target), signed_type(expr_type(cast.value)));
+            }
+
             // ---- coercion ----------------------------------------------------------
 
-            auto coerce(mir::Builder &b, const mir::ValueId value, const sema::ResolvedType &target) -> mir::ValueId {
-                return is_scalar(target) ? coerce_to(b, value, scalar_type(target)) : value;
+            // 'source' is the SEMA type the value came from, needed only for its
+            // signedness — see coerce_to.
+            auto coerce(mir::Builder &b, const mir::ValueId value, const sema::ResolvedType &target,
+                         const sema::ResolvedType &source = {}) -> mir::ValueId {
+                return is_scalar(target) ? coerce_to(b, value, scalar_type(target), signed_type(source)) : value;
             }
 
             // Width/representation adjustment between two MIR scalars. sema already accepted
             // the conversion; this only makes the representations agree.
-            auto coerce_to(mir::Builder &b, const mir::ValueId value, const mir::Ty target) -> mir::ValueId {
+            //
+            // 'source_is_signed' cannot be inferred from the MIR type: MIR integers are
+            // sign-agnostic (I8 is eight bits, not 'i8' or 'u8'), so the source LANGUAGE
+            // type decides whether a widening is a sign- or zero-extend. Defaulting it to
+            // signed silently miscompiled every unsigned widening -- 'cast(u8(200), i64)'
+            // produced -56.
+            auto coerce_to(mir::Builder &b, const mir::ValueId value, const mir::Ty target,
+                            const bool source_is_signed) -> mir::ValueId {
                 const auto from = b.value_type(value);
                 if (from == target || target == mir::Ty::Void) return value;
 
@@ -772,9 +1069,10 @@ namespace mirgen {
 
                 if (mir::is_integer(from) && mir::is_integer(target)) {
                     if (to_bits < from_bits) return b.convert(mir::Op::Trunc, target, value);
-                    // Widening an I1 is always a zero-extend; the front end has no signed
-                    // one-bit type.
-                    return b.convert(from == mir::Ty::I1 ? mir::Op::ZExt : mir::Op::SExt, target, value);
+                    // An I1 always zero-extends: the front end has no signed one-bit type,
+                    // so 'true' must widen to 1 rather than -1.
+                    const bool sign_extend = source_is_signed && from != mir::Ty::I1;
+                    return b.convert(sign_extend ? mir::Op::SExt : mir::Op::ZExt, target, value);
                 }
                 if (mir::is_float(from) && mir::is_float(target)) {
                     return b.convert(to_bits < from_bits ? mir::Op::FPTrunc : mir::Op::FPExt, target, value);
