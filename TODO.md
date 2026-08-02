@@ -197,8 +197,29 @@ Done:
   generics), ternaries (24), `type_info_of` (18), `defer` (17), `size_of` (13),
   calls dropping an ignorable error (13).
 
-  Still entirely absent from stage 2: `defer`, generics (monomorphized instances),
-  inline `asm`, global initializers.
+- **Stage 2, fourteenth increment** — the middle of the histogram in one pass:
+  ternaries and non-folded `when` expressions (one shared then/else/join shape, control
+  flow rather than `select` because the unchosen side's effects must not run; scalar
+  results merge through a block parameter, aggregates through a result slot), folded
+  `when` expressions (only the sema-selected side is emitted), `size_of`/`align_of`
+  (compile-time constants read from sema's layout, with the bare-type-name operand
+  resolved through the symbol table exactly as codegen's `resolve_operand_type` does),
+  and `defer` — scope-tracked, emitted LIFO at the block's end, at every `return`
+  (including `try`'s propagate path), and at `break`/`continue` down to and including
+  the loop body's scope. Return values are evaluated and sret slots written BEFORE the
+  defers run, matching codegen's order. The mirgen_test refuse-loudly probe moved from
+  `defer` to inline `asm`, which needs the stage-5 encoder.
+
+  **Coverage: 73 of 271; zero verifier failures.** Cleared: ternaries 24→0, `defer`
+  17→0, `size_of` 13→0, `when` expressions 7→0, `align_of` 6→0.
+
+  Largest remaining blockers: calls into not-yet-declared shapes (28, mostly
+  generics), `type_info_of` (18), calls dropping an ignorable error (13), generic
+  method calls (`try_get` 12, `get`, `put`, ...), slice-forming casts (9), inline
+  `asm` (9+7), bitset literals (9).
+
+  Still entirely absent from stage 2: generics (monomorphized instances), inline
+  `asm`, global initializers, `type_info_of`/reflection tables.
 
 Remaining:
 

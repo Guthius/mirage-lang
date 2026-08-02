@@ -102,11 +102,14 @@ def case_unsigned_and_float_operators():
 
 def case_unsupported_is_reported_not_skipped():
     """The property that matters while coverage is partial."""
-    # 'defer' is the probe BECAUSE it is still unlowered -- when that changes, point this
-    # at whatever is unlowered then rather than deleting it. The property under test is that
-    # mirgen refuses loudly, not that any particular construct is missing.
-    r = emit_mir("ext fn close(fd: i32) -> i32\n"
-                 "pub fn main() -> i32 {\n  defer { close(1) }\n  return 0\n}\n")
+    # Inline 'asm' is the probe BECAUSE it is still unlowered (it needs the stage-5
+    # encoder) -- when that changes, point this at whatever is unlowered then rather than
+    # deleting it. The property under test is that mirgen refuses loudly, not that any
+    # particular construct is missing.
+    r = emit_mir("pub fn main() -> i32 {\n"
+                 "  mut x: i64 = 41\n"
+                 "  asm {\n    add x, 1\n  }\n"
+                 "  return cast(x, i32) - 42\n}\n")
     check(r.returncode != 0, "a construct mirgen cannot lower fails the build")
     check("native backend cannot lower" in r.stderr,
           "and says so, naming the native backend")
@@ -436,6 +439,35 @@ def case_trait_dispatch():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_defer_ternary_sizeof():
+    """'defer' bodies run in LIFO order at every exit path: the block's end, every
+    'return', and 'break'/'continue' (down to the loop body's scope). A ternary is
+    control flow -- the unchosen side must not run -- merging like match does.
+    size_of/align_of are compile-time constants read from sema's layout."""
+    r = emit_mir("ext fn close(fd: i32) -> i32\n"
+                 "pub type P = struct { x: i64  y: i32 }\n"
+                 "fn work(early: bool) -> i32 {\n"
+                 "  defer { close(3) }\n"
+                 "  {\n    defer { close(1) }\n    if early { return 100 }\n  }\n"
+                 "  mut i: i32 = 0\n"
+                 "  while i < 3 {\n    defer { close(4) }\n    i = i + 1\n"
+                 "    if i == 2 { continue }\n  }\n"
+                 "  return 0\n}\n"
+                 "pub fn main() -> i32 {\n"
+                 "  const w := work(false)\n"
+                 "  const t := w == 0 ? cast(size_of(P), i32) : cast(align_of(P), i32)\n"
+                 "  return t - 16\n}\n")
+    check(r.returncode == 0, f"defer/ternary/size_of lower ({r.stderr.strip()[:140]})")
+    # Early return: inner defer (1), then outer (3), then ret -- LIFO across scopes.
+    check(re.search(r"const\.int 1\n.*call @close.*\n.*const\.int 3\n.*call @close",
+                    r.stdout) is not None,
+          "a return runs enclosing defers innermost-first")
+    check("ternary.then" in r.stdout and "ternary.else" in r.stdout,
+          "a ternary is control flow, not a select")
+    check("const.int 16" in r.stdout, "size_of(P) folds to sema's layout answer")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_switch_and_conditions():
     r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
                  "pub fn main() -> i32 {\n"
@@ -540,6 +572,7 @@ def main() -> int:
     case_slice_array_coercions()
     case_try_propagation()
     case_trait_dispatch()
+    case_defer_ternary_sizeof()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()

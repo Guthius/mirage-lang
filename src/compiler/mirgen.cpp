@@ -115,6 +115,17 @@ namespace mirgen {
             // its condition -- targeting the condition would skip the increment and spin.
             struct LoopTargets { mir::BlockId header; mir::BlockId exit; };
             std::vector<LoopTargets> loop_stack_;
+            // Registered 'defer' bodies, one scope per block, innermost last. Emitted in
+            // LIFO order at every exit: the block's own end, 'return' (all scopes),
+            // 'break'/'continue' (scopes down to and including the loop body's).
+            struct DeferScope {
+                bool is_loop_body = false;
+                std::vector<const ast::DeferStmt *> defers;
+            };
+            std::vector<DeferScope> defer_scopes_;
+            // Set by the loop emitters just before their body, consumed by the BlockStmt
+            // case: it marks that block's scope as the boundary 'break'/'continue' unwind to.
+            bool next_block_is_loop_body_ = false;
 
             static auto key(const std::string_view module_path, const std::string_view name) -> std::string {
                 return std::string(module_path) + "\n" + std::string(name);
@@ -663,6 +674,8 @@ namespace mirgen {
                 slots_escaping_.clear();
                 sret_ = mir::NO_VALUE;
                 loop_stack_.clear();
+                defer_scopes_.clear();
+                next_block_is_loop_body_ = false;
 
                 const auto entry = b.create_block("entry");
                 b.set_insert_point(entry);
@@ -759,6 +772,8 @@ namespace mirgen {
                 slots_escaping_.clear();
                 sret_ = mir::NO_VALUE;
                 loop_stack_.clear();
+                defer_scopes_.clear();
+                next_block_is_loop_body_ = false;
 
                 const auto entry = b.create_block("entry");
                 b.set_insert_point(entry);
@@ -801,6 +816,29 @@ namespace mirgen {
                 }
             }
 
+            void emit_defers_in_scope(mir::Builder &b, const DeferScope &scope,
+                                       const std::vector<sema::ResolvedType> &returns) {
+                for (const auto &deferred : scope.defers | std::views::reverse) {
+                    emit_stmt(b, deferred->body, returns);
+                }
+            }
+
+            void emit_defers_for_return(mir::Builder &b, const std::vector<sema::ResolvedType> &returns) {
+                // Snapshot: a defer body's own blocks push and pop scopes while this walks.
+                const auto scopes = defer_scopes_;
+                for (const auto &scope : scopes | std::views::reverse) {
+                    emit_defers_in_scope(b, scope, returns);
+                }
+            }
+
+            void emit_defers_for_loop_exit(mir::Builder &b, const std::vector<sema::ResolvedType> &returns) {
+                const auto scopes = defer_scopes_;
+                for (const auto &scope : scopes | std::views::reverse) {
+                    emit_defers_in_scope(b, scope, returns);
+                    if (scope.is_loop_body) break;
+                }
+            }
+
             // Binds one incoming parameter to a fresh local slot. A scalar arrives as its
             // value and is stored; an aggregate arrives as a POINTER to the caller's copy
             // (see signature_for) and its BYTES are copied in -- storing the pointer itself
@@ -828,13 +866,23 @@ namespace mirgen {
 
                     if constexpr (std::is_same_v<V, std::unique_ptr<ast::BlockStmt>>) {
                         // Locals are function-scoped slots, so a block needs no scope of its
-                        // own beyond restoring shadowed names.
+                        // own beyond restoring shadowed names -- and a defer scope.
                         const auto saved_locals = locals_;
                         const auto saved_types = local_types_;
+                        const bool is_loop_body = next_block_is_loop_body_;
+                        next_block_is_loop_body_ = false;
+                        defer_scopes_.push_back(DeferScope{.is_loop_body = is_loop_body});
                         for (const auto &s : v->stmts) {
                             emit_stmt(b, s, returns);
                             if (b.block_is_terminated()) break;
                         }
+                        // Falling off the block's end runs its defers; a terminated block
+                        // already ran them at whatever terminated it. Emitted BEFORE the
+                        // locals are restored: a defer body references the block's own names.
+                        if (!b.block_is_terminated()) {
+                            emit_defers_in_scope(b, defer_scopes_.back(), returns);
+                        }
+                        defer_scopes_.pop_back();
                         locals_ = saved_locals;
                         local_types_ = saved_types;
 
@@ -863,6 +911,7 @@ namespace mirgen {
                         if (loop_stack_.empty()) {
                             unsupported("'break' outside a loop", v.location);
                         } else {
+                            emit_defers_for_loop_exit(b, returns);
                             b.jump(loop_stack_.back().exit);
                         }
 
@@ -870,7 +919,17 @@ namespace mirgen {
                         if (loop_stack_.empty()) {
                             unsupported("'continue' outside a loop", v.location);
                         } else {
+                            emit_defers_for_loop_exit(b, returns);
                             b.jump(loop_stack_.back().header);
+                        }
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::DeferStmt>>) {
+                        // Registered now, emitted at scope exit. A function body outside
+                        // any block scope cannot happen -- the body IS a BlockStmt.
+                        if (defer_scopes_.empty()) {
+                            unsupported("'defer' at this position", v->location);
+                        } else {
+                            defer_scopes_.back().defers.push_back(v.get());
                         }
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenStmt>>) {
@@ -895,7 +954,6 @@ namespace mirgen {
             static auto stmt_kind_name() -> const char * {
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::ForInStmt>>) return "a 'for-in' loop";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SwitchStmt>>) return "a 'switch' statement";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::DeferStmt>>) return "'defer'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenStmt>>) return "a 'when' statement";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmStmt>>) return "an 'asm' block";
                 else if constexpr (std::is_same_v<V, ast::BreakStmt>) return "'break'";
@@ -1105,7 +1163,10 @@ namespace mirgen {
             }
 
             void emit_return(mir::Builder &b, const ast::ReturnStmt &stmt, const std::vector<sema::ResolvedType> &returns) {
+                // Return values are evaluated (and, for sret shapes, written) BEFORE the
+                // defers run; only the 'ret' itself comes after -- codegen's order.
                 if (stmt.return_values.empty()) {
+                    emit_defers_for_return(b, returns);
                     b.ret();
                     return;
                 }
@@ -1145,6 +1206,7 @@ namespace mirgen {
                             return;
                         }
                         b.mem_copy(sret_, blob, b.const_int(usize_ty(), layout.size));
+                        emit_defers_for_return(b, returns);
                         b.ret();
                         return;
                     }
@@ -1158,6 +1220,7 @@ namespace mirgen {
                             return;
                         }
                     }
+                    emit_defers_for_return(b, returns);
                     b.ret();
                     return;
                 }
@@ -1175,6 +1238,7 @@ namespace mirgen {
                         b.unreachable();
                         return;
                     }
+                    emit_defers_for_return(b, returns);
                     b.ret();
                     return;
                 }
@@ -1184,7 +1248,9 @@ namespace mirgen {
                     b.unreachable();
                     return;
                 }
-                b.ret(coerce(b, value, returns.front(), expr_type(stmt.return_values.front())));
+                const auto coerced = coerce(b, value, returns.front(), expr_type(stmt.return_values.front()));
+                emit_defers_for_return(b, returns);
+                b.ret(coerced);
             }
 
             // One slot of a 'return' list. The LAST slot of a fallible function accepts the
@@ -1236,6 +1302,7 @@ namespace mirgen {
                         return;
                     }
                 }
+                emit_defers_for_return(b, returns);
                 b.ret();
             }
 
@@ -1260,6 +1327,7 @@ namespace mirgen {
                     b.unreachable();
                     return;
                 }
+                emit_defers_for_return(b, returns);
                 b.ret();
             }
 
@@ -1305,6 +1373,7 @@ namespace mirgen {
                     b.set_insert_point(ok);
                     return false;
                 }
+                emit_defers_for_return(b, *current_returns_);
                 b.ret();
 
                 b.set_insert_point(ok);
@@ -1928,6 +1997,7 @@ namespace mirgen {
 
                 b.set_insert_point(body);
                 loop_stack_.push_back({header, exit});
+                next_block_is_loop_body_ = true;
                 emit_stmt(b, stmt.body, returns);
                 loop_stack_.pop_back();
                 if (!b.block_is_terminated()) b.jump(header);
@@ -2014,6 +2084,7 @@ namespace mirgen {
                 local_types_[stmt.element_name] = element_type;
 
                 loop_stack_.push_back({step, exit});
+                next_block_is_loop_body_ = true;
                 emit_stmt(b, stmt.body, returns);
                 loop_stack_.pop_back();
                 locals_ = saved_locals;
@@ -2274,14 +2345,10 @@ namespace mirgen {
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) return "an index or instantiation";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) return "a cast";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) return "a braced initializer";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) return "'size_of'";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) return "'align_of'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) return "'type_of'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeInfoOfExpr>>) return "'type_info_of'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) return "'len'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) return "a slice expression";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) return "a ternary";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) return "a 'when' expression";
                 else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) return "a '.variant' reference";
                 else if constexpr (std::is_same_v<V, ast::DefaultExpr>) return "'default'";
                 else if constexpr (std::is_same_v<V, ast::UndefinedExpr>) return "'undefined'";
@@ -2501,6 +2568,28 @@ namespace mirgen {
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TryExpr>>) {
                         return emit_try(b, *v, loc);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) {
+                        return emit_ternary_shape(b, v->condition, v->then_expr, v->else_expr, expr);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) {
+                        return emit_when_expr(b, *v, expr);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SizeOfExpr>>) {
+                        // Compile-time constants: sema owns layout, so the answer is a
+                        // lookup, never a computation.
+                        if (const auto type = operand_named_type(v->operand)) {
+                            return b.const_int(usize_ty(), static_cast<int64_t>(size_of(*type)));
+                        }
+                        unsupported("'size_of' on this operand", loc);
+                        return mir::NO_VALUE;
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AlignOfExpr>>) {
+                        if (const auto type = operand_named_type(v->operand)) {
+                            return b.const_int(usize_ty(), static_cast<int64_t>(align_of(*type)));
+                        }
+                        unsupported("'align_of' on this operand", loc);
+                        return mir::NO_VALUE;
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
                         return emit_braced_initializer(b, *v, expr);
@@ -3398,6 +3487,119 @@ namespace mirgen {
                     }
                 }
                 return false;
+            }
+
+            // The resolved type a 'size_of'/'align_of' operand names: a bare type name (or
+            // 'mod.Type') has no recorded expr_type, so the symbol table answers first;
+            // anything else is an expression whose recorded type is the answer (codegen's
+            // resolve_operand_type).
+            [[nodiscard]] auto operand_named_type(const ast::Expr &operand) const
+                -> std::optional<sema::ResolvedType> {
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&operand)) {
+                    if (module_ && !locals_.contains(ident->name)) {
+                        if (const auto it = module_->symbols.find(ident->name); it != module_->symbols.end()) {
+                            if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second);
+                                ts && ts->resolved) {
+                                return *ts->resolved;
+                            }
+                        }
+                    }
+                }
+                if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&operand)) {
+                    if (const auto *target = namespace_target((*member)->object)) {
+                        if (const auto mod = sema_.modules.find(*target); mod != sema_.modules.end()) {
+                            if (const auto it = mod->second.symbols.find((*member)->member);
+                                it != mod->second.symbols.end()) {
+                                if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second);
+                                    ts && ts->resolved) {
+                                    return *ts->resolved;
+                                }
+                            }
+                        }
+                    }
+                }
+                const auto recorded = expr_type(operand);
+                if (recorded.kind != sema::TypeKind::Invalid) return recorded;
+                return std::nullopt;
+            }
+
+            // The then/else/join shape TernaryExpr and a non-folded WhenExpr share. Control
+            // flow, never Select: the unchosen side's effects must not run. A scalar result
+            // merges through a block parameter; an aggregate through a result slot.
+            auto emit_ternary_shape(mir::Builder &b, const ast::Expr &cond, const ast::Expr &then_e,
+                                     const ast::Expr &else_e, const ast::Expr &expr) -> mir::ValueId {
+                const auto result_type = expr_type(expr);
+                const bool has_value = result_type.kind != sema::TypeKind::Void &&
+                                        result_type.kind != sema::TypeKind::Invalid;
+                const bool scalar_result = has_value && is_scalar(result_type);
+
+                const auto condition = emit_condition(b, cond);
+                if (condition == mir::NO_VALUE) return mir::NO_VALUE;
+
+                const auto then_block = b.create_block("ternary.then");
+                const auto else_block = b.create_block("ternary.else");
+                const auto join = b.create_block("ternary.end");
+                mir::ValueId result_param = mir::NO_VALUE;
+                mir::ValueId result_slot = mir::NO_VALUE;
+                if (scalar_result) {
+                    result_param = b.add_block_param(join, scalar_type(result_type));
+                } else if (has_value) {
+                    const auto slot = b.add_slot(std::max(1u, size_of(result_type)),
+                                                  std::max(1u, align_of(result_type)), "ternary.result");
+                    result_slot = b.slot_addr(slot);
+                }
+                b.branch(condition, then_block, else_block);
+
+                bool ok = true;
+                const auto emit_side = [&](const mir::BlockId block, const ast::Expr &side) {
+                    b.set_insert_point(block);
+                    const auto value = emit_expr(b, side);
+                    if (value == mir::NO_VALUE) {
+                        // Already reported; the block still needs a terminator so the
+                        // failure does not bury itself under malformed-module noise.
+                        ok = false;
+                        b.unreachable();
+                        return;
+                    }
+                    if (b.block_is_terminated()) return;
+                    if (scalar_result) {
+                        b.jump(join, {coerce(b, value, result_type, expr_type(side))});
+                    } else {
+                        if (has_value) {
+                            store_aggregate_value(b, result_slot, result_type, value, expr_type(side));
+                        }
+                        b.jump(join);
+                    }
+                };
+                emit_side(then_block, then_e);
+                emit_side(else_block, else_e);
+
+                b.set_insert_point(join);
+                if (!ok) return mir::NO_VALUE;
+                if (scalar_result) return result_param;
+                if (has_value) return result_slot;
+                return b.const_int(mir::Ty::I32, 0);
+            }
+
+            // A 'when' EXPRESSION: sema folded the condition and recorded the selected
+            // side; only that side is emitted, with no control flow. The (theoretical)
+            // unfolded case degrades to the ternary shape, exactly as codegen's
+            // emit_when_expr does.
+            auto emit_when_expr(mir::Builder &b, const ast::WhenExpr &when, const ast::Expr &expr) -> mir::ValueId {
+                if (exprs_) {
+                    if (const auto it = exprs_->expr_when_selected.find(sema::get_expr_key(expr));
+                        it != exprs_->expr_when_selected.end()) {
+                        const auto &side = it->second ? when.then_expr : when.else_expr;
+                        const auto value = emit_expr(b, side);
+                        if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                        const auto result_type = expr_type(expr);
+                        if (is_scalar(result_type)) {
+                            return coerce(b, value, result_type, expr_type(side));
+                        }
+                        return coerce_arg(b, value, result_type, expr_type(side));
+                    }
+                }
+                return emit_ternary_shape(b, when.condition, when.then_expr, when.else_expr, expr);
             }
 
             // 'type_of(x)' -- the operand's interned type id, a compile-time constant of
