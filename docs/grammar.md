@@ -12,7 +12,7 @@ program       ::= { declaration } EOF
 declaration   ::= [ attribute ] [ 'pub' ] fn_decl   (* attribute: also legal on method_decl inside impl blocks — see below *)
                | [ attribute ] [ 'pub' ] ext_fn_decl   (* only '@import' is legal here — see below *)
                | [ 'pub' ] type_decl
-               | [ 'pub' ] var_decl
+               | [ attribute ] [ 'pub' ] var_decl   (* only '@export' is legal here — see below *)
                | [ 'pub' ] macro_decl
                | impl_decl           (* impl cannot be pub *)
                | link_decl           (* cannot be pub *)
@@ -81,7 +81,7 @@ attr_name     ::= IDENT | 'import'
 ```
 
 One attribute clause may precede a `fn_decl`, a `method_decl` (a method inside an `impl`
-block), or an `ext_fn_decl`. Multiple separate clauses on the same declaration
+block), an `ext_fn_decl`, or a module-scope `var_decl`. Multiple separate clauses on the same declaration
 (`@naked @no_return`) are a parse error; use the grouped form instead
 (`@(naked, no_return)`). A grouped-form member never takes its own argument list —
 `@(section(".text"))` is a parse error; only the ungrouped `@name(args)` form takes arguments.
@@ -95,9 +95,12 @@ any known name in any of the three positions:
 
 - `init` and `test` are rejected specifically on a `method_decl` — see spec.md's `@init`
   and `@test` sections.
-- On an `ext_fn_decl`, every attribute except `import` is rejected. The parser accepts a
-  clause there at all only so that rejection can name the offending attribute, instead of
-  the whole clause failing with "attributes are only allowed on 'fn' declarations".
+- On an `ext_fn_decl`, every attribute except `import` is rejected, and on a module-scope
+  `var_decl` every attribute except `export` is. The parser accepts a clause in those two
+  positions only so that rejection can name the offending attribute, instead of the whole
+  clause failing with a blanket "attributes are only allowed on 'fn' declarations".
+- A `var_decl_stmt` (a LOCAL variable) takes no attribute clause at all — that remains a
+  parse error, since the position is inside a statement list rather than a declaration one.
 
 A parameter's `':=' expr` form infers the parameter's type from the default
 expression's type (same literal-defaulting rules as `var_decl_stmt`'s `:=`

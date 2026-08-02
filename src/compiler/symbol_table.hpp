@@ -28,6 +28,9 @@ namespace sema {
         bool is_mut = false;
         bool is_pub = false;
         bool is_resolved = false;
+        // '@export' / '@export("name")'. Same meaning as on FunctionSymbol: the
+        // linker-visible name, replacing the module-path mangling, with external linkage.
+        ExportName export_name;
     };
 
     struct FunctionSymbol {

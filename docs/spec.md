@@ -3280,9 +3280,11 @@ error: expected a register name after 'asm ->'
 
 ## 21. Declaration Attributes
 
-`@name` / `@name(args)` precedes a `fn` declaration or a method inside an `impl` block,
-attaching compiler-recognized metadata to it. Attributes are legal on `fn` and on methods
-inside `impl` blocks, and `pub`, if present, comes after the attribute:
+`@name` / `@name(args)` precedes a declaration, attaching compiler-recognized metadata to
+it. Attributes are legal on `fn`, on methods inside `impl` blocks, on `ext fn` (where only
+`@import` is accepted), and on module-scope `mut`/`const` declarations (where only
+`@export` is accepted). They are **not** legal on a local variable, a `type`, or anything
+else. `pub`, if present, comes after the attribute:
 
 ```mirage
 @naked
@@ -3472,6 +3474,11 @@ The `__mir_` and `__mirage_` prefixes are **reserved** — the compiler emits it
 and synthesized symbols there, and an export in that space could shadow one.
 
 `@export` fixes the *name* only, not the ABI — see `@callconv` below.
+
+**Globals.** `@export` is also legal on a module-scope `mut`/`const`, with the same meaning:
+the linker-visible name, and external linkage even for a non-`pub` declaration. Exported
+global names share the one flat namespace with functions and `ext fn`s, so they collide with
+those too. No other attribute is legal on a global.
 
 ### `@callconv` and `@cdecl`
 

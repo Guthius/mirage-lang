@@ -1222,10 +1222,13 @@ namespace codegen {
                         }
                         if (const auto *global = std::get_if<sema::GlobalSymbol>(&sym)) {
                             const auto gname = symbol_name(path, name);
+                            // '@export' replaces the module-path mangling with a fixed name
+                            // and forces external linkage, exactly as it does for a function.
+                            const auto export_name = global->export_name;
                             auto *gv = new llvm::GlobalVariable(
                                 *module_, llvm_type(path, global->type), !global->is_mut,
-                                global->is_pub ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::InternalLinkage,
-                                nullptr, gname);
+                                global->is_pub || export_name ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::InternalLinkage,
+                                nullptr, export_name ? *export_name : gname);
                             // Same reasoning as create_entry_alloca's floor: packed-struct /
                             // byte-array lowerings claim ABI align 1, while member accesses
                             // are annotated with their scalar's natural alignment.

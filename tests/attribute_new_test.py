@@ -206,6 +206,37 @@ def case_export():
                  "duplicate export name 'dup'", "a method and a function cannot claim one export name")
 
 
+def case_export_on_globals():
+    """'@export' on a module-scope 'mut'/'const'. The parser accepts an attribute clause
+    there solely for this; every other attribute is rejected by name."""
+    ir = emit_ir('@export("counter")\npub mut count: i32 = 0\n'
+                 "pub fn main() -> i32 { return count }\n")
+    check("@counter = global" in ir.stdout, "'@export(\"name\")' on a mut global emits that symbol")
+
+    ir2 = emit_ir("@export\npub const limit: i32 = 7\npub fn main() -> i32 { return limit }\n")
+    check("@limit = constant" in ir2.stdout, "bare '@export' on a const global uses its own name")
+
+    # As for functions, '@export' forces external linkage even on a non-pub declaration --
+    # otherwise the symbol would not be visible to a linker at all.
+    ir3 = emit_ir('@export("hidden")\nmut secret: i32 = 3\npub fn main() -> i32 { return secret }\n')
+    check("@hidden = global" in ir3.stdout and "internal" not in ir3.stdout.split("@hidden")[1][:40],
+          "'@export' on a non-pub global still gets external linkage")
+
+    expect_error("@naked\npub mut x: i32 = 0\npub fn main() -> i32 { return x }\n",
+                 "'@naked' is not allowed on a global declaration",
+                 "another attribute on a global is rejected by name")
+
+    expect_error('@export("dup")\npub mut x: i32 = 0\n'
+                 '@export("dup")\npub fn f() -> i32 { return 1 }\n'
+                 "pub fn main() -> i32 { return x + f() }\n",
+                 "duplicate export name 'dup'",
+                 "a global and a function cannot claim one export name")
+
+    # The carve-out is module scope only; a local is not a declaration position.
+    expect_error("pub fn main() -> i32 {\n  @export\n  mut x: i32 = 0\n  return x\n}\n",
+                 "expected expression", "an attribute on a local variable is still a parse error")
+
+
 # ---------------------------------------------------------------- @callconv / @cdecl
 
 def case_callconv():
@@ -316,6 +347,7 @@ def main() -> int:
     case_parser()
     case_no_discard()
     case_export()
+    case_export_on_globals()
     case_callconv()
     case_import()
 

@@ -635,6 +635,9 @@ namespace sema {
                 if (const auto *fn = std::get_if<FunctionSymbol>(&sym); fn && fn->export_name) {
                     claims.push_back({*fn->export_name, std::format("function '{}'", name),
                                       fn->decl ? fn->decl->location : SourceLocation{}});
+                } else if (const auto *global = std::get_if<GlobalSymbol>(&sym); global && global->export_name) {
+                    claims.push_back({*global->export_name, std::format("global '{}'", name),
+                                      global->decl ? global->decl->location : SourceLocation{}});
                 } else if (const auto *ext = std::get_if<ExtFunctionSymbol>(&sym); ext && ext->decl) {
                     seen.try_emplace(ext->decl->name, std::pair{std::format("'ext fn {}'", ext->decl->name), ext->decl->location});
                 }
@@ -669,6 +672,35 @@ namespace sema {
                 diag.report_error(DiagnosticStage::Sema, c.loc, std::format(
                     "duplicate export name '{}': already exported by {} at {}:{}:{}",
                     c.name, it->second.first, it->second.second.filename, it->second.second.line, it->second.second.column));
+            }
+        }
+    }
+
+    // Module-scope globals. The parser accepts an attribute clause before a 'mut'/'const'
+    // solely so '@export' can name one; every other attribute is rejected here by name, the
+    // same carve-out shape 'ext fn' uses for '@import'.
+    //
+    // A global has no signature, so there is nothing here that could need resolved types --
+    // unlike a function, this can run entirely off the attribute list.
+    void validate_global_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
+        for (auto &[name, sym] : module.symbols) {
+            // A bare-import alias shares the origin's decl; the origin's own pass validates
+            // it once, in the right context.
+            if (module.bare_import_origins.contains(name)) continue;
+            auto *global = std::get_if<GlobalSymbol>(&sym);
+            if (!global || !global->decl || global->decl->attributes.empty()) continue;
+
+            for (const auto &attr : global->decl->attributes) {
+                if (attr.name != "export") {
+                    diag.report_error(DiagnosticStage::Sema, attr.location, std::format(
+                        "'@{}' is not allowed on a global declaration; only '@export' is", attr.name));
+                }
+            }
+
+            if (const auto *export_attr = find_attribute(global->decl->attributes, "export")) {
+                // 'is_generic' is false: a global is never a template.
+                global->export_name = validate_export_attribute(*export_attr, name, /*is_generic=*/false,
+                                                                 module_path, program, diag);
             }
         }
     }

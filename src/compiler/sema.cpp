@@ -16,6 +16,7 @@ namespace sema {
     void validate_method_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
     void validate_trait_impl_attributes_for_program(Program &program, DiagnosticEngine &diag);
     void validate_ext_function_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
+    void validate_global_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
     void validate_export_names_for_program(Program &program, DiagnosticEngine &diag);
     void validate_init_dependencies_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag);
     void discover_tests_for_program(const ast::Program &ast_program, Program &sema_program);
@@ -933,6 +934,7 @@ namespace sema {
             validate_attributes_for_module(path, out.modules.at(path), out, diag);
             validate_method_attributes_for_module(path, out.modules.at(path), out, diag);
             validate_ext_function_attributes_for_module(path, out.modules.at(path), out, diag);
+            validate_global_attributes_for_module(path, out.modules.at(path), out, diag);
         }
         validate_trait_impl_attributes_for_program(out, diag);
         // Whole-program, and therefore only correct once every per-module and trait-impl

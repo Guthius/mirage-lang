@@ -3111,12 +3111,13 @@ namespace ast {
             };
         }
 
-        auto parse_var_decl(Parser &parser, const bool is_pub) -> Decl {
+        auto parse_var_decl(Parser &parser, const bool is_pub, std::vector<Attribute> attributes = {}) -> Decl {
             auto parts = parse_var_decl_parts(parser, /*allow_group=*/false);
 
             return VarDecl{
                 .is_pub = is_pub,
                 .is_mut = parts.is_mut,
+                .attributes = std::move(attributes),
                 .name = std::move(parts.name),
                 .type = std::move(parts.type),
                 .init = std::move(parts.init),
@@ -3726,13 +3727,17 @@ namespace ast {
         const auto is_pub = parser.match(TokenKind::KwPub);
 
         // 'ext fn' accepts an attribute clause too, solely so '@import' can name the wasm
-        // import a declaration binds to. Sema rejects every OTHER attribute on an 'ext fn'
-        // by name, so the long-standing prohibition stays in force and only '@import' is
-        // carved out — see validate_ext_function_attributes (sema_attributes.cpp).
+        // import a declaration binds to, and a module-scope 'mut'/'const' accepts one solely
+        // so '@export' can name a global. Sema rejects every OTHER attribute in both
+        // positions by name, so the long-standing prohibition stays in force and only those
+        // two are carved out — see validate_ext_function_attributes_for_module and
+        // validate_global_attributes_for_module (sema_attributes.cpp).
         const bool is_ext_fn = parser.check(TokenKind::Identifier) && parser.current_lexeme() == "ext";
+        const bool is_var_decl = parser.check(TokenKind::KwMut) || parser.check(TokenKind::KwConst);
 
-        if (!attributes.empty() && !parser.check(TokenKind::KwFn) && !is_ext_fn) {
-            parser.report_error(attributes.front().location, "attributes are only allowed on 'fn' and 'ext fn' declarations");
+        if (!attributes.empty() && !parser.check(TokenKind::KwFn) && !is_ext_fn && !is_var_decl) {
+            parser.report_error(attributes.front().location,
+                "attributes are only allowed on 'fn', 'ext fn' and module-scope 'mut'/'const' declarations");
         }
 
         if (is_ext_fn) {
@@ -3749,8 +3754,8 @@ namespace ast {
             return parse_type_decl(parser, is_pub);
         }
 
-        if (parser.check(TokenKind::KwMut) || parser.check(TokenKind::KwConst)) {
-            return parse_var_decl(parser, is_pub);
+        if (is_var_decl) {
+            return parse_var_decl(parser, is_pub, std::move(attributes));
         }
 
         if (parser.check(TokenKind::KwMacro)) {

@@ -997,6 +997,10 @@ namespace ast {
     struct VarDecl {
         bool is_pub;
         bool is_mut;
+        // Only '@export' is legal on a global; sema rejects every other attribute by name
+        // (see validate_global_attributes_for_module). Always empty for a VarDecl parsed
+        // inside a module-scope 'when' block, which has no attribute-clause position.
+        std::vector<Attribute> attributes;
         std::string name;
         std::optional<Type> type;
         std::optional<Expr> init;
