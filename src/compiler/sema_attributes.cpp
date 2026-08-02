@@ -1,5 +1,6 @@
 #include "sema.hpp"
 
+#include <filesystem>
 #include <algorithm>
 #include <format>
 #include <functional>
@@ -338,6 +339,42 @@ namespace sema {
             return facts;
         }
 
+        // '@test' signature restrictions. Checked in EVERY driver action, not just under
+        // 'mirage test': a malformed '@test' declaration is always an error, so switching
+        // actions never changes whether the declaration itself is valid. Only the BODY's
+        // type-checking is mode-dependent (see Options::test_mode).
+        void validate_test_structural(const ast::Attribute &attr, const ast::FunctionDecl &decl, const FunctionSymbol &fn,
+                                       const Program &program, DiagnosticEngine &diag) {
+            if (!attr.args.empty()) {
+                diag.report_error(DiagnosticStage::Sema, attr.location, "'@test' takes no arguments");
+            }
+            // The harness calls every test uniformly through a 'fn() -> bool' wrapper, so
+            // there is nothing to supply an argument from -- not even a defaulted one.
+            if (!decl.params.empty()) {
+                diag.report_error(DiagnosticStage::Sema, attr.location, "'@test' functions may not take parameters");
+            }
+            // Same rationale as 'ext fn'/'macro'/'trait' and '@init': there is no way to call
+            // an uninstantiated template uniformly from the harness.
+            if (!decl.generic_params.empty()) {
+                diag.report_error(DiagnosticStage::Sema, attr.location, "'@test' is not allowed on a generic function");
+                // A template's return_types are never resolved (there is one per
+                // instantiation, and none exists), so the check below would always fire a
+                // second, misleading "must return exactly 'error(...)'" on top of this one.
+                return;
+            }
+            // Deliberately WIDER than '@init', which restricts to 'enum(i32)': a test reports
+            // pass/fail through the Ok/Failed tag, and any error type (or union of them)
+            // carries that. Documented as an explicit asymmetry in spec.md's Testing section.
+            const bool returns_error_union = fn.return_types.size() == 1 &&
+                fn.return_types.front().kind == TypeKind::Union &&
+                program.union_at(fn.return_types.front().union_index) != nullptr &&
+                program.union_at(fn.return_types.front().union_index)->is_error_union;
+            if (!returns_error_union) {
+                diag.report_error(DiagnosticStage::Sema, attr.location,
+                    "'@test' functions must return exactly 'error(...)'");
+            }
+        }
+
         void validate_init_structural(const ast::Attribute &attr, const ast::FunctionDecl &decl, const FunctionSymbol &fn, const Program &program, DiagnosticEngine &diag) {
             if (!attr.args.empty()) {
                 diag.report_error(DiagnosticStage::Sema, attr.location, "'@init' takes no arguments");
@@ -403,6 +440,37 @@ namespace sema {
             fn->no_discard = facts.no_discard;
             fn->export_name = facts.export_name;
             fn->call_conv = facts.call_conv;
+            fn->is_test = find_attribute(attrs, "test") != nullptr;
+
+            if (const auto *test_attr = find_attribute(attrs, "test")) {
+                validate_test_structural(*test_attr, *fn->decl, *fn, program, diag);
+
+                // '@test' + '@always_inline' is deliberately ABSENT from this list: nothing
+                // prevents a test body from being inlined into its synthesized wrapper's
+                // call site, so the combination is legal.
+                if (find_attribute(attrs, "naked")) {
+                    diag.report_error(DiagnosticStage::Sema, test_attr->location,
+                        "'@test' and '@naked' cannot be combined: a naked function has no compiler-generated "
+                        "body shape, and the harness needs an ordinary calling convention");
+                }
+                if (find_attribute(attrs, "no_return")) {
+                    diag.report_error(DiagnosticStage::Sema, test_attr->location,
+                        "'@test' and '@no_return' cannot be combined: a test that never returns cannot report a status");
+                }
+                if (find_attribute(attrs, "init")) {
+                    diag.report_error(DiagnosticStage::Sema, test_attr->location,
+                        "'@test' and '@init' cannot be combined: two different automatic-invocation mechanisms");
+                }
+                if (find_attribute(attrs, "export")) {
+                    diag.report_error(DiagnosticStage::Sema, test_attr->location,
+                        "'@test' and '@export' cannot be combined: a test is invoked only through its synthesized wrapper");
+                }
+                if (find_attribute(attrs, "callconv") || find_attribute(attrs, "cdecl")) {
+                    diag.report_error(DiagnosticStage::Sema, test_attr->location,
+                        "'@test' and '@callconv' cannot be combined: the synthesized wrapper calls the test "
+                        "through the Mirage convention");
+                }
+            }
 
             if (const auto *init_attr = find_attribute(attrs, "init")) {
                 validate_init_structural(*init_attr, *fn->decl, *fn, program, diag);
@@ -820,6 +888,71 @@ namespace sema {
     // source declaration order — no cycle is possible there by construction); an edge
     // 'A -> B' means some '@init' function in module A references a symbol declared in
     // module B, and B itself has '@init' function(s) that must therefore run first.
+    // Collects every '@test' function in the program, in the order Test_Info must list them
+    // (see Program::discovered_tests). Runs only under 'mirage test'; the whole feature is
+    // inert otherwise.
+    //
+    // One uniform scan over every loaded module, with no special-casing for HOW a module
+    // entered the set -- a forced module ('--load') is scanned on exactly the same terms as
+    // one reached by an ordinary import. Order comes from ast::Program::module_order, which
+    // already appends forced modules after the normal graph.
+    void discover_tests_for_program(const ast::Program &ast_program, Program &sema_program) {
+        if (!sema_program.options.test_mode) {
+            return;
+        }
+
+        // Root-relative module names, which is the spelling 'import(...)' paths use and so
+        // the one a reader recognizes in the harness's output. A module outside the root
+        // (the standard library, reached through another search root) has no root-relative
+        // form; fall back to its final path component rather than printing an absolute path.
+        const auto display_name = [&](const std::string &path) -> std::string {
+            const auto &root = ast_program.root_module_path;
+            if (path == root) {
+                return std::filesystem::path(root).filename().string();
+            }
+            if (path.size() > root.size() + 1 && path.starts_with(root) && path[root.size()] == '/') {
+                return path.substr(root.size() + 1);
+            }
+            return std::filesystem::path(path).filename().string();
+        };
+
+        for (const auto &module_path : ast_program.module_order) {
+            const auto ast_it = ast_program.modules.find(module_path);
+            const auto sema_it = sema_program.modules.find(module_path);
+            if (ast_it == ast_program.modules.end() || sema_it == sema_program.modules.end()) {
+                continue;
+            }
+            // Walked over the AST rather than the symbol table so declaration order within
+            // the module is preserved -- symbols is an unordered_map.
+            for (const auto &decl : ast::all_decls(ast_it->second)) {
+                const auto *fn_decl = std::get_if<ast::FunctionDecl>(&decl);
+                if (!fn_decl || !find_attribute(fn_decl->attributes, "test")) {
+                    continue;
+                }
+                // A bare-import alias shares the origin's decl; the origin's own module
+                // already contributed it, and running the same test twice is not the intent.
+                if (sema_it->second.bare_import_origins.contains(fn_decl->name)) {
+                    continue;
+                }
+                const auto sym_it = sema_it->second.symbols.find(fn_decl->name);
+                if (sym_it == sema_it->second.symbols.end()) {
+                    continue;
+                }
+                const auto *fn = std::get_if<FunctionSymbol>(&sym_it->second);
+                // Only the declaration this module actually owns: a '#compile_only_if'
+                // excluded file's function never reaches the symbol table under its own decl.
+                if (!fn || fn->decl != fn_decl) {
+                    continue;
+                }
+                sema_program.discovered_tests.push_back(Program::TestCase{
+                    .module_path = module_path,
+                    .module_name = display_name(module_path),
+                    .function_name = fn_decl->name,
+                });
+            }
+        }
+    }
+
     void validate_init_dependencies_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag) {
         struct InitFn {
             std::string name;

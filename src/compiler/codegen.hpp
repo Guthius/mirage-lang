@@ -25,6 +25,13 @@ namespace codegen {
         // means "leave the module's defaults" (unit tests, --dump-ast paths).
         std::string target_triple;
         std::string data_layout;
+        // Under 'mirage test': the canonical directory the reserved 'core/testing' module
+        // resolved to. Codegen reaches that module's declarations by (module path,
+        // declaration name) -- the same mangled reference every cross-module symbol already
+        // uses -- rather than through identifier resolution, which cannot see a forced
+        // module by design. Empty in every other action, which is also what turns the whole
+        // test-mode code path off.
+        std::string testing_module_path;
     };
 
     // The generated module together with the LLVMContext that owns every type and

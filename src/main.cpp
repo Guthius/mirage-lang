@@ -29,7 +29,13 @@
 #include <vector>
 
 namespace {
-    enum class Action { None, Build, Run };
+    enum class Action { None, Build, Run, Test };
+
+    // 'core/testing' is a reserved module path: under 'mirage test' the compiler assumes it
+    // resolves and exposes the fixed contract in spec.md's Testing section. Same
+    // "known contract, not built into the compiler" posture as 'runtime/type_info' — the
+    // module is ordinary Mirage source, the compiler just knows the names.
+    constexpr const char *TESTING_MODULE_PATH = "core/testing";
 
     struct Options {
         Action action = Action::None;
@@ -47,6 +53,9 @@ namespace {
         std::string cc; // linker driver; see resolve_cc()
         std::string target; // '--target=' triple; empty means the host triple
         std::vector<std::string> libs;
+        // '--load <path>', repeatable: modules to compile even though nothing imports
+        // them. Under 'test', 'core/testing' is appended to this list automatically.
+        std::vector<std::string> forced_modules;
         std::unordered_map<std::string, std::string> opt_values;
     };
 
@@ -56,6 +65,7 @@ namespace {
                      << "Actions:\n"
                      << "  build   Compile a module to an executable\n"
                      << "  run     Compile and run a module\n"
+                     << "  test    Compile and run the module's '@test' functions\n"
                      << "\n"
                      << "Options:\n"
                      << "  -o, --output <file>  Output file name (default: a.out)\n"
@@ -67,6 +77,7 @@ namespace {
                      << "  --freestanding       Compile without standard library\n"
                      << "  --noinit             Skip generating/calling the synthesized '@init'-runner '_init'\n"
                      << "  --nortti             Disable runtime type information ('type_info_of'); sets '$rtti_enabled' to false\n"
+                     << "  --load <path>        Compile a module nothing imports (may be repeated)\n"
                      << "  --opt key=value      Set a compile-time '$option' value (may be repeated)\n"
                      << "  --print-link-directives  Print collected '#link' directives and exit\n"
                      << "  --print-module-search    Print how each import was resolved and exit\n"
@@ -115,6 +126,12 @@ namespace {
                     return std::nullopt;
                 }
                 options.opt_values[kv.substr(0, eq)] = kv.substr(eq + 1);
+            } else if (arg == "--load") {
+                if (i + 1 >= argc) {
+                    llvm::errs() << "mirage: '--load' requires a module path\n";
+                    return std::nullopt;
+                }
+                options.forced_modules.emplace_back(argv[++i]);
             } else if (arg == "-o" || arg == "--output") {
                 if (i + 1 >= argc) {
                     llvm::errs() << "mirage: '" << arg << "' requires an output filename\n";
@@ -140,8 +157,10 @@ namespace {
                     options.action = Action::Build;
                 } else if (arg == "run") {
                     options.action = Action::Run;
+                } else if (arg == "test") {
+                    options.action = Action::Test;
                 } else {
-                    llvm::errs() << "mirage: unknown action '" << arg << "'; expected 'build' or 'run'\n";
+                    llvm::errs() << "mirage: unknown action '" << arg << "'; expected 'build', 'run' or 'test'\n";
                     return std::nullopt;
                 }
             } else if (options.module_path.empty()) {
@@ -549,6 +568,26 @@ auto main(const int argc, char *argv[]) -> int {
     options.opt_values.try_emplace("build/target_os", default_target_os(target_triple));
     options.opt_values.try_emplace("build/target_arch", default_target_arch(target_triple));
 
+    // 'mirage test' validation, up front rather than after a full compile. The harness in
+    // 'core/testing' forks a child per test case for crash isolation, so it needs POSIX
+    // process primitives that neither a freestanding target nor wasm can provide.
+    if (options.action == Action::Test) {
+        if (options.freestanding) {
+            llvm::errs() << "mirage: 'mirage test' is not supported with '--freestanding' (test isolation\n"
+                            "       requires POSIX process primitives not available in freestanding builds)\n";
+            return 1;
+        }
+        if (target_triple.isWasm()) {
+            llvm::errs() << "mirage: 'mirage test' is not supported for target '" << target_triple.str()
+                         << "' (test isolation requires POSIX process primitives)\n";
+            return 1;
+        }
+        // The reserved module supplying the harness. Appended AFTER any '--load' the user
+        // gave, so an explicit '--load core/testing' still resolves to the same module and
+        // is a no-op rather than a double load.
+        options.forced_modules.emplace_back(TESTING_MODULE_PATH);
+    }
+
     // 'run' forks and execs the linked output. A wasm build's output is a page (plus a .wasm
     // beside it) that only a browser can start, so say that up front rather than after a
     // full compile — and before the link step, where emcc would reject the extensionless
@@ -571,6 +610,7 @@ auto main(const int argc, char *argv[]) -> int {
         // resolution stays free of process introspection and the LSP (which shares the
         // resolver) can supply its own answer or none at all.
         .compiler_dir = ast::executable_directory(argv[0]),
+        .forced_modules = options.forced_modules,
     });
     if (!ast.ok) {
         // The search trace is still worth printing on failure -- it shows which imports DID
@@ -608,6 +648,7 @@ auto main(const int argc, char *argv[]) -> int {
         .eager_generic_check = options.eager_generic_check,
         .pointer_size = target_triple.getArchPointerBitWidth() / 8,
         .rtti_enabled = !options.nortti,
+        .test_mode = options.action == Action::Test,
     });
     if (!sema.ok) {
         return 1;
@@ -623,6 +664,44 @@ auto main(const int argc, char *argv[]) -> int {
         return 0;
     }
 
+    // 'core/testing' is a reserved path: under 'test' the compiler assumes it resolved and
+    // exposes the fixed contract. Checked HERE — right after sema, before codegen — so a
+    // missing or reshaped module is a legible driver error rather than a confusing type
+    // mismatch deep inside Test_Info synthesis.
+    std::string testing_module_path;
+    if (options.action == Action::Test) {
+        for (const auto &record : ast.module_search_trace) {
+            if (record.import_path == TESTING_MODULE_PATH) {
+                testing_module_path = record.resolved_path;
+                break;
+            }
+        }
+        const auto missing_contract = [&] {
+            const auto mod = sema.modules.find(testing_module_path);
+            if (testing_module_path.empty() || mod == sema.modules.end()) {
+                return true;
+            }
+            // Exactly the names codegen reaches for, and their shapes: two structs and a
+            // function. Checking the shape (not just the name) is what makes the error
+            // legible when the module exists but has drifted.
+            for (const char *type_name : {"Test_Function", "Test_Case", "Test_Info"}) {
+                const auto it = mod->second.symbols.find(type_name);
+                if (it == mod->second.symbols.end() || !std::holds_alternative<sema::TypeSymbol>(it->second)) {
+                    return true;
+                }
+            }
+            const auto runner = mod->second.symbols.find("_run_tests");
+            return runner == mod->second.symbols.end() ||
+                   !std::holds_alternative<sema::FunctionSymbol>(runner->second);
+        };
+        if (missing_contract()) {
+            llvm::errs() << "mirage: 'core/testing' could not be resolved or does not expose the expected\n"
+                            "        testing contract (Test_Function, Test_Case, Test_Info, _run_tests) —\n"
+                            "        required for 'mirage test'\n";
+            return 1;
+        }
+    }
+
     const auto codegen_start = std::chrono::steady_clock::now();
     const auto target_machine = create_target_machine(target_triple, !options.target.empty());
     if (!target_machine) {
@@ -636,6 +715,7 @@ auto main(const int argc, char *argv[]) -> int {
         .noinit = options.noinit,
         .target_triple = target_machine->getTargetTriple().str(),
         .data_layout = target_machine->createDataLayout().getStringRepresentation(),
+        .testing_module_path = testing_module_path,
     });
     if (!llvm_module || diag.has_errors()) {
         return 1;
@@ -677,7 +757,10 @@ auto main(const int argc, char *argv[]) -> int {
     }
     const auto object_elapsed = std::chrono::steady_clock::now() - object_start;
 
-    const auto exe_path = options.action == Action::Run
+    // 'test' builds to a temp path and executes it, exactly as 'run' does — the compiled
+    // output is the test binary, and there is nothing to leave behind.
+    const bool executes_output = options.action == Action::Run || options.action == Action::Test;
+    const auto exe_path = executes_output
         ? make_temp_file("")
         : std::filesystem::path(options.output);
     if (exe_path.empty()) {
@@ -693,7 +776,7 @@ auto main(const int argc, char *argv[]) -> int {
         // orphaned in $TMPDIR on every failed link.
         std::error_code remove_error;
         std::filesystem::remove(object_path, remove_error);
-        if (options.action == Action::Run) {
+        if (executes_output) {
             std::filesystem::remove(exe_path, remove_error);
         }
         return 1;
@@ -710,7 +793,7 @@ auto main(const int argc, char *argv[]) -> int {
 
     const auto elapsed = std::chrono::steady_clock::now() - start_time;
     const auto secs = std::chrono::duration<double>(elapsed).count();
-    if (options.action == Action::Run) {
+    if (executes_output) {
         llvm::errs() << std::format("Compiled '{}' in {:.2f}s\n", options.module_path, secs);
     } else {
         llvm::errs() << std::format("Compiled '{}' -> '{}' in {:.2f}s\n", options.module_path, options.output, secs);
@@ -720,7 +803,7 @@ auto main(const int argc, char *argv[]) -> int {
     llvm::outs().flush();
     llvm::errs().flush();
 
-    if (options.action == Action::Run) {
+    if (executes_output) {
         const pid_t pid = fork();
         if (pid < 0) {
             llvm::errs() << "mirage: fork failed\n";

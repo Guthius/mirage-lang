@@ -1,0 +1,143 @@
+// tests/mir/generics — generic functions and types, type and value parameters,
+// monomorphization, and compile-time configuration ('when', '$option', '$rtti_enabled').
+// See tests/mir/core for what this tree is.
+
+pub type Check = enum(i32) { Failed = 1 }
+
+fn expect(condition: bool) -> ?error(Check) {
+    if !condition {
+        return .Failed
+    }
+    return_ok
+}
+
+fn expect_eq(actual: i64, expected: i64) -> ?error(Check) {
+    if actual != expected {
+        return .Failed
+    }
+    return_ok
+}
+
+fn identity[T: type](value: T) -> T {
+    return value
+}
+
+@test
+fn test_generic_function_inference() -> error(Check) {
+    try expect_eq(cast(identity(7), i64), 7)
+    try expect_eq(identity(cast(9, i64)), 9)
+    // A second instantiation with a different argument type must not reuse the first's
+    // monomorphization.
+    const b := identity(true)
+    try expect(b)
+    return_ok
+}
+
+fn explicit[T: type]() -> usize {
+    return size_of(T)
+}
+
+@test
+fn test_explicit_instantiation() -> error(Check) {
+    try expect_eq(cast(explicit[i32](), i64), 4)
+    try expect_eq(cast(explicit[i64](), i64), 8)
+    try expect_eq(cast(explicit[u8](), i64), 1)
+    return_ok
+}
+
+pub type Pair[T: type] = struct {
+    first: T
+    second: T
+}
+
+@test
+fn test_generic_struct() -> error(Check) {
+    mut p: Pair[i32] = default
+    p.first = 3
+    p.second = 4
+    try expect_eq(cast(p.first + p.second, i64), 7)
+
+    mut q: Pair[i64] = default
+    q.first = 100
+    q.second = 200
+    try expect_eq(q.first + q.second, 300)
+    return_ok
+}
+
+// A const-generic (value) parameter, in the style of a C++ non-type template parameter.
+pub type Buffer[N: usize] = struct {
+    data: [N]u8
+}
+
+@test
+fn test_const_generic_parameter() -> error(Check) {
+    mut small: Buffer[4] = default
+    mut large: Buffer[16] = default
+    try expect_eq(cast(size_of(Buffer[4]), i64), 4)
+    try expect_eq(cast(size_of(Buffer[16]), i64), 16)
+    try expect_eq(cast(len(small.data[..]), i64), 4)
+    try expect_eq(cast(len(large.data[..]), i64), 16)
+    return_ok
+}
+
+fn sum_all[T: type](values: []T) -> T {
+    mut total: T = default
+    for v in values {
+        total = total + v
+    }
+    return total
+}
+
+@test
+fn test_generic_over_slice() -> error(Check) {
+    mut xs: [4]i64 = default
+    xs[0] = 1
+    xs[1] = 2
+    xs[2] = 3
+    xs[3] = 4
+    try expect_eq(sum_all(xs[..]), 10)
+    return_ok
+}
+
+@test
+fn test_size_of_and_align_of() -> error(Check) {
+    try expect_eq(cast(size_of(u8), i64), 1)
+    try expect_eq(cast(size_of(u16), i64), 2)
+    try expect_eq(cast(size_of(u32), i64), 4)
+    try expect_eq(cast(size_of(u64), i64), 8)
+    try expect_eq(cast(align_of(u64), i64), 8)
+    return_ok
+}
+
+@test
+fn test_when_selects_one_branch() -> error(Check) {
+    // 'when' is resolved at compile time; only the selected branch is emitted, though both
+    // are type-checked.
+    when size_of(usize) == 8 {
+        try expect(true)
+    } else {
+        return .Failed
+    }
+    return_ok
+}
+
+@test
+fn test_rtti_enabled_is_a_constant() -> error(Check) {
+    // Whichever way the compiler was invoked, '$rtti_enabled' folds to a 'bool' usable
+    // anywhere a constant is. This suite is normally run with RTTI on.
+    const flag: bool = $rtti_enabled
+    when $rtti_enabled {
+        try expect(flag)
+    } else {
+        try expect(!flag)
+    }
+    return_ok
+}
+
+@test
+fn test_option_default() -> error(Check) {
+    // No '--opt' is passed by the runner, so the default is what comes back.
+    const value: i32 = $option("tests/unset_key", 17)
+    try expect_eq(cast(value, i64), 17)
+    return_ok
+}

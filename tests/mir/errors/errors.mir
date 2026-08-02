@@ -1,0 +1,131 @@
+// tests/mir/errors — the error type system: 'error(T)', 'try', '?error', typestate
+// narrowing, and tagged-union payloads.
+//
+// See tests/mir/core for what this tree is and why negative fixtures stayed in examples/.
+
+pub type Check = enum(i32) { Failed = 1 }
+
+pub type Io_Error = enum(i32) {
+    Not_Found = 1
+    Denied    = 2
+}
+
+pub type Parse_Error = enum(i32) {
+    Bad_Digit = 1
+}
+
+fn expect(condition: bool) -> ?error(Check) {
+    if !condition {
+        return .Failed
+    }
+    return_ok
+}
+
+fn expect_eq(actual: i64, expected: i64) -> ?error(Check) {
+    if actual != expected {
+        return .Failed
+    }
+    return_ok
+}
+
+fn may_fail(should_fail: bool) -> (i32, error(Io_Error)) {
+    if should_fail {
+        return 0, .Not_Found
+    }
+    return_ok 42
+}
+
+@test
+fn test_error_ok_path() -> error(Check) {
+    const value, err := may_fail(false)
+    try expect(!err)
+    try expect_eq(cast(value, i64), 42)
+    return_ok
+}
+
+@test
+fn test_error_failure_path() -> error(Check) {
+    const value, err := may_fail(true)
+    if !err {
+        return .Failed
+    }
+    return_ok
+}
+
+fn propagates() -> (i32, error(Io_Error)) {
+    // 'try' forwards the failure to this function's own caller.
+    const value := try may_fail(true)
+    return_ok value
+}
+
+@test
+fn test_try_propagates() -> error(Check) {
+    const value, err := propagates()
+    if !err {
+        return .Failed
+    }
+    return_ok
+}
+
+fn optional_failure(fail: bool) -> ?error(Io_Error) {
+    if fail {
+        return .Denied
+    }
+    return_ok
+}
+
+@test
+fn test_optional_error_can_be_ignored() -> error(Check) {
+    // A '?error(...)' return may be dropped at a statement -- that is the whole point of
+    // the '?'. Dropping a plain 'error(...)' is a compile error instead (see
+    // examples/example_unhandled_error).
+    optional_failure(false)
+    try expect(true)
+    return_ok
+}
+
+@test
+fn test_error_union_of_two_types() -> error(Io_Error | Parse_Error) {
+    // A '@test' may declare any error union; each gets its own wrapper, which is why
+    // differing unions coexist in one program.
+    return_ok
+}
+
+pub type Shape = union(enum) {
+    circle: struct { radius: i64 }
+    rect:   struct { w: i64  h: i64 }
+    point
+}
+
+@test
+fn test_tagged_union_payloads() -> error(Check) {
+    const c := Shape.circle{.radius = 5}
+    const area_ish := match c {
+        .circle(v): v.radius * 2,
+        .rect(v):   v.w * v.h,
+        .point:     0,
+    }
+    try expect_eq(area_ish, 10)
+
+    const r := Shape.rect{.w = 3, .h = 4}
+    const rect_area := match r {
+        .circle(v): v.radius * 2,
+        .rect(v):   v.w * v.h,
+        .point:     0,
+    }
+    try expect_eq(rect_area, 12)
+    return_ok
+}
+
+@test
+fn test_defer_runs_on_error_return() -> error(Check) {
+    mut ran: bool = false
+    const result := helper_with_defer(&ran)
+    try expect(ran)
+    return_ok
+}
+
+fn helper_with_defer(ran: *bool) -> ?error(Io_Error) {
+    defer { ran.* = true }
+    return .Denied
+}

@@ -530,6 +530,17 @@ namespace sema {
         //
         // Also the value the '$rtti_enabled' compile-time constant folds to.
         bool rtti_enabled = true;
+        // True under the 'mirage test' driver action. Two-tier effect, deliberately:
+        // '@test' SIGNATURE restrictions are checked in every action (a malformed '@test'
+        // declaration is always an error, so switching actions never changes whether the
+        // declaration itself is valid), while a '@test' function's BODY is only
+        // type-checked and emitted here. That mirrors the "an unreached generic
+        // instantiation is never type-checked" posture, NOT 'when''s "both branches always
+        // checked" one -- an asymmetry documented in spec.md's Testing section.
+        //
+        // Also flips the call-site diagnostic: calling a '@test' function is a hard error
+        // under build/run and a warning under test.
+        bool test_mode = false;
     };
 
     enum class LinkCategory : uint8_t { Lib, System, Flag };
@@ -642,6 +653,23 @@ namespace sema {
         // normal redefinition error. Cleared per file; meaningless outside the pass.
         std::set<std::string> overlay_declared_names;
         std::set<std::pair<std::string, std::string>> overlay_declared_methods;
+
+        // Every '@test' function in the program, in the order the generated Test_Info array
+        // must list them: source declaration order within a module, modules in
+        // ast::Program::module_order (import-graph traversal from the root, forced modules
+        // appended). Deterministic and diffable rather than hash-ordered -- execution order
+        // is entirely 'core/testing''s concern, but the TABLE's order is codegen output and
+        // must not move between runs.
+        //
+        // Populated only under Options::test_mode; empty otherwise. Visibility is not
+        // considered: a '@test' function need not be 'pub' to be discovered, same posture as
+        // '@init', since discovery has whole-program reach regardless.
+        struct TestCase {
+            std::string module_path;   // canonical directory, as everything else keys on
+            std::string module_name;   // root-relative, the spelling a user would recognize
+            std::string function_name; // unqualified
+        };
+        std::vector<TestCase> discovered_tests;
 
         // (module_path, function_name) pairs, in the exact order the synthesized '_init'
         // (codegen.cpp) must call them: modules topologically sorted by actual cross-module

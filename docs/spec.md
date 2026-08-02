@@ -1777,6 +1777,74 @@ roots is otherwise invisible.
 > `MIRAGE_MODULES_ROOT` is not, the resolution error carries a note saying so, purely so
 > the failure is legible.
 
+### Forced Module Loading
+
+A module is normally part of a program because something imports it. `--load <path>` adds
+one that nothing imports:
+
+```sh
+mirage build app --load drivers/postgres
+```
+
+The path resolves by the same five-root rule an ordinary `import(...)` uses, with the root
+module's directory standing in for the importer. A path that is already loaded — reached
+normally, forced earlier in the same command line, or the root module itself — is a no-op,
+not an error.
+
+A forced module participates in every whole-program concern on **identical terms** to a
+normally-loaded one: declaration type-checking, `impl` coherence, `@init` collection and
+ordering, `#link` collection, and `@test` discovery.
+
+**It creates no binding.** No `const` is synthesized and no name is inserted into any
+symbol table, so a forced module is unreachable from any Mirage expression, in any module,
+by any spelling. There is no "collision with an existing name" concern to check, because
+nothing is ever inserted anywhere to collide with. This is the entire point of the
+mechanism, and it must not regress into an accessible alias by an implementation shortcut —
+in particular, not by synthesizing a hidden binding under a mangled name that is merely
+*hard* to spell.
+
+The compiler itself does reach specific declarations of a forced module — `core/testing`'s
+`_run_tests`, under `mirage test` — through the fixed `(module path, declaration name)`
+mangled reference every cross-module symbol already uses, bypassing identifier resolution
+entirely.
+
+#### Worked example: driver registration
+
+The mechanism is not testing-specific. It supports the Go-style blank-import registration
+pattern, where a generic interface module exposes a registry and concrete driver modules
+register themselves via `@init` with no consumer-visible import:
+
+```mirage
+// core/db.mir
+pub type Driver = trait {
+    fn connect(self, dsn: []u8) -> (Connection, error(Db_Error))
+}
+pub fn register(name: []u8, driver: Driver) { ... }
+pub fn get(name: []u8) -> Driver { ... }
+```
+
+```mirage
+// drivers/postgres.mir — reached only via '--load drivers/postgres'
+const db := import("core/db")
+type Postgres_Driver = struct { }
+impl db.Driver for Postgres_Driver { ... }
+
+@init
+fn register_self() {
+    mut instance: Postgres_Driver = default
+    db.register("postgres", &instance)
+}
+```
+
+`register_self`'s reference to `db.register` is a real symbol reference, so `core/db`'s own
+`@init` (if any) is ordered before it by the existing dependency-graph rule, and the
+trait-handle coercion on `&instance` hides the concrete type by construction.
+
+**Caveat worth stating plainly:** this makes the driver type *unadvertised*, not provably
+unreachable. Forced loading does not alter the driver module's own `pub` visibility, so
+nothing stops another module from writing `import("drivers/postgres")` directly. It is not
+an encapsulation guarantee.
+
 ### Accessing Module Symbols
 
 ```mirage
@@ -2901,7 +2969,7 @@ reserved keyword, unlike its siblings above. `no_return`, `naked`,
 `always_inline`, `section`, and `init` are likewise parsed as plain
 identifiers, not keywords — meaningful only immediately after the `@`
 sigil (`@no_return`, `@naked`, `@always_inline`, `@section(...)`,
-`@init`, `@no_discard`, `@export`, `@callconv(...)`, `@cdecl`, see
+`@init`, `@no_discard`, `@export`, `@callconv(...)`, `@cdecl`, `@test`, see
 [Declaration Attributes](#21-declaration-attributes)). `@import` is the one
 exception to that pattern: `import` IS a reserved keyword, and the attribute
 name position accepts it by spelling — which is legal precisely because
@@ -3466,6 +3534,36 @@ resolved by the linker from its bare name and there is no import-module concept.
 deliberately *not* an error there, so one stdlib source file can carry the annotation for
 every target.
 
+### `@test`
+
+```mirage
+@test
+fn addition_works() -> error(Test_Error) { ... }
+```
+
+Marks a module-scope function as a test case, discovered and run by `mirage test` (see
+[Testing](#23-testing)). Takes no arguments.
+
+**Signature restrictions**, checked in *every* driver action — a malformed `@test`
+declaration is always an error, so switching actions never changes whether the declaration
+itself is valid:
+
+- **No parameters**, not even defaulted ones: the harness calls every test uniformly
+  through a generated `fn() -> bool` wrapper, and nothing supplies an argument.
+- **Return type must be exactly `error(...)`** — a single error type or a union
+  (`error(A | B)`), any member types permitted. This is a deliberate *widening* relative to
+  `@init`, which restricts to `enum(i32)`: a test reports pass/fail through the Ok/Failed
+  tag, and any error type carries that.
+- **No generic parameters** — same restriction and rationale as `ext fn`/`macro`/`trait`:
+  there is no way to call an uninstantiated template uniformly.
+- **Not allowed on an `impl` method**, mirroring `@init`:
+  ```
+  error: '@test' is not allowed on impl methods; declare a module-scope function instead
+  ```
+
+`@test` functions need not be `pub` to be discovered — same posture as `@init`, since
+discovery has whole-program reach regardless of visibility.
+
 ### Conflicting Attributes
 
 Some combinations are rejected outright:
@@ -3480,6 +3578,15 @@ Some combinations are rejected outright:
   ambiguous.
 - `@callconv("c")` + `@naked` — a naked function has no compiler-generated prologue to
   implement a convention with; its body *is* its ABI.
+- `@test` + `@naked` — a naked function has no compiler-generated body shape, and the
+  harness needs an ordinary calling convention.
+- `@test` + `@no_return` — a test that never returns cannot report a status.
+- `@test` + `@init` — two different automatic-invocation mechanisms.
+- `@test` + `@export` / `@callconv` — a test is invoked only through its synthesized
+  wrapper, which assumes the Mirage convention and the wrapper's own name.
+
+`@test` + `@always_inline` is **legal** and deliberately absent from this list: nothing
+prevents a test body from being inlined into its synthesized wrapper's call site.
 
 ---
 
@@ -3977,3 +4084,114 @@ fn make_fixed[N: usize](fill: [N]u8 = default) -> [N]u8 { ... }   // 'N' in the
                                                                     // default is
                                                                     // legal
 ```
+
+---
+
+## 23. Testing
+
+```sh
+mirage test <module>
+```
+
+Compiles `<module>`, discovers every `@test` function in the program, and runs them.
+
+### The `test` action
+
+`<module>` is parsed and resolved exactly as under `build`/`run`. Three differences:
+
+- A `main` in the root module is **legal and simply never called** — an ordinary program
+  can be tested without restructuring it. A module with **no** `main` is also legal here,
+  though it would not be under `build`.
+- The compiler adds `core/testing` to the forced-module list (see
+  [Forced Module Loading](#forced-module-loading)) for this invocation, in addition to any
+  `--load` paths.
+- `--noinit` is honored as-is: `_init` generation and invocation are suppressed exactly as
+  in `build`/`run` mode.
+
+`mirage test` is refused with `--freestanding`, and for any wasm target. Test isolation
+forks a child process per case, which neither has.
+
+### Mode-dependent body checking
+
+A `@test` function's **signature** is validated in every action (see
+[`@test`](#test)). Its **body** is type-checked and emitted only under `mirage test`.
+
+This is deliberately the same posture as §22's "an unreached generic instantiation is never
+type-checked", and deliberately *not* `when`'s "both branches are always type-checked". The
+practical consequence, stated so it is not mistaken for a bug: **a `@test` body containing
+e.g. a bad member access compiles cleanly under `mirage build` and surfaces only under
+`mirage test`.**
+
+### Calling a test
+
+Tests are invoked by the harness and nothing else. A direct call to a `@test` function — or
+taking its address — is:
+
+- a **hard error** under `build`/`run`:
+  ```
+  error: cannot call '@test' function 'foo' outside of 'mirage test'
+  ```
+- a **warning** under `test`:
+  ```
+  warning: '@test' function 'foo' called directly; tests should not call other tests
+  ```
+
+A helper meant to be shared between tests should simply not carry `@test`. A test calling
+another test is treated exactly like any other caller — there is no special case.
+
+### `core/testing`
+
+`core/testing` is a **reserved module path**, in the same "fixed contract, not built into
+the compiler" sense as `runtime/type_info`: the module is ordinary Mirage source, and the
+compiler only knows the names. Under `mirage test` it must resolve and expose:
+
+```mirage
+pub type Test_Function = fn() -> bool   // true = Ok, false = Failed
+
+pub type Test_Case = struct {
+    module_name: []u8
+    function_name: []u8
+    function: Test_Function
+}
+
+pub type Test_Info = struct {
+    cases: []Test_Case
+}
+
+pub fn _run_tests(tests: *Test_Info)
+```
+
+If it does not, that is a driver-level error reported before codegen, not a confusing type
+mismatch deep in generated code:
+
+```
+error: 'core/testing' could not be resolved or does not expose the expected
+       testing contract (Test_Function, Test_Case, Test_Info, _run_tests) —
+       required for 'mirage test'
+```
+
+### What the compiler generates
+
+Each `@test` may declare its own distinct `error(...)` return type, and function-pointer
+types are structurally exact (§15), so no single function-pointer type could point at the
+real test functions. The compiler therefore synthesizes, per discovered test, a wrapper with
+the one uniform signature `fn() -> bool`, whose body calls the test and collapses the result
+to its Ok/Failed tag. It then emits a `Test_Info` constant listing every wrapper and a
+`_start` that calls `_run_tests` with it.
+
+Discovery order — and therefore `Test_Info`'s order — is source declaration order within a
+module, modules in import-graph traversal order from the root, with forced modules appended
+after the normal graph in `--load` order. This is deterministic so that generated output is
+diffable; execution order and reporting are entirely `core/testing`'s concern.
+
+The process's exit code is whatever `_run_tests` produces; the compiler imposes no
+additional layer on top.
+
+### v1 limitations
+
+Carried deliberately, in the same style as §22's "No Bounds in v1":
+
+- Sequential execution only — no parallel jobs.
+- No hang or timeout protection.
+- No error-payload stringification in the output: a failure reports the tag
+  (`ok`/`FAILED`/`CRASHED`), not which variant or its fields.

@@ -86,14 +86,15 @@ block), or an `ext_fn_decl`. Multiple separate clauses on the same declaration
 (`@(naked, no_return)`). A grouped-form member never takes its own argument list —
 `@(section(".text"))` is a parse error; only the ungrouped `@name(args)` form takes arguments.
 The name (`no_return`, `naked`, `always_inline`, `section`, `init`, `no_discard`, `export`,
-`callconv`, `cdecl`, `import`) is validated against the fixed known-attribute set by the
+`callconv`, `cdecl`, `import`, `test`) is validated against the fixed known-attribute set by the
 parser, the same way `link_decl`'s category name is — see spec.md's "Declaration Attributes"
 section for each attribute's semantics.
 
 WHERE each one is legal is a sema restriction, not a parser-level one, so the parser accepts
 any known name in any of the three positions:
 
-- `init` is rejected specifically on a `method_decl` — see spec.md's `@init` section.
+- `init` and `test` are rejected specifically on a `method_decl` — see spec.md's `@init`
+  and `@test` sections.
 - On an `ext_fn_decl`, every attribute except `import` is rejected. The parser accepts a
   clause there at all only so that rejection can name the offending attribute, instead of
   the whole clause failing with "attributes are only allowed on 'fn' declarations".

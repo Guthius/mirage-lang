@@ -18,6 +18,7 @@ namespace sema {
     void validate_ext_function_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
     void validate_export_names_for_program(Program &program, DiagnosticEngine &diag);
     void validate_init_dependencies_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag);
+    void discover_tests_for_program(const ast::Program &ast_program, Program &sema_program);
     void check_generic_templates_for_program(Program &program, DiagnosticEngine &diag);
 
     // Minimal human-readable rendering of a resolved type, used for trait conformance
@@ -699,6 +700,14 @@ namespace sema {
                 // parameters unbound, by check_generic_templates_for_program; that is a
                 // separate pass, and this loop is only about concrete code.
                 if (fn->decl && !fn->decl->generic_params.empty()) continue;
+                // A '@test' function's body is type-checked (and emitted) only under
+                // 'mirage test'. Deliberately mirrors §22's "an unreached generic
+                // instantiation is never type-checked" posture rather than 'when''s "both
+                // branches always checked" one, so a broken test body compiles clean under
+                // 'mirage build' and surfaces only under 'mirage test'. Its SIGNATURE was
+                // still validated in every action (validate_test_structural), so the
+                // declaration itself is never silently wrong.
+                if (fn->is_test && !program.options.test_mode) continue;
 
                 LocalScope locals = globals_in_scope(*mod);
                 for (size_t i = 0; i < fn->decl->params.size(); ++i) {
@@ -972,6 +981,9 @@ namespace sema {
         // Runs last: the cross-module '@init' reference walk doesn't need type-checked
         // bodies, but keeping it after every other pass makes "last" unambiguous.
         validate_init_dependencies_for_program(program, out, diag);
+        // After every module is loaded and checked, so the scan sees forced ('--load')
+        // modules on the same terms as normally-reached ones. No-op outside 'mirage test'.
+        discover_tests_for_program(program, out);
 
         out.ok = !diag.has_errors();
         for (auto &module : out.modules | std::views::values) {

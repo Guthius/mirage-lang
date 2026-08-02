@@ -291,7 +291,7 @@
   },
   "example_attr_unknown": {
     "action": "build",
-    "diag": "examples/example_attr_unknown/main.mir:9:1: error: unknown attribute '@frobulate'. Known attributes: no_return, naked, always_inline, section, init, no_discard, export, callconv, cdecl, import.",
+    "diag": "examples/example_attr_unknown/main.mir:9:1: error: unknown attribute '@frobulate'. Known attributes: no_return, naked, always_inline, section, init, no_discard, export, callconv, cdecl, import, test.",
     "exit": 1
   },
   "example_bare_import_default_param": {

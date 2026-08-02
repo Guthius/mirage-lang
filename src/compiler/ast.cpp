@@ -1097,12 +1097,13 @@ namespace ast {
         void check_known_attribute_name(Parser &parser, const std::string &name, const SourceLocation &location) {
             if (name == "no_return" || name == "naked" || name == "always_inline" ||
                 name == "section" || name == "init" || name == "no_discard" ||
-                name == "export" || name == "callconv" || name == "cdecl" || name == "import") {
+                name == "export" || name == "callconv" || name == "cdecl" || name == "import" ||
+                name == "test") {
                 return;
             }
             parser.report_error(location, std::format(
                 "unknown attribute '@{}'. Known attributes: no_return, naked, always_inline, "
-                "section, init, no_discard, export, callconv, cdecl, import.", name));
+                "section, init, no_discard, export, callconv, cdecl, import, test.", name));
         }
 
         // The attribute name after '@' (or after '@(' / a ',' in the grouped form).

@@ -180,6 +180,9 @@ namespace ast {
             if (!inserted) {
                 return;
             }
+            // Recorded BEFORE parsing, so the order is genuinely first-reached (depth-first
+            // from the root) rather than first-finished.
+            program.module_order.push_back(path);
 
             it->second = load_and_parse(it->first, source_manager, diagnostics, program);
 
@@ -363,6 +366,32 @@ namespace ast {
         }
 
         visit(canonical, program, source_manager, diagnostics, roots);
+
+        // Forced modules, AFTER the normal graph, in the order given. A path already loaded
+        // (reached normally, forced earlier in this list, or the root module itself) is a
+        // no-op rather than an error -- visit()'s try_emplace already gives that for free.
+        //
+        // No entry is made in module_imports, which is what keeps a forced module genuinely
+        // unreachable by name: identifier resolution has no other route to a module.
+        for (const auto &forced : options.forced_modules) {
+            // The root module's directory stands in for the importer, since there is none.
+            // Everything else about resolution is identical to an ordinary import.
+            const auto resolved = resolve_import_path(canonical, forced, roots);
+            if (resolved.path.empty()) {
+                diagnostics.report_error(
+                    DiagnosticStage::Parser, {},
+                    std::format("cannot resolve forced module path '{}'{}",
+                                forced, describe_search_roots(canonical, roots)));
+                continue;
+            }
+            program.module_search_trace.push_back(ModuleSearchRecord{
+                .importer = canonical,
+                .import_path = forced,
+                .resolved_path = resolved.path,
+                .root_label = resolved.root_label,
+            });
+            visit(resolved.path, program, source_manager, diagnostics, roots);
+        }
 
         program.ok = !diagnostics.has_errors();
 

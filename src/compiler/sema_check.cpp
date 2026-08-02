@@ -595,7 +595,8 @@ namespace sema {
 
     // Defined further below (near the other per-node helpers); forward-declared here so
     // the generic-instantiation value path can share the fn-pointer decay rules.
-    auto check_fn_pointer_decay(bool is_variadic, const ast::FunctionDecl *decl, const std::string &name, const SourceLocation &loc, DiagnosticEngine &diag) -> bool;
+    auto check_fn_pointer_decay(bool is_variadic, const ast::FunctionDecl *decl, const std::string &name, const SourceLocation &loc, const Program &program, DiagnosticEngine &diag) -> bool;
+    void report_test_function_reference(const std::string &name, const SourceLocation &loc, const Program &program, DiagnosticEngine &diag);
     auto match_expected_fn_signature(const std::vector<ResolvedType> &params, const std::vector<ResolvedType> &returns, const ResolvedType &expected, const std::string &name, const SourceLocation &loc, Program &program, DiagnosticEngine &diag) -> ResolvedType;
 
     namespace {
@@ -870,6 +871,7 @@ namespace sema {
                                 }
                                 auto &resolved_fn = ensure_function_signature_resolved(*target_module, fn_name, program, diag);
                                 check_call_args(call.args, resolved_fn.params, false, locals, module_path, program, diag, call.location, fn_name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
+                                if (resolved_fn.is_test) report_test_function_reference(fn_name, call.location, program, diag);
                                 note_no_discard(resolved_fn.no_discard, fn_name);
                                 return resolved_fn.return_types;
                             } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
@@ -998,6 +1000,7 @@ namespace sema {
                         }
                         auto &resolved_fn = ensure_function_signature_resolved(module_path, callee_ident->name, program, diag);
                         check_call_args(call.args, resolved_fn.params, false, locals, module_path, program, diag, call.location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
+                        if (resolved_fn.is_test) report_test_function_reference(callee_ident->name, call.location, program, diag);
                         note_no_discard(resolved_fn.no_discard, callee_ident->name);
                         return resolved_fn.return_types;
                     } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
@@ -2489,7 +2492,7 @@ namespace sema {
 
         const size_t idx = instantiate_generic_function(program, diag, decl_module, *decl_name, std::move(*args), expr.location);
         const auto &instance = *program.generic_fn_instances[idx];
-        if (!check_fn_pointer_decay(instance.is_variadic, instance.decl, *decl_name, expr.location, diag)) {
+        if (!check_fn_pointer_decay(instance.is_variadic, instance.decl, *decl_name, expr.location, program, diag)) {
             return ResolvedType{.kind = TypeKind::Invalid};
         }
         // Recorded under the ENCLOSING expr's key so codegen can map this node straight to
@@ -3474,7 +3477,7 @@ namespace sema {
                             "specific instantiation (e.g. '{}[i32]')", v.name, v.name));
                     }
                     auto &resolved_fn = ensure_function_signature_resolved(module_path, v.name, program, diag);
-                    if (!check_fn_pointer_decay(resolved_fn.is_variadic, resolved_fn.decl, v.name, v.location, diag)) {
+                    if (!check_fn_pointer_decay(resolved_fn.is_variadic, resolved_fn.decl, v.name, v.location, program, diag)) {
                         return ResolvedType{.kind = TypeKind::Invalid};
                     }
                     if (expected && expected->kind == TypeKind::Function) {
@@ -3744,12 +3747,30 @@ namespace sema {
         return {.then_ty = then_ty, .else_ty = else_ty, .selected = selected};
     }
 
+    // Calling a '@test' function, or taking its address, from ordinary code. Tests are
+    // invoked by the harness through their synthesized wrappers and nothing else; a helper
+    // meant to be shared between tests should simply not carry '@test'.
+    //
+    // A hard error under build/run (where the test's body was never even type-checked, so
+    // the call would reference something the compiler declined to look at) and a warning
+    // under 'mirage test' (where the call is merely a bad idea). Same trigger conditions in
+    // both modes -- a test calling another test is treated exactly like any other caller.
+    void report_test_function_reference(const std::string &name, const SourceLocation &loc, const Program &program, DiagnosticEngine &diag) {
+        if (program.options.test_mode) {
+            diag.warn(DiagnosticStage::Sema, loc, std::format(
+                "'@test' function '{}' called directly; tests should not call other tests", name));
+        } else {
+            diag.report_error(DiagnosticStage::Sema, loc, std::format(
+                "cannot call '@test' function '{}' outside of 'mirage test'", name));
+        }
+    }
+
     // Shared by every function-name-to-function-pointer decay site (same-module idents,
     // cross-module members, explicit generic instantiations — the block had been pasted
     // three times): a variadic function has no pointer type, and an '@always_inline' one
     // silently loses its attribute through an indirect call. Returns false after
     // reporting the variadic rejection.
-    auto check_fn_pointer_decay(const bool is_variadic, const ast::FunctionDecl *decl, const std::string &name, const SourceLocation &loc, DiagnosticEngine &diag) -> bool {
+    auto check_fn_pointer_decay(const bool is_variadic, const ast::FunctionDecl *decl, const std::string &name, const SourceLocation &loc, const Program &program, DiagnosticEngine &diag) -> bool {
         if (is_variadic) {
             diag.report_error(DiagnosticStage::Sema, loc, std::format(
                 "cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", name));
@@ -3764,6 +3785,12 @@ namespace sema {
         // Read off the raw attributes rather than FunctionSymbol::call_conv: this helper is
         // shared by call sites that only have the decl, and checking the source spelling
         // means the ban still fires if attribute validation itself reported an error.
+        if (decl && find_attribute(decl->attributes, "test")) {
+            // Deliberately shares this choke point with the '@callconv' ban below rather
+            // than growing a second address-of walk: the trigger conditions are identical.
+            report_test_function_reference(name, loc, program, diag);
+            return false;
+        }
         if (decl && (find_attribute(decl->attributes, "cdecl") || find_attribute(decl->attributes, "callconv"))) {
             diag.report_error(DiagnosticStage::Sema, loc, std::format(
                 "cannot take the address of '@callconv(\"c\")' function '{}'\n"
@@ -3928,7 +3955,7 @@ namespace sema {
                     if (std::holds_alternative<FunctionSymbol>(sym_it->second)) {
                         auto &fn = ensure_function_signature_resolved(*target_mod, v->member, program, diag);
                         if (!fn.is_pub) return error(diag, v->location, std::format("'{}' is not pub", v->member));
-                        if (!check_fn_pointer_decay(fn.is_variadic, fn.decl, v->member, v->location, diag)) {
+                        if (!check_fn_pointer_decay(fn.is_variadic, fn.decl, v->member, v->location, program, diag)) {
                             return ResolvedType{.kind = TypeKind::Invalid};
                         }
                         if (!exp_sig) return function_pointer_type_of(fn, program);

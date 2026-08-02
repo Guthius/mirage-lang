@@ -42,6 +42,12 @@ namespace ast {
         std::unordered_map<std::string, Module> modules;
         std::unordered_map<std::string, std::unordered_map<std::string, std::string>> module_imports;
         std::string root_module_path;
+        // Every loaded module path in the order it was first reached: depth-first from the
+        // root module, then any forced modules (see ResolveOptions::forced_modules) in the
+        // order they were given. 'modules' is an unordered_map, so this is the only stable
+        // module ordering available -- '@test' discovery uses it to make the generated
+        // Test_Info array deterministic and diffable rather than hash-ordered.
+        std::vector<std::string> module_order;
         std::vector<ModuleSearchRecord> module_search_trace;
         size_t file_count = 0;
         size_t token_count = 0;
@@ -76,6 +82,21 @@ namespace ast {
     struct ResolveOptions {
         std::string std_path_override; // '--std=<path>'; takes precedence over $MIRAGE_MODULES_ROOT
         std::string compiler_dir;      // directory of the running executable; see executable_directory()
+
+        // Module paths to load even though nothing imports them ('--load <path>', plus
+        // 'core/testing' under the 'test' action). Loaded and compiled on identical terms to
+        // a normally-reached module -- declaration checking, impl coherence, '@init'
+        // ordering, '#link' collection, '@test' discovery.
+        //
+        // Critically, forcing creates NO binding: no 'const' is synthesized and no name is
+        // inserted into any symbol table, so a forced module is unreachable from any Mirage
+        // source expression in any module. That falls out of the design rather than being
+        // enforced -- an identifier resolves to a module only through module_imports, and a
+        // forced module gets no entry there. Do not "fix" that by adding one.
+        //
+        // Resolved against the same five roots an ordinary import uses, with the ROOT
+        // MODULE's directory standing in for the importer (there is no importer).
+        std::vector<std::string> forced_modules;
     };
 
     auto canonicalize(const std::string &path) -> std::string;

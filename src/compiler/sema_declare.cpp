@@ -829,6 +829,12 @@ namespace sema {
                                 diag.report_error(DiagnosticStage::Sema, fn.location,
                                     "'@init' is not allowed on impl methods; declare a module-scope function instead");
                             }
+                            // Same structural rejection as '@init' above, and for the same
+                            // reason: the harness calls a test uniformly with no receiver.
+                            if (find_attribute(fn.attributes, "test")) {
+                                diag.report_error(DiagnosticStage::Sema, fn.location,
+                                    "'@test' is not allowed on impl methods; declare a module-scope function instead");
+                            }
                             // Reject a redefinition instead of overwriting it, mirroring
                             // register_trait_impls_for_program's "duplicate method" check and
                             // declare_symbol's "redefinition of 'x'" for every other symbol
@@ -1228,6 +1234,10 @@ namespace sema {
                         if (find_attribute(fn.attributes, "init")) {
                             diag.report_error(DiagnosticStage::Sema, fn.location,
                                 "'@init' is not allowed on impl methods; declare a module-scope function instead");
+                        }
+                        if (find_attribute(fn.attributes, "test")) {
+                            diag.report_error(DiagnosticStage::Sema, fn.location,
+                                "'@test' is not allowed on impl methods; declare a module-scope function instead");
                         }
 
                         impl_info.methods[fn.name] = MethodInfo{

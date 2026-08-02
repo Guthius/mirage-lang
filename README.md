@@ -45,6 +45,7 @@ file in the directory is one module):
 mirage build my_project             # compile to ./a.out
 mirage build -o myprogram my_project
 mirage run my_project               # compile and run
+mirage test my_project              # run the module's '@test' functions
 mirage build --emit-ir my_project   # print LLVM IR to stdout instead of compiling
 mirage build --freestanding my_project
 ```
@@ -59,6 +60,7 @@ Options:
 --target=<triple>         Cross-compile for <triple> (default: the host triple)
 --emit-ir                 Print LLVM IR to stdout instead of compiling
 --freestanding            Compile without standard library
+--load <path>             Compile a module nothing imports (may be repeated)
 --noinit                  Skip generating/calling the synthesized '@init'-runner '_init'
 --nortti                  Disable runtime type information; sets '$rtti_enabled' to false
 --opt key=value           Set a compile-time '$option' value (may be repeated)
@@ -80,6 +82,32 @@ works. `--print-module-search` shows which root satisfied each import.
 > `MIRAGE_PATH` is no longer consulted — it was replaced by `MIRAGE_MODULES_ROOT` and is
 > not a fallback. If it is set while `MIRAGE_MODULES_ROOT` is not, an unresolved import
 > says so.
+
+### Testing
+
+`mirage test <module>` discovers every `@test` function in the program and runs each in a
+forked child, so a crashing test does not take the run down with it:
+
+```mirage
+pub type Check = enum(i32) { Failed = 1 }
+
+@test
+fn addition_works() -> error(Check) {
+    if 2 + 2 != 4 {
+        return .Failed
+    }
+    return_ok
+}
+```
+
+A `@test` takes no parameters and returns exactly `error(...)`; the Ok/Failed tag is the
+result. The runtime half lives in the standard library's `core/testing`, which the compiler
+loads automatically. `--load <path>` additionally compiles a module nothing imports —
+useful for tests that live outside the import graph, and for `@init`-based driver
+registration.
+
+The repo's own Mirage-language tests are under `tests/mir/`; run them all with
+`python3 tests/mir_suite_test.py`.
 
 ## Language Tour
 

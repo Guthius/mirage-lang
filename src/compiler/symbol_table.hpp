@@ -47,6 +47,9 @@ namespace sema {
         bool no_discard = false;               // '@no_discard': the result may not be dropped
         ExportName export_name;                // '@export' / '@export("name")'
         CallConv call_conv = CallConv::Mirage; // '@callconv("c")' / '@cdecl'
+        // '@test'. Read at two places: check_bodies_for_module, which skips a test's body
+        // outside 'mirage test', and the call-site diagnostic in check_expr.
+        bool is_test = false;
     };
 
     // True for a generic function TEMPLATE ('fn f[T: type](v: T)'). Such a symbol's

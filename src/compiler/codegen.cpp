@@ -266,7 +266,12 @@ namespace codegen {
                 declare_vtables();
                 declare_type_info_globals();
                 const sema::FunctionSymbol *entry_main = nullptr;
-                if (!options_.freestanding) {
+                // Under 'mirage test' a 'main' is optional: the synthesized '_start' calls
+                // the harness, not 'main'. A test-only module that declares none is the
+                // normal case, so demanding one would be exactly backwards. If one IS
+                // present it is compiled like any other function and never called, so it
+                // does not need validating as an entry point either.
+                if (!options_.freestanding && !is_test_mode()) {
                     entry_main = validate_hosted_main();
                 }
                 emit_global_initializers();
@@ -281,7 +286,11 @@ namespace codegen {
                 if (!options_.noinit && !sema_program_.init_call_order.empty()) {
                     emit_init();
                 }
-                if (!options_.freestanding && entry_main) {
+                if (is_test_mode()) {
+                    // 'main' (if the root module declares one) is compiled like any other
+                    // function above and simply never called -- see emit_test_start.
+                    emit_test_start();
+                } else if (!options_.freestanding && entry_main) {
                     if (is_wasm_target()) {
                         emit_wasm_main(*entry_main);
                     } else {
@@ -556,6 +565,13 @@ namespace codegen {
             // run(). An empty target triple (the unit tests' shape) reads as not-wasm.
             [[nodiscard]] auto is_wasm_target() const -> bool {
                 return module_->getTargetTriple().isWasm();
+            }
+
+            // 'mirage test'. The driver only fills testing_module_path for that action, and
+            // refuses the action outright for freestanding and wasm targets, so this single
+            // predicate is the whole gate.
+            [[nodiscard]] auto is_test_mode() const -> bool {
+                return !options_.testing_module_path.empty();
             }
 
             // The target's word width, and the integer type/constants of that width. 'usize',
@@ -1222,6 +1238,12 @@ namespace codegen {
                             // instantiation gets its own llvm::Function via
                             // declare_generic_functions() instead.
                             if (fn->decl && !fn->decl->generic_params.empty()) continue;
+                            // Outside 'mirage test' a '@test' function is not emitted AT ALL
+                            // (spec.md's Testing section) -- its body was never type-checked,
+                            // so there are no expr_types for emit_function to read and doing
+                            // so aborts rather than diagnosing. Nothing can call it either:
+                            // that is a hard error under build/run.
+                            if (fn->is_test && !is_test_mode()) continue;
                             // On wasm the C runtime owns the 'main' symbol and calls it with
                             // (argc, argv) — emit_wasm_main takes that name for its glue, so the
                             // user's own 'main' is mangled like any other function there.
@@ -1959,6 +1981,9 @@ namespace codegen {
                         // a generic function's body is emitted per-instantiation instead, by
                         // emit_generic_functions().
                         if (fn->decl && !fn->decl->generic_params.empty()) continue;
+                        // Matching skip to declare_globals_and_functions(): no declaration
+                        // exists to define, and no checked body to define it from.
+                        if (fn->is_test && !is_test_mode()) continue;
                         emit_function(path, name, *fn);
                     }
                 }
@@ -3576,6 +3601,147 @@ namespace codegen {
                 }
 
                 builder_.CreateRetVoid();
+            }
+
+            // ---- 'mirage test' glue ----
+            //
+            // Three pieces, all synthesized: one wrapper per discovered '@test' function, a
+            // 'Test_Info' constant listing them, and a '_start' that hands that constant to
+            // 'core/testing''s '_run_tests'. The fork/report/timing loop is ordinary library
+            // code, not generated here.
+
+            // Every '@test' may declare its own distinct 'error(...)' return type, and
+            // function-pointer types are structurally exact, so no single pointer type can
+            // point at the real test functions. Each gets a wrapper with the one uniform
+            // signature 'fn() -> bool', which collapses the error union to its Ok/Failed tag.
+            //
+            // Returns the wrappers in discovered_tests order.
+            auto emit_test_wrappers() -> std::vector<llvm::Function *> {
+                std::vector<llvm::Function *> wrappers;
+                wrappers.reserve(sema_program_.discovered_tests.size());
+
+                auto *wrapper_ty = llvm::FunctionType::get(llvm::Type::getInt1Ty(*context_), {}, false);
+                size_t index = 0;
+                for (const auto &test : sema_program_.discovered_tests) {
+                    // Mangled and internal: not user-writable, same precedent as a generic
+                    // instantiation's symbol.
+                    auto *wrapper = llvm::Function::Create(
+                        wrapper_ty, llvm::GlobalValue::InternalLinkage,
+                        std::format("__mirage_test_wrapper_{}", index++), *module_);
+
+                    auto *entry = llvm::BasicBlock::Create(*context_, "entry", wrapper);
+                    builder_.SetInsertPoint(entry);
+
+                    const auto callee = functions_.find(FunctionKey{test.module_path, test.function_name});
+                    if (callee == functions_.end()) {
+                        report_codegen_error(diag_, {}, std::format(
+                            "internal error: '@test' function '{}' was discovered but never declared", test.function_name));
+                        builder_.CreateRet(builder_.getFalse());
+                        wrappers.push_back(wrapper);
+                        continue;
+                    }
+
+                    // Ok is tag 0, so 'ok' is 'tag == 0' -- the same boolean-coercion rule an
+                    // error value obeys in any other boolean context.
+                    auto *result = builder_.CreateCall(callee->second);
+                    auto *is_ok = builder_.CreateICmpEQ(extract_error_tag(result), builder_.getInt32(0));
+                    builder_.CreateRet(is_ok);
+
+                    wrappers.push_back(wrapper);
+                }
+                return wrappers;
+            }
+
+            // The 'Test_Info' constant: one 'Test_Case' per discovered test, in
+            // discovered_tests order. Built against 'core/testing''s own declarations rather
+            // than a compiler-internal layout, so the two cannot drift silently -- if the
+            // module's structs are renamed or reshaped, this reports instead of miscompiling.
+            auto emit_test_info_global(const std::vector<llvm::Function *> &wrappers) -> llvm::Constant * {
+                const auto &testing_path = options_.testing_module_path;
+                const auto case_ty = find_resolved_type_by_name(testing_path, "Test_Case");
+                const auto info_ty = find_resolved_type_by_name(testing_path, "Test_Info");
+                if (!case_ty || case_ty->kind != sema::TypeKind::Struct ||
+                    !info_ty || info_ty->kind != sema::TypeKind::Struct) {
+                    report_codegen_error(diag_, {}, "internal error: 'core/testing' does not expose 'Test_Case'/'Test_Info' as structs");
+                    return nullptr;
+                }
+
+                const auto *case_info = sema_program_.struct_at(case_ty->struct_index);
+                if (!case_info || case_info->fields.size() != 3) {
+                    report_codegen_error(diag_, {}, "internal error: 'core/testing''s 'Test_Case' does not have the expected three fields");
+                    return nullptr;
+                }
+
+                std::vector<llvm::Constant *> case_constants;
+                case_constants.reserve(sema_program_.discovered_tests.size());
+                for (size_t i = 0; i < sema_program_.discovered_tests.size(); ++i) {
+                    const auto &test = sema_program_.discovered_tests[i];
+                    case_constants.push_back(build_struct_constant(case_ty->struct_index, {
+                        emit_string_literal(test.module_name),
+                        emit_string_literal(test.function_name),
+                        wrappers[i],
+                    }));
+                }
+
+                auto *cases_slice = emit_constant_slice(
+                    case_constants, size_of(testing_path, *case_ty), align_of(testing_path, *case_ty),
+                    "Test_Case");
+                auto *info_init = build_struct_constant(info_ty->struct_index, {cases_slice});
+                if (!info_init) {
+                    return nullptr;
+                }
+
+                return new llvm::GlobalVariable(
+                    *module_, info_init->getType(), /*isConstant=*/true,
+                    llvm::GlobalValue::PrivateLinkage, info_init, "__mirage_test_info");
+            }
+
+            // '_start' for the 'test' action: the ordinary hosted shape with the call to
+            // 'main' replaced by one to 'core/testing''s '_run_tests'.
+            //
+            // 'main' is deliberately NOT called even when the root module declares one -- it
+            // is compiled like any other function and simply never invoked, which is what
+            // lets an ordinary program be tested without restructuring it.
+            void emit_test_start() {
+                auto *start_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), {}, false);
+                auto *start = llvm::Function::Create(start_ty, llvm::GlobalValue::ExternalLinkage, "_start", *module_);
+                start->setDoesNotReturn();
+
+                auto *entry = llvm::BasicBlock::Create(*context_, "entry", start);
+                builder_.SetInsertPoint(entry);
+
+                // Same kernel-entry stack realignment emit_start needs, and for the same
+                // reason: %rsp is 16-byte aligned on entry here, not the 8 LLVM assumes.
+                // Omitting it makes the harness's own fork() crash in a way that looks like a
+                // failing test.
+                auto *align_ty = llvm::FunctionType::get(llvm::Type::getVoidTy(*context_), {}, false);
+                auto *align_asm = llvm::InlineAsm::get(align_ty, "and $$-16, %rsp",
+                    "~{rsp},~{dirflag},~{fpsr},~{flags}", true);
+                builder_.CreateCall(align_asm);
+
+                // '--noinit' is honored exactly as in build/run mode.
+                if (!options_.noinit && !sema_program_.init_call_order.empty()) {
+                    builder_.CreateCall(functions_.at(FunctionKey{"", "_init"}));
+                }
+
+                const auto wrappers = emit_test_wrappers();
+                // emit_test_wrappers left the builder inside the last wrapper.
+                builder_.SetInsertPoint(&start->back());
+
+                auto *info = emit_test_info_global(wrappers);
+                const auto runner = functions_.find(FunctionKey{options_.testing_module_path, "_run_tests"});
+                if (!info || runner == functions_.end()) {
+                    report_codegen_error(diag_, {}, "internal error: 'core/testing''s '_run_tests' was not declared");
+                    builder_.CreateUnreachable();
+                    return;
+                }
+
+                builder_.CreateCall(runner->second, {info});
+                // '_run_tests' exits the process itself (its exit code IS the run's result,
+                // with no extra layer imposed here). This is the fallback for a build where
+                // it somehow returns anyway -- 'unreachable' alone would be undefined
+                // behaviour rather than a clean stop.
+                emit_process_exit(builder_.getInt32(0));
             }
 
             void emit_start(const sema::FunctionSymbol &main_fn) {

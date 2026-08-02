@@ -89,7 +89,7 @@ CASES = [
         "example_attr_unknown",
         "build",
         False,
-        ["unknown attribute '@frobulate'. Known attributes: no_return, naked, always_inline, section, init, no_discard, export, callconv, cdecl, import."],
+        ["unknown attribute '@frobulate'. Known attributes: no_return, naked, always_inline, section, init, no_discard, export, callconv, cdecl, import, test."],
         [],
     ),
     (

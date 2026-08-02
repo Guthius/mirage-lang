@@ -1,0 +1,157 @@
+// tests/mir/traits — impl blocks, methods, traits, dynamic dispatch, trait composition.
+// See tests/mir/core for what this tree is.
+
+pub type Check = enum(i32) { Failed = 1 }
+
+fn expect(condition: bool) -> ?error(Check) {
+    if !condition {
+        return .Failed
+    }
+    return_ok
+}
+
+fn expect_eq(actual: i64, expected: i64) -> ?error(Check) {
+    if actual != expected {
+        return .Failed
+    }
+    return_ok
+}
+
+pub type Counter = struct {
+    value: i64
+}
+
+impl Counter {
+    pub fn get(self) -> i64 {
+        return self.value
+    }
+
+    pub fn bump(mut self, by: i64) {
+        self.value = self.value + by
+    }
+}
+
+@test
+fn test_methods_read_and_mutate() -> error(Check) {
+    mut c: Counter = default
+    try expect_eq(c.get(), 0)
+    c.bump(5)
+    c.bump(3)
+    try expect_eq(c.get(), 8)
+    return_ok
+}
+
+pub type Named = trait {
+    fn name(self) -> []u8
+}
+
+pub type Sized_Thing = trait {
+    fn area(self) -> i64
+}
+
+pub type Square = struct {
+    side: i64
+}
+
+impl Named for Square {
+    fn name(self) -> []u8 {
+        return "square"
+    }
+}
+
+impl Sized_Thing for Square {
+    fn area(self) -> i64 {
+        return self.side * self.side
+    }
+}
+
+pub type Circle = struct {
+    radius: i64
+}
+
+impl Named for Circle {
+    fn name(self) -> []u8 {
+        return "circle"
+    }
+}
+
+impl Sized_Thing for Circle {
+    fn area(self) -> i64 {
+        // Deliberately not pi: the point is dispatch, not geometry.
+        return self.radius * self.radius * 3
+    }
+}
+
+fn area_through_handle(s: Sized_Thing) -> i64 {
+    return s.area()
+}
+
+fn first_byte_of_name(n: Named) -> u8 {
+    const name := n.name()
+    return name[0]
+}
+
+@test
+fn test_dynamic_dispatch() -> error(Check) {
+    mut sq: Square = default
+    sq.side = 4
+    mut ci: Circle = default
+    ci.radius = 2
+
+    try expect_eq(area_through_handle(&sq), 16)
+    try expect_eq(area_through_handle(&ci), 12)
+
+    // Two different concrete types reached through one handle type; the vtable is what
+    // makes the second call land somewhere else.
+    try expect_eq(cast(first_byte_of_name(&sq), i64), cast('s', i64))
+    try expect_eq(cast(first_byte_of_name(&ci), i64), cast('c', i64))
+    return_ok
+}
+
+pub type Shape_Trait = trait(Named, Sized_Thing)
+
+// A composed trait is satisfied by its OWN impl block, which supplies every method of every
+// component -- implementing the components separately does not add up to the composition.
+pub type Tile = struct {
+    size: i64
+}
+
+impl Shape_Trait for Tile {
+    fn name(self) -> []u8 {
+        return "tile"
+    }
+    fn area(self) -> i64 {
+        return self.size * self.size
+    }
+}
+
+fn describe(s: Shape_Trait) -> i64 {
+    // Both methods reached through one composed handle.
+    const n := s.name()
+    return s.area() + cast(len(n), i64)
+}
+
+@test
+fn test_trait_composition() -> error(Check) {
+    mut tile: Tile = default
+    tile.size = 3
+    // 9 + len("tile") == 9 + 4
+    try expect_eq(describe(&tile), 13)
+    return_ok
+}
+
+@test
+fn test_composed_handle_narrows_to_component() -> error(Check) {
+    mut tile: Tile = default
+    tile.size = 5
+    const composed: Shape_Trait = &tile
+    // Narrowing to a component trait goes through the sub-vtable back-pointer the composed
+    // vtable carries, which is a distinct code path from an ordinary method call.
+    const only_sized: Sized_Thing = composed
+    try expect_eq(only_sized.area(), 25)
+
+    const only_named: Named = composed
+    const n := only_named.name()
+    try expect_eq(cast(len(n), i64), 4)
+    return_ok
+}
