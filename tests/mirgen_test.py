@@ -409,6 +409,33 @@ def case_try_propagation():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_trait_dispatch():
+    """A trait handle is {data, vtable}; a '.method()' call through one is an indirect
+    call through the vtable slot at the method's order index. Vtables are constant
+    globals whose entries are RELOCATIONS -- no address exists until layout."""
+    r = emit_mir("pub type Animal = trait {\n  fn speak(self) -> i32\n  fn legs(self) -> i32\n}\n"
+                 "type Dog = struct { volume: i32 }\n"
+                 "impl Animal for Dog {\n"
+                 "  fn speak(self) -> i32 { return self.volume * 2 }\n"
+                 "  fn legs(self) -> i32 { return 4 }\n}\n"
+                 "fn describe(a: Animal) -> i32 {\n"
+                 "  if a == nil { return -1 }\n  return a.speak() + a.legs()\n}\n"
+                 "pub fn main() -> i32 {\n"
+                 "  mut d: Dog = { .volume = 10 }\n  const da: Animal = &d\n"
+                 "  return describe(da)\n}\n")
+    check(r.returncode == 0, f"trait dispatch lowers ({r.stderr.strip()[:140]})")
+    check("const @.vtable.0" in r.stdout, "the impl gets a constant vtable global")
+    check(re.search(r"\+0 -> @\S*Dog::Animal::speak", r.stdout) is not None,
+          "whose slot 0 relocates to the first trait method")
+    check(re.search(r"\+8 -> @\S*Dog::Animal::legs", r.stdout) is not None,
+          "and slot 1 to the second, in TraitInfo::methods order")
+    check("call.indirect" in r.stdout, "dispatch is an indirect call")
+    # 'a == nil' compares DATA words: the nil literal is already the null data word,
+    # so no load through null is emitted.
+    check(re.search(r"icmp\.eq %\d+, %\d+", r.stdout) is not None, "nil test compares data words")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_switch_and_conditions():
     r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
                  "pub fn main() -> i32 {\n"
@@ -512,6 +539,7 @@ def main() -> int:
     case_pointer_arithmetic_scales()
     case_slice_array_coercions()
     case_try_propagation()
+    case_trait_dispatch()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()

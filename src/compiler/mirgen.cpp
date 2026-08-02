@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <format>
 #include <functional>
+#include <map>
 #include <optional>
 #include <ranges>
+#include <tuple>
 #include <unordered_map>
 
 namespace mirgen {
@@ -39,8 +41,11 @@ namespace mirgen {
                 declare_globals();
                 declare_functions();
                 declare_methods();
+                declare_trait_methods();
+                declare_vtables();
                 emit_function_bodies();
                 emit_method_bodies();
+                emit_trait_method_bodies();
 
                 // The verifier is the analogue of llvm::verifyModule, which the LLVM path
                 // runs on every compile. Running it here means a lowering bug is reported
@@ -76,6 +81,14 @@ namespace mirgen {
             // function_index_ so a method and a free function of the same name cannot
             // collide, which is the same reason codegen keys them apart.
             std::unordered_map<std::string, uint32_t> method_index_;
+            // (trait_module, trait_name, type_module, type_name) -> the impl's vtable
+            // global, and the six-key variant for synthesized composition sub-vtables --
+            // both mirroring codegen's vtables_/component_vtables_. Ordered maps: global
+            // emission order must be a function of the source, not of hashes.
+            std::map<std::tuple<std::string, std::string, std::string, std::string>, uint32_t> vtable_index_;
+            std::map<std::tuple<std::string, std::string, std::string, std::string, std::string, std::string>, uint32_t>
+                component_vtable_index_;
+            size_t vtable_counter_ = 0;
 
             // Per-function lowering state.
             const std::string *module_path_ = nullptr;
@@ -474,6 +487,149 @@ namespace mirgen {
                             f.has_body = true;
                             result_.module.functions.push_back(std::move(f));
                             method_index_[key(path, k)] = static_cast<uint32_t>(result_.module.functions.size() - 1);
+                        }
+                    }
+                }
+            }
+
+            // Trait-impl methods live ONLY in Program::trait_impls_by_type -- an
+            // 'impl TRAIT for TYPE' block's methods are never entered into
+            // ProgramModule::methods -- so they need their own declare/emit passes,
+            // mirroring codegen's declare_trait_methods/emit_trait_methods. The
+            // method_index_ guard keeps a method that IS also reachable through the module
+            // map from being declared twice under the same symbol.
+            std::vector<std::pair<const sema::TraitImplInfo *, const sema::MethodInfo *>> trait_method_bodies_;
+
+            void declare_trait_methods() {
+                for (const auto &impls : sema_.trait_impls_by_type | std::views::values) {
+                    for (const auto &impl_info : impls) {
+                        for (const auto &info : impl_info.methods | std::views::values) {
+                            if (!info.is_resolved || !info.decl) continue;
+                            const auto k = key(impl_info.impl_module, key_for_method(info));
+                            if (method_index_.contains(k)) continue;
+
+                            mir::Function f;
+                            f.name = info.export_name
+                                ? *info.export_name
+                                : symbol_name(impl_info.impl_module, key_for_method(info));
+                            f.linkage = info.export_name ? mir::Linkage::External : mir::Linkage::Internal;
+                            f.signature = method_signature(info);
+                            f.has_body = true;
+                            result_.module.functions.push_back(std::move(f));
+                            method_index_[k] = static_cast<uint32_t>(result_.module.functions.size() - 1);
+                            trait_method_bodies_.emplace_back(&impl_info, &info);
+                        }
+                    }
+                }
+            }
+
+            void emit_trait_method_bodies() {
+                for (const auto &[impl_info, info] : trait_method_bodies_) {
+                    const auto mod = sema_.modules.find(impl_info->impl_module);
+                    if (mod == sema_.modules.end()) continue;
+                    module_path_ = &mod->first;
+                    module_ = &mod->second;
+                    exprs_ = &mod->second.exprs;
+                    const auto it = method_index_.find(key(impl_info->impl_module, key_for_method(*info)));
+                    if (it != method_index_.end()) {
+                        emit_method_body(it->second, *info);
+                    }
+                }
+                module_path_ = nullptr;
+                module_ = nullptr;
+                exprs_ = nullptr;
+            }
+
+            // Vtable globals, one per 'impl TRAIT for TYPE' plus one synthesized
+            // sub-vtable per composed component (codegen's declare_vtables): an array of
+            // code pointers in TraitInfo::methods order -- that order IS the vtable layout
+            // and is never re-derived -- followed by one back-pointer slot per component
+            // trait, in component_traits order. MIR globals carry every entry as a
+            // relocation, since no address exists until layout; a missing method leaves a
+            // null slot, which only happens when sema already reported the conformance
+            // error.
+            void declare_vtables() {
+                for (const auto &impls : sema_.trait_impls_by_type | std::views::values) {
+                    for (const auto &impl_info : impls) {
+                        const auto *trait_info = sema_.trait_at(impl_info.trait_index);
+                        if (!trait_info) continue;
+
+                        struct FamilyMember {
+                            const sema::TraitInfo *info;
+                            std::string module_path, name;
+                            int trait_index;
+                            uint32_t global_index = 0;
+                        };
+                        std::vector<FamilyMember> family;
+                        family.push_back({trait_info, impl_info.trait_module, impl_info.trait_name,
+                                           impl_info.trait_index});
+                        for (const auto &c : trait_info->component_traits) {
+                            const auto *c_info = sema_.trait_at(c.trait_index);
+                            if (!c_info) continue;
+                            family.push_back({c_info, c.module_path, c.name, c.trait_index});
+                        }
+
+                        // Pass 1: create every family member's global first, so Pass 2 can
+                        // freely reference any other member's address.
+                        for (auto &fm : family) {
+                            const auto slots = static_cast<uint32_t>(
+                                fm.info->methods.size() + fm.info->component_traits.size());
+                            mir::Global g;
+                            g.name = std::format(".vtable.{}", vtable_counter_++);
+                            g.linkage = mir::Linkage::Internal;
+                            g.is_constant = true;
+                            g.size = std::max(1u, slots * pointer_bytes());
+                            g.align = pointer_bytes();
+                            g.init.assign(g.size, 0);
+                            result_.module.globals.push_back(std::move(g));
+                            fm.global_index = static_cast<uint32_t>(result_.module.globals.size() - 1);
+
+                            if (fm.trait_index == impl_info.trait_index) {
+                                vtable_index_[{impl_info.trait_module, impl_info.trait_name,
+                                                impl_info.type_module, impl_info.type_name}] = fm.global_index;
+                            } else {
+                                component_vtable_index_[{impl_info.trait_module, impl_info.trait_name,
+                                                          fm.module_path, fm.name,
+                                                          impl_info.type_module, impl_info.type_name}] = fm.global_index;
+                            }
+                        }
+
+                        // Pass 2: the entries, as relocations.
+                        for (const auto &fm : family) {
+                            auto &g = result_.module.globals[fm.global_index];
+                            uint32_t offset = 0;
+                            for (const auto &trait_method : fm.info->methods) {
+                                if (const auto method_it = impl_info.methods.find(trait_method.name);
+                                    method_it != impl_info.methods.end()) {
+                                    if (const auto fn_it = method_index_.find(
+                                            key(impl_info.impl_module, key_for_method(method_it->second)));
+                                        fn_it != method_index_.end()) {
+                                        g.relocations.push_back({.kind = mir::Relocation::Kind::FunctionAddr,
+                                                                  .offset = offset, .target = fn_it->second});
+                                    }
+                                }
+                                offset += pointer_bytes();
+                            }
+                            for (const auto &c : fm.info->component_traits) {
+                                uint32_t sub = UINT32_MAX;
+                                if (c.trait_index == impl_info.trait_index) {
+                                    if (const auto it = vtable_index_.find({impl_info.trait_module, impl_info.trait_name,
+                                                                             impl_info.type_module, impl_info.type_name});
+                                        it != vtable_index_.end()) {
+                                        sub = it->second;
+                                    }
+                                } else if (const auto it = component_vtable_index_.find(
+                                               {impl_info.trait_module, impl_info.trait_name, c.module_path, c.name,
+                                                impl_info.type_module, impl_info.type_name});
+                                           it != component_vtable_index_.end()) {
+                                    sub = it->second;
+                                }
+                                if (sub != UINT32_MAX) {
+                                    g.relocations.push_back({.kind = mir::Relocation::Kind::GlobalAddr,
+                                                              .offset = offset, .target = sub});
+                                }
+                                offset += pointer_bytes();
+                            }
                         }
                     }
                 }
@@ -2145,13 +2301,89 @@ namespace mirgen {
             auto emit_expr(mir::Builder &b, const ast::Expr &expr) -> mir::ValueId {
                 const auto natural = emit_expr_natural(b, expr);
                 if (natural == mir::NO_VALUE || !exprs_) return natural;
-                // An implicit tagged-union coercion sema recorded for THIS expression: the
-                // context expected the union, so the natural value is wrapped into a fresh
-                // blob. Applied at the one funnel every context goes through, rather than
-                // re-implemented per context the way codegen's emit_value_as does.
-                const auto it = exprs_->expr_variant_coercions.find(sema::get_expr_key(expr));
-                if (it == exprs_->expr_variant_coercions.end()) return natural;
-                return emit_variant_coercion(b, natural, expr, it->second);
+                // Implicit coercions sema recorded for THIS expression -- tagged-union
+                // wrapping, pointer-to-trait-handle, handle-to-handle narrowing. Applied at
+                // the one funnel every context goes through, rather than re-implemented per
+                // context the way codegen's emit_value_as does.
+                const auto expr_key = sema::get_expr_key(expr);
+                if (const auto it = exprs_->expr_variant_coercions.find(expr_key);
+                    it != exprs_->expr_variant_coercions.end()) {
+                    return emit_variant_coercion(b, natural, expr, it->second);
+                }
+                if (const auto it = exprs_->expr_trait_coercions.find(expr_key);
+                    it != exprs_->expr_trait_coercions.end()) {
+                    return emit_trait_coercion(b, natural, expr, it->second);
+                }
+                if (const auto it = exprs_->expr_trait_handle_coercions.find(expr_key);
+                    it != exprs_->expr_trait_handle_coercions.end()) {
+                    return emit_trait_handle_coercion(b, natural, it->second);
+                }
+                return natural;
+            }
+
+            // A two-word {data, vtable} trait handle built in a fresh slot; an aggregate,
+            // so its value is the slot's address.
+            auto build_trait_handle(mir::Builder &b, const mir::ValueId data, const mir::ValueId vtable) -> mir::ValueId {
+                const auto slot = b.add_slot(pointer_bytes() * 2, pointer_bytes(), "handle");
+                const auto base = b.slot_addr(slot);
+                b.store(base, data);
+                b.store(b.ptr_add_const(base, pointer_bytes()), vtable);
+                return base;
+            }
+
+            // '*T -> Trait' (sema::TraitCoercion): word 0 is the source pointer as it is,
+            // word 1 the impl's vtable global -- the direct one, or the synthesized
+            // sub-vtable when the coercion resolved through a composing trait.
+            auto emit_trait_coercion(mir::Builder &b, const mir::ValueId data, const ast::Expr &expr,
+                                      const sema::TraitCoercion &tc) -> mir::ValueId {
+                const auto loc = sema::get_expr_location(expr);
+                const auto from = expr_type(expr);
+                if (from.kind != sema::TypeKind::Pointer) {
+                    unsupported("a trait coercion of this operand", loc);
+                    return mir::NO_VALUE;
+                }
+                const auto *pointee = sema_.pointee_at(from.pointee_index);
+                if (!pointee) {
+                    unsupported("a trait coercion of this operand", loc);
+                    return mir::NO_VALUE;
+                }
+                const auto [pointee_module, pointee_name] = sema::find_type_module_and_name(*pointee, sema_);
+                const sema::ResolvedType trait_ty{.kind = sema::TypeKind::Trait, .trait_index = tc.trait_index};
+                const auto [trait_module, trait_name] = sema::find_type_module_and_name(trait_ty, sema_);
+
+                uint32_t vtable = UINT32_MAX;
+                if (tc.provider_trait_index == tc.trait_index) {
+                    if (const auto it = vtable_index_.find({trait_module, trait_name, pointee_module, pointee_name});
+                        it != vtable_index_.end()) {
+                        vtable = it->second;
+                    }
+                } else {
+                    const sema::ResolvedType provider_ty{.kind = sema::TypeKind::Trait,
+                                                          .trait_index = tc.provider_trait_index};
+                    const auto [provider_module, provider_name] = sema::find_type_module_and_name(provider_ty, sema_);
+                    if (const auto it = component_vtable_index_.find(
+                            {provider_module, provider_name, trait_module, trait_name, pointee_module, pointee_name});
+                        it != component_vtable_index_.end()) {
+                        vtable = it->second;
+                    }
+                }
+                if (vtable == UINT32_MAX) {
+                    unsupported("a trait coercion without a vtable", loc);
+                    return mir::NO_VALUE;
+                }
+                return build_trait_handle(b, data, b.global_addr(vtable));
+            }
+
+            // Handle-to-handle composed-trait narrowing (sema::TraitHandleCoercion): the
+            // data word passes through; the new vtable is loaded from the source vtable's
+            // pre-computed trailing slot. Zero runtime checks.
+            auto emit_trait_handle_coercion(mir::Builder &b, const mir::ValueId handle,
+                                             const sema::TraitHandleCoercion &thc) -> mir::ValueId {
+                const auto data = b.load(mir::Ty::Ptr, handle);
+                const auto vtable = b.load(mir::Ty::Ptr, b.ptr_add_const(handle, pointer_bytes()));
+                const auto sub = b.load(mir::Ty::Ptr,
+                    b.ptr_add_const(vtable, static_cast<int64_t>(thc.slot_index) * pointer_bytes()));
+                return build_trait_handle(b, data, sub);
             }
 
             // Materializes a sema::VariantCoercion over an already-emitted value: tag at 0,
@@ -2381,6 +2613,23 @@ namespace mirgen {
                     return emit_pointer_offset(b, rhs, lhs, rhs_type, lhs_type, false);
                 }
 
+                // Trait-handle comparison ('h == nil', 'h != other'): a handle is a
+                // {data, vtable} aggregate, so the DATA words are compared -- object
+                // identity, and a nil handle's data word is null. Comparing the vtable
+                // word instead would falsely equate two objects of the same concrete type.
+                if ((bin.op == Bop::Equal || bin.op == Bop::NotEqual) &&
+                    (lhs_type.kind == sema::TypeKind::Trait || rhs_type.kind == sema::TypeKind::Trait)) {
+                    const auto data_word = [&](const ast::Expr &operand, const mir::ValueId value,
+                                                const sema::ResolvedType &type) {
+                        // A 'nil' literal is contextually trait-typed, but its emitted value
+                        // IS the null data word already -- loading through it would crash.
+                        if (std::holds_alternative<ast::LiteralNilExpr>(operand)) return value;
+                        return type.kind == sema::TypeKind::Trait ? b.load(mir::Ty::Ptr, value) : value;
+                    };
+                    return b.compare(bin.op == Bop::Equal ? mir::Op::ICmpEq : mir::Op::ICmpNe,
+                                      data_word(bin.lhs, lhs, lhs_type), data_word(bin.rhs, rhs, rhs_type));
+                }
+
                 const auto ty = b.value_type(lhs);
                 const bool is_signed = signed_type(lhs_type);
                 const bool is_float = mir::is_float(ty);
@@ -2528,6 +2777,15 @@ namespace mirgen {
                 if (!module_path_) {
                     unsupported("this call form", call.location);
                     return mir::NO_VALUE;
+                }
+
+                // Dynamic dispatch through a trait handle, decided by sema and keyed by the
+                // call node -- never re-derived from the receiver's shape here.
+                if (exprs_) {
+                    if (const auto it = exprs_->expr_trait_dispatch.find(&call);
+                        it != exprs_->expr_trait_dispatch.end()) {
+                        return emit_trait_dispatch(b, call, it->second);
+                    }
                 }
 
                 // Two callee shapes lower here: a bare name in this module, and a
@@ -2773,6 +3031,82 @@ namespace mirgen {
                 // Mirage's '++'/'--' are statements in practice; yielding the NEW value is
                 // the conservative choice and matches what an assignment expression returns.
                 return updated;
+            }
+
+            // A '.method()' call through a dyn-handle receiver: an indirect call through
+            // the handle's vtable slot at method_order_index (codegen's
+            // emit_trait_handle_dispatch). The receiver may be the handle itself or a
+            // '*Trait' -- sema's dispatch decision auto-derefs one pointer level, and in
+            // memory form both spellings emit the SAME value: the blob's address (an
+            // aggregate's value IS its address; a pointer's value is the address it holds).
+            //
+            // A nil-handle call is UB with no runtime check, per spec: the vtable word is
+            // null and the load/call simply crashes.
+            auto emit_trait_dispatch(mir::Builder &b, const ast::CallExpr &call,
+                                      const sema::TraitDispatchInfo &dispatch) -> mir::ValueId {
+                const auto *trait_info = sema_.trait_at(dispatch.trait_index);
+                const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee);
+                if (!trait_info || !member || dispatch.method_order_index < 0 ||
+                    static_cast<size_t>(dispatch.method_order_index) >= trait_info->methods.size()) {
+                    unsupported("a trait-handle method call", call.location);
+                    return mir::NO_VALUE;
+                }
+                if (exprs_ && exprs_->call_dropped_optional_error.contains(&call)) {
+                    unsupported("a call dropping an ignorable error", call.location);
+                    return mir::NO_VALUE;
+                }
+                const auto &trait_method = trait_info->methods[dispatch.method_order_index];
+
+                const auto handle = emit_expr(b, (*member)->object);
+                if (handle == mir::NO_VALUE) return mir::NO_VALUE;
+
+                const auto data = b.load(mir::Ty::Ptr, handle);
+                const auto vtable = b.load(mir::Ty::Ptr, b.ptr_add_const(handle, pointer_bytes()));
+                const auto callee = b.load(mir::Ty::Ptr, b.ptr_add_const(vtable,
+                    static_cast<int64_t>(dispatch.method_order_index) * pointer_bytes()));
+
+                // The signature mirrors method_signature: optional sret, then self, then
+                // the declared parameters.
+                mir::Signature raw;
+                if (returns_via_sret(trait_method.return_types)) {
+                    raw.params.push_back(mir::Ty::Ptr);
+                } else if (!trait_method.return_types.empty()) {
+                    raw.result = scalar_type(trait_method.return_types.front());
+                }
+                raw.params.push_back(mir::Ty::Ptr); // self
+                for (const auto &p : trait_method.params) {
+                    raw.params.push_back(is_scalar(p) ? scalar_type(p) : mir::Ty::Ptr);
+                }
+                const auto signature = result_.module.intern_signature(std::move(raw));
+                const auto &sig = result_.module.signatures[signature];
+
+                std::vector<mir::ValueId> args;
+                mir::ValueId sret_slot = mir::NO_VALUE;
+                if (returns_via_sret(trait_method.return_types)) {
+                    const auto layout = multi_return_layout(trait_method.return_types);
+                    const auto slot = b.add_slot(layout.size, layout.align, "ret");
+                    sret_slot = b.slot_addr(slot);
+                    args.push_back(sret_slot);
+                }
+                args.push_back(data);
+
+                for (size_t i = 0; i < call.args.size(); ++i) {
+                    auto value = emit_expr(b, call.args[i]);
+                    if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                    if (i < trait_method.params.size()) {
+                        value = coerce_arg(b, value, trait_method.params[i], expr_type(call.args[i]));
+                    }
+                    const auto slot = args.size();
+                    args.push_back(slot < sig.params.size()
+                        ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
+                        : value);
+                }
+                if (args.size() != sig.params.size()) {
+                    unsupported("a trait method call with defaulted arguments", call.location);
+                    return mir::NO_VALUE;
+                }
+                const auto result = b.call_indirect(callee, signature, sig.result, args);
+                return sret_slot != mir::NO_VALUE ? sret_slot : result;
             }
 
             // 'receiver.method(args)' on a concrete type. The receiver is passed as a

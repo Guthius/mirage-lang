@@ -174,8 +174,31 @@ Done:
   trait-handle method calls (27), ternaries (23), `type_info_of` (18), `defer` (17),
   `size_of` (13).
 
+- **Stage 2, thirteenth increment** — trait handles end to end. Vtables are constant
+  globals whose entries are `mir::Relocation`s (the machinery they were designed for):
+  one per `impl TRAIT for TYPE` plus one synthesized sub-vtable per composed component,
+  method slots in `TraitInfo::methods` order followed by component back-pointer slots,
+  exactly codegen's `declare_vtables`. Pointer-to-handle coercion, handle-to-handle
+  composition narrowing (a load from the pre-computed trailing slot), dynamic dispatch
+  (`call.indirect` through the vtable slot at `method_order_index`, keyed off sema's
+  `expr_trait_dispatch` record — never re-derived from the receiver's shape), and
+  handle-vs-nil comparison on the data word. Two bugs found on the way, both fixed in
+  their own right: trait-impl methods live ONLY in `trait_impls_by_type` (never in
+  `ProgramModule::methods`), so mirgen had never declared or emitted them — its comment
+  claiming otherwise was wrong; and aggregate parameters were bound by storing the
+  incoming POINTER into an aggregate-sized slot that every reader treats as holding the
+  aggregate itself (separate commit, since it affected every aggregate parameter, not
+  just traits).
+
+  **Coverage: 60 of 271; zero verifier failures.** Cleared: trait-handle method calls
+  27→0.
+
+  Largest remaining blockers: calls into not-yet-declared shapes (28, mostly
+  generics), ternaries (24), `type_info_of` (18), `defer` (17), `size_of` (13),
+  calls dropping an ignorable error (13).
+
   Still entirely absent from stage 2: `defer`, generics (monomorphized instances),
-  inline `asm`, global initializers, trait vtables.
+  inline `asm`, global initializers.
 
 Remaining:
 
