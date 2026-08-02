@@ -90,6 +90,9 @@ namespace mirgen {
             // String literals interned by content: one global per distinct string, matching
             // codegen. Module-scoped, not per function.
             std::unordered_map<std::string, uint32_t> string_globals_;
+            // The hidden sret pointer of the body being emitted, or NO_VALUE when the
+            // return is a plain scalar. Every 'return' of an aggregate writes through it.
+            mir::ValueId sret_ = mir::NO_VALUE;
 
             static auto key(const std::string_view module_path, const std::string_view name) -> std::string {
                 return std::string(module_path) + "\n" + std::string(name);
@@ -219,14 +222,23 @@ namespace mirgen {
                 for (const auto &p : params) {
                     sig.params.push_back(is_scalar(p) ? scalar_type(p) : mir::Ty::Ptr);
                 }
-                if (returns.size() == 1) {
-                    sig.result = is_scalar(returns.front()) ? scalar_type(returns.front()) : mir::Ty::Ptr;
-                } else if (returns.size() > 1) {
-                    // Multi-return lowers to an sret pointer parameter. Recorded as such so
-                    // the signature is honest even before bodies use it.
+                // An aggregate return travels through a hidden leading pointer the CALLER
+                // owns. Returning the address of a callee slot instead would dangle the
+                // moment the frame went away -- the bug this shape exists to prevent.
+                if (returns.size() == 1 && is_scalar(returns.front())) {
+                    sig.result = scalar_type(returns.front());
+                } else if (!returns.empty()) {
                     sig.params.insert(sig.params.begin(), mir::Ty::Ptr);
                 }
                 return result_.module.intern_signature(std::move(sig));
+            }
+
+            // Whether a return list crosses the boundary through a hidden sret pointer: any
+            // aggregate return, and any multi-return. Asked in three places (signature
+            // building, parameter binding, call sites) which must agree exactly.
+            [[nodiscard]] auto returns_via_sret(const std::vector<sema::ResolvedType> &returns) const -> bool {
+                if (returns.empty()) return false;
+                return returns.size() > 1 || !is_scalar(returns.front());
             }
 
             void declare_functions() {
@@ -311,10 +323,9 @@ namespace mirgen {
                 for (const auto &p : info.param_types) {
                     sig.params.push_back(is_scalar(p) ? scalar_type(p) : mir::Ty::Ptr);
                 }
-                if (info.return_types.size() == 1) {
-                    sig.result = is_scalar(info.return_types.front())
-                        ? scalar_type(info.return_types.front()) : mir::Ty::Ptr;
-                } else if (info.return_types.size() > 1) {
+                if (info.return_types.size() == 1 && is_scalar(info.return_types.front())) {
+                    sig.result = scalar_type(info.return_types.front());
+                } else if (!info.return_types.empty()) {
                     sig.params.insert(sig.params.begin(), mir::Ty::Ptr); // sret
                 }
                 return result_.module.intern_signature(std::move(sig));
@@ -369,11 +380,19 @@ namespace mirgen {
                 locals_.clear();
                 local_types_.clear();
                 slots_escaping_.clear();
+                sret_ = mir::NO_VALUE;
 
                 const auto entry = b.create_block("entry");
                 b.set_insert_point(entry);
 
                 const auto &sig = result_.module.signatures[result_.module.functions[fn_index].signature];
+
+                size_t first_param = 0;
+                if (returns_via_sret(info.return_types)) {
+                    sret_ = b.add_block_param(entry, mir::Ty::Ptr);
+                    result_.module.functions[fn_index].params.push_back(sret_);
+                    first_param = 1;
+                }
 
                 // 'self' arrives as a pointer. It is bound directly to that pointer rather
                 // than spilled: the receiver IS an address, and member access on it goes
@@ -385,8 +404,8 @@ namespace mirgen {
                 locals_["self"] = self_slot;
                 local_types_["self"] = self_pointer_type(info);
 
-                for (size_t i = 0; i < info.param_types.size() && i + 1 < sig.params.size(); ++i) {
-                    const auto value = b.add_block_param(entry, sig.params[i + 1]);
+                for (size_t i = 0; i < info.param_types.size() && i + first_param + 1 < sig.params.size(); ++i) {
+                    const auto value = b.add_block_param(entry, sig.params[i + first_param + 1]);
                     result_.module.functions[fn_index].params.push_back(value);
                     const auto &decl_param = info.decl->params[i];
                     const auto slot = b.add_slot(std::max(1u, size_of(info.param_types[i])),
@@ -452,6 +471,7 @@ namespace mirgen {
                 locals_.clear();
                 local_types_.clear();
                 slots_escaping_.clear();
+                sret_ = mir::NO_VALUE;
 
                 const auto entry = b.create_block("entry");
                 b.set_insert_point(entry);
@@ -460,8 +480,16 @@ namespace mirgen {
                 // immediately spilled to slots, matching the memory form the front end
                 // emits. promote_slots undoes this for the ones that never escape.
                 const auto &sig = result_.module.signatures[result_.module.functions[fn_index].signature];
-                for (size_t i = 0; i < fn.params.size() && i < sig.params.size(); ++i) {
-                    const auto param_value = b.add_block_param(entry, sig.params[i]);
+
+                size_t first_param = 0;
+                if (returns_via_sret(fn.return_types)) {
+                    sret_ = b.add_block_param(entry, mir::Ty::Ptr);
+                    result_.module.functions[fn_index].params.push_back(sret_);
+                    first_param = 1;
+                }
+
+                for (size_t i = 0; i < fn.params.size() && i + first_param < sig.params.size(); ++i) {
+                    const auto param_value = b.add_block_param(entry, sig.params[i + first_param]);
                     result_.module.functions[fn_index].params.push_back(param_value);
 
                     const auto &decl_param = fn.decl->params[i];
@@ -523,6 +551,12 @@ namespace mirgen {
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhileStmt>>) {
                         emit_while(b, *v, returns);
+
+                    } else if constexpr (std::is_same_v<V, ast::ReturnOkStmt>) {
+                        emit_return_ok(b, v, returns);
+
+                    } else if constexpr (std::is_same_v<V, ast::ReturnErrStmt>) {
+                        emit_return_err(b, v, returns);
 
                     } else {
                         unsupported(stmt_kind_name<V>(), stmt_location(stmt));
@@ -612,17 +646,106 @@ namespace mirgen {
                     b.unreachable();
                     return;
                 }
-                if (!returns.empty() && !is_scalar(returns.front())) {
-                    unsupported("returning an aggregate by value", stmt.location);
-                    b.unreachable();
-                    return;
-                }
+
                 const auto value = emit_expr(b, stmt.return_values.front());
                 if (value == mir::NO_VALUE) {
                     b.unreachable();
                     return;
                 }
+
+                // An aggregate is copied through the caller's sret pointer and the function
+                // returns void; only a scalar is returned by value.
+                if (returns_via_sret(returns)) {
+                    if (sret_ == mir::NO_VALUE) {
+                        unsupported("returning an aggregate from this function", stmt.location);
+                        b.unreachable();
+                        return;
+                    }
+                    b.mem_copy(sret_, value, b.const_int(usize_ty(), size_of(returns.front())));
+                    b.ret();
+                    return;
+                }
                 b.ret(coerce(b, value, returns.front(), expr_type(stmt.return_values.front())));
+            }
+
+            // 'error(...)' is a tagged union laid out as a byte blob: a u32 tag at offset 0
+            // (0 = Ok, non-zero = a Failed variant) with the payload at
+            // UnionInfo::payload_offset. Both halves below build it in the caller's sret
+            // slot, since an error union is an aggregate and travels that way.
+
+            // 'return_ok' / 'return_ok v'. Ok is tag 0 and carries no payload, so the zero
+            // fill IS the value -- nothing else needs writing.
+            void emit_return_ok(mir::Builder &b, const ast::ReturnOkStmt &stmt,
+                                 const std::vector<sema::ResolvedType> &returns) {
+                if (returns.empty()) {
+                    unsupported("'return_ok' in a function with no error return", stmt.location);
+                    b.unreachable();
+                    return;
+                }
+                // 'return_ok a, b' fills leading value slots as well; that is multi-return,
+                // which needs its own lowering.
+                if (!stmt.return_values.empty() || returns.size() > 1) {
+                    unsupported("'return_ok' with value slots (multi-return)", stmt.location);
+                    b.unreachable();
+                    return;
+                }
+                if (sret_ == mir::NO_VALUE) {
+                    unsupported("'return_ok' from this function", stmt.location);
+                    b.unreachable();
+                    return;
+                }
+                b.mem_set(sret_, b.const_int(mir::Ty::I8, 0),
+                           b.const_int(usize_ty(), size_of(returns.front())));
+                b.ret();
+            }
+
+            // 'return_err .Variant'. Zero the blob, write the Failed tag, then the payload.
+            void emit_return_err(mir::Builder &b, const ast::ReturnErrStmt &stmt,
+                                  const std::vector<sema::ResolvedType> &returns) {
+                if (returns.empty() || returns.size() > 1 || sret_ == mir::NO_VALUE) {
+                    unsupported("'return_err' from this function", stmt.location);
+                    b.unreachable();
+                    return;
+                }
+                const auto &error_type = returns.front();
+                const auto *info = error_type.kind == sema::TypeKind::Union
+                    ? sema_.union_at(error_type.union_index) : nullptr;
+                if (!info || !info->is_error_union) {
+                    unsupported("'return_err' on this return type", stmt.location);
+                    b.unreachable();
+                    return;
+                }
+
+                b.mem_set(sret_, b.const_int(mir::Ty::I8, 0),
+                           b.const_int(usize_ty(), size_of(error_type)));
+
+                // The Failed variant's tag. Located by name rather than assumed to be 1, so
+                // a change to how the wrapper is synthesized cannot silently invert the
+                // Ok/Failed sense.
+                int64_t failed_tag = 1;
+                for (const auto &variant : info->variants) {
+                    if (variant.name != "Ok") {
+                        failed_tag = variant.tag_value;
+                        break;
+                    }
+                }
+                b.store(sret_, b.const_int(mir::Ty::I32, failed_tag));
+
+                // The error member itself, at the payload offset. A scalar member (the
+                // common 'enum(i32)' case) is stored; anything wider is copied.
+                const auto member_type = expr_type(stmt.error_value);
+                const auto value = emit_expr(b, stmt.error_value);
+                if (value == mir::NO_VALUE) {
+                    b.ret();
+                    return;
+                }
+                const auto payload = b.ptr_add_const(sret_, info->payload_offset);
+                if (is_scalar(member_type)) {
+                    b.store(payload, value);
+                } else {
+                    b.mem_copy(payload, value, b.const_int(usize_ty(), size_of(member_type)));
+                }
+                b.ret();
             }
 
             void emit_if(mir::Builder &b, const ast::IfStmt &stmt, const std::vector<sema::ResolvedType> &returns) {
@@ -934,6 +1057,9 @@ namespace mirgen {
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                         return emit_cast(b, *v, expr);
 
+                    } else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
+                        return emit_dot_ident(b, v, expr);
+
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
                         return emit_braced_initializer(b, *v, expr);
 
@@ -1175,20 +1301,38 @@ namespace mirgen {
                 }
 
                 const auto &sig = result_.module.signatures[result_.module.functions[it->second].signature];
+
+                // An aggregate result comes back through a slot the CALLER owns and passes
+                // in; the call's value is that slot's address. Must agree with
+                // returns_via_sret, which decided the signature.
                 std::vector<mir::ValueId> args;
-                args.reserve(call.args.size());
+                mir::ValueId sret_slot = mir::NO_VALUE;
+                const auto result_type = expr_type(expr);
+                const bool via_sret = sig.result == mir::Ty::Void && !sig.params.empty() &&
+                                       result_type.kind != sema::TypeKind::Void &&
+                                       result_type.kind != sema::TypeKind::Invalid &&
+                                       !is_scalar(result_type);
+                if (via_sret) {
+                    const auto slot = b.add_slot(std::max(1u, size_of(result_type)),
+                                                  std::max(1u, align_of(result_type)), "ret");
+                    sret_slot = b.slot_addr(slot);
+                    args.push_back(sret_slot);
+                }
+
                 for (size_t i = 0; i < call.args.size(); ++i) {
                     const auto value = emit_expr(b, call.args[i]);
                     if (value == mir::NO_VALUE) return mir::NO_VALUE;
-                    args.push_back(i < sig.params.size()
-                        ? coerce_to(b, value, sig.params[i], signed_type(expr_type(call.args[i])))
+                    const auto slot = args.size();
+                    args.push_back(slot < sig.params.size()
+                        ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
                         : value);
                 }
                 if (!sig.is_variadic && args.size() != sig.params.size()) {
                     unsupported("a call with defaulted arguments", call.location);
                     return mir::NO_VALUE;
                 }
-                return b.call(it->second, sig.result, args);
+                const auto result = b.call(it->second, sig.result, args);
+                return via_sret ? sret_slot : result;
             }
 
             // Reads through an lvalue. An aggregate has no MIR value form, so its "value" IS
@@ -1398,11 +1542,22 @@ namespace mirgen {
                 }
 
                 const auto &sig = result_.module.signatures[result_.module.functions[it->second].signature];
-                std::vector<mir::ValueId> args{self};
+
+                std::vector<mir::ValueId> args;
+                mir::ValueId sret_slot = mir::NO_VALUE;
+                if (returns_via_sret(info->return_types)) {
+                    const auto &ret_type = info->return_types.front();
+                    const auto slot = b.add_slot(std::max(1u, size_of(ret_type)),
+                                                  std::max(1u, align_of(ret_type)), "ret");
+                    sret_slot = b.slot_addr(slot);
+                    args.push_back(sret_slot);
+                }
+                args.push_back(self);
+
                 for (size_t i = 0; i < call.args.size(); ++i) {
                     const auto value = emit_expr(b, call.args[i]);
                     if (value == mir::NO_VALUE) return mir::NO_VALUE;
-                    const auto slot = i + 1;
+                    const auto slot = args.size();
                     args.push_back(slot < sig.params.size()
                         ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
                         : value);
@@ -1411,7 +1566,8 @@ namespace mirgen {
                     unsupported("a method call with defaulted arguments", call.location);
                     return mir::NO_VALUE;
                 }
-                return b.call(it->second, sig.result, args);
+                const auto result = b.call(it->second, sig.result, args);
+                return sret_slot != mir::NO_VALUE ? sret_slot : result;
             }
 
             // '{.x = 1, .y = 2}' and '{1, 2, 3}'. Built into a fresh slot, because an
@@ -1488,6 +1644,26 @@ namespace mirgen {
                     b.mem_copy(address, emitted, b.const_int(usize_ty(), size_of(type)));
                 }
                 return true;
+            }
+
+            // '.Variant' -- a contextual reference whose type comes from the surrounding
+            // expectation. For an enum (including a bitset's member enum) it is a compile-time
+            // constant: the variant's declared value, in the enum's own storage type.
+            auto emit_dot_ident(mir::Builder &b, const ast::DotIdentExpr &dot, const ast::Expr &expr) -> mir::ValueId {
+                const auto type = expr_type(expr);
+                if (type.kind == sema::TypeKind::Enum) {
+                    if (const auto *info = sema_.enum_at(type.enum_index)) {
+                        for (const auto &field : info->fields) {
+                            if (field.name == dot.name) {
+                                return b.const_int(scalar_type(type), field.value);
+                            }
+                        }
+                    }
+                }
+                // A tagged-union variant reference is a value in a byte blob, not a scalar;
+                // it belongs with the tagged-union work.
+                unsupported(std::format("a '.{}' reference of this type", dot.name), dot.location);
+                return mir::NO_VALUE;
             }
 
             // ---- coercion ----------------------------------------------------------

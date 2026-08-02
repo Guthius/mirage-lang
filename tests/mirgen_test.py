@@ -237,6 +237,36 @@ def case_braced_initializers():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_aggregate_returns_use_sret():
+    """An aggregate return travels through a hidden pointer the CALLER owns.
+
+    Returning the address of a callee slot instead would dangle the moment the frame went
+    away, so the sret shape is a correctness requirement, not an optimization.
+    """
+    r = emit_mir("pub type Point = struct { x: i32  y: i32 }\n"
+                 "pub fn make(a: i32, b: i32) -> Point {\n"
+                 "  mut p: Point = { .x = a, .y = b }\n  return p\n}\n"
+                 "pub fn main() -> i32 {\n  mut q: Point = make(3, 4)\n  return q.x + q.y }\n")
+    check(r.returncode == 0, f"an aggregate return lowers ({r.stderr.strip()[:140]})")
+    check("@__mir_" in r.stdout and "make(%0: ptr" in r.stdout,
+          "the callee takes a leading sret pointer")
+    check("mem.copy" in r.stdout, "and writes its result through it")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
+def case_error_returns():
+    """'error(...)' is a tagged blob: u32 tag at offset 0, payload at payload_offset."""
+    r = emit_mir("pub type E = enum(i32) { Bad = 1  Worse = 2 }\n"
+                 "fn check(v: i32) -> error(E) {\n"
+                 "  if v < 0 { return_err .Bad }\n  return_ok\n}\n"
+                 "pub fn main() -> i32 {\n  const e := check(1)\n  return 0 }\n")
+    check(r.returncode == 0, f"'return_ok'/'return_err' lower ({r.stderr.strip()[:140]})")
+    # Ok carries no payload, so the zero fill IS the value.
+    check(r.stdout.count("mem.set") >= 2, "both paths zero the blob first")
+    check("store" in r.stdout, "and the failing path writes a tag")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_mir_goes_to_stdout():
     """'--emit-mir > out.mir' has to produce a valid file, as '--emit-ir' does."""
     r = emit_mir("pub fn main() -> i32 { return 0 }\n")
@@ -261,6 +291,8 @@ def main() -> int:
     case_cross_module_calls()
     case_methods()
     case_braced_initializers()
+    case_aggregate_returns_use_sret()
+    case_error_returns()
     case_unsupported_is_reported_not_skipped()
     case_mir_goes_to_stdout()
 
