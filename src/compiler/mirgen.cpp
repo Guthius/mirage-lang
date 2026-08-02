@@ -95,6 +95,9 @@ namespace mirgen {
             // The hidden sret pointer of the body being emitted, or NO_VALUE when the
             // return is a plain scalar. Every 'return' of an aggregate writes through it.
             mir::ValueId sret_ = mir::NO_VALUE;
+            // The return list of the body being emitted. 'try' needs it from expression
+            // position, where emit_stmt's parameter does not reach.
+            const std::vector<sema::ResolvedType> *current_returns_ = nullptr;
             // Enclosing loops, innermost last. 'continue' targets the loop's STEP block, not
             // its condition -- targeting the condition would skip the increment and spin.
             struct LoopTargets { mir::BlockId header; mir::BlockId exit; };
@@ -538,7 +541,9 @@ namespace mirgen {
                     local_types_[decl_param.name] = info.param_types[i];
                 }
 
+                current_returns_ = &info.return_types;
                 emit_stmt(b, info.decl->body, info.return_types);
+                current_returns_ = nullptr;
 
                 for (const auto slot : slots_escaping_) {
                     b.mark_slot_escaping(slot);
@@ -630,7 +635,9 @@ namespace mirgen {
                     local_types_[decl_param.name] = fn.params[i];
                 }
 
+                current_returns_ = &fn.return_types;
                 emit_stmt(b, fn.decl->body, fn.return_types);
+                current_returns_ = nullptr;
 
                 for (const auto slot : slots_escaping_) {
                     b.mark_slot_escaping(slot);
@@ -859,14 +866,22 @@ namespace mirgen {
                 b.mem_copy(dest, source, b.const_int(usize, std::max(1u, size_of(target))));
             }
 
-            // 'const a, b := f()' -- the callee's sret blob is destructured into fresh
-            // locals, one copy per bound name, at the layout offsets. '_' slots are simply
-            // not bound; the blob still holds them. 'try a, b := f()' also branches on the
-            // error slot, which is the 'try' lowering's business and reported until it lands.
+            // 'const a, b := f()' / 'try a, b := f()' -- the callee's sret blob is
+            // destructured into fresh locals, one copy per bound name, at the layout
+            // offsets. '_' slots are simply not bound; the blob still holds them. The 'try'
+            // form first branches on the trailing error slot and propagates it, then binds
+            // only the value slots.
             void emit_var_decl_group(mir::Builder &b, const ast::VarDeclGroupStmt &decl) {
                 const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&decl.init);
+                const ast::TryExpr *tr = nullptr;
                 if (!call) {
-                    unsupported("'try'", decl.location);
+                    if (const auto *t = std::get_if<std::unique_ptr<ast::TryExpr>>(&decl.init)) {
+                        tr = t->get();
+                        call = std::get_if<std::unique_ptr<ast::CallExpr>>(&tr->call);
+                    }
+                }
+                if (!call) {
+                    unsupported("a group declaration of this form", decl.location);
                     return;
                 }
                 if (exprs_ && exprs_->call_dropped_optional_error.contains(call->get())) {
@@ -874,15 +889,27 @@ namespace mirgen {
                     return;
                 }
                 const auto callee_returns = callee_return_types(**call);
-                if (!callee_returns || callee_returns->size() != decl.names.size()) {
+                const size_t bound = tr ? decl.names.size() + 1 : decl.names.size();
+                if (!callee_returns || callee_returns->size() != bound) {
                     unsupported("a group declaration", decl.location);
                     return;
                 }
 
-                const auto blob = emit_expr(b, decl.init);
+                const auto blob = emit_expr(b, tr ? tr->call : decl.init);
                 if (blob == mir::NO_VALUE) return;
 
                 const auto layout = multi_return_layout(*callee_returns);
+                if (tr) {
+                    if (!is_error_union(callee_returns->back())) {
+                        unsupported("'try' on this callee", decl.location);
+                        return;
+                    }
+                    const auto err_addr = layout.offsets.back() == 0
+                        ? blob : b.ptr_add_const(blob, layout.offsets.back());
+                    if (!emit_try_propagation(b, err_addr, callee_returns->back(), decl.location)) {
+                        return;
+                    }
+                }
                 for (size_t i = 0; i < decl.names.size(); ++i) {
                     const auto &name = decl.names[i];
                     if (name.empty() || name == "_") continue;
@@ -1072,6 +1099,187 @@ namespace mirgen {
                 b.ret();
             }
 
+            // The propagate-or-continue skeleton every 'try' form shares (codegen's
+            // emit_try_propagation): branch on the callee error's tag; on failure write the
+            // error into the caller's own LAST return slot -- zeroing the value slots for
+            // determinism, where codegen leaves them undef -- and return; on success fall
+            // through with the insert point in the ok block. False means the propagation
+            // itself cannot be lowered (already reported).
+            auto emit_try_propagation(mir::Builder &b, const mir::ValueId err_addr,
+                                       const sema::ResolvedType &callee_error, const SourceLocation &loc) -> bool {
+                if (!current_returns_ || current_returns_->empty() || sret_ == mir::NO_VALUE ||
+                    !is_error_union(current_returns_->back())) {
+                    unsupported("'try' in this function", loc);
+                    return false;
+                }
+                const auto &caller_error = current_returns_->back();
+                const auto *callee_info = callee_error.kind == sema::TypeKind::Union
+                    ? sema_.union_at(callee_error.union_index) : nullptr;
+                const auto *caller_info = sema_.union_at(caller_error.union_index);
+                if (!callee_info || !caller_info) {
+                    unsupported("'try' on this callee", loc);
+                    return false;
+                }
+                const auto propagate = b.create_block("try.propagate");
+                const auto ok = b.create_block("try.ok");
+                const auto tag = b.load(mir::Ty::I32, err_addr);
+                b.branch(b.compare(mir::Op::ICmpNe, tag, b.const_int(mir::Ty::I32, 0)), propagate, ok);
+
+                b.set_insert_point(propagate);
+                const auto layout = multi_return_layout(*current_returns_);
+                if (layout.offsets.back() > 0) {
+                    b.mem_set(sret_, b.const_int(mir::Ty::I8, 0),
+                               b.const_int(usize_ty(), layout.offsets.back()));
+                }
+                const auto dest = layout.offsets.back() == 0
+                    ? sret_ : b.ptr_add_const(sret_, layout.offsets.back());
+                if (callee_info->error_member_types == caller_info->error_member_types) {
+                    // Identical member lists are byte-identical blobs -- one copy.
+                    b.mem_copy(dest, err_addr, b.const_int(usize_ty(), size_of(caller_error)));
+                } else if (!emit_error_retag(b, dest, caller_error, err_addr, callee_error, loc)) {
+                    b.unreachable();
+                    b.set_insert_point(ok);
+                    return false;
+                }
+                b.ret();
+
+                b.set_insert_point(ok);
+                return true;
+            }
+
+            // Re-tags a FAILED error value of 'callee_error' as one of 'caller_error',
+            // where the callee's member list is a strict subset of the caller's (sema's
+            // error_union_is_subset). Payload bytes for a given member are identical
+            // between any two error unions carrying it -- both wrap it via the one-field
+            // struct convention -- so only the dispatch TAGS differ (codegen's
+            // translate_error_value): a single-member callee re-tags at compile time, a
+            // multi-member callee switches on its inner tag at runtime.
+            auto emit_error_retag(mir::Builder &b, const mir::ValueId dest, const sema::ResolvedType &caller_error,
+                                   const mir::ValueId src, const sema::ResolvedType &callee_error,
+                                   const SourceLocation &loc) -> bool {
+                const auto *callee_info = sema_.union_at(callee_error.union_index);
+                const auto *caller_info = sema_.union_at(caller_error.union_index);
+                if (!callee_info || !caller_info ||
+                    callee_info->variants.size() < 2 || caller_info->variants.size() < 2 ||
+                    caller_info->error_member_types.size() < 2) {
+                    // A single-member caller cannot be a strict superset of anything.
+                    unsupported("an error propagation between different 'error(...)' types", loc);
+                    return false;
+                }
+
+                b.mem_set(dest, b.const_int(mir::Ty::I8, 0), b.const_int(usize_ty(), size_of(caller_error)));
+                const auto &caller_failed = caller_info->variants[1];
+                b.store(dest, b.const_int(mir::Ty::I32, caller_failed.tag_value));
+
+                const auto &callee_failed = callee_info->variants[1];
+                const auto src_payload_at = variant_payload_offset(*callee_info, callee_failed);
+                const auto dest_payload_at = variant_payload_offset(*caller_info, caller_failed);
+                const auto *caller_inner = caller_failed.payload_type.kind == sema::TypeKind::Union
+                    ? sema_.union_at(caller_failed.payload_type.union_index) : nullptr;
+                if (!caller_inner) {
+                    unsupported("an error propagation between different 'error(...)' types", loc);
+                    return false;
+                }
+                const auto dest_inner_tag_addr = dest_payload_at == 0
+                    ? dest : b.ptr_add_const(dest, dest_payload_at);
+
+                // Writes one member: the caller-side inner tag, then the member bytes.
+                const auto write_member = [&](const sema::ResolvedType &member_type,
+                                               const uint32_t src_member_at) -> bool {
+                    const auto found = std::ranges::find(caller_inner->variants, member_type,
+                                                          &sema::TaggedUnionVariant::payload_type);
+                    if (found == caller_inner->variants.end()) return false;
+                    b.store(dest_inner_tag_addr, b.const_int(mir::Ty::I32, found->tag_value));
+                    const auto dest_member_at = dest_payload_at + caller_inner->payload_offset +
+                                                 wrapper_field_offset(found->payload_struct_index);
+                    b.mem_copy(b.ptr_add_const(dest, dest_member_at),
+                                src_member_at == 0 ? src : b.ptr_add_const(src, src_member_at),
+                                b.const_int(usize_ty(), std::max(1u, size_of(member_type))));
+                    return true;
+                };
+
+                if (callee_info->error_member_types.size() == 1) {
+                    // The member type is fixed at compile time; no runtime dispatch.
+                    if (!write_member(callee_failed.payload_type, src_payload_at)) {
+                        unsupported("an error propagation between different 'error(...)' types", loc);
+                        return false;
+                    }
+                    return true;
+                }
+
+                // Multi-member callee: dispatch on its inner tag, one case per POSSIBLE
+                // member (a compile-time-known list).
+                const auto *callee_inner = callee_failed.payload_type.kind == sema::TypeKind::Union
+                    ? sema_.union_at(callee_failed.payload_type.union_index) : nullptr;
+                if (!callee_inner) {
+                    unsupported("an error propagation between different 'error(...)' types", loc);
+                    return false;
+                }
+                const auto src_tag = b.load(mir::Ty::I32, src_payload_at == 0
+                    ? src : b.ptr_add_const(src, src_payload_at));
+
+                const auto merge = b.create_block("retag.merge");
+                // sema fixed the possible tags; anything else cannot occur at runtime.
+                const auto dead = b.create_block("retag.unreachable");
+                std::vector<std::pair<int64_t, mir::BlockId>> cases;
+                std::vector<std::pair<mir::BlockId, const sema::TaggedUnionVariant *>> arms;
+                for (const auto &variant : callee_inner->variants) {
+                    const auto block = b.create_block(std::format("retag.{}", variant.name));
+                    cases.emplace_back(variant.tag_value, block);
+                    arms.emplace_back(block, &variant);
+                }
+                b.switch_on(src_tag, dead, cases);
+                b.set_insert_point(dead);
+                b.unreachable();
+
+                for (const auto &[block, variant] : arms) {
+                    b.set_insert_point(block);
+                    const auto src_member_at = src_payload_at + callee_inner->payload_offset +
+                                                wrapper_field_offset(variant->payload_struct_index);
+                    if (!write_member(variant->payload_type, src_member_at)) {
+                        unsupported("an error propagation between different 'error(...)' types", loc);
+                        return false;
+                    }
+                    b.jump(merge);
+                }
+                b.set_insert_point(merge);
+                return true;
+            }
+
+            // 'try f()' in expression position: call, propagate on failure, and on the ok
+            // path yield the surviving value -- nothing for a bare 'error(...)' callee
+            // (statement position), the first slot otherwise.
+            auto emit_try(mir::Builder &b, const ast::TryExpr &tr, const SourceLocation &loc) -> mir::ValueId {
+                const auto *call = std::get_if<std::unique_ptr<ast::CallExpr>>(&tr.call);
+                if (!call) {
+                    unsupported("'try' on this operand", loc);
+                    return mir::NO_VALUE;
+                }
+                const auto callee_returns = callee_return_types(**call);
+                if (!callee_returns || callee_returns->empty() || !is_error_union(callee_returns->back())) {
+                    unsupported("'try' on this callee", loc);
+                    return mir::NO_VALUE;
+                }
+
+                const auto blob = emit_expr(b, tr.call);
+                if (blob == mir::NO_VALUE) return mir::NO_VALUE;
+
+                const auto layout = multi_return_layout(*callee_returns);
+                const auto err_addr = layout.offsets.back() == 0
+                    ? blob : b.ptr_add_const(blob, layout.offsets.back());
+                if (!emit_try_propagation(b, err_addr, callee_returns->back(), loc)) {
+                    return mir::NO_VALUE;
+                }
+
+                if (callee_returns->size() == 1) {
+                    // Statement position; the value is never consumed, but NO_VALUE means
+                    // "failed and reported", so a throwaway constant stands in.
+                    return b.const_int(mir::Ty::I8, 0);
+                }
+                const auto &value_type = callee_returns->front();
+                return is_scalar(value_type) ? b.load(scalar_type(value_type), blob) : blob;
+            }
+
             // The one-field '{v: T}' wrapper struct convention puts the wrapped value at its
             // single field's sema offset (0 in practice, but read rather than assumed).
             [[nodiscard]] auto wrapper_field_offset(const int struct_index) const -> uint32_t {
@@ -1102,17 +1310,17 @@ namespace mirgen {
                 if (operand_type.kind == sema::TypeKind::Union) {
                     const auto *operand_info = sema_.union_at(operand_type.union_index);
                     if (operand_info && operand_info->is_error_union) {
-                        // Same member list means byte-identical representation ('error(E)'
-                        // vs '?error(E)' included) -- see codegen's
-                        // error_unions_interchangeable for why this is load-bearing.
-                        if (operand_info->error_member_types != info->error_member_types) {
-                            unsupported("an error propagation between different 'error(...)' types", loc);
-                            return false;
-                        }
                         const auto value = emit_expr(b, operand);
                         if (value == mir::NO_VALUE) return false;
-                        b.mem_copy(dest, value, b.const_int(usize_ty(), size_of(operand_type)));
-                        return true;
+                        // Same member list means byte-identical representation ('error(E)'
+                        // vs '?error(E)' included) -- see codegen's
+                        // error_unions_interchangeable for why this is load-bearing. A
+                        // subset union re-tags instead.
+                        if (operand_info->error_member_types == info->error_member_types) {
+                            b.mem_copy(dest, value, b.const_int(usize_ty(), size_of(operand_type)));
+                            return true;
+                        }
+                        return emit_error_retag(b, dest, error_type, value, operand_type, loc);
                     }
                 }
 
@@ -1908,7 +2116,6 @@ namespace mirgen {
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeInfoOfExpr>>) return "'type_info_of'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) return "'len'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) return "a slice expression";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TryExpr>>) return "'try'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) return "a ternary";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) return "a 'when' expression";
                 else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) return "a '.variant' reference";
@@ -2051,6 +2258,9 @@ namespace mirgen {
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) {
                         return emit_match(b, *v, expr);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TryExpr>>) {
+                        return emit_try(b, *v, loc);
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
                         return emit_braced_initializer(b, *v, expr);

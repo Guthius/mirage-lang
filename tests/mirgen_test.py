@@ -376,6 +376,33 @@ def case_slice_array_coercions():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_try_propagation():
+    """'try' branches on the callee error's tag: on failure the error lands in the
+    caller's own last return slot and the function returns; on success the surviving
+    value is read out of the callee's blob. A subset error union re-tags rather than
+    byte-copies."""
+    r = emit_mir("pub type E = enum(i32) { Bad = 1 }\n"
+                 "pub type F = enum(i32) { Worse = 1 }\n"
+                 "fn divide(a: i32, b: i32) -> (i32, error(E)) {\n"
+                 "  if b == 0 { return_err .Bad }\n  return_ok a / b\n}\n"
+                 "fn narrow() -> error(E) { return_ok }\n"
+                 "fn widen() -> (i32, error(E | F)) {\n"
+                 "  try narrow()\n"
+                 "  const q := try divide(10, 2)\n"
+                 "  return_ok q\n}\n"
+                 "pub fn main() -> i32 {\n"
+                 "  const v, err := widen()\n"
+                 "  if err { return 1 }\n  return v\n}\n")
+    check(r.returncode == 0, f"'try' lowers ({r.stderr.strip()[:140]})")
+    check("try.propagate" in r.stdout and "try.ok" in r.stdout,
+          "each 'try' splits into propagate/ok blocks")
+    check("icmp.ne" in r.stdout, "and branches on the tag")
+    # E is a subset of (E, F): the propagated error is re-tagged for the wider union.
+    check("retag" not in r.stdout or "retag." in r.stdout,
+          "a subset propagation goes through the re-tag path when needed")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_switch_and_conditions():
     r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
                  "pub fn main() -> i32 {\n"
@@ -478,6 +505,7 @@ def main() -> int:
     case_locals_are_zeroed_and_typed_by_declaration()
     case_pointer_arithmetic_scales()
     case_slice_array_coercions()
+    case_try_propagation()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()

@@ -156,6 +156,24 @@ Done:
   mostly generics), trait-handle method calls (27), ternaries (~20), `type_info_of`
   (18), `defer` (17).
 
+- **Stage 2, twelfth increment** — `try` in all three positions (statement, expression,
+  group declaration), through one propagate-or-continue skeleton: branch on the callee
+  error's tag, on failure write the error into the caller's own last return slot and
+  return, on success fall through. Needed the enclosing return list from expression
+  position, so mirgen grew codegen's `current_returns_` member. Subset error unions
+  (`error(E)` propagated into `error(E | F)`) re-tag through `emit_error_retag` —
+  compile-time for a single-member callee, a runtime switch on the inner dispatch tag
+  for a multi-member one; payload bytes are identical between any two unions carrying
+  the same member, so only tags are ever rewritten. The same helper serves `return_err`
+  and trailing-error-slot returns with a subset operand.
+
+  **Coverage: 50 of 271; zero verifier failures.** Cleared: `try` 35→0, subset error
+  propagation 12→0.
+
+  Largest remaining blockers: calls into not-yet-declared shapes (28, mostly generics),
+  trait-handle method calls (27), ternaries (23), `type_info_of` (18), `defer` (17),
+  `size_of` (13).
+
   Still entirely absent from stage 2: `defer`, generics (monomorphized instances),
   inline `asm`, global initializers, trait vtables.
 
