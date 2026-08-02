@@ -130,6 +130,32 @@ Done:
   including the group-declaration form), trait-handle method calls (27), ternaries (20),
   `type_info_of` (18), `defer` (17).
 
+- **Stage 2, eleventh increment** — tagged unions end to end: constructors
+  (`.Variant{...}`, payload-free `.Variant` / `Type.Variant`, and sema's implicit
+  `VariantCoercion` applied at the one emit_expr funnel), and `switch`/`match` dispatch
+  through a shared `emit_arm_dispatch` skeleton mirroring codegen's — tag switch on a
+  fresh copy of the operand, payload captures by value and by reference, the transparent
+  error-value unwrap, `match` results merging through a block parameter (scalar) or a
+  result slot (aggregate).
+
+  The wider coverage exposed four latent lowering bugs, all fixed with the coverage that
+  found them: a declaration with an explicit type but no initializer fell back to `i64`
+  (a `mut out: [20]u8` local was an 8-byte scalar); uninitialized locals were not
+  zeroed (codegen's `emit_default_value` semantics — `undefined` is now the explicit
+  opt-out); pointer ± integer emitted an integer `add` on a `ptr` operand instead of
+  scaled address arithmetic; and the array↔slice representation changes (`out = s`
+  copy-and-zero-fill, array→slice headers, slice→pointer data words at call arguments)
+  were blind byte copies. Aggregate stores now funnel through one coercion-aware
+  `store_aggregate_value`; assignment targets resolve global symbols' types.
+
+  **Coverage: 48 of 271 corpus modules lower fully; zero verifier failures across the
+  corpus.** Cleared: tagged-union `switch` 41→0, `match` 41→0, tagged-variant
+  constructors 16→0, `undefined` 14→0.
+
+  Largest remaining blockers: `try` (35), calls into not-yet-declared shapes (29,
+  mostly generics), trait-handle method calls (27), ternaries (~20), `type_info_of`
+  (18), `defer` (17).
+
   Still entirely absent from stage 2: `defer`, generics (monomorphized instances),
   inline `asm`, global initializers, trait vtables.
 

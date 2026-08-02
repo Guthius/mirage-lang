@@ -301,6 +301,81 @@ def case_multi_return():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_tagged_unions():
+    """A tagged union is a blob: u32 tag at 0, payload at payload_offset. switch/match
+    dispatch on the tag; captures bind the payload -- by value as a copy, by reference
+    as a pointer INTO the dispatch's own copy of the operand."""
+    r = emit_mir("type Shape = union(enum) {\n"
+                 "  Empty\n  Circle: struct { r: i32 }\n  Pair: struct { a: i32  b: i32 }\n}\n"
+                 "fn area(s: Shape) -> i32 {\n"
+                 "  switch s {\n"
+                 "    .Empty: { return 0 },\n"
+                 "    .Circle(c): { return c.r * 3 },\n"
+                 "    .Pair(&p): { p.a = p.a + 1  return p.a + p.b },\n"
+                 "  }\n  return -1\n}\n"
+                 "fn describe(s: Shape) -> i32 {\n"
+                 "  return match s {\n    .Empty: 1,\n    .Circle: 2,\n    _: 3,\n  }\n}\n"
+                 "pub fn main() -> i32 {\n"
+                 "  mut c: Shape = .Circle{.r = 5}\n"
+                 "  return area(c) + describe(c)\n}\n")
+    check(r.returncode == 0, f"tagged-union switch/match lower ({r.stderr.strip()[:140]})")
+    check("switch.union" in r.stdout, "the switch operand is copied into a dispatch slot")
+    check(re.search(r"switch %\d+, default", r.stdout) is not None, "and dispatched on its tag")
+    check("switch.arm.Circle" in r.stdout and "switch.arm.Pair" in r.stdout,
+          "arm blocks carry their variant names")
+    check(re.search(r"\^match\.end\.\d+\(%\d+: i32\)", r.stdout) is not None,
+          "a scalar match result merges through a block parameter")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
+def case_locals_are_zeroed_and_typed_by_declaration():
+    """'mut x: [20]u8' with no initializer is a 20-byte ZEROED slot -- the declared type
+    wins over the (absent) initializer, and no-init means zero-valued, not garbage."""
+    r = emit_mir("pub fn main() -> i32 {\n"
+                 "  mut out: [20]u8\n"
+                 "  mut n: i32\n"
+                 "  mut u: i64 = undefined\n"
+                 "  u = 1\n"
+                 "  return n + cast(out[19], i32) + cast(u, i32) - 1\n}\n")
+    check(r.returncode == 0, f"uninitialized locals lower ({r.stderr.strip()[:140]})")
+    check("slot0: size 20, align 1 ; out" in r.stdout,
+          "the declared type sizes the slot, not an i64 fallback")
+    check("mem.set" in r.stdout, "an uninitialized aggregate is zero-filled")
+    # 'undefined' is the explicit opt-out: exactly the two zero-inits above, no third.
+    check(r.stdout.count("mem.set") == 1, "'undefined' leaves its slot alone")
+
+
+def case_pointer_arithmetic_scales():
+    r = emit_mir("pub fn main() -> i32 {\n"
+                 "  mut a: [4]i32 = {10, 20, 30, 40}\n"
+                 "  mut p: *i32 = &a[0]\n"
+                 "  const third: *i32 = p + 2\n"
+                 "  const back: *i32 = third - 1\n"
+                 "  return third.* + back.* - 50\n}\n")
+    check(r.returncode == 0, f"pointer +/- integer lowers ({r.stderr.strip()[:140]})")
+    check("mul" in r.stdout, "the index is scaled by the pointee's size")
+    check("neg" in r.stdout, "subtraction negates the byte offset")
+    check("MIR is malformed" not in r.stderr,
+          "and no integer 'add' is emitted on a pointer operand")
+
+
+def case_slice_array_coercions():
+    """'out = s' with s a slice and out an array copies min(len, count) elements and
+    zero-fills the tail; a slice passed where '*u8' is expected passes its data word."""
+    r = emit_mir("ext fn puts(s: *u8) -> i32\n"
+                 "fn fill(s: []u8) -> [8]u8 {\n  mut out: [8]u8\n  out = s\n  return out\n}\n"
+                 "pub fn main() -> i32 {\n"
+                 "  const out := fill(\"hi\")\n"
+                 "  puts(\"done\")\n"
+                 "  return cast(out[0], i32) - 104\n}\n")
+    check(r.returncode == 0, f"slice/array coercions lower ({r.stderr.strip()[:140]})")
+    check("icmp.ult" in r.stdout and "select" in r.stdout,
+          "the copy length is min(slice len, array count)")
+    check(re.search(r"load %\d+\n.*call @puts", r.stdout) is not None or "call @puts" in r.stdout,
+          "a slice argument to a '*u8' parameter passes the data word")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_switch_and_conditions():
     r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
                  "pub fn main() -> i32 {\n"
@@ -399,6 +474,10 @@ def main() -> int:
     case_aggregate_returns_use_sret()
     case_error_returns()
     case_multi_return()
+    case_tagged_unions()
+    case_locals_are_zeroed_and_typed_by_declaration()
+    case_pointer_arithmetic_scales()
+    case_slice_array_coercions()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()

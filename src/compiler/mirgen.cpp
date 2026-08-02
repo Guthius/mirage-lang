@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <format>
+#include <functional>
+#include <optional>
 #include <ranges>
 #include <unordered_map>
 
@@ -320,6 +322,42 @@ namespace mirgen {
                 return through_pointer();
             }
 
+            // The sema parameter list of a named function or 'ext fn', mirroring
+            // symbol_return_types; nullopt when the name resolves to neither.
+            [[nodiscard]] auto symbol_param_types(const std::string &path, const std::string &name) const
+                -> const std::vector<sema::ResolvedType> * {
+                const auto mod = sema_.modules.find(path);
+                if (mod == sema_.modules.end()) return nullptr;
+                const auto it = mod->second.symbols.find(name);
+                if (it == mod->second.symbols.end()) return nullptr;
+                if (const auto *fn = std::get_if<sema::FunctionSymbol>(&it->second)) return &fn->params;
+                if (const auto *ext = std::get_if<sema::ExtFunctionSymbol>(&it->second)) return &ext->params;
+                return nullptr;
+            }
+
+            // Representation changes between an argument's own type and the parameter's,
+            // the argument-position half of store_aggregate_value: an array where a slice
+            // is expected materializes a (data, len) header; a slice where a bare pointer
+            // is expected passes its data word. Scalar width stays coerce_to's job.
+            auto coerce_arg(mir::Builder &b, const mir::ValueId value, const sema::ResolvedType &param,
+                             const sema::ResolvedType &arg) -> mir::ValueId {
+                if (param.kind == sema::TypeKind::Slice && arg.kind == sema::TypeKind::Array) {
+                    const auto *info = sema_.array_at(arg.array_index);
+                    if (!info) return value;
+                    const auto slot = b.add_slot(pointer_bytes() * 2, pointer_bytes(), "slice");
+                    const auto base = b.slot_addr(slot);
+                    b.store(base, value);
+                    b.store(b.ptr_add_const(base, pointer_bytes()),
+                             b.const_int(usize_ty(), static_cast<int64_t>(info->count)));
+                    return base;
+                }
+                if ((param.kind == sema::TypeKind::Pointer || param.kind == sema::TypeKind::Anyptr) &&
+                    arg.kind == sema::TypeKind::Slice) {
+                    return b.load(mir::Ty::Ptr, value);
+                }
+                return value;
+            }
+
             [[nodiscard]] auto is_error_union(const sema::ResolvedType &type) const -> bool {
                 const auto *info = type.kind == sema::TypeKind::Union ? sema_.union_at(type.union_index) : nullptr;
                 return info && info->is_error_union;
@@ -511,19 +549,25 @@ namespace mirgen {
                 }
             }
 
-            // 'self' is a pointer to the receiver type, which is what makes 'self.field'
-            // resolve through the same auto-deref path as any other pointer object.
-            [[nodiscard]] auto self_pointer_type(const sema::MethodInfo &info) const -> sema::ResolvedType {
+            // The interned '*T' for a pointee, or the bare type when the program never
+            // formed that pointer type -- field offsets still resolve either way, and the
+            // address form is what emit_member_address actually uses. Shared by 'self'
+            // binding and by-reference match captures, which are the same trick: a local
+            // whose slot holds an address.
+            [[nodiscard]] auto pointer_type_to(const sema::ResolvedType &pointee) const -> sema::ResolvedType {
                 for (size_t i = 0; i < sema_.pointer_pointees.size(); ++i) {
-                    if (sema_.pointer_pointees[i] == info.self_type) {
+                    if (sema_.pointer_pointees[i] == pointee) {
                         return sema::ResolvedType{.kind = sema::TypeKind::Pointer,
                                                    .pointee_index = static_cast<int>(i)};
                     }
                 }
-                // No interned '*T' for this receiver: nothing in the program took its
-                // address. Fall back to the bare type so field offsets still resolve; the
-                // address form is what emit_member_address actually uses.
-                return info.self_type;
+                return pointee;
+            }
+
+            // 'self' is a pointer to the receiver type, which is what makes 'self.field'
+            // resolve through the same auto-deref path as any other pointer object.
+            [[nodiscard]] auto self_pointer_type(const sema::MethodInfo &info) const -> sema::ResolvedType {
+                return pointer_type_to(info.self_type);
             }
 
 
@@ -700,39 +744,119 @@ namespace mirgen {
             }
 
             void emit_var_decl(mir::Builder &b, const ast::VarDeclStmt &decl) {
-                const auto type = decl.init ? expr_type(*decl.init) : sema::ResolvedType{};
-                const auto resolved = local_declared_type(decl, type);
+                auto type = decl.init ? expr_type(*decl.init) : sema::ResolvedType{};
+                // An implicit tagged-union coercion on the initializer: the LOCAL is the
+                // union, even though the initializer expression's own recorded type is the
+                // payload -- expr_types is left untouched by sema, the coercion is a side
+                // table (see emit_expr's wrapping).
+                if (decl.init && exprs_) {
+                    if (const auto it = exprs_->expr_variant_coercions.find(sema::get_expr_key(*decl.init));
+                        it != exprs_->expr_variant_coercions.end()) {
+                        type = it->second.union_type;
+                    }
+                }
+                // A declared type wins over the initializer's own: 'mut out: [20]u8 = s'
+                // declares an ARRAY however the slice initializer was typed. Resolved the
+                // way codegen does it -- a no-op re-walk by now, since sema interned every
+                // type this can name, which is what makes the const_cast safe.
+                auto resolved = local_declared_type(decl, type);
+                if (decl.type && module_path_) {
+                    if (const auto declared = sema::resolve_declared_type(
+                            decl.type, decl.init, *module_path_,
+                            const_cast<sema::Program &>(sema_), diag_, decl.location)) {
+                        resolved = *declared;
+                    }
+                }
                 const auto slot = b.add_slot(std::max(1u, size_of(resolved)),
                                               std::max(1u, align_of(resolved)), decl.name);
                 locals_[decl.name] = slot;
                 local_types_[decl.name] = resolved;
 
                 if (!decl.init) {
+                    // No initializer means zero-valued (codegen's emit_default_value);
+                    // leaving the slot's garbage in place would silently diverge.
+                    zero_slot(b, slot, resolved);
+                    return;
+                }
+                // 'undefined' is the explicit opt-out: the slot stays uninitialized.
+                if (std::holds_alternative<ast::UndefinedExpr>(*decl.init)) {
                     return;
                 }
                 if (!is_scalar(resolved)) {
                     // 'default' on an aggregate is a zero fill of the slot: a memset of a
                     // size sema already computed, needing no aggregate value form.
                     if (std::holds_alternative<ast::DefaultExpr>(*decl.init)) {
-                        b.mem_set(b.slot_addr(slot), b.const_int(mir::Ty::I8, 0),
-                                   b.const_int(usize_ty(), size_of(resolved)));
+                        zero_slot(b, slot, resolved);
                         return;
                     }
-                    // Any other aggregate initializer is a byte copy from whatever the
-                    // initializer produced -- an aggregate expression's value IS its address,
-                    // so this is the same operation aggregate assignment performs.
+                    // Any other aggregate initializer writes through the same coercion-aware
+                    // path aggregate assignment uses.
                     const auto source = emit_expr(b, *decl.init);
                     if (source == mir::NO_VALUE) {
                         // emit_expr already reported the construct it could not lower.
                         return;
                     }
-                    b.mem_copy(b.slot_addr(slot), source, b.const_int(usize_ty(), size_of(resolved)));
+                    store_aggregate_value(b, b.slot_addr(slot), resolved, source, type);
                     return;
                 }
                 const auto value = emit_expr(b, *decl.init);
                 if (value != mir::NO_VALUE) {
-                    b.store(b.slot_addr(slot), value);
+                    b.store(b.slot_addr(slot), coerce(b, value, resolved, type));
                 }
+            }
+
+            void zero_slot(mir::Builder &b, const uint32_t slot, const sema::ResolvedType &type) {
+                if (is_scalar(type)) {
+                    const auto ty = scalar_type(type);
+                    mir::ValueId zero;
+                    if (ty == mir::Ty::Ptr) zero = b.const_null();
+                    else if (mir::is_float(ty)) zero = b.const_float(ty, 0.0);
+                    else zero = b.const_int(ty, 0);
+                    b.store(b.slot_addr(slot), zero);
+                    return;
+                }
+                b.mem_set(b.slot_addr(slot), b.const_int(mir::Ty::I8, 0),
+                           b.const_int(usize_ty(), std::max(1u, size_of(type))));
+            }
+
+            // Central writer for aggregate destinations, honoring the representation
+            // changes 'assignable' permits between arrays and slices; a same-representation
+            // source is one byte copy. Every aggregate store (assignment, initialization,
+            // return slots) funnels through here so the coercion set cannot drift per site.
+            void store_aggregate_value(mir::Builder &b, const mir::ValueId dest, const sema::ResolvedType &target,
+                                        const mir::ValueId source, const sema::ResolvedType &source_type) {
+                const auto usize = usize_ty();
+
+                // slice -> array: copy min(len, count) elements, zero-fill the tail (an
+                // empty slice clears the array) -- codegen's emit_slice_to_array, verbatim.
+                if (target.kind == sema::TypeKind::Array && source_type.kind == sema::TypeKind::Slice) {
+                    const auto *info = sema_.array_at(target.array_index);
+                    if (!info) return;
+                    const auto data = b.load(mir::Ty::Ptr, source);
+                    const auto len = b.load(usize, b.ptr_add_const(source, pointer_bytes()));
+                    const auto count = b.const_int(usize, static_cast<int64_t>(info->count));
+                    const auto n = b.select(b.compare(mir::Op::ICmpUlt, len, count), len, count, usize);
+                    const auto stride = std::max(1u, size_of(info->element_type));
+                    const auto bytes = stride == 1
+                        ? n : b.binary(mir::Op::Mul, usize, n, b.const_int(usize, stride));
+                    const auto total = b.const_int(usize, size_of(target));
+                    b.mem_copy(dest, data, bytes);
+                    b.mem_set(b.ptr_add(dest, bytes), b.const_int(mir::Ty::I8, 0),
+                               b.binary(mir::Op::Sub, usize, total, bytes));
+                    return;
+                }
+
+                // array -> slice: a (data, len) header over the array's own storage.
+                if (target.kind == sema::TypeKind::Slice && source_type.kind == sema::TypeKind::Array) {
+                    const auto *info = sema_.array_at(source_type.array_index);
+                    if (!info) return;
+                    b.store(dest, source);
+                    b.store(b.ptr_add_const(dest, pointer_bytes()),
+                             b.const_int(usize, static_cast<int64_t>(info->count)));
+                    return;
+                }
+
+                b.mem_copy(dest, source, b.const_int(usize, std::max(1u, size_of(target))));
             }
 
             // 'const a, b := f()' -- the callee's sret blob is destructured into fresh
@@ -885,7 +1009,7 @@ namespace mirgen {
                 if (is_scalar(slot_type)) {
                     b.store(dest, coerce(b, emitted, slot_type, expr_type(value)));
                 } else {
-                    b.mem_copy(dest, emitted, b.const_int(usize_ty(), size_of(slot_type)));
+                    store_aggregate_value(b, dest, slot_type, emitted, expr_type(value));
                 }
                 return true;
             }
@@ -1032,77 +1156,290 @@ namespace mirgen {
                 return true;
             }
 
-            // 'switch' over an integer, bool or enum operand. MIR has a Switch terminator
-            // taking (value, block) pairs plus a default, which is exactly this shape.
-            //
-            // A tagged-union operand switches on the TAG rather than the value, and its
-            // payload-capturing arms need the tagged-union work; reported for now.
-            void emit_switch(mir::Builder &b, const ast::SwitchStmt &stmt,
-                              const std::vector<sema::ResolvedType> &returns) {
-                const auto operand_type = expr_type(stmt.operand);
-                if (!is_scalar(operand_type)) {
-                    unsupported("a 'switch' on a tagged union", stmt.location);
-                    return;
-                }
-                const auto scrutinee = emit_expr(b, stmt.operand);
-                if (scrutinee == mir::NO_VALUE) return;
+            // The dispatch skeleton 'match' and 'switch' share, mirroring codegen's
+            // emit_arm_dispatch: operand typing with the transparent error-value unwrap, the
+            // union/enum/scalar classification, the MIR switch terminator with per-family
+            // case values, and per-arm payload-capture binding. 'emit_arm' runs with the
+            // insert point inside the arm's block, locals freshly restored, and any capture
+            // already bound. Returns false (with the construct reported) when something in
+            // the dispatch itself cannot be lowered.
+            template <typename ArmT>
+            auto emit_arm_dispatch(mir::Builder &b, const ast::Expr &operand_expr, const std::vector<ArmT> &arms,
+                                    const std::string_view noun, const mir::BlockId default_block,
+                                    const ArmT *default_arm, const SourceLocation &loc,
+                                    const std::function<void(const ArmT &)> &emit_arm) -> bool {
+                auto operand_type = expr_type(operand_expr);
+                mir::ValueId operand_addr = mir::NO_VALUE;
 
-                const auto end_block = b.create_block("switch.end");
-                auto default_block = end_block;
+                // Transparent error matching: sema recorded that the arms dispatch against
+                // the wrapper's Failed payload, not the wrapper. In memory form the unwrap
+                // is pure address arithmetic into the wrapper blob.
+                if (exprs_) {
+                    if (const auto it = exprs_->expr_error_match_unwrap.find(sema::get_expr_key(operand_expr));
+                        it != exprs_->expr_error_match_unwrap.end()) {
+                        const auto *wrapper = it->second.wrapper_type.kind == sema::TypeKind::Union
+                            ? sema_.union_at(it->second.wrapper_type.union_index) : nullptr;
+                        const auto wrapper_addr = emit_expr(b, operand_expr);
+                        if (!wrapper || wrapper->variants.size() < 2 || wrapper_addr == mir::NO_VALUE) {
+                            unsupported(std::format("a '{}' on this error operand", noun), loc);
+                            return false;
+                        }
+                        operand_type = it->second.effective_type;
+                        const auto at = variant_payload_offset(*wrapper, wrapper->variants[1]);
+                        operand_addr = at == 0 ? wrapper_addr : b.ptr_add_const(wrapper_addr, at);
+                    }
+                }
+
+                mir::ValueId scrutinee = mir::NO_VALUE;
+                mir::ValueId union_base = mir::NO_VALUE;
+                const sema::UnionInfo *union_info = nullptr;
+
+                if (operand_type.kind == sema::TypeKind::Union) {
+                    union_info = sema_.union_at(operand_type.union_index);
+                    if (!union_info || !union_info->is_tagged) {
+                        unsupported(std::format("a '{}' on this operand", noun), loc);
+                        return false;
+                    }
+                    if (operand_addr == mir::NO_VALUE) {
+                        operand_addr = emit_expr(b, operand_expr);
+                        if (operand_addr == mir::NO_VALUE) return false;
+                    }
+                    // The operand is copied into a fresh slot and captures -- by-ref
+                    // included -- bind into the COPY, matching codegen: mutating a by-ref
+                    // capture must not write through to the original value.
+                    const auto size = std::max(1u, size_of(operand_type));
+                    const auto slot = b.add_slot(size, std::max(1u, align_of(operand_type)),
+                                                  std::format("{}.union", noun));
+                    union_base = b.slot_addr(slot);
+                    b.mem_copy(union_base, operand_addr, b.const_int(usize_ty(), size));
+                    // A by-ref capture stores this slot's address; promote_slots must keep
+                    // its hands off it either way.
+                    slots_escaping_.insert(slot);
+                    scrutinee = b.load(mir::Ty::I32, union_base);
+                } else if (operand_addr != mir::NO_VALUE) {
+                    // Unwrapped single-member error: the payload IS the scalar member.
+                    if (!is_scalar(operand_type)) {
+                        unsupported(std::format("a '{}' on this error operand", noun), loc);
+                        return false;
+                    }
+                    scrutinee = b.load(scalar_type(operand_type), operand_addr);
+                } else {
+                    scrutinee = emit_expr(b, operand_expr);
+                    if (scrutinee == mir::NO_VALUE) return false;
+                }
 
                 // Arms are laid out first so every case can name its block before the
                 // terminator that references them is emitted.
+                struct PendingArm {
+                    mir::BlockId block;
+                    const ArmT *arm;
+                    const ast::MatchExpr::VariantPattern *capture_pattern = nullptr;
+                    const sema::TaggedUnionVariant *variant = nullptr;
+                };
                 std::vector<std::pair<int64_t, mir::BlockId>> cases;
-                std::vector<std::pair<mir::BlockId, const ast::Stmt *>> bodies;
-                bool ok = true;
+                std::vector<PendingArm> pending;
 
-                for (size_t i = 0; i < stmt.arms.size(); ++i) {
-                    const auto &arm = stmt.arms[i];
-                    const auto block = b.create_block(std::format("switch.arm{}", i));
-                    bodies.emplace_back(block, &arm.body);
+                for (size_t i = 0; i < arms.size(); ++i) {
+                    const auto &arm = arms[i];
+                    if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) continue;
 
-                    std::visit([&]<typename P>(const P &pattern) {
-                        using PT = std::decay_t<P>;
-                        if constexpr (std::is_same_v<PT, ast::MatchExpr::DefaultPattern>) {
-                            default_block = block;
-                        } else if constexpr (std::is_same_v<PT, ast::MatchExpr::VariantPattern>) {
-                            // '.Variant' on an enum operand is its declared value.
-                            if (operand_type.kind == sema::TypeKind::Enum) {
-                                if (const auto *info = sema_.enum_at(operand_type.enum_index)) {
-                                    for (const auto &field : info->fields) {
-                                        if (field.name == pattern.name) {
-                                            cases.emplace_back(field.value, block);
-                                            return;
-                                        }
+                    if (union_info) {
+                        const auto *vp = std::get_if<ast::MatchExpr::VariantPattern>(&arm.pattern);
+                        const sema::TaggedUnionVariant *variant = nullptr;
+                        if (vp) {
+                            const auto found = std::ranges::find(union_info->variants, vp->name,
+                                                                  &sema::TaggedUnionVariant::name);
+                            if (found != union_info->variants.end()) variant = &*found;
+                        }
+                        if (!vp || !variant) {
+                            unsupported(std::format("a '{}' arm pattern of this kind", noun), arm.location);
+                            return false;
+                        }
+                        const auto block = b.create_block(std::format("{}.arm.{}", noun, vp->name));
+                        cases.emplace_back(variant->tag_value, block);
+                        pending.push_back({block, &arm, vp, variant});
+                        continue;
+                    }
+
+                    const auto block = b.create_block(std::format("{}.arm{}", noun, i));
+                    if (const auto *vp = std::get_if<ast::MatchExpr::VariantPattern>(&arm.pattern)) {
+                        // '.Variant' on an enum operand is its declared value.
+                        bool found = false;
+                        if (operand_type.kind == sema::TypeKind::Enum) {
+                            if (const auto *info = sema_.enum_at(operand_type.enum_index)) {
+                                for (const auto &field : info->fields) {
+                                    if (field.name == vp->name) {
+                                        cases.emplace_back(field.value, block);
+                                        found = true;
+                                        break;
                                     }
                                 }
                             }
-                            unsupported("a 'switch' arm pattern of this kind", arm.location);
-                            ok = false;
-                        } else {
-                            // A literal pattern: sema guaranteed it is a compile-time
-                            // constant of the operand's type.
-                            if (const auto value = constant_int(*pattern.expr)) {
-                                cases.emplace_back(*value, block);
-                            } else {
-                                unsupported("a non-constant 'switch' arm pattern", arm.location);
-                                ok = false;
-                            }
                         }
-                    }, arm.pattern);
+                        if (!found) {
+                            unsupported(std::format("a '{}' arm pattern of this kind", noun), arm.location);
+                            return false;
+                        }
+                    } else if (const auto *lp = std::get_if<ast::MatchExpr::LiteralPattern>(&arm.pattern)) {
+                        // A literal pattern: sema guaranteed it is a compile-time constant
+                        // of the operand's type.
+                        if (const auto value = constant_int(*lp->expr)) {
+                            cases.emplace_back(*value, block);
+                        } else {
+                            unsupported(std::format("a non-constant '{}' arm pattern", noun), arm.location);
+                            return false;
+                        }
+                    }
+                    pending.push_back({block, &arm});
                 }
-                if (!ok) return;
 
                 b.switch_on(scrutinee, default_block, cases);
 
-                for (const auto &[block, body] : bodies) {
-                    b.set_insert_point(block);
-                    emit_stmt(b, *body, returns);
-                    // 'switch' arms do not fall through.
-                    if (!b.block_is_terminated()) b.jump(end_block);
+                // Captures are arm-scoped: each arm starts from the locals as they were at
+                // the dispatch, never from a sibling arm's bindings.
+                const auto saved_locals = locals_;
+                const auto saved_types = local_types_;
+                for (const auto &p : pending) {
+                    b.set_insert_point(p.block);
+                    locals_ = saved_locals;
+                    local_types_ = saved_types;
+                    if (p.capture_pattern && p.capture_pattern->capture_name && p.variant &&
+                        p.variant->payload_struct_index >= 0) {
+                        bind_variant_capture(b, union_base, *union_info, *p.variant, *p.capture_pattern);
+                    }
+                    emit_arm(*p.arm);
+                }
+                if (default_arm) {
+                    b.set_insert_point(default_block);
+                    locals_ = saved_locals;
+                    local_types_ = saved_types;
+                    emit_arm(*default_arm);
+                }
+                locals_ = saved_locals;
+                local_types_ = saved_types;
+                return true;
+            }
+
+            // A '.Variant(v)' / '.Variant(&v)' payload capture, bound for one arm's body.
+            // By value: a fresh local holding a copy of the payload. By reference: a
+            // pointer local aimed INTO the dispatch's union copy.
+            void bind_variant_capture(mir::Builder &b, const mir::ValueId union_base, const sema::UnionInfo &info,
+                                       const sema::TaggedUnionVariant &variant,
+                                       const ast::MatchExpr::VariantPattern &vp) {
+                const auto &payload_type = variant.payload_type;
+                const auto at = variant_payload_offset(info, variant);
+                const auto payload_addr = at == 0 ? union_base : b.ptr_add_const(union_base, at);
+
+                if (vp.capture_by_ref) {
+                    const auto slot = b.add_slot(pointer_bytes(), pointer_bytes(), *vp.capture_name);
+                    b.store(b.slot_addr(slot), payload_addr);
+                    locals_[*vp.capture_name] = slot;
+                    local_types_[*vp.capture_name] = pointer_type_to(payload_type);
+                    return;
+                }
+                const auto slot = b.add_slot(std::max(1u, size_of(payload_type)),
+                                              std::max(1u, align_of(payload_type)), *vp.capture_name);
+                if (is_scalar(payload_type)) {
+                    b.store(b.slot_addr(slot), b.load(scalar_type(payload_type), payload_addr));
+                } else {
+                    b.mem_copy(b.slot_addr(slot), payload_addr,
+                                b.const_int(usize_ty(), size_of(payload_type)));
+                }
+                locals_[*vp.capture_name] = slot;
+                local_types_[*vp.capture_name] = payload_type;
+            }
+
+            // 'switch' -- a statement: arms do not fall through, an unmatched value falls
+            // out of the switch, and a '_' arm catches it when present.
+            void emit_switch(mir::Builder &b, const ast::SwitchStmt &stmt,
+                              const std::vector<sema::ResolvedType> &returns) {
+                const auto end_block = b.create_block("switch.end");
+
+                const ast::SwitchStmt::Arm *default_arm = nullptr;
+                for (const auto &arm : stmt.arms) {
+                    if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
+                        default_arm = &arm;
+                        break;
+                    }
+                }
+                const auto default_block = default_arm ? b.create_block("switch.default") : end_block;
+
+                emit_arm_dispatch<ast::SwitchStmt::Arm>(b, stmt.operand, stmt.arms, "switch",
+                    default_block, default_arm, stmt.location,
+                    [&](const ast::SwitchStmt::Arm &arm) {
+                        emit_stmt(b, arm.body, returns);
+                        if (!b.block_is_terminated()) b.jump(end_block);
+                    });
+
+                b.set_insert_point(end_block);
+            }
+
+            // 'match' -- an expression: every arm yields a value of the match's own type.
+            // A scalar result merges through a block parameter (the same mechanism the
+            // short-circuit operators use); an aggregate result is copied into one result
+            // slot per arm, whose address is the match's value.
+            auto emit_match(mir::Builder &b, const ast::MatchExpr &match, const ast::Expr &expr) -> mir::ValueId {
+                const auto result_type = expr_type(expr);
+                const bool has_value = result_type.kind != sema::TypeKind::Void &&
+                                        result_type.kind != sema::TypeKind::Invalid;
+                const bool scalar_result = has_value && is_scalar(result_type);
+
+                const auto end_block = b.create_block("match.end");
+                mir::ValueId result_param = mir::NO_VALUE;
+                mir::ValueId result_slot = mir::NO_VALUE;
+                if (scalar_result) {
+                    result_param = b.add_block_param(end_block, scalar_type(result_type));
+                } else if (has_value) {
+                    const auto slot = b.add_slot(std::max(1u, size_of(result_type)),
+                                                  std::max(1u, align_of(result_type)), "match.result");
+                    result_slot = b.slot_addr(slot);
+                }
+
+                const ast::MatchExpr::Arm *default_arm = nullptr;
+                for (const auto &arm : match.arms) {
+                    if (std::holds_alternative<ast::MatchExpr::DefaultPattern>(arm.pattern)) {
+                        default_arm = &arm;
+                        break;
+                    }
+                }
+                // sema guarantees exhaustiveness, so the no-default sentinel is never
+                // entered at runtime.
+                const auto default_block = b.create_block(default_arm ? "match.default" : "match.unreachable");
+
+                bool arms_ok = true;
+                const bool ok = emit_arm_dispatch<ast::MatchExpr::Arm>(b, match.operand, match.arms, "match",
+                    default_block, default_arm, match.location,
+                    [&](const ast::MatchExpr::Arm &arm) {
+                        const auto value = emit_expr(b, arm.value);
+                        if (value == mir::NO_VALUE) {
+                            arms_ok = false;
+                            b.unreachable();
+                            return;
+                        }
+                        if (b.block_is_terminated()) return;
+                        if (scalar_result) {
+                            b.jump(end_block, {coerce(b, value, result_type, expr_type(arm.value))});
+                        } else {
+                            if (has_value) {
+                                b.mem_copy(result_slot, value, b.const_int(usize_ty(), size_of(result_type)));
+                            }
+                            b.jump(end_block);
+                        }
+                    });
+
+                if (!default_arm) {
+                    b.set_insert_point(default_block);
+                    b.unreachable();
                 }
 
                 b.set_insert_point(end_block);
+                if (!ok || !arms_ok) return mir::NO_VALUE;
+                if (scalar_result) return result_param;
+                if (has_value) return result_slot;
+                // A void match in statement position: there is nothing to yield, but
+                // NO_VALUE means "failed and reported" to every caller, so a throwaway
+                // constant stands in -- the analogue of codegen's UndefValue.
+                return b.const_int(mir::Ty::I32, 0);
             }
 
             // A compile-time integer constant, for switch/match arm patterns. Only the
@@ -1380,8 +1717,28 @@ namespace mirgen {
                     if (const auto it = local_types_.find(ident->name); it != local_types_.end()) {
                         return it->second;
                     }
+                    // A module-scope global: its declared type, from the symbol table --
+                    // sema records expr_types for reads but an assignment TARGET is not one.
+                    if (module_) {
+                        if (const auto it = module_->symbols.find(ident->name); it != module_->symbols.end()) {
+                            if (const auto *global = std::get_if<sema::GlobalSymbol>(&it->second)) {
+                                return global->type;
+                            }
+                        }
+                    }
                 }
                 if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr)) {
+                    // 'mod.g' -- a global reached through a namespace, same rule as above.
+                    if (const auto *target = namespace_target((*member)->object)) {
+                        if (const auto mod = sema_.modules.find(*target); mod != sema_.modules.end()) {
+                            if (const auto it = mod->second.symbols.find((*member)->member);
+                                it != mod->second.symbols.end()) {
+                                if (const auto *global = std::get_if<sema::GlobalSymbol>(&it->second)) {
+                                    return global->type;
+                                }
+                            }
+                        }
+                    }
                     auto object_type = lvalue_type((*member)->object);
                     if (object_type.kind == sema::TypeKind::Pointer) {
                         if (const auto *pointee = sema_.pointee_at(object_type.pointee_index)) {
@@ -1551,12 +1908,10 @@ namespace mirgen {
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeInfoOfExpr>>) return "'type_info_of'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) return "'len'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) return "a slice expression";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) return "a 'match' expression";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TryExpr>>) return "'try'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TernaryExpr>>) return "a ternary";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenExpr>>) return "a 'when' expression";
                 else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) return "a '.variant' reference";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TaggedVariantExpr>>) return "a tagged-variant constructor";
                 else if constexpr (std::is_same_v<V, ast::DefaultExpr>) return "'default'";
                 else if constexpr (std::is_same_v<V, ast::UndefinedExpr>) return "'undefined'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) return "'++' / '--'";
@@ -1573,6 +1928,52 @@ namespace mirgen {
             }
 
             auto emit_expr(mir::Builder &b, const ast::Expr &expr) -> mir::ValueId {
+                const auto natural = emit_expr_natural(b, expr);
+                if (natural == mir::NO_VALUE || !exprs_) return natural;
+                // An implicit tagged-union coercion sema recorded for THIS expression: the
+                // context expected the union, so the natural value is wrapped into a fresh
+                // blob. Applied at the one funnel every context goes through, rather than
+                // re-implemented per context the way codegen's emit_value_as does.
+                const auto it = exprs_->expr_variant_coercions.find(sema::get_expr_key(expr));
+                if (it == exprs_->expr_variant_coercions.end()) return natural;
+                return emit_variant_coercion(b, natural, expr, it->second);
+            }
+
+            // Materializes a sema::VariantCoercion over an already-emitted value: tag at 0,
+            // the value at the variant's payload location -- verbatim if the expression's own
+            // type is already the payload struct, wrapped into its single field otherwise.
+            // The variant choice comes from sema's record; this never re-scans variants.
+            auto emit_variant_coercion(mir::Builder &b, const mir::ValueId value, const ast::Expr &expr,
+                                        const sema::VariantCoercion &vc) -> mir::ValueId {
+                const auto *info = vc.union_type.kind == sema::TypeKind::Union
+                    ? sema_.union_at(vc.union_type.union_index) : nullptr;
+                if (!info) {
+                    unsupported("a tagged-union coercion", sema::get_expr_location(expr));
+                    return mir::NO_VALUE;
+                }
+                const auto slot = b.add_slot(std::max(1u, size_of(vc.union_type)),
+                                              std::max(1u, align_of(vc.union_type)), "variant");
+                const auto base = b.slot_addr(slot);
+                b.mem_set(base, b.const_int(mir::Ty::I8, 0), b.const_int(usize_ty(), size_of(vc.union_type)));
+                b.store(base, b.const_int(mir::Ty::I32, vc.tag_value));
+
+                if (vc.payload_struct_index >= 0) {
+                    const auto from = expr_type(expr);
+                    const bool struct_payload = from.kind == sema::TypeKind::Struct &&
+                                                 from.struct_index == vc.payload_struct_index;
+                    const auto at = info->payload_offset +
+                                     (struct_payload ? 0 : wrapper_field_offset(vc.payload_struct_index));
+                    const auto dest = at == 0 ? base : b.ptr_add_const(base, at);
+                    if (is_scalar(from)) {
+                        b.store(dest, value);
+                    } else {
+                        b.mem_copy(dest, value, b.const_int(usize_ty(), size_of(from)));
+                    }
+                }
+                return base;
+            }
+
+            auto emit_expr_natural(mir::Builder &b, const ast::Expr &expr) -> mir::ValueId {
                 const auto loc = sema::get_expr_location(expr);
                 b.set_location(loc.line, loc.column);
 
@@ -1616,6 +2017,14 @@ namespace mirgen {
                         if (const auto value = enum_member_constant(b, *v, expr); value != mir::NO_VALUE) {
                             return value;
                         }
+                        // 'U.None' -- a payload-free tagged-union variant through its type.
+                        if (const auto type = expr_type(expr);
+                            type.kind == sema::TypeKind::Union && names_a_type(v->object)) {
+                            if (const auto value = emit_tag_only_variant(b, type, v->member);
+                                value != mir::NO_VALUE) {
+                                return value;
+                            }
+                        }
                         return emit_load_from_address(b, expr, loc, expr_kind_name<V>());
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
@@ -1636,6 +2045,12 @@ namespace mirgen {
 
                     } else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
                         return emit_dot_ident(b, v, expr);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TaggedVariantExpr>>) {
+                        return emit_tagged_variant(b, *v, expr);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) {
+                        return emit_match(b, *v, expr);
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
                         return emit_braced_initializer(b, *v, expr);
@@ -1729,9 +2144,24 @@ namespace mirgen {
                 }
 
                 const auto lhs_type = expr_type(bin.lhs);
+                const auto rhs_type = expr_type(bin.rhs);
                 const auto lhs = emit_expr(b, bin.lhs);
                 const auto rhs = emit_expr(b, bin.rhs);
                 if (lhs == mir::NO_VALUE || rhs == mir::NO_VALUE) return mir::NO_VALUE;
+
+                // Pointer +/- integer is address arithmetic stepping by the pointee's size
+                // (1 for anyptr), never an integer op -- an 'add' on a Ptr operand is
+                // ill-typed MIR, which the verifier rejects.
+                const auto pointer_like = [](const sema::ResolvedType &t) {
+                    return t.kind == sema::TypeKind::Pointer || t.kind == sema::TypeKind::Anyptr;
+                };
+                if ((bin.op == Bop::Add || bin.op == Bop::Sub) &&
+                    pointer_like(lhs_type) && rhs_type.is_integer()) {
+                    return emit_pointer_offset(b, lhs, rhs, lhs_type, rhs_type, bin.op == Bop::Sub);
+                }
+                if (bin.op == Bop::Add && pointer_like(rhs_type) && lhs_type.is_integer()) {
+                    return emit_pointer_offset(b, rhs, lhs, rhs_type, lhs_type, false);
+                }
 
                 const auto ty = b.value_type(lhs);
                 const bool is_signed = signed_type(lhs_type);
@@ -1823,21 +2253,44 @@ namespace mirgen {
                 }
             }
 
+            // 'p + n' / 'p - n' / 'n + p': the index is widened to the target word, scaled
+            // by the pointee's size, and applied as byte arithmetic (codegen's
+            // emit_pointer_offset, minus the GEP).
+            auto emit_pointer_offset(mir::Builder &b, const mir::ValueId ptr, mir::ValueId amount,
+                                      const sema::ResolvedType &ptr_type, const sema::ResolvedType &amount_type,
+                                      const bool subtract) -> mir::ValueId {
+                const auto usize = usize_ty();
+                amount = coerce_to(b, amount, usize, signed_type(amount_type));
+                uint32_t step = 1;
+                if (ptr_type.kind == sema::TypeKind::Pointer) {
+                    if (const auto *pointee = sema_.pointee_at(ptr_type.pointee_index)) {
+                        step = std::max(1u, size_of(*pointee));
+                    }
+                }
+                if (step != 1) {
+                    amount = b.binary(mir::Op::Mul, usize, amount, b.const_int(usize, step));
+                }
+                if (subtract) {
+                    amount = b.unary(mir::Op::Neg, usize, amount);
+                }
+                return b.ptr_add(ptr, amount);
+            }
+
             auto emit_assign(mir::Builder &b, const ast::AssignExpr &assign) -> mir::ValueId {
                 const auto target_type = lvalue_type(assign.target);
                 const auto address = emit_address(b, assign.target);
 
                 if (!is_scalar(target_type)) {
-                    // An aggregate assignment is a byte copy of a size sema already computed.
-                    // The source's "value" is its address, which is what every aggregate
-                    // expression yields.
+                    // An aggregate assignment writes through the shared coercion-aware
+                    // path; the source's "value" is its address, which is what every
+                    // aggregate expression yields.
                     if (address == mir::NO_VALUE) {
                         unsupported("assignment to this target", assign.location);
                         return mir::NO_VALUE;
                     }
                     const auto source = emit_expr(b, assign.value);
                     if (source == mir::NO_VALUE) return mir::NO_VALUE;
-                    b.mem_copy(address, source, b.const_int(usize_ty(), size_of(target_type)));
+                    store_aggregate_value(b, address, target_type, source, expr_type(assign.value));
                     return address;
                 }
 
@@ -1916,9 +2369,13 @@ namespace mirgen {
                     args.push_back(sret_slot);
                 }
 
+                const auto *callee_params = symbol_param_types(*callee_module, callee_name);
                 for (size_t i = 0; i < call.args.size(); ++i) {
-                    const auto value = emit_expr(b, call.args[i]);
+                    auto value = emit_expr(b, call.args[i]);
                     if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                    if (callee_params && i < callee_params->size()) {
+                        value = coerce_arg(b, value, (*callee_params)[i], expr_type(call.args[i]));
+                    }
                     const auto slot = args.size();
                     args.push_back(slot < sig.params.size()
                         ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
@@ -2158,8 +2615,11 @@ namespace mirgen {
                 args.push_back(self);
 
                 for (size_t i = 0; i < call.args.size(); ++i) {
-                    const auto value = emit_expr(b, call.args[i]);
+                    auto value = emit_expr(b, call.args[i]);
                     if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                    if (i < info->param_types.size()) {
+                        value = coerce_arg(b, value, info->param_types[i], expr_type(call.args[i]));
+                    }
                     const auto slot = args.size();
                     args.push_back(slot < sig.params.size()
                         ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
@@ -2201,13 +2661,7 @@ namespace mirgen {
                 std::visit([&]<typename BV>(const BV &v) {
                     using B = std::decay_t<BV>;
                     if constexpr (std::is_same_v<B, ast::StructExpr>) {
-                        const auto *info = sema_.struct_at(type.struct_index);
-                        if (!info) { ok = false; return; }
-                        for (const auto &field : v.fields) {
-                            const auto declared = std::ranges::find(info->fields, field.name, &sema::StructField::name);
-                            if (declared == info->fields.end()) { ok = false; continue; }
-                            if (!store_element(b, base, declared->offset, declared->type, field.expr)) ok = false;
-                        }
+                        ok = store_struct_fields(b, base, type.struct_index, v);
                     } else if constexpr (std::is_same_v<B, ast::ArrayExpr>) {
                         const auto *info = sema_.array_at(type.array_index);
                         if (!info) { ok = false; return; }
@@ -2234,6 +2688,22 @@ namespace mirgen {
                 return ok ? base : mir::NO_VALUE;
             }
 
+            // Named fields of a struct literal, written at their sema offsets over an
+            // already-zeroed destination. Shared by braced initializers and tagged-variant
+            // payloads, which are the same operation at different base addresses.
+            auto store_struct_fields(mir::Builder &b, const mir::ValueId base, const int struct_index,
+                                      const ast::StructExpr &fields) -> bool {
+                const auto *info = sema_.struct_at(struct_index);
+                if (!info) return false;
+                bool ok = true;
+                for (const auto &field : fields.fields) {
+                    const auto declared = std::ranges::find(info->fields, field.name, &sema::StructField::name);
+                    if (declared == info->fields.end()) { ok = false; continue; }
+                    if (!store_element(b, base, declared->offset, declared->type, field.expr)) ok = false;
+                }
+                return ok;
+            }
+
             // One element of a braced initializer: a scalar is stored, an aggregate is
             // copied. Returns false if the element could not be lowered (already reported).
             auto store_element(mir::Builder &b, const mir::ValueId base, const uint32_t offset,
@@ -2244,14 +2714,80 @@ namespace mirgen {
                 if (is_scalar(type)) {
                     b.store(address, coerce(b, emitted, type, expr_type(value)));
                 } else {
-                    b.mem_copy(address, emitted, b.const_int(usize_ty(), size_of(type)));
+                    store_aggregate_value(b, address, type, emitted, expr_type(value));
                 }
                 return true;
             }
 
+            // Where a variant's payload VALUE lives relative to the union's base: the shared
+            // payload offset, plus -- when the payload is a bare (non-struct) type wrapped in
+            // the one-field '{v: T}' convention -- that wrapper's field offset. A struct
+            // payload is the struct itself (layout_union reuses it verbatim), so nothing is
+            // added. Writers (constructors, coercions) and readers (captures) must agree.
+            [[nodiscard]] auto variant_payload_offset(const sema::UnionInfo &info,
+                                                       const sema::TaggedUnionVariant &variant) const -> uint32_t {
+                const bool struct_payload = variant.payload_type.kind == sema::TypeKind::Struct &&
+                                             variant.payload_type.struct_index == variant.payload_struct_index;
+                return info.payload_offset +
+                       (struct_payload ? 0 : wrapper_field_offset(variant.payload_struct_index));
+            }
+
+            // A payload-free tagged-union variant value: a zeroed blob carrying just the
+            // tag. NO_VALUE when 'name' is not one of the union's variants -- the caller
+            // falls back to its own path or diagnostic.
+            auto emit_tag_only_variant(mir::Builder &b, const sema::ResolvedType &type,
+                                        const std::string &name) -> mir::ValueId {
+                const auto *info = type.kind == sema::TypeKind::Union ? sema_.union_at(type.union_index) : nullptr;
+                if (!info || !info->is_tagged) return mir::NO_VALUE;
+                const auto variant = std::ranges::find(info->variants, name, &sema::TaggedUnionVariant::name);
+                if (variant == info->variants.end()) return mir::NO_VALUE;
+
+                const auto slot = b.add_slot(std::max(1u, size_of(type)), std::max(1u, align_of(type)), "variant");
+                const auto base = b.slot_addr(slot);
+                b.mem_set(base, b.const_int(mir::Ty::I8, 0), b.const_int(usize_ty(), size_of(type)));
+                b.store(base, b.const_int(mir::Ty::I32, variant->tag_value));
+                return base;
+            }
+
+            // '.Variant{...}' / 'Type.Variant{...}' -- a tagged union built in a slot:
+            // [tag:u32 | padding | payload]. Zero-filled first so padding and omitted
+            // payload fields are deterministic.
+            auto emit_tagged_variant(mir::Builder &b, const ast::TaggedVariantExpr &tv,
+                                      const ast::Expr &expr) -> mir::ValueId {
+                const auto type = expr_type(expr);
+                const auto *info = type.kind == sema::TypeKind::Union ? sema_.union_at(type.union_index) : nullptr;
+                if (!info || !info->is_tagged) {
+                    unsupported("a tagged-variant constructor of this type", tv.location);
+                    return mir::NO_VALUE;
+                }
+                const auto variant = std::ranges::find(info->variants, tv.variant_name, &sema::TaggedUnionVariant::name);
+                if (variant == info->variants.end()) {
+                    unsupported(std::format("a '.{}' constructor of this type", tv.variant_name), tv.location);
+                    return mir::NO_VALUE;
+                }
+
+                const auto slot = b.add_slot(std::max(1u, size_of(type)), std::max(1u, align_of(type)), "variant");
+                const auto base = b.slot_addr(slot);
+                b.mem_set(base, b.const_int(mir::Ty::I8, 0), b.const_int(usize_ty(), size_of(type)));
+                b.store(base, b.const_int(mir::Ty::I32, variant->tag_value));
+
+                if (variant->payload_struct_index >= 0) {
+                    // The payload struct's fields land at payload_offset + their own sema
+                    // offsets; the zero fill above covers whatever the literal omitted.
+                    const auto payload_base = info->payload_offset == 0
+                        ? base : b.ptr_add_const(base, info->payload_offset);
+                    if (!store_struct_fields(b, payload_base, variant->payload_struct_index, tv.payload)) {
+                        unsupported(std::format("a '.{}' constructor payload", tv.variant_name), tv.location);
+                        return mir::NO_VALUE;
+                    }
+                }
+                return base;
+            }
+
             // '.Variant' -- a contextual reference whose type comes from the surrounding
             // expectation. For an enum (including a bitset's member enum) it is a compile-time
-            // constant: the variant's declared value, in the enum's own storage type.
+            // constant: the variant's declared value, in the enum's own storage type. For a
+            // tagged union it is a payload-free variant: a blob carrying just the tag.
             auto emit_dot_ident(mir::Builder &b, const ast::DotIdentExpr &dot, const ast::Expr &expr) -> mir::ValueId {
                 const auto type = expr_type(expr);
                 if (type.kind == sema::TypeKind::Enum) {
@@ -2263,8 +2799,9 @@ namespace mirgen {
                         }
                     }
                 }
-                // A tagged-union variant reference is a value in a byte blob, not a scalar;
-                // it belongs with the tagged-union work.
+                if (const auto value = emit_tag_only_variant(b, type, dot.name); value != mir::NO_VALUE) {
+                    return value;
+                }
                 unsupported(std::format("a '.{}' reference of this type", dot.name), dot.location);
                 return mir::NO_VALUE;
             }
@@ -2371,8 +2908,11 @@ namespace mirgen {
                 }
 
                 for (size_t i = 0; i < call.args.size(); ++i) {
-                    const auto value = emit_expr(b, call.args[i]);
+                    auto value = emit_expr(b, call.args[i]);
                     if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                    if (i < info->param_types.size()) {
+                        value = coerce_arg(b, value, info->param_types[i], expr_type(call.args[i]));
+                    }
                     const auto slot = args.size();
                     args.push_back(slot < sig.params.size()
                         ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
