@@ -38,6 +38,8 @@ add_library(mirage_core OBJECT
         src/compiler/diagnostic_engine.hpp
         src/compiler/lexer.cpp
         src/compiler/lexer.hpp
+        src/compiler/mir.cpp
+        src/compiler/mir.hpp
         src/compiler/module_resolver.cpp
         src/compiler/module_resolver.hpp
         src/compiler/resolved_type.hpp
@@ -115,6 +117,21 @@ target_include_directories(lexer_robustness_test
 
 add_test(NAME lexer_robustness_test COMMAND lexer_robustness_test)
 set_tests_properties(lexer_robustness_test PROPERTIES TIMEOUT 10)
+
+# MIR is standalone by construction — it depends on nothing but the standard library, which
+# is what lets the backends be developed and tested without a front end attached.
+add_executable(mir_test
+        tests/mir_test.cpp
+        src/compiler/mir.cpp
+        src/compiler/mir.hpp
+)
+
+target_include_directories(mir_test
+        PRIVATE src
+)
+
+add_test(NAME mir_test COMMAND mir_test)
+set_tests_properties(mir_test PROPERTIES TIMEOUT 10)
 
 add_executable(diagnostic_engine_test
         tests/diagnostic_engine_test.cpp
