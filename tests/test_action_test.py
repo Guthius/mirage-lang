@@ -243,6 +243,13 @@ def case_driver():
     check(r3.returncode == 0, f"a root-module 'main' is legal under 'test' ({r3.stderr.strip()[:120]})")
     check("MAIN-RAN" not in r3.stdout, "that 'main' is never called")
 
+    # A 'main' that IS present is validated under 'test' too -- compiling clean here only
+    # to fail under 'build' would be a trap.
+    r_bad = run("test", one("@test\nfn t() -> error(E) { return_ok }\n"
+                            "fn main() -> i32 { return 0 }\n"))
+    check(r_bad.returncode != 0 and "must be declared 'pub fn main'" in r_bad.stderr,
+          "a malformed 'main' is reported under 'test', not silently accepted")
+
     # And a module with NO main is fine under 'test', though not under 'build'.
     r4 = run("test", one("@test\nfn t() -> error(E) { return_ok }\n"))
     check(r4.returncode == 0, "a module with no 'main' is legal under 'test'")

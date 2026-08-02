@@ -1,0 +1,12 @@
+// example_entry_generic_main — REJECTION CASE. A generic 'main' is not an entry point: a
+// template is emitted per instantiation, so there is no single function for '_start' to
+// call.
+//
+// Regression fixture: this used to abort the compiler. validate_hosted_main returned the
+// symbol, then emit_start looked it up in 'functions_' -- where a generic is never inserted
+// -- and the uncaught out_of_range terminated the process with no diagnostic at all.
+//
+// Expected: error "hosted entry point must not be generic".
+pub fn main[T: type]() -> i32 {
+    return 0
+}

@@ -435,6 +435,16 @@
     "action": "run",
     "exit": 7
   },
+  "example_entry_generic_main": {
+    "action": "build",
+    "diag": "examples/example_entry_generic_main/main.mir:10:5: error: hosted entry point must not be generic",
+    "exit": 1
+  },
+  "example_entry_test_main": {
+    "action": "build",
+    "diag": "examples/example_entry_test_main/main.mir:14:5: error: '@test' is not allowed on the hosted entry point 'main'",
+    "exit": 1
+  },
   "example_enum": {
     "action": "run",
     "exit": 10
@@ -1159,8 +1169,7 @@
   },
   "lexer": {
     "action": "emit-ir",
-    "exit": 0,
-    "timeout": 5
+    "exit": 0
   },
   "mem": {
     "action": "emit-ir",

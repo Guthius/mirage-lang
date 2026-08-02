@@ -1,0 +1,16 @@
+// example_entry_test_main — REJECTION CASE. '@test' on 'main' is not an entry point:
+// outside 'mirage test' a '@test' function is not emitted at all, so there is nothing for
+// '_start' to call.
+//
+// Same abort as example_entry_generic_main, reached the other way -- both are declarations
+// that validate_hosted_main accepted but codegen had deliberately skipped.
+//
+// Expected: error "'@test' is not allowed on the hosted entry point 'main'".
+pub type E = enum(i32) {
+    Bad = 1
+}
+
+@test
+pub fn main() -> error(E) {
+    return_ok
+}

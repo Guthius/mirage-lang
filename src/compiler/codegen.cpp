@@ -266,13 +266,13 @@ namespace codegen {
                 declare_vtables();
                 declare_type_info_globals();
                 const sema::FunctionSymbol *entry_main = nullptr;
-                // Under 'mirage test' a 'main' is optional: the synthesized '_start' calls
-                // the harness, not 'main'. A test-only module that declares none is the
-                // normal case, so demanding one would be exactly backwards. If one IS
-                // present it is compiled like any other function and never called, so it
-                // does not need validating as an entry point either.
-                if (!options_.freestanding && !is_test_mode()) {
-                    entry_main = validate_hosted_main();
+                // Under 'mirage test' a 'main' is OPTIONAL -- the synthesized '_start' calls
+                // the harness, not 'main', so a test-only module declaring none is the normal
+                // case. One that IS present is still validated: it is compiled like any other
+                // function, and a malformed entry point should not compile clean under 'test'
+                // only to fail under 'build'.
+                if (!options_.freestanding) {
+                    entry_main = validate_hosted_main(/*required=*/!is_test_mode());
                 }
                 emit_global_initializers();
                 emit_functions();
@@ -1855,7 +1855,11 @@ namespace codegen {
                 return any_val;
             }
 
-            auto validate_hosted_main() const -> const sema::FunctionSymbol * {
+            // 'required' is false under 'mirage test', where the synthesized '_start' calls
+            // the harness rather than 'main': a test-only module declaring none is the normal
+            // case. A 'main' that IS present is still validated there, so a malformed entry
+            // point is reported under every action rather than only under 'build'.
+            auto validate_hosted_main(const bool required = true) const -> const sema::FunctionSymbol * {
                 const auto root_it = sema_program_.modules.find(ast_program_.root_module_path);
                 if (root_it == sema_program_.modules.end()) {
                     report_codegen_error(diag_, {}, "internal error: root module not found during codegen");
@@ -1864,7 +1868,9 @@ namespace codegen {
 
                 const auto sym_it = root_it->second.symbols.find("main");
                 if (sym_it == root_it->second.symbols.end()) {
-                    report_codegen_error(diag_, {}, std::format("hosted build requires 'pub fn main()' or 'pub fn main() -> i32' in the entry module '{}'", ast_program_.root_module_path));
+                    if (required) {
+                        report_codegen_error(diag_, {}, std::format("hosted build requires 'pub fn main()' or 'pub fn main() -> i32' in the entry module '{}'", ast_program_.root_module_path));
+                    }
                     return nullptr;
                 }
 
@@ -1875,6 +1881,22 @@ namespace codegen {
                 }
 
                 const auto &decl = *main_fn->decl;
+
+                // Both of these are declarations that never reach 'functions_': a generic is
+                // emitted per instantiation by declare_generic_functions, and a '@test'
+                // function is not emitted at all outside 'mirage test'. Returning either as
+                // the entry point sent emit_start into a 'functions_.at()' on a key that was
+                // never inserted -- an uncaught out_of_range, i.e. a compiler abort with no
+                // diagnostic, for a program that merely names its entry point badly.
+                if (!decl.generic_params.empty()) {
+                    report_codegen_error(diag_, decl.location, "hosted entry point must not be generic");
+                    return nullptr;
+                }
+                if (main_fn->is_test) {
+                    report_codegen_error(diag_, decl.location, "'@test' is not allowed on the hosted entry point 'main'");
+                    return nullptr;
+                }
+
                 if (!main_fn->is_pub) {
                     report_codegen_error(diag_, decl.location, "hosted entry point must be declared 'pub fn main'");
                     return nullptr;
