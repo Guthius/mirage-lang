@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """The in-repo VS Code TextMate grammar tracks the language's actual syntax.
 
-Only the VS Code grammar lives here. Zed's highlighting comes from the separate
-tree-sitter-mirage repository, pinned by commit SHA in editors/zed/extension.toml — so a
-syntax change landed in this repo leaves Zed stale until a PR is opened there. See
-editors/zed/README.md.
+The VS Code grammar is the only editor integration this repo owns. (A tree-sitter grammar
+exists in a separate tree-sitter-mirage repository for other editors; nothing here checks
+it.)
 
 Two kinds of check:
 

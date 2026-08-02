@@ -101,8 +101,9 @@ Remaining:
   fixed: it spelled the type queries `sizeof` rather than `size_of`/`align_of`/`type_of`/
   `type_info_of`, which made `highlights.scm` fail to *compile*, costing Zed all
   highlighting. That also cut parse errors on a real source file from 43 to 11.
-  **Follow-up:** those remaining 11 are pre-existing gaps between the tree-sitter grammar
-  and the language, worth a separate pass in that repo.
+  The Zed extension has since been dropped (unused), so the tree-sitter grammar is no
+  longer consumed by anything in this repo; its remaining 11 parse errors are that repo's
+  concern if another editor ever wants it.
 - ~~**5.2** No `just test`, no CI.~~ `f410a70` — `just test` runs ctest plus every
   `tests/*_test.py`, continuing past failures and listing them together;
   `.github/workflows/ci.yml` does the same, checking the stdlib out as a sibling so the
