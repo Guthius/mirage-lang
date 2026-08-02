@@ -72,12 +72,6 @@ SPECIAL_CASES: dict[str, dict] = {
     # cannot see that (it compiles and has a 'fn main'), so it ran the program and pinned the
     # resulting crash as a plain exit code. It really does die with SIGSEGV.
     "example_asm_width_mismatch": {"action": "build"},
-    # Parsing 'examples/lexer/token.mir' never terminates: line 16 uses a postfix
-    # 'kind match { ... }' form that docs/grammar.md:646 does not define (match_expr is
-    # prefix-only), and the parser spins on it instead of reporting a syntax error.
-    # Pinned as a timeout with a short clock so the suite does not burn a full minute
-    # on it every run. Drop the timeout override once the parser rejects the form.
-    "lexer": {"action": "emit-ir", "timeout": 5},
 }
 
 # Actions, in the order auto-derivation tries them:
