@@ -2901,7 +2901,12 @@ reserved keyword, unlike its siblings above. `no_return`, `naked`,
 `always_inline`, `section`, and `init` are likewise parsed as plain
 identifiers, not keywords — meaningful only immediately after the `@`
 sigil (`@no_return`, `@naked`, `@always_inline`, `@section(...)`,
-`@init`, see [Declaration Attributes](#21-declaration-attributes)).
+`@init`, `@no_discard`, `@export`, `@callconv(...)`, `@cdecl`, see
+[Declaration Attributes](#21-declaration-attributes)). `@import` is the one
+exception to that pattern: `import` IS a reserved keyword, and the attribute
+name position accepts it by spelling — which is legal precisely because
+attribute names live in their own namespace, where nothing can be confused
+with an `import(...)` expression.
 
 ### Reserved for Future Use
 
@@ -3209,8 +3214,7 @@ error: expected a register name after 'asm ->'
 
 `@name` / `@name(args)` precedes a `fn` declaration or a method inside an `impl` block,
 attaching compiler-recognized metadata to it. Attributes are legal on `fn` and on methods
-inside `impl` blocks (not `ext fn` or any other declaration kind), and `pub`, if present,
-comes after the attribute:
+inside `impl` blocks, and `pub`, if present, comes after the attribute:
 
 ```mirage
 @naked
@@ -3358,6 +3362,110 @@ responsible for calling `_init` itself at the appropriate time.
 hosted builds, skips the `_start` call to it). Every `@init` function still compiles normally
 and remains individually callable — only the automatic invocation is suppressed.
 
+### `@no_discard`
+
+```mirage
+@no_discard
+fn checked_add(a: i32, b: i32) -> i32 { ... }
+```
+
+The function's return value may not be dropped. Takes no arguments, and is an error on a
+function with no return value (there would be nothing to discard).
+
+An expression *statement* is the only context that can drop a result, so that is the only
+place this fires. The documented opt-out is to bind the result to `_`:
+
+```mirage
+checked_add(1, 2)              // error: return value of 'checked_add' must be used
+const _ := checked_add(1, 2)   // fine — deliberately discarded
+```
+
+Legal on methods as well as free functions. `try f()` never triggers it, because `try`
+consumes the result.
+
+### `@export`
+
+```mirage
+@export                 // export under the declaration's own name
+@export("custom_name")  // export under an explicit name
+```
+
+Replaces the module-path mangling every other symbol gets with a fixed, linker-visible
+name, and forces external linkage even for a non-`pub` declaration. The optional argument
+is a compile-time constant `[]u8`.
+
+Export names live in one flat namespace shared with `ext fn` declarations, so two
+declarations claiming the same name is an error naming both sites — including a collision
+between an `@export` and an `ext fn` of that name. Not allowed on a generic function: each
+instantiation would need a distinct name and nothing supplies one.
+
+`@export` fixes the *name* only, not the ABI — see `@callconv` below.
+
+### `@callconv` and `@cdecl`
+
+```mirage
+@callconv("c")   // use the platform C ABI
+@callconv("mirage")  // the default
+@cdecl           // exactly equivalent to @callconv("c")
+```
+
+Mirage has two calling conventions. The default (`"mirage"`) passes structs, arrays and
+unions **raw**: the compiler owns both sides of such a call, so they are self-consistent
+regardless of any platform rule. `"c"` routes the signature — and every call site — through
+the platform C ABI instead: System V eightbyte classification natively, the WebAssembly
+rules on wasm. That is the same machinery `ext fn` already goes through, so a `@cdecl`
+function and an `ext fn` marshal identically.
+
+`@callconv` takes exactly one string argument. Anything other than `"c"` or `"mirage"` is
+an error; names that are real conventions on other platforms (`"win64"`, `"stdcall"`, …)
+are recognized and reported as not supported in v1, rather than as unknown.
+
+**v1 limitation — function pointers carry no convention.** `fn() -> i32` and
+`@cdecl fn() -> i32` are the same type, so calling the latter through the former would
+marshal arguments the wrong way with no diagnostic anywhere. Taking the *address* of a
+`@callconv("c")` function is therefore an error; direct calls are unaffected, which is the
+use case the attribute exists for. Lifting this means adding a convention field to function
+types and to the structural-equality rule in [Type Compatibility](#15-type-compatibility-and-assignability).
+
+`@callconv("c")` is also not allowed on a multi-return function (C has no multi-return
+convention) or on a generic one.
+
+**`@export` and `@callconv` are orthogonal**, and exposing a function to C wants both:
+
+```mirage
+@(export, cdecl)
+pub fn mirage_add(a: i32, b: i32) -> i32 { return a + b }
+```
+
+They are kept separate because an exported symbol is also how two separately-compiled
+Mirage objects will find each other, and that path must keep the Mirage ABI. Because the
+one-word mistake — `@export` alone on a signature passing an aggregate by value — produces
+a symbol C callers silently mis-marshal, the compiler warns about exactly that shape. A
+scalar-only signature stays quiet, since there the two conventions coincide.
+
+### `@import`
+
+```mirage
+@import("module")            // name defaults to the declaration's own
+@import("module", "name")
+```
+
+Names the WebAssembly import an `ext fn` declaration binds to. **The only attribute legal
+on an `ext fn`** — every other one is an error there, naming itself. Both arguments are
+compile-time constant `[]u8`.
+
+Absent, the defaults are module `"env"` and the declaration's own name.
+
+```mirage
+@import("wasi_snapshot_preview1", "fd_write")
+ext fn fd_write(fd: i32, iovs: *Iovec, iovs_len: i32, written: *i32) -> i32
+```
+
+On non-wasm targets `@import` is accepted, validated, and has no effect: an ELF `ext fn` is
+resolved by the linker from its bare name and there is no import-module concept. It is
+deliberately *not* an error there, so one stdlib source file can carry the annotation for
+every target.
+
 ### Conflicting Attributes
 
 Some combinations are rejected outright:
@@ -3368,6 +3476,10 @@ Some combinations are rejected outright:
 - `@init` + `@no_return` — an initializer must return control so the next one can run.
 - `@init` + `@always_inline` — init functions are called once, from generated code; inlining
   them defeats the purpose.
+- `@callconv` + `@cdecl` — `@cdecl` is an alias for `@callconv("c")`; writing both is
+  ambiguous.
+- `@callconv("c")` + `@naked` — a naked function has no compiler-generated prologue to
+  implement a convention with; its body *is* its ABI.
 
 ---
 

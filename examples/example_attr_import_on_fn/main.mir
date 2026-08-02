@@ -1,0 +1,16 @@
+// example_attr_import_on_fn — REJECTION CASE. '@import' names the wasm import an 'ext fn'
+// binds to. A 'fn' has a body and IS the definition, so there is nothing to import.
+//
+// This fixture also pins that '@import' PARSES at all: 'import' is a reserved keyword
+// ('const x := import("...")'), so the attribute-name position has to accept it by
+// spelling. Before that, '@import(...)' failed with a bare "expected identifier".
+//
+// Expected: error "'@import' is only allowed on an 'ext fn' declaration".
+@import("env")
+pub fn f() -> i32 {
+    return 1
+}
+
+pub fn main() -> i32 {
+    return f()
+}

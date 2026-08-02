@@ -1086,18 +1086,38 @@ namespace ast {
             };
         }
 
-        // Reports a parser-stage "unknown attribute" error if 'name' isn't one of the five
-        // known declaration-attribute names (see Attribute's doc comment in ast.hpp) — a pure
+        // Reports a parser-stage "unknown attribute" error if 'name' isn't one of the known
+        // declaration-attribute names (see Attribute's doc comment in ast.hpp) — a pure
         // lexical fact, checked identically for both the bare/single-with-args form and the
         // grouped '@(...)' form's members below.
+        //
+        // WHERE each is legal (fn vs method vs 'ext fn'), how many arguments it takes, and
+        // which combinations conflict are all sema's business, not this function's — see
+        // sema_attributes.cpp. This is only "is that a word we recognize at all".
         void check_known_attribute_name(Parser &parser, const std::string &name, const SourceLocation &location) {
             if (name == "no_return" || name == "naked" || name == "always_inline" ||
-                name == "section" || name == "init") {
+                name == "section" || name == "init" || name == "no_discard" ||
+                name == "export" || name == "callconv" || name == "cdecl" || name == "import") {
                 return;
             }
             parser.report_error(location, std::format(
                 "unknown attribute '@{}'. Known attributes: no_return, naked, always_inline, "
-                "section, init.", name));
+                "section, init, no_discard, export, callconv, cdecl, import.", name));
+        }
+
+        // The attribute name after '@' (or after '@(' / a ',' in the grouped form).
+        //
+        // Almost every attribute name is an ordinary identifier, but 'import' is a reserved
+        // KEYWORD ('const x := import("...")'), so expect_identifier() rejects it and
+        // '@import(...)' would not parse at all. Attribute names live in their own namespace
+        // -- nothing here can be confused with an import expression -- so the keyword is
+        // simply accepted by spelling.
+        auto parse_attribute_name(Parser &parser) -> std::string {
+            if (parser.check(TokenKind::KwImport)) {
+                parser.advance();
+                return "import";
+            }
+            return parser.expect_identifier();
         }
 
         // '@name' / '@name(arg1, arg2, ...)' — a single (non-grouped) attribute. The '@' is
@@ -1106,7 +1126,7 @@ namespace ast {
         auto parse_single_attribute(Parser &parser) -> Attribute {
             const auto location = parser.current_location();
             parser.expect(TokenKind::At, "'@'");
-            const auto name = parser.expect_identifier();
+            const auto name = parse_attribute_name(parser);
             check_known_attribute_name(parser, name, location);
 
             std::vector<Expr> args;
@@ -1158,7 +1178,7 @@ namespace ast {
             std::vector<Attribute> attrs;
             do {
                 const auto location = parser.current_location();
-                const auto name = parser.expect_identifier();
+                const auto name = parse_attribute_name(parser);
                 check_known_attribute_name(parser, name, location);
 
                 if (parser.check(TokenKind::LParen)) {
@@ -3069,7 +3089,7 @@ namespace ast {
             return std::nullopt;
         }
 
-        auto parse_ext_function_decl(Parser &parser, const bool is_pub) -> ExtFunctionDecl {
+        auto parse_ext_function_decl(Parser &parser, const bool is_pub, std::vector<Attribute> attributes = {}) -> ExtFunctionDecl {
             const auto location = parser.current_location();
 
             parser.expect(TokenKind::KwFn, "'fn'");
@@ -3082,6 +3102,7 @@ namespace ast {
             return ExtFunctionDecl{
                 .is_pub = is_pub,
                 .is_variadic = is_variadic,
+                .attributes = std::move(attributes),
                 .name = fn_name,
                 .params = std::move(fn_params),
                 .return_type = std::move(fn_return_type),
@@ -3703,14 +3724,20 @@ namespace ast {
 
         const auto is_pub = parser.match(TokenKind::KwPub);
 
-        if (!attributes.empty() && !parser.check(TokenKind::KwFn)) {
-            parser.report_error(attributes.front().location, "attributes are only allowed on 'fn' declarations");
+        // 'ext fn' accepts an attribute clause too, solely so '@import' can name the wasm
+        // import a declaration binds to. Sema rejects every OTHER attribute on an 'ext fn'
+        // by name, so the long-standing prohibition stays in force and only '@import' is
+        // carved out — see validate_ext_function_attributes (sema_attributes.cpp).
+        const bool is_ext_fn = parser.check(TokenKind::Identifier) && parser.current_lexeme() == "ext";
+
+        if (!attributes.empty() && !parser.check(TokenKind::KwFn) && !is_ext_fn) {
+            parser.report_error(attributes.front().location, "attributes are only allowed on 'fn' and 'ext fn' declarations");
         }
 
-        if (parser.check(TokenKind::Identifier) && parser.current_lexeme() == "ext") {
+        if (is_ext_fn) {
             parser.advance();
 
-            return parse_ext_function_decl(parser, is_pub);
+            return parse_ext_function_decl(parser, is_pub, std::move(attributes));
         }
 
         if (parser.check(TokenKind::KwFn)) {

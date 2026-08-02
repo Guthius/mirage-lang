@@ -1,11 +1,27 @@
 #pragma once
 
+#include <optional>
 #include <unordered_map>
 
 #include "ast.hpp"
 #include "resolved_type.hpp"
 
 namespace sema {
+    // Which ABI a function's signature is lowered with, and therefore how aggregates cross
+    // its boundary. 'Mirage' passes structs/arrays/unions raw -- the compiler owns both
+    // sides of such a call, so they are self-consistent regardless of any platform rule.
+    // 'C' routes the signature (and every call site) through the platform C ABI instead:
+    // System V eightbyte classification natively, clang's WebAssembly rules on wasm. Set by
+    // '@callconv("c")' / '@cdecl'; see ext_function_type in codegen.cpp, which is the same
+    // machinery 'ext fn' already goes through.
+    enum class CallConv : uint8_t { Mirage, C };
+
+    // '@export' / '@export("name")': the linker-visible name a declaration is emitted under,
+    // replacing the module-path mangling every other symbol gets. Absent means "mangle
+    // normally". An empty string is never stored -- a bare '@export' records the
+    // declaration's own name.
+    using ExportName = std::optional<std::string>;
+
     struct GlobalSymbol {
         const ast::VarDecl *decl = nullptr;
         ResolvedType type;
@@ -24,6 +40,13 @@ namespace sema {
         bool is_resolved = false;              // lazily/reentrantly resolved — see ensure_function_signature_resolved
         size_t required_params = 0;            // count of leading non-defaulted params; == params.size() if none are defaulted
         std::vector<bool> param_default_is_const; // parallel to params; meaningful only at i >= required_params
+
+        // Declaration attributes that outlive the AST walk. Filled by
+        // validate_function_attributes (sema_attributes.cpp) once per declaration, so that
+        // check sites (call expressions, codegen) never re-scan the attribute list.
+        bool no_discard = false;               // '@no_discard': the result may not be dropped
+        ExportName export_name;                // '@export' / '@export("name")'
+        CallConv call_conv = CallConv::Mirage; // '@callconv("c")' / '@cdecl'
     };
 
     // True for a generic function TEMPLATE ('fn f[T: type](v: T)'). Such a symbol's
@@ -47,6 +70,13 @@ namespace sema {
         // symbol-table entries (the origin's own, and an alias's), unlike ordinary
         // (non-aliased) 'ext fn's, which this loop previously only ever visited once.
         bool is_resolved = false;
+
+        // '@import("module")' / '@import("module", "name")' -- which wasm import this
+        // declaration binds to. Empty means the defaults: module "env", name == the
+        // declaration's own name. Inert on non-wasm targets, where an 'ext fn' is resolved
+        // by the linker from its bare name and there is no import-module concept.
+        std::string import_module;
+        std::string import_name;
     };
 
     struct MacroSymbol {

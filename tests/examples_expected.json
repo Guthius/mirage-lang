@@ -161,14 +161,33 @@
     "action": "run",
     "exit": 0
   },
+  "example_attr_cdecl_address_of": {
+    "action": "build",
+    "diag": "examples/example_attr_cdecl_address_of/main.mir:14:28: error: cannot take the address of '@callconv(\"c\")' function 'c_fn'",
+    "exit": 1
+  },
   "example_attr_conflict_init_no_return": {
     "action": "build",
     "diag": "examples/example_attr_conflict_init_no_return/main.mir:9:3: error: '@init' and '@no_return' cannot be combined: an initializer must return control so the next one can run",
     "exit": 1
   },
+  "example_attr_export_cdecl": {
+    "action": "run",
+    "exit": 7
+  },
+  "example_attr_export_duplicate": {
+    "action": "build",
+    "diag": "examples/example_attr_export_duplicate/main.mir:13:5: error: duplicate export name 'shared': already exported by function 'first' at examples/example_attr_export_duplicate/main.mir:8:5",
+    "exit": 1
+  },
   "example_attr_grouped_with_args": {
     "action": "build",
     "diag": "examples/example_attr_grouped_with_args/main.mir:15:17: error: a grouped attribute ('@(...)') cannot take arguments; use the single '@name(args)' form instead",
+    "exit": 1
+  },
+  "example_attr_import_on_fn": {
+    "action": "build",
+    "diag": "examples/example_attr_import_on_fn/main.mir:9:1: error: '@import' is only allowed on an 'ext fn' declaration",
     "exit": 1
   },
   "example_attr_init_bad_return": {
@@ -235,6 +254,15 @@
     "action": "run",
     "exit": 0
   },
+  "example_attr_no_discard": {
+    "action": "build",
+    "diag": "examples/example_attr_no_discard/main.mir:11:5: error: return value of 'checked_add' must be used ('@no_discard')",
+    "exit": 1
+  },
+  "example_attr_no_discard_opt_out": {
+    "action": "run",
+    "exit": 3
+  },
   "example_attr_no_return": {
     "action": "run",
     "exit": 0
@@ -263,7 +291,7 @@
   },
   "example_attr_unknown": {
     "action": "build",
-    "diag": "examples/example_attr_unknown/main.mir:9:1: error: unknown attribute '@frobulate'. Known attributes: no_return, naked, always_inline, section, init.",
+    "diag": "examples/example_attr_unknown/main.mir:9:1: error: unknown attribute '@frobulate'. Known attributes: no_return, naked, always_inline, section, init, no_discard, export, callconv, cdecl, import.",
     "exit": 1
   },
   "example_bare_import_default_param": {

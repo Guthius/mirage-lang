@@ -1,0 +1,14 @@
+// example_attr_no_discard_opt_out — the documented '@no_discard' opt-out: bind to '_'.
+// The attribute exists to catch an accidentally-ignored result, not to make a deliberate
+// one impossible.
+//
+// Expected: exit 3.
+@no_discard
+fn checked_add(a: i32, b: i32) -> i32 {
+    return a + b
+}
+
+pub fn main() -> i32 {
+    const _ := checked_add(10, 20)
+    return checked_add(1, 2)
+}

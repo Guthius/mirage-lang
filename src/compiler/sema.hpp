@@ -184,6 +184,12 @@ namespace sema {
         size_t required_params = 0;
         std::vector<bool> param_default_is_const; // parallel to param_types
 
+        // Declaration attributes that outlive the AST walk — the MethodInfo counterparts
+        // of the same three fields on FunctionSymbol; see there.
+        bool no_discard = false;
+        ExportName export_name;
+        CallConv call_conv = CallConv::Mirage;
+
         // Set (to the trait's local name) only when this MethodInfo came from an
         // 'impl TRAIT for TYPE' block, rather than a bare 'impl TYPE' block. Codegen
         // uses this to route function lookups to the trait_functions_ table instead
@@ -437,6 +443,12 @@ namespace sema {
         // value (codegen emits a runtime branch/PHI in that case, like an ordinary ternary).
         // Instance-varying: 'when N > 4' picks a different branch per 'N'.
         std::unordered_map<const void *, bool> expr_when_selected;
+        // CallExpr nodes whose resolved callee carries '@no_discard', mapped to that
+        // callee's name for the diagnostic. Recorded where the callee is resolved
+        // (resolve_call_returns, the only place that knows which of the half-dozen callee
+        // shapes actually named a function) and read by check_stmt's ExprStmt case, so the
+        // discard check never re-runs callee resolution.
+        std::unordered_map<const void *, std::string> call_no_discard;
         // 'when' STATEMENT -> which branch is live (always present; a when statement's
         // condition is always required to be a compile-time constant).
         std::unordered_map<const ast::WhenStmt *, bool> when_stmt_selected;

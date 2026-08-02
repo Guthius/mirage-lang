@@ -772,6 +772,15 @@ namespace sema {
                 error(diag, call.location, std::move(msg));
                 return {};
             };
+            // Records that this call's callee carries '@no_discard', so check_stmt's ExprStmt
+            // case can reject a dropped result without redoing callee resolution -- which is
+            // the whole reason this lives here: only this function knows which of the many
+            // callee shapes below actually named a function.
+            const auto note_no_discard = [&](const bool value, const std::string &callee_name) {
+                if (value) {
+                    expr_tables_for_write(program, module_path).call_no_discard[instance_key] = callee_name;
+                }
+            };
             const auto record_instance = [&](const size_t idx) -> std::vector<ResolvedType> {
                 const auto &instance = *program.generic_fn_instances[idx];
                 check_call_args(call.args, instance.param_types, false, locals, module_path, program, diag,
@@ -861,6 +870,7 @@ namespace sema {
                                 }
                                 auto &resolved_fn = ensure_function_signature_resolved(*target_module, fn_name, program, diag);
                                 check_call_args(call.args, resolved_fn.params, false, locals, module_path, program, diag, call.location, fn_name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
+                                note_no_discard(resolved_fn.no_discard, fn_name);
                                 return resolved_fn.return_types;
                             } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
                                 if (!sym.is_pub) return fail(std::format("'{}' is not pub", fn_name));
@@ -935,6 +945,7 @@ namespace sema {
                     return record_instance(*idx);
                 }
                 check_call_args(call.args, method->param_types, false, locals, module_path, program, diag, call.location, (*member_callee)->member, loop_depth, defer_loop_base, fn_error_type, method->is_variadic, method_required_params(*method, program));
+                note_no_discard(method->no_discard, (*member_callee)->member);
                 return method->return_types;
             }
 
@@ -987,6 +998,7 @@ namespace sema {
                         }
                         auto &resolved_fn = ensure_function_signature_resolved(module_path, callee_ident->name, program, diag);
                         check_call_args(call.args, resolved_fn.params, false, locals, module_path, program, diag, call.location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type, resolved_fn.is_variadic, resolved_fn.required_params);
+                        note_no_discard(resolved_fn.no_discard, callee_ident->name);
                         return resolved_fn.return_types;
                     } else if constexpr (std::is_same_v<S, ExtFunctionSymbol>) {
                         check_call_args(call.args, sym.params, sym.is_variadic, locals, module_path, program, diag, call.location, callee_ident->name, loop_depth, defer_loop_base, fn_error_type);
@@ -3743,6 +3755,21 @@ namespace sema {
                 "cannot take the address of variadic function '{}'; function pointers to variadic functions are not supported", name));
             return false;
         }
+        // A function-pointer TYPE carries no calling convention in v1 (spec.md §21), so
+        // 'fn() -> i32' and a '@cdecl fn() -> i32' are indistinguishable once the address is
+        // taken -- and calling the latter through the former would marshal arguments the
+        // wrong way with no diagnostic anywhere. Refuse the address instead. Direct calls
+        // stay legal, which is the entire use case (exposing a Mirage function to C).
+        //
+        // Read off the raw attributes rather than FunctionSymbol::call_conv: this helper is
+        // shared by call sites that only have the decl, and checking the source spelling
+        // means the ban still fires if attribute validation itself reported an error.
+        if (decl && (find_attribute(decl->attributes, "cdecl") || find_attribute(decl->attributes, "callconv"))) {
+            diag.report_error(DiagnosticStage::Sema, loc, std::format(
+                "cannot take the address of '@callconv(\"c\")' function '{}'\n"
+                "       note: function pointers do not carry a calling convention in v1", name));
+            return false;
+        }
         if (decl && find_attribute(decl->attributes, "always_inline")) {
             diag.warn(DiagnosticStage::Sema, loc, std::format(
                 "taking the address of '@always_inline' function '{}'. Calls through a "
@@ -5977,6 +6004,23 @@ namespace sema {
                     check_for_in_stmt(v, locals, module_path, program, diag, expected_returns, loop_depth, defer_loop_base, fn_error_type);
                 } else if constexpr (std::is_same_v<V, ast::ExprStmt>) {
                     const auto expr_ty = check_expr(v.expr, locals, module_path, program, diag, std::nullopt, loop_depth, defer_loop_base, fn_error_type);
+
+                    // '@no_discard': the callee's result is being dropped on the floor. An
+                    // expression STATEMENT is the only place that can happen -- every other
+                    // context consumes the value -- so this is the whole check.
+                    //
+                    // 'try f()' is exempt: 'try' consumes the result. An assignment is not a
+                    // CallExpr, so it never reaches here in the first place.
+                    if (std::holds_alternative<std::unique_ptr<ast::CallExpr>>(v.expr)) {
+                        if (const auto *callee_name = find_expr_record(program, module_path,
+                                &ExprSideTables::call_no_discard, get_expr_key(v.expr))) {
+                            diag.report_error(DiagnosticStage::Sema, v.location, std::format(
+                                "return value of '{}' must be used ('@no_discard')\n"
+                                "       note: assign to '_' to discard it deliberately",
+                                *callee_name));
+                        }
+                    }
+
                     // Detect ignored errors from fallible calls. An ASSIGNMENT whose target
                     // is error-typed is exempt: its statement-level "result" is the value
                     // just stored into the (error-tracked) target, not an ignored error —

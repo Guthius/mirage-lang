@@ -1,0 +1,109 @@
+// Fixture for tests/cdecl_abi_test.py — the MIRROR IMAGE of ext_abi_fixture.
+//
+// ext_abi_fixture checks Mirage-as-caller / C-as-callee. This one checks
+// Mirage-as-CALLEE: every function below is '@(export, cdecl)', so C calls into it
+// through the platform C ABI and the coercion has to be unwound on our side. A callee-side
+// bug is invisible to ext_abi_fixture, because there Mirage never has to take a coerced
+// aggregate apart.
+//
+// The struct shapes are chosen to hit each tier of the System V x86-64 classification:
+//   Pair    (8 bytes, one INTEGER eightbyte)  -> packed into one i64
+//   Vec2    (8 bytes, one SSE eightbyte)      -> <2 x float>
+//   Vec3    (12 bytes, two eightbytes)        -> {<2 x float>, float}
+//   Big     (32 bytes, > 16)                  -> MEMORY: 'ptr byval' in, sret out
+// Each is both passed and returned, since the two directions use different machinery.
+
+#link(lib, "helper.o")
+
+pub type Pair = struct {
+    a: i32
+    b: i32
+}
+
+pub type Vec2 = struct {
+    x: f32
+    y: f32
+}
+
+pub type Vec3 = struct {
+    x: f32
+    y: f32
+    z: f32
+}
+
+pub type Big = struct {
+    a: i64
+    b: i64
+    c: i64
+    d: i64
+}
+
+@(export, cdecl)
+pub fn mir_pair_sum(p: Pair) -> i32 {
+    return p.a + p.b
+}
+
+@(export, cdecl)
+pub fn mir_pair_make(a: i32, b: i32) -> Pair {
+    mut p: Pair = default
+    p.a = a
+    p.b = b
+    return p
+}
+
+@(export, cdecl)
+pub fn mir_vec2_sum(v: Vec2) -> f32 {
+    return v.x + v.y
+}
+
+@(export, cdecl)
+pub fn mir_vec2_make(x: f32, y: f32) -> Vec2 {
+    mut v: Vec2 = default
+    v.x = x
+    v.y = y
+    return v
+}
+
+@(export, cdecl)
+pub fn mir_vec3_sum(v: Vec3) -> f32 {
+    return v.x + v.y + v.z
+}
+
+@(export, cdecl)
+pub fn mir_vec3_make(x: f32, y: f32, z: f32) -> Vec3 {
+    mut v: Vec3 = default
+    v.x = x
+    v.y = y
+    v.z = z
+    return v
+}
+
+@(export, cdecl)
+pub fn mir_big_sum(b: Big) -> i64 {
+    return b.a + b.b + b.c + b.d
+}
+
+@(export, cdecl)
+pub fn mir_big_make(a: i64, b: i64, c: i64, d: i64) -> Big {
+    mut v: Big = default
+    v.a = a
+    v.b = b
+    v.c = c
+    v.d = d
+    return v
+}
+
+// Mixed scalars alongside an aggregate, so the aggregate's coercion cannot accidentally
+// work by occupying the argument registers a simpler signature would have used.
+@(export, cdecl)
+pub fn mir_mixed(lead: i32, p: Pair, trail: i32) -> i32 {
+    return lead + p.a + p.b + trail
+}
+
+// The C side runs the checks and returns a failure count; Mirage's 'main' just forwards it
+// as the process exit code, so a mismatch shows up as a non-zero exit naming how many.
+ext fn run_c_side() -> i32
+
+pub fn main() -> i32 {
+    return run_c_side()
+}

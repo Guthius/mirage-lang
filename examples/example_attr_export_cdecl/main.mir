@@ -1,0 +1,16 @@
+// example_attr_export_cdecl — the documented idiom for exposing a Mirage function to C.
+// '@export' and '@callconv' are deliberately orthogonal: '@export' fixes the symbol NAME,
+// '@cdecl' fixes the ABI. Both are needed, and the grouped form is how you write them.
+//
+// tests/cdecl_abi_test.py is what actually links this shape against C; this fixture just
+// pins that the combination compiles and runs.
+//
+// Expected: exit 7.
+@(export, cdecl)
+pub fn mirage_add(a: i32, b: i32) -> i32 {
+    return a + b
+}
+
+pub fn main() -> i32 {
+    return mirage_add(3, 4)
+}

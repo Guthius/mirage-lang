@@ -15,6 +15,8 @@ namespace sema {
     void validate_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
     void validate_method_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
     void validate_trait_impl_attributes_for_program(Program &program, DiagnosticEngine &diag);
+    void validate_ext_function_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
+    void validate_export_names_for_program(Program &program, DiagnosticEngine &diag);
     void validate_init_dependencies_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag);
     void check_generic_templates_for_program(Program &program, DiagnosticEngine &diag);
 
@@ -916,13 +918,17 @@ namespace sema {
         resolve_trait_impl_signatures_for_program(out, diag);
 
         // Every free-function/impl-method/trait-impl-method signature is resolved by this
-        // point, but body-checking hasn't started — exactly what the five attributes' own
+        // point, but body-checking hasn't started — exactly what the attributes' own
         // checks need (resolved return types, raw AST param/attribute/body shape).
         for (const auto &path : program.modules | std::views::keys) {
             validate_attributes_for_module(path, out.modules.at(path), out, diag);
             validate_method_attributes_for_module(path, out.modules.at(path), out, diag);
+            validate_ext_function_attributes_for_module(path, out.modules.at(path), out, diag);
         }
         validate_trait_impl_attributes_for_program(out, diag);
+        // Whole-program, and therefore only correct once every per-module and trait-impl
+        // pass above has recorded its export names.
+        validate_export_names_for_program(out, diag);
 
         for (const auto &path : program.modules | std::views::keys) {
             resolve_values_for_module(path, out.modules.at(path), out, diag);

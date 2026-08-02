@@ -983,6 +983,11 @@ namespace ast {
 
         bool is_pub;
         bool is_variadic = false;
+        // Only '@import' is ever legal here; sema rejects every other attribute by name
+        // (see validate_ext_function_attributes). The parser accepts an attribute clause
+        // before 'ext fn' at all only so that rejection can be a precise diagnostic rather
+        // than a bare "attributes are only allowed on 'fn' declarations".
+        std::vector<Attribute> attributes;
         std::string name;
         std::vector<Param> params;
         std::optional<Type> return_type;

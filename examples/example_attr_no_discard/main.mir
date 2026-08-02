@@ -1,0 +1,13 @@
+// example_attr_no_discard — REJECTION CASE. A '@no_discard' function's result may not be
+// dropped by an expression statement, which is the only context that can drop one.
+//
+// Expected: error "return value of 'checked_add' must be used ('@no_discard')".
+@no_discard
+fn checked_add(a: i32, b: i32) -> i32 {
+    return a + b
+}
+
+pub fn main() -> i32 {
+    checked_add(1, 2)
+    return 0
+}

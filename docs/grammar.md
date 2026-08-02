@@ -10,7 +10,7 @@ This grammar is derived directly from the parser in `src/compiler/ast.cpp`. Term
 program       ::= { declaration } EOF
 
 declaration   ::= [ attribute ] [ 'pub' ] fn_decl   (* attribute: also legal on method_decl inside impl blocks — see below *)
-               | [ 'pub' ] ext_fn_decl
+               | [ attribute ] [ 'pub' ] ext_fn_decl   (* only '@import' is legal here — see below *)
                | [ 'pub' ] type_decl
                | [ 'pub' ] var_decl
                | [ 'pub' ] macro_decl
@@ -69,21 +69,34 @@ entries.
 ### Declaration Attributes
 
 ```ebnf
-attribute     ::= '@' IDENT                                 (* single, no arguments *)
-               | '@' IDENT '(' expr { ',' expr } ')'       (* single, with arguments *)
-               | '@' '(' IDENT { ',' IDENT } ')'           (* grouped — one or more, no arguments *)
+attribute     ::= '@' attr_name                              (* single, no arguments *)
+               | '@' attr_name '(' expr { ',' expr } ')'    (* single, with arguments *)
+               | '@' '(' attr_name { ',' attr_name } ')'    (* grouped — one or more, no arguments *)
+
+(* Almost every attribute name is an ordinary IDENT, but 'import' is a reserved keyword
+   ('const x := import("...")'), so the name position accepts it by spelling. Attribute
+   names live in their own namespace, where nothing can be confused with an import
+   expression. *)
+attr_name     ::= IDENT | 'import'
 ```
 
-One attribute clause may precede a `fn_decl` or a `method_decl` (a method inside an `impl`
-block) — these are the only declaration kinds attributes are legal on. Multiple separate
-clauses on the same declaration (`@naked @no_return`) are a parse error; use the grouped form
-instead (`@(naked, no_return)`). A grouped-form member never takes its own argument list —
+One attribute clause may precede a `fn_decl`, a `method_decl` (a method inside an `impl`
+block), or an `ext_fn_decl`. Multiple separate clauses on the same declaration
+(`@naked @no_return`) are a parse error; use the grouped form instead
+(`@(naked, no_return)`). A grouped-form member never takes its own argument list —
 `@(section(".text"))` is a parse error; only the ungrouped `@name(args)` form takes arguments.
-`IDENT` here (`no_return`, `naked`, `always_inline`, `section`, `init`) is validated against
-the fixed known-attribute set by the parser, the same way `link_decl`'s category name is —
-see spec.md's "Declaration Attributes" section for each attribute's semantics. `init` is
-additionally rejected specifically on a `method_decl` by sema (a structural restriction, not
-a parser-level one) — see spec.md's `@init` section.
+The name (`no_return`, `naked`, `always_inline`, `section`, `init`, `no_discard`, `export`,
+`callconv`, `cdecl`, `import`) is validated against the fixed known-attribute set by the
+parser, the same way `link_decl`'s category name is — see spec.md's "Declaration Attributes"
+section for each attribute's semantics.
+
+WHERE each one is legal is a sema restriction, not a parser-level one, so the parser accepts
+any known name in any of the three positions:
+
+- `init` is rejected specifically on a `method_decl` — see spec.md's `@init` section.
+- On an `ext_fn_decl`, every attribute except `import` is rejected. The parser accepts a
+  clause there at all only so that rejection can name the offending attribute, instead of
+  the whole clause failing with "attributes are only allowed on 'fn' declarations".
 
 A parameter's `':=' expr` form infers the parameter's type from the default
 expression's type (same literal-defaulting rules as `var_decl_stmt`'s `:=`
@@ -100,7 +113,7 @@ Values" section for the full semantics.
 ### Extern Function Declaration
 
 ```ebnf
-ext_fn_decl   ::= ext_kw 'fn' IDENT '(' [ ext_params ] ')' [ '->' type ]
+ext_fn_decl   ::= [ attribute ] ext_kw 'fn' IDENT '(' [ ext_params ] ')' [ '->' type ]
 
 ext_kw        ::= 'ext'     (* parsed as identifier, not keyword *)
 

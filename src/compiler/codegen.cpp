@@ -327,6 +327,17 @@ namespace codegen {
             std::vector<llvm::BasicBlock *> continue_targets_;
             std::vector<llvm::BasicBlock *> break_targets_;
             std::vector<sema::ResolvedType> current_returns_;
+            // Callee-side state for a '@callconv("c")' function body. A C-ABI function's LLVM
+            // signature is not its Mirage one: an aggregate return travels through a hidden
+            // leading sret pointer or as a coerced scalar, and an aggregate parameter arrives
+            // as 'ptr byval' or packed into one integer/SSE value. Both ends of that have to
+            // agree, so emit_return consults these rather than returning the raw value.
+            //
+            // sret_slot is the hidden pointer argument (null when the return is not
+            // indirect); ret_coerced_type is the coerced LLVM return type (null unless the
+            // return is a direct-but-coerced aggregate).
+            llvm::Value *c_abi_sret_slot_ = nullptr;
+            llvm::Type *c_abi_ret_coerced_type_ = nullptr;
             std::vector<DeferScope> defer_scopes_;
             bool next_block_is_loop_body_ = false;
             std::unordered_map<std::string, LocalValue> locals_;
@@ -1112,6 +1123,33 @@ namespace codegen {
                 return llvm::FunctionType::get(ret_type, param_types, is_vararg);
             }
 
+            // Attaches the sret/byval parameter attributes a C-ABI signature needs to an
+            // already-created llvm::Function. Shared by 'ext fn' declarations and by Mirage
+            // functions declared '@callconv("c")' — the two must agree exactly, and this was
+            // open-coded at the 'ext fn' site before '@cdecl' needed the same thing.
+            void apply_c_abi_param_attrs(llvm::Function *fn, const std::vector<sema::ResolvedType> &params,
+                                          const std::optional<sema::ResolvedType> &return_type, const std::string &module_path) {
+                unsigned param_idx = 0;
+                if (return_type && needs_ext_abi_coercion(*return_type)) {
+                    const auto cls = classify_aggregate(*return_type, module_path);
+                    if (cls.indirect) {
+                        fn->addParamAttr(0, llvm::Attribute::getWithStructRetType(*context_, cls.raw_type));
+                        fn->addParamAttr(0, llvm::Attribute::getWithAlignment(*context_, llvm::Align(cls.raw_align)));
+                        param_idx = 1;
+                    }
+                }
+                for (const auto &param : params) {
+                    if (needs_ext_abi_coercion(param)) {
+                        const auto cls = classify_aggregate(param, module_path);
+                        if (cls.indirect) {
+                            fn->addParamAttr(param_idx, llvm::Attribute::getWithByValType(*context_, cls.raw_type));
+                            fn->addParamAttr(param_idx, llvm::Attribute::getWithAlignment(*context_, llvm::Align(cls.raw_align)));
+                        }
+                    }
+                    ++param_idx;
+                }
+            }
+
             // Maps a declaration attribute name to the plain LLVM function attribute it
             // corresponds to. 'section' and 'init' aren't ordinary FnAttrs — 'section' calls
             // llvm::Function::setSection directly (see declare_globals_and_functions below),
@@ -1189,11 +1227,30 @@ namespace codegen {
                             // user's own 'main' is mangled like any other function there.
                             const bool entry_symbol = path == ast_program_.root_module_path && !is_wasm_target() &&
                                 (name == "main" || (options_.freestanding && name == "_start"));
-                            const auto fname = symbol_name(path, name, entry_symbol);
+                            // '@export' replaces the module-path mangling with a fixed name
+                            // and forces external linkage — the general form of the escape
+                            // hatch the root module's 'main' already had.
+                            const auto fname = fn->export_name ? *fn->export_name : symbol_name(path, name, entry_symbol);
+                            // '@callconv("c")' / '@cdecl': the signature C sees, not the raw
+                            // Mirage one. Same machinery an 'ext fn' declaration goes through.
+                            auto *fn_ty = fn->call_conv == sema::CallConv::C
+                                ? ext_function_type(path, fn->params,
+                                                    fn->return_types.empty() ? std::optional<sema::ResolvedType>{}
+                                                                             : std::optional{fn->return_types.front()},
+                                                    /*is_vararg=*/false)
+                                : function_type(path, fn->params, fn->return_types);
                             auto *llvm_fn = llvm::Function::Create(
-                                function_type(path, fn->params, fn->return_types),
-                                fn->is_pub || entry_symbol ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::InternalLinkage,
+                                fn_ty,
+                                fn->is_pub || entry_symbol || fn->export_name ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::InternalLinkage,
                                 fname, *module_);
+                            // sret/byval on the DECLARATION, mirroring what the 'ext fn'
+                            // branch below does — a C caller reads these off the symbol.
+                            if (fn->call_conv == sema::CallConv::C) {
+                                apply_c_abi_param_attrs(llvm_fn, fn->params,
+                                    fn->return_types.empty() ? std::optional<sema::ResolvedType>{}
+                                                             : std::optional{fn->return_types.front()},
+                                    path);
+                            }
                             functions_[FunctionKey{path, name}] = llvm_fn;
 
                             if (fn->decl) {
@@ -1210,26 +1267,7 @@ namespace codegen {
                                     ext_function_type(path, ef->params, ef->return_type, ef->is_variadic),
                                     llvm::GlobalValue::ExternalLinkage,
                                     name, *module_);
-
-                                unsigned param_idx = 0;
-                                if (ef->return_type && needs_ext_abi_coercion(*ef->return_type)) {
-                                    const auto cls = classify_aggregate(*ef->return_type, path);
-                                    if (cls.indirect) {
-                                        llvm_fn->addParamAttr(0, llvm::Attribute::getWithStructRetType(*context_, cls.raw_type));
-                                        llvm_fn->addParamAttr(0, llvm::Attribute::getWithAlignment(*context_, llvm::Align(cls.raw_align)));
-                                        param_idx = 1;
-                                    }
-                                }
-                                for (const auto &param : ef->params) {
-                                    if (needs_ext_abi_coercion(param)) {
-                                        const auto cls = classify_aggregate(param, path);
-                                        if (cls.indirect) {
-                                            llvm_fn->addParamAttr(param_idx, llvm::Attribute::getWithByValType(*context_, cls.raw_type));
-                                            llvm_fn->addParamAttr(param_idx, llvm::Attribute::getWithAlignment(*context_, llvm::Align(cls.raw_align)));
-                                        }
-                                    }
-                                    ++param_idx;
-                                }
+                                apply_c_abi_param_attrs(llvm_fn, ef->params, ef->return_type, path);
                             }
                             ext_functions_[path + "\n" + name] = llvm_fn;
                         }
@@ -3004,6 +3042,10 @@ namespace codegen {
                 break_targets_.clear();
                 defer_scopes_.clear();
                 next_block_is_loop_body_ = false;
+                // Cleared unconditionally: leaking either into the NEXT function's body would
+                // make its returns store through a pointer belonging to another frame.
+                c_abi_sret_slot_ = nullptr;
+                c_abi_ret_coerced_type_ = nullptr;
                 auto *entry = llvm::BasicBlock::Create(*context_, "entry", current_function_);
                 builder_.SetInsertPoint(entry);
             }
@@ -3040,6 +3082,63 @@ namespace codegen {
                         .type = param_types[index],
                         .type_module = param.type
                                            ? type_module_for_ast_type(*param.type, module_path, param_types[index])
+                                           : module_path,
+                    };
+                }
+            }
+
+            // Callee-side counterpart of emit_c_abi_call: binds a '@callconv("c")' function's
+            // parameters back into ordinary Mirage locals, and records how its return must
+            // travel (see c_abi_sret_slot_).
+            //
+            // ext_function_type lowers each by-value aggregate to exactly ONE LLVM parameter
+            // -- a pointer when the classification is indirect, otherwise a single scalar or
+            // a small struct of the coerced parts -- so every case below is a one-argument
+            // one, and reinterpreting is a store-then-load through the same stack slot.
+            template <typename ParamT>
+            void bind_c_abi_param_locals(const std::vector<ParamT> &params, const std::vector<sema::ResolvedType> &param_types,
+                                          const std::vector<sema::ResolvedType> &return_types, const std::string &module_path) {
+                auto arg_it = current_function_->arg_begin();
+
+                if (!return_types.empty() && needs_ext_abi_coercion(return_types.front())) {
+                    const auto ret_cls = classify_aggregate(return_types.front(), module_path);
+                    if (ret_cls.indirect) {
+                        arg_it->setName("sret");
+                        c_abi_sret_slot_ = &*arg_it;
+                        ++arg_it;
+                    } else {
+                        c_abi_ret_coerced_type_ = current_function_->getReturnType();
+                    }
+                }
+
+                for (size_t index = 0; index < param_types.size() && arg_it != current_function_->arg_end(); ++index, ++arg_it) {
+                    const auto &param = params[index];
+                    const auto &raw_ty = param_types[index];
+                    arg_it->setName(param.name);
+
+                    auto *raw_llvm_ty = llvm_type(module_path, raw_ty);
+                    auto *slot = create_entry_alloca(current_function_, raw_llvm_ty, param.name);
+
+                    if (!needs_ext_abi_coercion(raw_ty)) {
+                        builder_.CreateStore(&*arg_it, slot);
+                    } else if (const auto cls = classify_aggregate(raw_ty, module_path); cls.indirect) {
+                        // 'ptr byval': the caller already placed a private copy at that
+                        // address, but copy it into our own frame so the local behaves like
+                        // every other parameter (addressable, mutable, same lifetime).
+                        builder_.CreateMemCpy(slot, llvm::MaybeAlign(cls.raw_align), &*arg_it,
+                                              llvm::MaybeAlign(cls.raw_align),
+                                              usize_const(size_of(module_path, raw_ty)));
+                    } else {
+                        // Coerced into one scalar/small struct: write those bytes into the
+                        // slot and let every later read see the raw Mirage layout.
+                        builder_.CreateStore(&*arg_it, slot);
+                    }
+
+                    locals_[param.name] = LocalValue{
+                        .alloca = slot,
+                        .type = raw_ty,
+                        .type_module = param.type
+                                           ? type_module_for_ast_type(*param.type, module_path, raw_ty)
                                            : module_path,
                     };
                 }
@@ -3591,7 +3690,11 @@ namespace codegen {
 
             void emit_function(const std::string &module_path, const std::string &name, const sema::FunctionSymbol &fn) {
                 begin_function_body(functions_.at(FunctionKey{module_path, name}), fn.return_types);
-                bind_param_locals(current_function_->arg_begin(), fn.decl->params, fn.params, module_path);
+                if (fn.call_conv == sema::CallConv::C) {
+                    bind_c_abi_param_locals(fn.decl->params, fn.params, fn.return_types, module_path);
+                } else {
+                    bind_param_locals(current_function_->arg_begin(), fn.decl->params, fn.params, module_path);
+                }
 
                 emit_stmt(fn.decl->body);
 
@@ -4580,6 +4683,14 @@ namespace codegen {
 
                 std::vector<llvm::Value *> args;
                 if (const auto *fn = std::get_if<sema::FunctionSymbol>(&sym_it->second)) {
+                    // '@callconv("c")' / '@cdecl': marshal exactly as an 'ext fn' call does.
+                    // Both sides of the call must agree, and the declaration below was
+                    // emitted with ext_function_type for the same reason.
+                    if (fn->call_conv == sema::CallConv::C) {
+                        std::optional<sema::ResolvedType> ret;
+                        if (!fn->return_types.empty()) ret = fn->return_types.front();
+                        return emit_c_abi_call(functions_.at(FunctionKey{target_module, name}), call, fn->params, ret);
+                    }
                     if (fn->is_variadic) {
                         const size_t fixed_count = fn->params.size() - 1;
                         for (size_t i = 0; i < fixed_count; ++i) {
@@ -4613,62 +4724,76 @@ namespace codegen {
                     return builder_.CreateCall(functions_.at(FunctionKey{target_module, name}), args);
                 }
                 if (const auto *ef = std::get_if<sema::ExtFunctionSymbol>(&sym_it->second)) {
-                    // Aggregate-by-value args/return crossing into real C code need System V
-                    // target ABI coercion (see classify_aggregate) - LLVM's default
-                    // lowering of a raw aggregate argument doesn't match what a real C callee
-                    // (raylib, libc, ...) reads. byval/sret attributes must be attached to the
-                    // CallInst itself, not just the callee's declaration, so track which
-                    // argument positions need them as they're built.
-                    std::vector<std::pair<unsigned, AbiClassification>> byval_args;
-                    for (size_t i = 0; i < call.args.size(); ++i) {
-                        if (i < ef->params.size()) {
-                            AbiClassification cls;
-                            auto *value = emit_ext_call_arg(call.args[i], ef->params[i], *current_module_path_, &cls);
-                            if (needs_ext_abi_coercion(ef->params[i]) && cls.indirect) {
-                                byval_args.emplace_back(static_cast<unsigned>(args.size()), cls);
-                            }
-                            args.push_back(value);
-                        } else {
-                            args.push_back(emit_expr(call.args[i]));
+                    return emit_c_abi_call(ext_functions_.at(global_key(target_module, name)),
+                                            call, ef->params, ef->return_type);
+                }
+                return nullptr;
+            }
+
+            // Emits a call through the platform C ABI: aggregate-by-value arguments and
+            // returns are coerced per classify_aggregate (System V eightbytes natively,
+            // clang's WebAssembly rules on wasm), because LLVM's default lowering of a raw
+            // aggregate argument does not match what a real C callee (raylib, libc, ...)
+            // reads. byval/sret attributes must be attached to the CallInst itself, not just
+            // the callee's declaration, so argument positions needing them are tracked as the
+            // arguments are built.
+            //
+            // Reached from two places, which is why it is a function rather than inline at
+            // the 'ext fn' site it grew up in: an 'ext fn' call, and a call to a Mirage
+            // function declared '@callconv("c")' / '@cdecl'. Those must marshal identically
+            // or the two sides of the same call would disagree.
+            auto emit_c_abi_call(llvm::Function *callee, const ast::CallExpr &call,
+                                  const std::vector<sema::ResolvedType> &params,
+                                  const std::optional<sema::ResolvedType> &return_type) -> llvm::Value * {
+                std::vector<llvm::Value *> args;
+                std::vector<std::pair<unsigned, AbiClassification>> byval_args;
+                for (size_t i = 0; i < call.args.size(); ++i) {
+                    if (i < params.size()) {
+                        AbiClassification cls;
+                        auto *value = emit_ext_call_arg(call.args[i], params[i], *current_module_path_, &cls);
+                        if (needs_ext_abi_coercion(params[i]) && cls.indirect) {
+                            byval_args.emplace_back(static_cast<unsigned>(args.size()), cls);
                         }
+                        args.push_back(value);
+                    } else {
+                        // Beyond the declared parameter list: a C variadic tail, passed as-is.
+                        args.push_back(emit_expr(call.args[i]));
                     }
+                }
 
-                    auto *callee = ext_functions_.at(global_key(target_module, name));
-                    const auto apply_byval_attrs = [&](llvm::CallInst *call_inst, const unsigned index_offset) {
-                        for (const auto &[index, cls] : byval_args) {
-                            call_inst->addParamAttr(index + index_offset, llvm::Attribute::getWithByValType(*context_, cls.raw_type));
-                            call_inst->addParamAttr(index + index_offset, llvm::Attribute::getWithAlignment(*context_, llvm::Align(cls.raw_align)));
-                        }
-                    };
+                const auto apply_byval_attrs = [&](llvm::CallInst *call_inst, const unsigned index_offset) {
+                    for (const auto &[index, cls] : byval_args) {
+                        call_inst->addParamAttr(index + index_offset, llvm::Attribute::getWithByValType(*context_, cls.raw_type));
+                        call_inst->addParamAttr(index + index_offset, llvm::Attribute::getWithAlignment(*context_, llvm::Align(cls.raw_align)));
+                    }
+                };
 
-                    if (ef->return_type && needs_ext_abi_coercion(*ef->return_type)) {
-                        const auto ret_cls = classify_aggregate(*ef->return_type, *current_module_path_);
-                        if (ret_cls.indirect) {
-                            auto *ret_slot = create_entry_alloca(current_function_, ret_cls.raw_type, "ext.ret");
-                            std::vector<llvm::Value *> full_args;
-                            full_args.push_back(ret_slot);
-                            full_args.insert(full_args.end(), args.begin(), args.end());
-                            auto *call_inst = builder_.CreateCall(callee, full_args);
-                            call_inst->addParamAttr(0, llvm::Attribute::getWithStructRetType(*context_, ret_cls.raw_type));
-                            call_inst->addParamAttr(0, llvm::Attribute::getWithAlignment(*context_, llvm::Align(ret_cls.raw_align)));
-                            apply_byval_attrs(call_inst, 1);
-                            return builder_.CreateLoad(ret_cls.raw_type, ret_slot);
-                        }
-
-                        auto *call_inst = builder_.CreateCall(callee, args);
-                        apply_byval_attrs(call_inst, 0);
-                        // Round-trip the coerced return value through memory to reinterpret its
-                        // bytes back into the raw Mirage struct representation.
-                        auto *coerced_slot = create_entry_alloca(current_function_, call_inst->getType(), "ext.ret.coerced");
-                        builder_.CreateStore(call_inst, coerced_slot);
-                        return builder_.CreateLoad(ret_cls.raw_type, coerced_slot);
+                if (return_type && needs_ext_abi_coercion(*return_type)) {
+                    const auto ret_cls = classify_aggregate(*return_type, *current_module_path_);
+                    if (ret_cls.indirect) {
+                        auto *ret_slot = create_entry_alloca(current_function_, ret_cls.raw_type, "ext.ret");
+                        std::vector<llvm::Value *> full_args;
+                        full_args.push_back(ret_slot);
+                        full_args.insert(full_args.end(), args.begin(), args.end());
+                        auto *call_inst = builder_.CreateCall(callee, full_args);
+                        call_inst->addParamAttr(0, llvm::Attribute::getWithStructRetType(*context_, ret_cls.raw_type));
+                        call_inst->addParamAttr(0, llvm::Attribute::getWithAlignment(*context_, llvm::Align(ret_cls.raw_align)));
+                        apply_byval_attrs(call_inst, 1);
+                        return builder_.CreateLoad(ret_cls.raw_type, ret_slot);
                     }
 
                     auto *call_inst = builder_.CreateCall(callee, args);
                     apply_byval_attrs(call_inst, 0);
-                    return call_inst;
+                    // Round-trip the coerced return value through memory to reinterpret its
+                    // bytes back into the raw Mirage struct representation.
+                    auto *coerced_slot = create_entry_alloca(current_function_, call_inst->getType(), "ext.ret.coerced");
+                    builder_.CreateStore(call_inst, coerced_slot);
+                    return builder_.CreateLoad(ret_cls.raw_type, coerced_slot);
                 }
-                return nullptr;
+
+                auto *call_inst = builder_.CreateCall(callee, args);
+                apply_byval_attrs(call_inst, 0);
+                return call_inst;
             }
 
             auto call_return_types(const ast::CallExpr &call) -> std::pair<std::string, std::vector<sema::ResolvedType>> {
@@ -6831,6 +6956,24 @@ namespace codegen {
 
                 if (ret_vals.empty()) {
                     builder_.CreateRetVoid();
+                    return;
+                }
+                // '@callconv("c")' return shapes. The value was built in the raw Mirage
+                // representation above; here it is handed over the way a C caller expects.
+                // Sema rejects '@cdecl' on a multi-return function, so there is exactly one.
+                if (c_abi_sret_slot_) {
+                    // Indirect: write through the caller's hidden pointer and return void.
+                    builder_.CreateStore(ret_vals.front(), c_abi_sret_slot_);
+                    builder_.CreateRetVoid();
+                    return;
+                }
+                if (c_abi_ret_coerced_type_) {
+                    // Direct but coerced: round-trip through a stack slot to reinterpret the
+                    // aggregate's bytes as the coerced scalar, the mirror of what
+                    // emit_c_abi_call does to the value it receives.
+                    auto *slot = create_entry_alloca(current_function_, ret_vals.front()->getType(), "cdecl.ret");
+                    builder_.CreateStore(ret_vals.front(), slot);
+                    builder_.CreateRet(builder_.CreateLoad(c_abi_ret_coerced_type_, slot));
                     return;
                 }
                 if (ret_vals.size() == 1) {

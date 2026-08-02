@@ -1,0 +1,19 @@
+// example_attr_export_duplicate — REJECTION CASE. Export names live in one flat linker
+// namespace, so two declarations claiming the same one is an error naming both sites. The
+// SECOND in source order is the one reported, deterministically -- the check sorts by
+// position before reporting, because the symbol tables it walks are unordered.
+//
+// Expected: error "duplicate export name 'shared'".
+@export("shared")
+pub fn first() -> i32 {
+    return 1
+}
+
+@export("shared")
+pub fn second() -> i32 {
+    return 2
+}
+
+pub fn main() -> i32 {
+    return first() + second()
+}

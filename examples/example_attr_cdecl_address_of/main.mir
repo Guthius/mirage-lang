@@ -1,0 +1,16 @@
+// example_attr_cdecl_address_of — REJECTION CASE. A function-pointer TYPE carries no
+// calling convention in v1, so 'fn() -> i32' and a '@cdecl fn() -> i32' are
+// indistinguishable once the address is taken -- and calling the latter through the former
+// would marshal arguments the wrong way with no diagnostic anywhere. Taking the address is
+// refused instead; direct calls stay legal, which is the whole use case.
+//
+// Expected: error "cannot take the address of '@callconv(\"c\")' function 'c_fn'".
+@cdecl
+fn c_fn() -> i32 {
+    return 1
+}
+
+pub fn main() -> i32 {
+    const p: fn() -> i32 = c_fn
+    return p()
+}

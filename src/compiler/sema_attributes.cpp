@@ -79,39 +79,207 @@ namespace sema {
             }
         }
 
+        // Type-checks and folds one attribute argument as a compile-time constant '[]u8',
+        // returning the string or nullopt (having reported why). '@section' grew this shape
+        // first; '@export', '@callconv' and '@import' all need exactly the same three checks,
+        // so 'what' names the attribute in each diagnostic rather than each re-spelling them.
+        auto fold_string_attribute_arg(const ast::Expr &arg, const char *what, const SourceLocation &loc,
+                                        const std::string &module_path, Program &program, DiagnosticEngine &diag) -> std::optional<std::string> {
+            LocalScope empty;
+            const auto u8_slice = intern_slice(program, ResolvedType{.kind = TypeKind::U8});
+            const auto arg_type = check_expr(arg, empty, module_path, program, diag, u8_slice, 0);
+            if (!is_assignable(arg_type, u8_slice, program)) {
+                diag.report_error(DiagnosticStage::Sema, loc, std::format("'{}' argument must be a compile-time constant '[]u8' expression", what));
+                return std::nullopt;
+            }
+            if (!is_constant_expr(arg, module_path, program)) {
+                diag.report_error(DiagnosticStage::Sema, loc, std::format("'{}' argument must be a compile-time constant expression", what));
+                return std::nullopt;
+            }
+            const auto folded = evaluate_const_value(arg, module_path, program, diag);
+            if (!folded) {
+                return std::nullopt;
+            }
+            const auto *str = std::get_if<std::string>(&*folded);
+            if (!str) {
+                return std::nullopt;
+            }
+            if (str->empty()) {
+                diag.report_error(DiagnosticStage::Sema, loc, std::format("'{}' argument must not be an empty string", what));
+                return std::nullopt;
+            }
+            return *str;
+        }
+
         void validate_section_attribute(const ast::Attribute &attr, const std::string &module_path, Program &program, DiagnosticEngine &diag) {
             if (attr.args.size() != 1) {
                 diag.report_error(DiagnosticStage::Sema, attr.location, "'@section' requires exactly one string argument");
                 return;
             }
+            (void) fold_string_attribute_arg(attr.args[0], "@section", attr.location, module_path, program, diag);
+        }
 
-            LocalScope empty;
-            const auto u8_slice = intern_slice(program, ResolvedType{.kind = TypeKind::U8});
-            const auto arg_type = check_expr(attr.args[0], empty, module_path, program, diag, u8_slice, 0);
-            if (!is_assignable(arg_type, u8_slice, program)) {
-                diag.report_error(DiagnosticStage::Sema, attr.location, "'@section' argument must be a compile-time constant '[]u8' expression");
-                return;
+        // Whether 'name' can be a linker symbol at all. Deliberately permissive -- '$' and
+        // '.' appear in real mangled names, and this is not the place to relitigate what a
+        // platform accepts -- but a name with whitespace, a NUL, or a leading digit is
+        // always a mistake, and catching it here beats emitting an object the assembler
+        // rejects with no reference to the source.
+        auto is_plausible_symbol_name(const std::string &name) -> bool {
+            if (name.empty() || (name.front() >= '0' && name.front() <= '9')) {
+                return false;
             }
-            if (!is_constant_expr(attr.args[0], module_path, program)) {
-                diag.report_error(DiagnosticStage::Sema, attr.location, "'@section' argument must be a compile-time constant expression");
-                return;
-            }
-            if (const auto folded = evaluate_const_value(attr.args[0], module_path, program, diag)) {
-                if (const auto *str = std::get_if<std::string>(&*folded); str && str->empty()) {
-                    diag.report_error(DiagnosticStage::Sema, attr.location, "'@section' argument must not be an empty string");
+            for (const unsigned char ch : name) {
+                if (ch <= ' ' || ch == 0x7f || ch == ',' || ch == '(' || ch == ')') {
+                    return false;
                 }
+            }
+            return true;
+        }
+
+        void validate_no_discard_attribute(const ast::Attribute &attr, const std::vector<ResolvedType> &return_types, DiagnosticEngine &diag) {
+            if (!attr.args.empty()) {
+                diag.report_error(DiagnosticStage::Sema, attr.location, "'@no_discard' takes no arguments");
+            }
+            // Nothing to discard, so the attribute could only ever mislead a reader into
+            // thinking a result exists.
+            if (return_types.empty()) {
+                diag.report_error(DiagnosticStage::Sema, attr.location,
+                    "'@no_discard' on a function with no return value has no effect");
             }
         }
 
-        // Covers the four attribute checks that apply identically regardless of whether the
+        // '@export' / '@export("name")'. 'decl_name' is the declaration's own unqualified
+        // name, used when no argument is given -- for a method too, which means two methods
+        // of the same name on different types both default to that bare name and collide.
+        // That collision is reported by validate_export_names_for_program with both
+        // locations, which is a better answer than silently mangling one of them.
+        auto validate_export_attribute(const ast::Attribute &attr, const std::string &decl_name, const bool is_generic,
+                                        const std::string &module_path, Program &program, DiagnosticEngine &diag) -> ExportName {
+            if (attr.args.size() > 1) {
+                diag.report_error(DiagnosticStage::Sema, attr.location, "'@export' takes at most one string argument");
+                return std::nullopt;
+            }
+            // Each instantiation would need its own export name, and nothing supplies one.
+            // Same rationale as '@init''s and 'ext fn''s generic bans.
+            if (is_generic) {
+                diag.report_error(DiagnosticStage::Sema, attr.location,
+                    "'@export' is not allowed on a generic function; each instantiation would need a distinct export name");
+                return std::nullopt;
+            }
+
+            std::string name = decl_name;
+            if (attr.args.size() == 1) {
+                const auto folded = fold_string_attribute_arg(attr.args[0], "@export", attr.location, module_path, program, diag);
+                if (!folded) {
+                    return std::nullopt;
+                }
+                name = *folded;
+            }
+            if (!is_plausible_symbol_name(name)) {
+                diag.report_error(DiagnosticStage::Sema, attr.location,
+                    std::format("'@export' name '{}' is not a valid symbol name", name));
+                return std::nullopt;
+            }
+            return name;
+        }
+
+        // '@callconv("c")' and its alias '@cdecl'. Returns the convention the declaration
+        // ends up with; CallConv::Mirage on any error, which is the status quo and so cannot
+        // turn a diagnostic into a miscompile.
+        auto validate_callconv_attributes(const std::vector<ast::Attribute> &attrs, const bool is_generic,
+                                           const std::string &module_path, Program &program, DiagnosticEngine &diag) -> CallConv {
+            const auto *callconv = find_attribute(attrs, "callconv");
+            const auto *cdecl_attr = find_attribute(attrs, "cdecl");
+
+            if (cdecl_attr && !cdecl_attr->args.empty()) {
+                diag.report_error(DiagnosticStage::Sema, cdecl_attr->location, "'@cdecl' takes no arguments");
+            }
+            if (callconv && cdecl_attr) {
+                diag.report_error(DiagnosticStage::Sema, callconv->location,
+                    "'@callconv' and '@cdecl' cannot be combined: '@cdecl' is an alias for '@callconv(\"c\")'");
+                return CallConv::Mirage;
+            }
+            if (!callconv && !cdecl_attr) {
+                return CallConv::Mirage;
+            }
+
+            const auto *chosen = callconv ? callconv : cdecl_attr;
+            if (is_generic) {
+                diag.report_error(DiagnosticStage::Sema, chosen->location,
+                    "'@callconv' is not allowed on a generic function");
+                return CallConv::Mirage;
+            }
+            // A naked function has no compiler-generated prologue, so there is nothing to
+            // implement a convention with -- the body IS the ABI.
+            if (find_attribute(attrs, "naked")) {
+                diag.report_error(DiagnosticStage::Sema, chosen->location,
+                    "'@callconv' and '@naked' cannot be combined: a naked function has no compiler-generated prologue to implement a convention with");
+                return CallConv::Mirage;
+            }
+
+            if (cdecl_attr) {
+                return CallConv::C;
+            }
+
+            if (callconv->args.size() != 1) {
+                diag.report_error(DiagnosticStage::Sema, callconv->location, "'@callconv' requires exactly one string argument");
+                return CallConv::Mirage;
+            }
+            const auto folded = fold_string_attribute_arg(callconv->args[0], "@callconv", callconv->location, module_path, program, diag);
+            if (!folded) {
+                return CallConv::Mirage;
+            }
+            if (*folded == "c") {
+                return CallConv::C;
+            }
+            if (*folded == "mirage") {
+                return CallConv::Mirage;
+            }
+            // Names that are real conventions elsewhere get their own message rather than
+            // the generic one -- the same courtesy asm_registers.hpp extends to SSE
+            // registers, so "not supported" reads differently from "not a thing".
+            if (*folded == "sysv" || *folded == "win64" || *folded == "fastcall" ||
+                *folded == "stdcall" || *folded == "thiscall" || *folded == "vectorcall") {
+                diag.report_error(DiagnosticStage::Sema, callconv->location, std::format(
+                    "calling convention '{}' is not supported in v1; only \"c\" and \"mirage\" are", *folded));
+                return CallConv::Mirage;
+            }
+            diag.report_error(DiagnosticStage::Sema, callconv->location, std::format(
+                "unknown calling convention '{}'; expected \"c\" or \"mirage\"", *folded));
+            return CallConv::Mirage;
+        }
+
+        // Whether any parameter or return type crosses the boundary as a by-value aggregate,
+        // i.e. whether the Mirage and C conventions actually differ for this signature. Used
+        // only to decide whether an '@export' without '@cdecl' deserves a warning: for a
+        // scalar-only signature the two conventions coincide and there is nothing to say.
+        auto signature_passes_aggregate_by_value(const std::vector<ResolvedType> &params,
+                                                  const std::vector<ResolvedType> &returns) -> bool {
+            const auto is_aggregate = [](const ResolvedType &t) {
+                return t.kind == TypeKind::Struct || t.kind == TypeKind::Array || t.kind == TypeKind::Union;
+            };
+            return std::ranges::any_of(params, is_aggregate) || std::ranges::any_of(returns, is_aggregate);
+        }
+
+        // The attribute facts that outlive this pass and get copied onto the
+        // FunctionSymbol/MethodInfo, so no later stage has to re-scan an attribute list.
+        struct AttributeFacts {
+            bool no_discard = false;
+            ExportName export_name;
+            CallConv call_conv = CallConv::Mirage;
+        };
+
+        // Covers the attribute checks that apply identically regardless of whether the
         // declaration is a free function, a bare-impl method, or a trait-impl method, plus
-        // their one mutual conflict that isn't '@init'-specific ('@naked' + '@always_inline').
+        // their mutual conflicts that aren't '@init'-specific.
         // '@init' is deliberately NOT handled here: it's rejected on methods upstream at
         // declare time (sema_declare.cpp), so a method's attrs never legitimately contain it;
         // its own structural check and '@init'-combination conflicts stay free-function-only,
         // inline at validate_attributes_for_module's call site below.
-        void validate_common_attributes(const std::vector<ast::Attribute> &attrs, const std::vector<ResolvedType> &return_types,
-                                         const ast::Stmt &body, const std::string &module_path, Program &program, DiagnosticEngine &diag) {
+        auto validate_common_attributes(const std::vector<ast::Attribute> &attrs, const std::vector<ResolvedType> &params,
+                                         const std::vector<ResolvedType> &return_types, const std::string &decl_name,
+                                         const bool is_generic, const ast::Stmt &body, const std::string &module_path,
+                                         Program &program, DiagnosticEngine &diag) -> AttributeFacts {
             // Bound once and reused: 'naked' and 'always_inline' were each looked up twice
             // more for the combination check below, which re-scanned the attribute list to
             // rediscover what had just been found.
@@ -119,15 +287,55 @@ namespace sema {
             const auto *naked = find_attribute(attrs, "naked");
             const auto *always_inline = find_attribute(attrs, "always_inline");
             const auto *section = find_attribute(attrs, "section");
+            const auto *no_discard = find_attribute(attrs, "no_discard");
+            const auto *export_attr = find_attribute(attrs, "export");
+            const auto *import_attr = find_attribute(attrs, "import");
 
             if (no_return) validate_no_return_attribute(*no_return, return_types, program, diag);
             if (naked) validate_naked_attribute(*naked, body, diag);
             if (always_inline) validate_always_inline_attribute(*always_inline, diag);
             if (section) validate_section_attribute(*section, module_path, program, diag);
+            if (no_discard) validate_no_discard_attribute(*no_discard, return_types, diag);
             if (naked && always_inline) {
                 diag.report_error(DiagnosticStage::Sema, naked->location,
                     "'@naked' and '@always_inline' cannot be combined: a naked function has no body to inline");
             }
+            // '@import' names a wasm import for an 'ext fn'; a 'fn' has a body and IS the
+            // definition, so there is nothing to import.
+            if (import_attr) {
+                diag.report_error(DiagnosticStage::Sema, import_attr->location,
+                    "'@import' is only allowed on an 'ext fn' declaration");
+            }
+
+            AttributeFacts facts;
+            facts.no_discard = no_discard != nullptr;
+            facts.call_conv = validate_callconv_attributes(attrs, is_generic, module_path, program, diag);
+            // C has no multi-return, and the C-ABI lowering (ext_function_type) accepts at
+            // most one return type -- silently lowering only the first would produce a
+            // function C callers read wrongly.
+            if (facts.call_conv == CallConv::C && return_types.size() > 1) {
+                const auto *conv_attr = find_attribute(attrs, "callconv");
+                const auto *loc_attr = conv_attr ? conv_attr : find_attribute(attrs, "cdecl");
+                diag.report_error(DiagnosticStage::Sema, loc_attr ? loc_attr->location : SourceLocation{},
+                    "'@callconv(\"c\")' is not allowed on a multi-return function; C has no multi-return convention");
+                facts.call_conv = CallConv::Mirage;
+            }
+            if (export_attr) {
+                facts.export_name = validate_export_attribute(*export_attr, decl_name, is_generic, module_path, program, diag);
+
+                // '@export' and '@callconv' are deliberately orthogonal (an exported symbol
+                // is also how two separately-compiled Mirage objects will find each other,
+                // and that path must keep the Mirage ABI). But the one-word mistake --
+                // '@export' alone on a signature passing a struct by value -- produces a
+                // symbol C callers silently mis-marshal, so say so where it can happen.
+                // Scalar-only signatures stay quiet: there the conventions coincide.
+                if (facts.call_conv != CallConv::C && signature_passes_aggregate_by_value(params, return_types)) {
+                    diag.warn(DiagnosticStage::Sema, export_attr->location, std::format(
+                        "'@export' function '{}' passes or returns an aggregate by value but does not declare '@cdecl'; "
+                        "C callers will not see the C ABI. Add '@cdecl' if this is meant to be called from C.", decl_name));
+                }
+            }
+            return facts;
         }
 
         void validate_init_structural(const ast::Attribute &attr, const ast::FunctionDecl &decl, const FunctionSymbol &fn, const Program &program, DiagnosticEngine &diag) {
@@ -189,7 +397,12 @@ namespace sema {
             if (!fn || !fn->decl || fn->decl->attributes.empty()) continue;
             const auto &attrs = fn->decl->attributes;
 
-            validate_common_attributes(attrs, fn->return_types, fn->decl->body, module_path, program, diag);
+            const auto facts = validate_common_attributes(attrs, fn->params, fn->return_types, name,
+                                                          is_generic_function(*fn), fn->decl->body,
+                                                          module_path, program, diag);
+            fn->no_discard = facts.no_discard;
+            fn->export_name = facts.export_name;
+            fn->call_conv = facts.call_conv;
 
             if (const auto *init_attr = find_attribute(attrs, "init")) {
                 validate_init_structural(*init_attr, *fn->decl, *fn, program, diag);
@@ -221,8 +434,129 @@ namespace sema {
         for (auto &method_map : module.methods | std::views::values) {
             for (auto &info : method_map | std::views::values) {
                 if (!info.is_resolved || !info.decl || info.decl->attributes.empty()) continue;
-                validate_common_attributes(info.decl->attributes, info.return_types, info.decl->body, module_path, program, diag);
+                // A method of a generic type (or in a generic 'impl' block) is a template in
+                // the same sense a generic free function is -- one declaration, many
+                // instantiations -- so '@export'/'@callconv' are refused for the same reason.
+                const auto is_generic = info.impl_generic_params != nullptr && !info.impl_generic_params->empty();
+                const auto facts = validate_common_attributes(info.decl->attributes, info.param_types, info.return_types,
+                                                              info.decl->name, is_generic, info.decl->body,
+                                                              module_path, program, diag);
+                info.no_discard = facts.no_discard;
+                info.export_name = facts.export_name;
+                info.call_conv = facts.call_conv;
             }
+        }
+    }
+
+    // Whole-program collision check over every linker-visible name '@export' introduces.
+    // Must run after every per-module and trait-impl attribute pass, since it reads the
+    // export names those passes recorded.
+    //
+    // 'ext fn' names are collected too: they occupy the same flat linker namespace, so
+    // '@export("printf")' beside 'ext fn printf' is a genuine clash, just one where only
+    // one side carries an attribute.
+    void validate_export_names_for_program(Program &program, DiagnosticEngine &diag) {
+        // Collected first and sorted by source position before any diagnostic is emitted.
+        // Program::modules and each symbol table are unordered_maps, so claiming as we walk
+        // would make WHICH of two colliding declarations is reported the winner depend on
+        // hash order -- i.e. differ between runs on the same input. Sorted, the first
+        // declaration in source order always owns the name and the later one is the error.
+        struct Claim {
+            std::string name;
+            std::string what;
+            SourceLocation loc;
+        };
+        std::vector<Claim> claims;
+        // 'ext fn' names are pre-claimed rather than reported on: they occupy the same flat
+        // linker namespace, so '@export("printf")' beside 'ext fn printf' is a genuine clash,
+        // but two modules declaring the same 'ext fn' is not (they are deduplicated
+        // process-globally by name, and a genuine redefinition is caught upstream).
+        std::map<std::string, std::pair<std::string, SourceLocation>> seen;
+
+        for (auto &module : program.modules | std::views::values) {
+            for (auto &[name, sym] : module.symbols) {
+                // A bare-import alias shares the origin's decl; the origin claims the name.
+                if (module.bare_import_origins.contains(name)) continue;
+                if (const auto *fn = std::get_if<FunctionSymbol>(&sym); fn && fn->export_name) {
+                    claims.push_back({*fn->export_name, std::format("function '{}'", name),
+                                      fn->decl ? fn->decl->location : SourceLocation{}});
+                } else if (const auto *ext = std::get_if<ExtFunctionSymbol>(&sym); ext && ext->decl) {
+                    seen.try_emplace(ext->decl->name, std::pair{std::format("'ext fn {}'", ext->decl->name), ext->decl->location});
+                }
+            }
+            for (auto &[type_name, method_map] : module.methods) {
+                for (auto &[method_name, info] : method_map) {
+                    if (!info.export_name) continue;
+                    claims.push_back({*info.export_name, std::format("method '{}.{}'", type_name, method_name),
+                                      info.decl ? info.decl->location : SourceLocation{}});
+                }
+            }
+        }
+
+        for (auto &impls : program.trait_impls_by_type | std::views::values) {
+            for (auto &impl_info : impls) {
+                for (auto &[method_name, info] : impl_info.methods) {
+                    if (!info.export_name) continue;
+                    claims.push_back({*info.export_name, std::format("trait method '{}.{}'", info.type_name, method_name),
+                                      info.decl ? info.decl->location : SourceLocation{}});
+                }
+            }
+        }
+
+        std::ranges::sort(claims, [](const Claim &a, const Claim &b) {
+            return std::tie(a.loc.filename, a.loc.line, a.loc.column, a.name) <
+                   std::tie(b.loc.filename, b.loc.line, b.loc.column, b.name);
+        });
+
+        for (const auto &c : claims) {
+            const auto [it, inserted] = seen.try_emplace(c.name, std::pair{c.what, c.loc});
+            if (!inserted) {
+                diag.report_error(DiagnosticStage::Sema, c.loc, std::format(
+                    "duplicate export name '{}': already exported by {} at {}:{}:{}",
+                    c.name, it->second.first, it->second.second.filename, it->second.second.line, it->second.second.column));
+            }
+        }
+    }
+
+    // 'ext fn' declarations. The parser accepts an attribute clause before 'ext fn' solely
+    // so '@import' can name a wasm import; every OTHER attribute is rejected here by name,
+    // which keeps the long-standing "attributes are not for 'ext fn'" rule in force while
+    // giving a precise diagnostic instead of a blanket parse error.
+    void validate_ext_function_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
+        for (auto &[name, sym] : module.symbols) {
+            // Same bare-import-alias reasoning as validate_attributes_for_module: the origin
+            // module's own pass validates the shared decl once, in the right context.
+            if (module.bare_import_origins.contains(name)) continue;
+            auto *ext = std::get_if<ExtFunctionSymbol>(&sym);
+            if (!ext || !ext->decl || ext->decl->attributes.empty()) continue;
+
+            for (const auto &attr : ext->decl->attributes) {
+                if (attr.name != "import") {
+                    diag.report_error(DiagnosticStage::Sema, attr.location, std::format(
+                        "'@{}' is not allowed on an 'ext fn' declaration; only '@import' is", attr.name));
+                }
+            }
+
+            const auto *import_attr = find_attribute(ext->decl->attributes, "import");
+            if (!import_attr) continue;
+
+            if (import_attr->args.empty() || import_attr->args.size() > 2) {
+                diag.report_error(DiagnosticStage::Sema, import_attr->location,
+                    "'@import' requires one or two string arguments: '@import(\"module\")' or '@import(\"module\", \"name\")'");
+                continue;
+            }
+            const auto module_name = fold_string_attribute_arg(import_attr->args[0], "@import", import_attr->location, module_path, program, diag);
+            if (!module_name) continue;
+
+            std::string import_name = ext->decl->name;
+            if (import_attr->args.size() == 2) {
+                const auto folded = fold_string_attribute_arg(import_attr->args[1], "@import", import_attr->location, module_path, program, diag);
+                if (!folded) continue;
+                import_name = *folded;
+            }
+
+            ext->import_module = *module_name;
+            ext->import_name = std::move(import_name);
         }
     }
 
@@ -236,8 +570,13 @@ namespace sema {
             for (auto &impl_info : impls) {
                 for (auto &info : impl_info.methods | std::views::values) {
                     if (!info.is_resolved || !info.decl || info.decl->attributes.empty()) continue;
-                    validate_common_attributes(info.decl->attributes, info.return_types, info.decl->body,
-                                                impl_info.impl_module, program, diag);
+                    const auto is_generic = info.impl_generic_params != nullptr && !info.impl_generic_params->empty();
+                    const auto facts = validate_common_attributes(info.decl->attributes, info.param_types, info.return_types,
+                                                                   info.decl->name, is_generic, info.decl->body,
+                                                                   impl_info.impl_module, program, diag);
+                    info.no_discard = facts.no_discard;
+                    info.export_name = facts.export_name;
+                    info.call_conv = facts.call_conv;
                 }
             }
         }
