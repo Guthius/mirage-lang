@@ -72,10 +72,20 @@ Done:
   access 70→0, indexing 30→0, string literals 91→0, `len` 51→0, aggregate initializers
   156→0, aggregate assignment 48→0, cross-module calls resolved.
 
-  Largest remaining blockers, by occurrence: method calls (80), braced initializers /
-  struct literals (67), `return_err` (62), `return_ok` (50), `switch` (45), `match` (30),
-  calls through a function pointer (28), non-integer conditions (23), `type_of` (22),
-  group declarations (21).
+- **Stage 2, fourth increment** — methods (declared, bodies emitted, and called, with the
+  receiver as a leading pointer parameter) and braced initializers (struct and array
+  literals, built into a slot: zero fill then per-element stores at sema offsets).
+
+  **Coverage: 25 of 271 corpus modules lower fully.** Cleared: method calls 80→0, braced
+  initializers 67→0.
+
+  Largest remaining blockers, by occurrence: `return_err` (62), `return_ok` (50), `switch`
+  (45), `match` (30), calls through a function pointer (28), trait-handle method calls
+  (26), non-integer conditions (23), `type_of` (22), group declarations (21).
+
+  The error-return statements are the next natural step — `return_err`/`return_ok` are the
+  two halves of `error(...)`'s tagged representation and together account for 112
+  occurrences, more than any other pair.
 
 Remaining:
 

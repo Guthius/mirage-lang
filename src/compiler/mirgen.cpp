@@ -36,7 +36,9 @@ namespace mirgen {
             auto run() -> Result {
                 declare_globals();
                 declare_functions();
+                declare_methods();
                 emit_function_bodies();
+                emit_method_bodies();
 
                 // The verifier is the analogue of llvm::verifyModule, which the LLVM path
                 // runs on every compile. Running it here means a lowering bug is reported
@@ -68,6 +70,10 @@ namespace mirgen {
             // (module path, name) -> index into mir::Module::functions / ::globals.
             std::unordered_map<std::string, uint32_t> function_index_;
             std::unordered_map<std::string, uint32_t> global_index_;
+            // (module path, 'Type::method') -> function index. Kept separate from
+            // function_index_ so a method and a free function of the same name cannot
+            // collide, which is the same reason codegen keys them apart.
+            std::unordered_map<std::string, uint32_t> method_index_;
 
             // Per-function lowering state.
             const std::string *module_path_ = nullptr;
@@ -275,6 +281,148 @@ namespace mirgen {
             }
 
             // ---- bodies ------------------------------------------------------------
+            // Bare-impl methods ('impl T { fn f(self) }'). Mangled exactly as codegen does --
+            // 'Type::method' inside the module's symbol name -- so both backends emit the
+            // same symbol and the eventual differential test can compare them directly.
+            //
+            // Trait-impl methods use a distinct key ('Type::Trait::method') so an inherent
+            // and a trait method of the same name on the same type cannot collide; those are
+            // declared here too, since a trait impl is still a concrete function even before
+            // dynamic dispatch is lowered.
+            static auto method_key(const std::string &type_name, const std::string &method_name) -> std::string {
+                return type_name + "::" + method_name;
+            }
+            static auto trait_method_key(const std::string &type_name, const std::string &trait_name,
+                                          const std::string &method_name) -> std::string {
+                return type_name + "::" + trait_name + "::" + method_name;
+            }
+            static auto key_for_method(const sema::MethodInfo &info) -> std::string {
+                return info.trait_name
+                    ? trait_method_key(info.type_name, *info.trait_name, info.decl->name)
+                    : method_key(info.type_name, info.decl->name);
+            }
+
+            // A method's MIR signature: the receiver is a leading pointer parameter, which is
+            // how 'self' crosses the boundary regardless of whether the receiver is a value
+            // or a pointer at the source level.
+            [[nodiscard]] auto method_signature(const sema::MethodInfo &info) -> uint32_t {
+                mir::Signature sig;
+                sig.params.push_back(mir::Ty::Ptr); // self
+                for (const auto &p : info.param_types) {
+                    sig.params.push_back(is_scalar(p) ? scalar_type(p) : mir::Ty::Ptr);
+                }
+                if (info.return_types.size() == 1) {
+                    sig.result = is_scalar(info.return_types.front())
+                        ? scalar_type(info.return_types.front()) : mir::Ty::Ptr;
+                } else if (info.return_types.size() > 1) {
+                    sig.params.insert(sig.params.begin(), mir::Ty::Ptr); // sret
+                }
+                return result_.module.intern_signature(std::move(sig));
+            }
+
+            void declare_methods() {
+                for (const auto &[path_ptr, mod_ptr] : modules_in_order()) {
+                    const auto &path = *path_ptr;
+                    for (const auto &[type_name, method_map] : mod_ptr->methods) {
+                        for (const auto &info : method_map | std::views::values) {
+                            // A generic type's methods are never signature-resolved; each
+                            // instantiation is a separate function, which generics support
+                            // will declare.
+                            if (!info.is_resolved || !info.decl) continue;
+
+                            const auto k = key_for_method(info);
+                            mir::Function f;
+                            f.name = info.export_name ? *info.export_name : symbol_name(path, k);
+                            f.linkage = info.export_name ? mir::Linkage::External : mir::Linkage::Internal;
+                            f.signature = method_signature(info);
+                            f.has_body = true;
+                            result_.module.functions.push_back(std::move(f));
+                            method_index_[key(path, k)] = static_cast<uint32_t>(result_.module.functions.size() - 1);
+                        }
+                    }
+                }
+            }
+
+            void emit_method_bodies() {
+                for (const auto &[path_ptr, mod_ptr] : modules_in_order()) {
+                    const auto &path = *path_ptr;
+                    module_path_ = &path;
+                    module_ = mod_ptr;
+                    exprs_ = &mod_ptr->exprs;
+
+                    for (const auto &[type_name, method_map] : mod_ptr->methods) {
+                        for (const auto &info : method_map | std::views::values) {
+                            if (!info.is_resolved || !info.decl) continue;
+                            const auto it = method_index_.find(key(path, key_for_method(info)));
+                            if (it == method_index_.end()) continue;
+                            emit_method_body(it->second, info);
+                        }
+                    }
+                }
+                module_path_ = nullptr;
+                module_ = nullptr;
+                exprs_ = nullptr;
+            }
+
+            void emit_method_body(const uint32_t fn_index, const sema::MethodInfo &info) {
+                mir::Builder b(result_.module, fn_index);
+                locals_.clear();
+                local_types_.clear();
+                slots_escaping_.clear();
+
+                const auto entry = b.create_block("entry");
+                b.set_insert_point(entry);
+
+                const auto &sig = result_.module.signatures[result_.module.functions[fn_index].signature];
+
+                // 'self' arrives as a pointer. It is bound directly to that pointer rather
+                // than spilled: the receiver IS an address, and member access on it goes
+                // through the same pointer-object path 'p.x' on a '*Point' uses.
+                const auto self_value = b.add_block_param(entry, mir::Ty::Ptr);
+                result_.module.functions[fn_index].params.push_back(self_value);
+                const auto self_slot = b.add_slot(pointer_bytes(), pointer_bytes(), "self");
+                b.store(b.slot_addr(self_slot), self_value);
+                locals_["self"] = self_slot;
+                local_types_["self"] = self_pointer_type(info);
+
+                for (size_t i = 0; i < info.param_types.size() && i + 1 < sig.params.size(); ++i) {
+                    const auto value = b.add_block_param(entry, sig.params[i + 1]);
+                    result_.module.functions[fn_index].params.push_back(value);
+                    const auto &decl_param = info.decl->params[i];
+                    const auto slot = b.add_slot(std::max(1u, size_of(info.param_types[i])),
+                                                  std::max(1u, align_of(info.param_types[i])), decl_param.name);
+                    b.store(b.slot_addr(slot), value);
+                    locals_[decl_param.name] = slot;
+                    local_types_[decl_param.name] = info.param_types[i];
+                }
+
+                emit_stmt(b, info.decl->body, info.return_types);
+
+                for (const auto slot : slots_escaping_) {
+                    b.mark_slot_escaping(slot);
+                }
+                if (!b.block_is_terminated()) {
+                    if (info.return_types.empty()) b.ret();
+                    else b.unreachable();
+                }
+            }
+
+            // 'self' is a pointer to the receiver type, which is what makes 'self.field'
+            // resolve through the same auto-deref path as any other pointer object.
+            [[nodiscard]] auto self_pointer_type(const sema::MethodInfo &info) const -> sema::ResolvedType {
+                for (size_t i = 0; i < sema_.pointer_pointees.size(); ++i) {
+                    if (sema_.pointer_pointees[i] == info.self_type) {
+                        return sema::ResolvedType{.kind = sema::TypeKind::Pointer,
+                                                   .pointee_index = static_cast<int>(i)};
+                    }
+                }
+                // No interned '*T' for this receiver: nothing in the program took its
+                // address. Fall back to the bare type so field offsets still resolve; the
+                // address form is what emit_member_address actually uses.
+                return info.self_type;
+            }
+
+
 
             void emit_function_bodies() {
                 for (const auto &[path_ptr, mod_ptr] : modules_in_order()) {
@@ -324,7 +472,7 @@ namespace mirgen {
                     local_types_[decl_param.name] = fn.params[i];
                 }
 
-                emit_stmt(b, fn.decl->body, fn);
+                emit_stmt(b, fn.decl->body, fn.return_types);
 
                 for (const auto slot : slots_escaping_) {
                     b.mark_slot_escaping(slot);
@@ -342,7 +490,7 @@ namespace mirgen {
                 }
             }
 
-            void emit_stmt(mir::Builder &b, const ast::Stmt &stmt, const sema::FunctionSymbol &fn) {
+            void emit_stmt(mir::Builder &b, const ast::Stmt &stmt, const std::vector<sema::ResolvedType> &returns) {
                 if (b.block_is_terminated()) {
                     return;
                 }
@@ -355,7 +503,7 @@ namespace mirgen {
                         const auto saved_locals = locals_;
                         const auto saved_types = local_types_;
                         for (const auto &s : v->stmts) {
-                            emit_stmt(b, s, fn);
+                            emit_stmt(b, s, returns);
                             if (b.block_is_terminated()) break;
                         }
                         locals_ = saved_locals;
@@ -368,13 +516,13 @@ namespace mirgen {
                         (void) emit_expr(b, v.expr);
 
                     } else if constexpr (std::is_same_v<V, ast::ReturnStmt>) {
-                        emit_return(b, v, fn);
+                        emit_return(b, v, returns);
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IfStmt>>) {
-                        emit_if(b, *v, fn);
+                        emit_if(b, *v, returns);
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhileStmt>>) {
-                        emit_while(b, *v, fn);
+                        emit_while(b, *v, returns);
 
                     } else {
                         unsupported(stmt_kind_name<V>(), stmt_location(stmt));
@@ -454,17 +602,17 @@ namespace mirgen {
                 return sema::ResolvedType{.kind = sema::TypeKind::I64};
             }
 
-            void emit_return(mir::Builder &b, const ast::ReturnStmt &stmt, const sema::FunctionSymbol &fn) {
+            void emit_return(mir::Builder &b, const ast::ReturnStmt &stmt, const std::vector<sema::ResolvedType> &returns) {
                 if (stmt.return_values.empty()) {
                     b.ret();
                     return;
                 }
-                if (stmt.return_values.size() > 1 || fn.return_types.size() > 1) {
+                if (stmt.return_values.size() > 1 || returns.size() > 1) {
                     unsupported("a multi-return 'return'", stmt.location);
                     b.unreachable();
                     return;
                 }
-                if (!fn.return_types.empty() && !is_scalar(fn.return_types.front())) {
+                if (!returns.empty() && !is_scalar(returns.front())) {
                     unsupported("returning an aggregate by value", stmt.location);
                     b.unreachable();
                     return;
@@ -474,10 +622,10 @@ namespace mirgen {
                     b.unreachable();
                     return;
                 }
-                b.ret(coerce(b, value, fn.return_types.front(), expr_type(stmt.return_values.front())));
+                b.ret(coerce(b, value, returns.front(), expr_type(stmt.return_values.front())));
             }
 
-            void emit_if(mir::Builder &b, const ast::IfStmt &stmt, const sema::FunctionSymbol &fn) {
+            void emit_if(mir::Builder &b, const ast::IfStmt &stmt, const std::vector<sema::ResolvedType> &returns) {
                 const auto cond = emit_condition(b, stmt.condition);
                 if (cond == mir::NO_VALUE) return;
 
@@ -489,19 +637,19 @@ namespace mirgen {
                 b.branch(cond, then_block, else_block);
 
                 b.set_insert_point(then_block);
-                emit_stmt(b, stmt.then_stmt, fn);
+                emit_stmt(b, stmt.then_stmt, returns);
                 if (!b.block_is_terminated()) b.jump(end_block);
 
                 if (stmt.else_stmt) {
                     b.set_insert_point(else_block);
-                    emit_stmt(b, *stmt.else_stmt, fn);
+                    emit_stmt(b, *stmt.else_stmt, returns);
                     if (!b.block_is_terminated()) b.jump(end_block);
                 }
 
                 b.set_insert_point(end_block);
             }
 
-            void emit_while(mir::Builder &b, const ast::WhileStmt &stmt, const sema::FunctionSymbol &fn) {
+            void emit_while(mir::Builder &b, const ast::WhileStmt &stmt, const std::vector<sema::ResolvedType> &returns) {
                 const auto header = b.create_block("while.cond");
                 const auto body = b.create_block("while.body");
                 const auto exit = b.create_block("while.end");
@@ -516,7 +664,7 @@ namespace mirgen {
                 }
 
                 b.set_insert_point(body);
-                emit_stmt(b, stmt.body, fn);
+                emit_stmt(b, stmt.body, returns);
                 if (!b.block_is_terminated()) b.jump(header);
 
                 b.set_insert_point(exit);
@@ -786,6 +934,9 @@ namespace mirgen {
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                         return emit_cast(b, *v, expr);
 
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) {
+                        return emit_braced_initializer(b, *v, expr);
+
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) {
                         return emit_incr_decr(b, *v);
 
@@ -1011,8 +1162,7 @@ namespace mirgen {
                         callee_name = (*member)->member;
                         it = function_index_.find(key(*target, callee_name));
                     } else {
-                        unsupported("a method call", call.location);
-                        return mir::NO_VALUE;
+                        return emit_method_call(b, call, **member);
                     }
                 } else {
                     unsupported("a call through a function pointer", call.location);
@@ -1207,6 +1357,137 @@ namespace mirgen {
                 // Mirage's '++'/'--' are statements in practice; yielding the NEW value is
                 // the conservative choice and matches what an assignment expression returns.
                 return updated;
+            }
+
+            // 'receiver.method(args)' on a concrete type. The receiver is passed as a
+            // POINTER, which is why a value receiver needs an address: taking one is what
+            // makes 'self' work uniformly whether the method reads or mutates.
+            //
+            // Trait-handle dispatch is deliberately not handled here -- it is an indirect
+            // call through a vtable slot, a different shape entirely.
+            auto emit_method_call(mir::Builder &b, const ast::CallExpr &call, const ast::MemberExpr &member) -> mir::ValueId {
+                auto receiver_type = expr_type(member.object);
+                if (receiver_type.kind == sema::TypeKind::Trait) {
+                    unsupported("a trait-handle method call", call.location);
+                    return mir::NO_VALUE;
+                }
+
+                const auto *info = sema::find_method(receiver_type, member.member, sema_);
+                if (!info || !info->is_resolved) {
+                    unsupported(std::format("a call to method '{}'", member.member), call.location);
+                    return mir::NO_VALUE;
+                }
+                const auto it = method_index_.find(key(info->impl_module, key_for_method(*info)));
+                if (it == method_index_.end()) {
+                    unsupported(std::format("a call to method '{}'", member.member), call.location);
+                    return mir::NO_VALUE;
+                }
+
+                // The receiver's address. A pointer receiver already IS one; a value
+                // receiver must be addressable, and taking its address pins its slot.
+                mir::ValueId self;
+                if (receiver_type.kind == sema::TypeKind::Pointer) {
+                    self = emit_expr(b, member.object);
+                } else {
+                    mark_root_slot_escaping(member.object);
+                    self = emit_address(b, member.object);
+                }
+                if (self == mir::NO_VALUE) {
+                    unsupported("a method call on this receiver", call.location);
+                    return mir::NO_VALUE;
+                }
+
+                const auto &sig = result_.module.signatures[result_.module.functions[it->second].signature];
+                std::vector<mir::ValueId> args{self};
+                for (size_t i = 0; i < call.args.size(); ++i) {
+                    const auto value = emit_expr(b, call.args[i]);
+                    if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                    const auto slot = i + 1;
+                    args.push_back(slot < sig.params.size()
+                        ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
+                        : value);
+                }
+                if (args.size() != sig.params.size()) {
+                    unsupported("a method call with defaulted arguments", call.location);
+                    return mir::NO_VALUE;
+                }
+                return b.call(it->second, sig.result, args);
+            }
+
+            // '{.x = 1, .y = 2}' and '{1, 2, 3}'. Built into a fresh slot, because an
+            // aggregate has no MIR value form -- the literal's "value" is that slot's
+            // address, which is what every aggregate expression yields.
+            //
+            // Zero-filled first, then each provided element written at its sema-computed
+            // offset. The memset is what makes an omitted field default to zero without
+            // needing to know which fields were omitted.
+            auto emit_braced_initializer(mir::Builder &b, const ast::BracedInitializerExpr &init,
+                                          const ast::Expr &expr) -> mir::ValueId {
+                const auto type = expr_type(expr);
+                if (is_scalar(type)) {
+                    // A bitset literal lowers to its storage integer, not to memory.
+                    unsupported("a bitset literal", sema::get_expr_location(expr));
+                    return mir::NO_VALUE;
+                }
+                if (type.kind != sema::TypeKind::Struct && type.kind != sema::TypeKind::Array) {
+                    unsupported("this braced initializer", sema::get_expr_location(expr));
+                    return mir::NO_VALUE;
+                }
+
+                const auto slot = b.add_slot(std::max(1u, size_of(type)), std::max(1u, align_of(type)), "lit");
+                const auto base = b.slot_addr(slot);
+                b.mem_set(base, b.const_int(mir::Ty::I8, 0), b.const_int(usize_ty(), size_of(type)));
+
+                bool ok = true;
+                std::visit([&]<typename BV>(const BV &v) {
+                    using B = std::decay_t<BV>;
+                    if constexpr (std::is_same_v<B, ast::StructExpr>) {
+                        const auto *info = sema_.struct_at(type.struct_index);
+                        if (!info) { ok = false; return; }
+                        for (const auto &field : v.fields) {
+                            const auto declared = std::ranges::find(info->fields, field.name, &sema::StructField::name);
+                            if (declared == info->fields.end()) { ok = false; continue; }
+                            if (!store_element(b, base, declared->offset, declared->type, field.expr)) ok = false;
+                        }
+                    } else if constexpr (std::is_same_v<B, ast::ArrayExpr>) {
+                        const auto *info = sema_.array_at(type.array_index);
+                        if (!info) { ok = false; return; }
+                        // A trailing '...' fill repeats the last value across the remainder;
+                        // that needs a loop, which is a separate increment.
+                        if (v.has_fill) {
+                            unsupported("an array literal with a '...' fill", v.location);
+                            ok = false;
+                            return;
+                        }
+                        const auto stride = size_of(info->element_type);
+                        for (size_t i = 0; i < v.values.size(); ++i) {
+                            if (!store_element(b, base, static_cast<uint32_t>(i) * stride,
+                                                info->element_type, v.values[i])) ok = false;
+                        }
+                    } else if constexpr (std::is_same_v<B, ast::EmptyExpr>) {
+                        // '{}' -- the zero fill above is the whole answer.
+                    } else {
+                        unsupported("this braced initializer", v.location);
+                        ok = false;
+                    }
+                }, init);
+
+                return ok ? base : mir::NO_VALUE;
+            }
+
+            // One element of a braced initializer: a scalar is stored, an aggregate is
+            // copied. Returns false if the element could not be lowered (already reported).
+            auto store_element(mir::Builder &b, const mir::ValueId base, const uint32_t offset,
+                                const sema::ResolvedType &type, const ast::Expr &value) -> bool {
+                const auto address = b.ptr_add_const(base, offset);
+                const auto emitted = emit_expr(b, value);
+                if (emitted == mir::NO_VALUE) return false;
+                if (is_scalar(type)) {
+                    b.store(address, coerce(b, emitted, type, expr_type(value)));
+                } else {
+                    b.mem_copy(address, emitted, b.const_int(usize_ty(), size_of(type)));
+                }
+                return true;
             }
 
             // ---- coercion ----------------------------------------------------------

@@ -202,6 +202,41 @@ def case_cross_module_calls():
           "and resolves to the target module's mangled symbol")
 
 
+def case_methods():
+    """A method is an ordinary function taking the receiver as a leading pointer.
+
+    A value receiver therefore needs an ADDRESS, and taking one pins its slot -- which is
+    what makes 'self' work uniformly whether the method reads or mutates.
+    """
+    r = emit_mir("pub type Counter = struct { value: i32 }\n"
+                 "impl Counter {\n"
+                 "  pub fn get(self) -> i32 { return self.value }\n"
+                 "  pub fn bump(mut self, by: i32) { self.value = self.value + by }\n"
+                 "}\n"
+                 "pub fn main() -> i32 {\n"
+                 "  mut c: Counter = default\n  c.bump(5)\n  c.bump(3)\n  return c.get()\n}\n")
+    check(r.returncode == 0, f"methods declare, emit and call ({r.stderr.strip()[:140]})")
+    check("Counter::get" in r.stdout and "Counter::bump" in r.stdout,
+          "mangled as 'Type::method', matching codegen so both backends emit one symbol")
+    check("(%0: ptr" in r.stdout, "the receiver is a leading pointer parameter")
+    check(", escapes ; c" in r.stdout,
+          "a value receiver's slot is pinned, since the call needs its address")
+
+
+def case_braced_initializers():
+    r = emit_mir("pub type Point = struct { x: i32  y: i32 }\n"
+                 "pub fn main() -> i32 {\n"
+                 "  mut p: Point = { .x = 3, .y = 4 }\n"
+                 "  mut arr: [3]i32 = { 1, 2, 3 }\n"
+                 "  return p.x + p.y + arr[2]\n}\n")
+    check(r.returncode == 0, f"struct and array literals lower ({r.stderr.strip()[:140]})")
+    # The zero fill is what makes an OMITTED field default to zero without mirgen having to
+    # know which fields were omitted.
+    check("mem.set" in r.stdout, "a literal is zero-filled before its elements are written")
+    check(r.stdout.count("store") >= 5, "each provided element is stored at its own offset")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_mir_goes_to_stdout():
     """'--emit-mir > out.mir' has to produce a valid file, as '--emit-ir' does."""
     r = emit_mir("pub fn main() -> i32 { return 0 }\n")
@@ -224,6 +259,8 @@ def main() -> int:
     case_aggregates_are_memory()
     case_strings_and_len()
     case_cross_module_calls()
+    case_methods()
+    case_braced_initializers()
     case_unsupported_is_reported_not_skipped()
     case_mir_goes_to_stdout()
 
