@@ -92,11 +92,16 @@ Done:
 
   **Coverage: 27 of 271 corpus modules lower fully.**
 
-  Largest remaining blockers: `return_err`/`return_ok` in *multi-return* functions
-  (`-> (T, error(E))`, 72 combined — a different lowering, not the same one unfinished),
-  `switch`/`match` on tagged unions (79), calls through a function pointer (28), trait-handle
-  method calls (26), `try` (23), `type_of` (22), group declarations (21), character
-  literals (20).
+- **Stage 2, seventh increment** — character literals, `type_of` (a constant type id),
+  and calls through a function pointer (`call.indirect`, carrying its signature explicitly
+  because wasm needs it as a type index).
+
+  **Coverage: 28 of 271 corpus modules lower fully.**
+
+  Largest remaining blockers: multi-return in all its forms (`-> (T, error(E))` returns,
+  `return_ok` with value slots, group declarations — ~99 combined, and one lowering that
+  covers all of them), `switch`/`match` on tagged unions (80), `try` (31), trait-handle
+  method calls (26).
 
   Still entirely absent from stage 2: `defer`, `for-in`, `when` statements, generics
   (monomorphized instances), inline `asm`, global initializers, trait vtables.

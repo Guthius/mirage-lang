@@ -1190,6 +1190,16 @@ namespace mirgen {
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                         return emit_cast(b, *v, expr);
 
+                    } else if constexpr (std::is_same_v<V, ast::LiteralCharExpr>) {
+                        // A character literal is a 'u8' value; the lexer already rejected
+                        // anything wider than one byte.
+                        return b.const_int(mir::Ty::I8, static_cast<int64_t>(v.value));
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
+                        // 'type_of(T)' is a compile-time constant: the type's interned id,
+                        // which sema assigned. Nothing is computed at runtime.
+                        return emit_type_id(b, expr, v->location);
+
                     } else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
                         return emit_dot_ident(b, v, expr);
 
@@ -1419,6 +1429,11 @@ namespace mirgen {
                 auto it = function_index_.end();
                 std::string callee_name;
                 if (const auto *ident = std::get_if<ast::IdentExpr>(&call.callee)) {
+                    // A LOCAL of function-pointer type shadows any same-named function, and
+                    // is an indirect call -- 'const f: fn(i32) -> i32 = add; f(1)'.
+                    if (locals_.contains(ident->name)) {
+                        return emit_indirect_call(b, call);
+                    }
                     callee_name = ident->name;
                     it = function_index_.find(key(*module_path_, callee_name));
                 } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
@@ -1429,8 +1444,7 @@ namespace mirgen {
                         return emit_method_call(b, call, **member);
                     }
                 } else {
-                    unsupported("a call through a function pointer", call.location);
-                    return mir::NO_VALUE;
+                    return emit_indirect_call(b, call);
                 }
 
                 if (it == function_index_.end()) {
@@ -1844,6 +1858,68 @@ namespace mirgen {
                     }
                 }
                 return false;
+            }
+
+            // 'type_of(x)' -- the operand's interned type id, a compile-time constant of
+            // type 'type' (a u64). sema recorded the operand's resolved type; the id comes
+            // from Program::type_ids, which sema owns and codegen only reads.
+            auto emit_type_id(mir::Builder &b, const ast::Expr &expr, const SourceLocation &loc) -> mir::ValueId {
+                if (const auto *recorded = exprs_ ? find_operand_type(expr) : nullptr) {
+                    if (const auto it = sema_.type_ids.find(*recorded); it != sema_.type_ids.end()) {
+                        return b.const_int(mir::Ty::I64, static_cast<int64_t>(it->second));
+                    }
+                }
+                unsupported("'type_of' on this operand", loc);
+                return mir::NO_VALUE;
+            }
+
+            [[nodiscard]] auto find_operand_type(const ast::Expr &expr) const -> const sema::ResolvedType * {
+                const auto it = exprs_->expr_type_of_operand_type.find(sema::get_expr_key(expr));
+                return it == exprs_->expr_type_of_operand_type.end() ? nullptr : &it->second;
+            }
+
+            // A call through a function-pointer VALUE. wasm's call_indirect needs the
+            // signature as a type index, so MIR carries it explicitly rather than inferring
+            // it from the callee -- which is why the signature is interned here even though
+            // x86-64 would not need it.
+            auto emit_indirect_call(mir::Builder &b, const ast::CallExpr &call) -> mir::ValueId {
+                // lvalue_type, not expr_type: sema records no type for a call's CALLEE
+                // identifier, so a local holding a function pointer has to be looked up in
+                // the local table the same way any other read of it would be.
+                const auto callee_type = lvalue_type(call.callee);
+                if (callee_type.kind != sema::TypeKind::Function) {
+                    unsupported("this call form", call.location);
+                    return mir::NO_VALUE;
+                }
+                const auto *info = sema_.fn_signature_at(callee_type.fn_index);
+                if (!info) {
+                    unsupported("a call through a function pointer", call.location);
+                    return mir::NO_VALUE;
+                }
+                if (returns_via_sret(info->return_types)) {
+                    unsupported("an indirect call returning an aggregate", call.location);
+                    return mir::NO_VALUE;
+                }
+
+                const auto signature = signature_for(info->param_types, info->return_types, info->is_variadic);
+                const auto &sig = result_.module.signatures[signature];
+
+                const auto callee = emit_expr(b, call.callee);
+                if (callee == mir::NO_VALUE) return mir::NO_VALUE;
+
+                std::vector<mir::ValueId> args;
+                for (size_t i = 0; i < call.args.size(); ++i) {
+                    const auto value = emit_expr(b, call.args[i]);
+                    if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                    args.push_back(i < sig.params.size()
+                        ? coerce_to(b, value, sig.params[i], signed_type(expr_type(call.args[i])))
+                        : value);
+                }
+                if (!sig.is_variadic && args.size() != sig.params.size()) {
+                    unsupported("an indirect call with defaulted arguments", call.location);
+                    return mir::NO_VALUE;
+                }
+                return b.call_indirect(callee, signature, sig.result, args);
             }
 
             // ---- coercion ----------------------------------------------------------

@@ -293,6 +293,21 @@ def case_switch_and_conditions():
           "duplicate block labels are disambiguated by index")
 
 
+def case_indirect_calls_and_constants():
+    r = emit_mir("fn add(a: i32, b: i32) -> i32 { return a + b }\n"
+                 "pub fn main() -> i32 {\n"
+                 "  const f: fn(i32, i32) -> i32 = add\n  const c := 'A'\n"
+                 "  return f(3, 4) + cast(c, i32)\n}\n")
+    check(r.returncode == 0, f"function-pointer calls lower ({r.stderr.strip()[:140]})")
+    check("func.addr @" in r.stdout, "taking a function's address yields a code pointer")
+    # wasm's call_indirect needs the signature as a TYPE INDEX, so MIR carries it
+    # explicitly rather than inferring it from the callee.
+    check("call.indirect" in r.stdout and ": sig" in r.stdout,
+          "an indirect call names its signature explicitly")
+    check("const.int 65" in r.stdout, "a character literal is its byte value")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_mir_goes_to_stdout():
     """'--emit-mir > out.mir' has to produce a valid file, as '--emit-ir' does."""
     r = emit_mir("pub fn main() -> i32 { return 0 }\n")
@@ -320,6 +335,7 @@ def main() -> int:
     case_aggregate_returns_use_sret()
     case_error_returns()
     case_switch_and_conditions()
+    case_indirect_calls_and_constants()
     case_unsupported_is_reported_not_skipped()
     case_mir_goes_to_stdout()
 
