@@ -283,6 +283,12 @@ namespace ast {
         std::unique_ptr<SpreadExpr>,
         std::unique_ptr<AsmExpr>>;
 
+    struct Attribute {
+        std::string name;
+        std::vector<Expr> args;
+        SourceLocation location;
+    };
+
     // 'name : type' inside a 'generic_params' clause ('[T: type]' / '[N: usize]'). The
     // declared type is parsed as an ordinary 'type' production; sema (not the parser)
     // validates it resolves to either the builtin 'type' keyword (a type parameter) or one
@@ -397,7 +403,12 @@ namespace ast {
         };
 
         struct Method {
-    std::string name;
+            // Only '@no_discard' is legal here; sema rejects every other attribute by name.
+            // A trait method is a SIGNATURE, so attributes that describe a body (@naked,
+            // @always_inline, @section) or a symbol (@export, @callconv) have nothing to
+            // attach to.
+            std::vector<Attribute> attributes;
+            std::string name;
             bool is_mut_self;
             std::vector<Param> params; // non-self params; no 'mut', no variadics (rejected by parser)
             std::vector<Type> return_types;
@@ -942,11 +953,6 @@ namespace ast {
     // sema_attributes.cpp). 'args' is empty for a bare '@name' or for a grouped-form member
     // (grouped attributes never take their own argument list — only the single '@name(args)'
     // form does).
-    struct Attribute {
-        std::string name;
-        std::vector<Expr> args;
-        SourceLocation location;
-    };
 
     struct FunctionDecl {
         struct Param {

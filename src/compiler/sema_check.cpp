@@ -930,6 +930,20 @@ namespace sema {
                     }
                 }
                 if (auto trait_returns = try_trait_handle_dispatch(receiver_type, (*member_callee)->member, call.args, &call, locals, module_path, program, diag, call.location, loop_depth, defer_loop_base, fn_error_type)) {
+                    // '@no_discard' declared on the TRAIT's method signature binds every
+                    // caller reaching it through a handle or a bound generic parameter, which
+                    // is the point: an implementor cannot opt out, and going through the
+                    // interface cannot launder the result away.
+                    //
+                    // Recorded here rather than inside try_trait_handle_dispatch because that
+                    // helper is keyed on the CallExpr's own address, while the ExprStmt check
+                    // reads the outer Expr variant slot -- 'instance_key' is the latter.
+                    if (const auto *trait_info = program.trait_at(receiver_type.trait_index)) {
+                        const auto it = std::ranges::find(trait_info->methods, (*member_callee)->member, &TraitMethodInfo::name);
+                        if (it != trait_info->methods.end()) {
+                            note_no_discard(it->no_discard, (*member_callee)->member);
+                        }
+                    }
                     return *trait_returns;
                 }
                 const auto *method = find_method(receiver_type, (*member_callee)->member, program);

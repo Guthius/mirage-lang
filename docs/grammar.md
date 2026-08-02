@@ -81,7 +81,7 @@ attr_name     ::= IDENT | 'import'
 ```
 
 One attribute clause may precede a `fn_decl`, a `method_decl` (a method inside an `impl`
-block), an `ext_fn_decl`, or a module-scope `var_decl`. Multiple separate clauses on the same declaration
+block), an `ext_fn_decl`, a module-scope `var_decl`, or a `trait_method_decl`. Multiple separate clauses on the same declaration
 (`@naked @no_return`) are a parse error; use the grouped form instead
 (`@(naked, no_return)`). A grouped-form member never takes its own argument list —
 `@(section(".text"))` is a parse error; only the ungrouped `@name(args)` form takes arguments.
@@ -95,8 +95,9 @@ any known name in any of the three positions:
 
 - `init` and `test` are rejected specifically on a `method_decl` — see spec.md's `@init`
   and `@test` sections.
-- On an `ext_fn_decl`, every attribute except `import` is rejected, and on a module-scope
-  `var_decl` every attribute except `export` is. The parser accepts a clause in those two
+- On an `ext_fn_decl`, every attribute except `import` is rejected; on a module-scope
+  `var_decl` every attribute except `export` is; and on a `trait_method_decl` every
+  attribute except `no_discard` is. The parser accepts a clause in those two
   positions only so that rejection can name the offending attribute, instead of the whole
   clause failing with a blanket "attributes are only allowed on 'fn' declarations".
 - A `var_decl_stmt` (a LOCAL variable) takes no attribute clause at all — that remains a
@@ -336,7 +337,7 @@ builtin_type  ::= 'u8' | 'u16' | 'u32' | 'u64'
 trait_type    ::= 'trait' '{' { trait_method_decl } '}'
                | 'trait' '(' named_type { ',' named_type } ')' [ '{' { trait_method_decl } '}' ]
 
-trait_method_decl ::= 'fn' IDENT
+trait_method_decl ::= [ attribute ] 'fn' IDENT   (* only '@no_discard' is legal here *)
                       '(' ( 'self' | 'mut' 'self' )
                           { ',' ( IDENT ':' type [ '=' expr ] | IDENT ':=' expr ) }
                       ')'

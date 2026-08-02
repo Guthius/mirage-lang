@@ -219,6 +219,10 @@ namespace sema {
         const ast::TraitType::Method *decl = nullptr; // needed to reach param default_value AST nodes
         size_t required_params = 0;                    // count of leading non-defaulted params
         std::vector<bool> param_default_is_const;        // parallel to params
+        // '@no_discard' declared on the trait's method signature. Enforced at every
+        // dispatch site through a handle of this trait, so an implementor cannot opt out
+        // and a caller cannot drop the result by going through the interface.
+        bool no_discard = false;
     };
 
     // One resolved entry in a trait's composition relationship (direct or transitive).

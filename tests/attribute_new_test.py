@@ -125,6 +125,35 @@ def case_no_discard():
                  "return value of 'get' must be used", "'@no_discard' works on an impl method")
 
 
+def case_no_discard_on_trait_methods():
+    """'@no_discard' declared on a TRAIT's method signature binds every caller reaching it
+    through a handle, so an implementor cannot opt out and going through the interface
+    cannot launder the result away."""
+    base = ("pub type Src = trait {\n  @no_discard\n  fn read(self) -> i32\n}\n"
+            "pub type F = struct { x: i32 }\n"
+            "impl Src for F {\n  fn read(self) -> i32 { return self.x }\n}\n")
+    handle = "  mut f: F = default\n  const h: Src = &f\n"
+
+    expect_error(base + "pub fn main() -> i32 {\n" + handle + "  h.read()\n  return 0\n}\n",
+                 "return value of 'read' must be used",
+                 "a dropped result through a trait handle is an error")
+    expect_ok(base + "pub fn main() -> i32 {\n" + handle + "  return h.read()\n}\n",
+              "using it is fine")
+    expect_ok(base + "pub fn main() -> i32 {\n" + handle + "  const _ := h.read()\n  return 0\n}\n",
+              "'_' silences it through a handle too")
+
+    # A trait method is a signature: attributes describing a body or a symbol have nothing
+    # to attach to, so only '@no_discard' is accepted there.
+    expect_error("pub type Src = trait {\n  @naked\n  fn read(self) -> i32\n}\n"
+                 "pub fn main() -> i32 { return 0 }\n",
+                 "'@naked' is not allowed on a trait method declaration",
+                 "another attribute on a trait method is rejected by name")
+    expect_error("pub type Src = trait {\n  @no_discard\n  fn go(self)\n}\n"
+                 "pub fn main() -> i32 { return 0 }\n",
+                 "no return value has no effect",
+                 "'@no_discard' on a void trait method is an error")
+
+
 # ---------------------------------------------------------------- @export
 
 def case_export():
@@ -346,6 +375,7 @@ def main() -> int:
 
     case_parser()
     case_no_discard()
+    case_no_discard_on_trait_methods()
     case_export()
     case_export_on_globals()
     case_callconv()

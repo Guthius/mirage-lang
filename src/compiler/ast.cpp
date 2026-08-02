@@ -2829,6 +2829,16 @@ namespace ast {
         }
 
         auto parse_trait_method_decl(Parser &parser) -> TraitType::Method {
+            // An attribute clause is accepted here so a trait can declare '@no_discard' on a
+            // method its implementors must honour. Sema rejects every other attribute by
+            // name -- same carve-out shape as 'ext fn'/'@import' and globals/'@export'.
+            auto attributes = parse_attribute_clause(parser);
+            if (!attributes.empty()) {
+                // The clause's last token is an ASI trigger, so the idiomatic
+                // one-clause-per-line style leaves a virtual ';' before 'fn'.
+                skip_semicolons(parser);
+            }
+
             const auto location = parser.current_location();
 
             if (parser.check(TokenKind::KwPub)) {
@@ -2885,6 +2895,7 @@ namespace ast {
             }
 
             return TraitType::Method{
+                .attributes = std::move(attributes),
                 .name = std::move(name),
                 .is_mut_self = is_mut_self,
                 .params = std::move(params),

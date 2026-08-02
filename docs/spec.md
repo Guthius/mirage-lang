@@ -3453,6 +3453,25 @@ const _ := checked_add(1, 2)   // fine — deliberately discarded
 Legal on methods as well as free functions. `try f()` never triggers it, because `try`
 consumes the result.
 
+**On a trait method declaration.** `@no_discard` is also legal inside
+`type X = trait { ... }`, and is the only attribute that is — a trait method is a
+*signature*, so attributes describing a body (`@naked`, `@always_inline`, `@section`) or a
+symbol (`@export`, `@callconv`) have nothing to attach to. Declared there it binds every
+caller reaching the method through a handle or a bounded generic parameter: an implementor
+cannot opt out, and going through the interface cannot launder the result away.
+
+```mirage
+pub type Reader = trait {
+    @no_discard
+    fn read(self, dst: []u8) -> (usize, ?IO_Error)
+}
+```
+
+**Known limitation:** the check fires on a direct call, a method call, a generic call and a
+trait-handle dispatch, but *not* on a call through a function pointer — `@no_discard` is a
+property of the declaration, and a function-pointer type does not carry it (the same
+reasoning as `@callconv`'s v1 limitation below).
+
 ### `@export`
 
 ```mirage

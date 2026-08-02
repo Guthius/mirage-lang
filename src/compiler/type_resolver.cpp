@@ -1665,6 +1665,24 @@ namespace sema {
                     m.is_mut_self = method.is_mut_self;
                     m.location = method.location;
                     m.decl = &method;
+                    // A trait method is a SIGNATURE: attributes describing a body or a
+                    // symbol have nothing to attach to, so only '@no_discard' is accepted.
+                    // Reported here rather than in sema_attributes.cpp because that file's
+                    // passes walk symbols and impls; a trait's method list is only reachable
+                    // from the type resolver, which is what builds it.
+                    for (const auto &attr : method.attributes) {
+                        if (attr.name != "no_discard") {
+                            diag.report_error(DiagnosticStage::Sema, attr.location, std::format(
+                                "'@{}' is not allowed on a trait method declaration; only '@no_discard' is", attr.name));
+                        } else if (!attr.args.empty()) {
+                            diag.report_error(DiagnosticStage::Sema, attr.location, "'@no_discard' takes no arguments");
+                        } else if (method.return_types.empty()) {
+                            diag.report_error(DiagnosticStage::Sema, attr.location,
+                                "'@no_discard' on a trait method with no return value has no effect");
+                        } else {
+                            m.no_discard = true;
+                        }
+                    }
                     for (auto &p : method.params) {
                         if (p.type) {
                             m.params.push_back(resolve_field_type(module_path, *p.type, p.location));
