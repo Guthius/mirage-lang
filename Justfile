@@ -50,3 +50,34 @@ format:
         -print0 | xargs -0 clang-format -i
     find ./src -type f \( -name '*.hpp' \) \
         -print0 | xargs -0 clang-format -i
+
+# Run the full test battery (ctest + every tests/*_test.py)
+test: build
+    #!/usr/bin/env bash
+    # Two suites need the standard library for 'core/testing'. MIRAGE_STD defaults to a
+    # sibling checkout of the Mirage repo; override it if yours lives elsewhere:
+    #
+    #     just test
+    #     MIRAGE_STD=/path/to/Mirage just test
+    #
+    # Every suite runs even after one fails, and the full list is reported at the end — one
+    # early failure otherwise hides whatever else broke.
+    set -uo pipefail
+    export MIRAGE_STD="${MIRAGE_STD:-$(cd .. && pwd)/Mirage}"
+    if [ ! -d "$MIRAGE_STD/core/testing" ]; then
+      echo "error: no stdlib at $MIRAGE_STD (needs core/testing)" >&2
+      echo "       set MIRAGE_STD to a checkout of the Mirage standard library" >&2
+      exit 1
+    fi
+    failed=()
+    ( cd {{ build_dir }} && ctest --output-on-failure ) || failed+=("ctest")
+    for t in tests/*_test.py; do
+      echo "=== $t ==="
+      python3 "$t" || failed+=("$t")
+    done
+    echo
+    if [ ${#failed[@]} -ne 0 ]; then
+      printf 'FAILED: %s\n' "${failed[@]}" >&2
+      exit 1
+    fi
+    echo "all green"

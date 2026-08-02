@@ -119,6 +119,18 @@ registration.
 The repo's own Mirage-language tests are under `tests/mir/`; run them all with
 `python3 tests/mir_suite_test.py`.
 
+## Testing the compiler
+
+```sh
+just test                             # ctest + every tests/*_test.py
+MIRAGE_STD=/path/to/Mirage just test  # if the stdlib is not a sibling checkout
+```
+
+Two suites (`test_action_test.py`, `mir_suite_test.py`) need the standard library for
+`core/testing`; `MIRAGE_STD` defaults to `../Mirage`. Every suite runs even after one
+fails, and the failures are listed together at the end. The same command runs in CI
+(`.github/workflows/ci.yml`).
+
 ## Language Tour
 
 ### Hello World

@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out the compiler
+        uses: actions/checkout@v4
+        with:
+          path: Mirage-Cpp
+
+      # Two test suites need 'core/testing' from the standard library, and the corpus
+      # fixtures resolve stdlib imports through --std. The Justfile's default for
+      # MIRAGE_STD is a SIBLING directory, so check it out as one rather than teaching the
+      # build about a CI-only layout.
+      - name: Check out the standard library
+        uses: actions/checkout@v4
+        with:
+          repository: mirage-lang/Mirage
+          path: Mirage
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake clang lld
+          # The repo builds against whatever LLVM the distro ships; CMakeLists finds it via
+          # find_package(LLVM CONFIG). Pinning a version here would silently diverge from
+          # what a contributor has locally.
+          sudo apt-get install -y llvm-dev libclang-dev
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Build
+        working-directory: Mirage-Cpp
+        run: just build
+
+      # 'just test' runs ctest plus every tests/*_test.py, continuing past failures so one
+      # early break does not hide the rest, and exits non-zero listing everything that
+      # failed.
+      - name: Test
+        working-directory: Mirage-Cpp
+        run: just test
+
+      # The real-world consumer: 90 files, links raylib, and exercises the 'ext fn' struct
+      # ABI, function pointers, traits and '#link' together in a way no fixture does.
+      # Best-effort — it lives in a separate repo that may not be public.
+      - name: Smoke-build mirage303 (optional)
+        continue-on-error: true
+        run: |
+          if git clone --depth 1 https://github.com/mirage-lang/mirage303.git; then
+            sudo apt-get install -y libraylib-dev || exit 0
+            ./Mirage-Cpp/build/mirage build mirage303/game -l raylib \
+              --std="$PWD/Mirage" -o /tmp/Client
+          else
+            echo "mirage303 not reachable; skipping"
+          fi
