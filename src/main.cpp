@@ -49,6 +49,9 @@ namespace {
         bool eager_generic_check = true;
         std::string module_path;
         std::string output = "a.out";
+        // Whether '-o' was given explicitly, as opposed to defaulted. Only 'test' cares:
+        // it has no output to name, and silently ignoring the flag looked like it worked.
+        bool output_explicit = false;
         std::string std_path;
         std::string cc; // linker driver; see resolve_cc()
         std::string target; // '--target=' triple; empty means the host triple
@@ -138,6 +141,7 @@ namespace {
                     return std::nullopt;
                 }
                 options.output = argv[++i];
+                options.output_explicit = true;
             } else if (arg.starts_with("--std=")) {
                 options.std_path = arg.substr(6);
             } else if (arg.starts_with("--cc=")) {
@@ -580,6 +584,14 @@ auto main(const int argc, char *argv[]) -> int {
         if (target_triple.isWasm()) {
             llvm::errs() << "mirage: 'mirage test' is not supported for target '" << target_triple.str()
                          << "' (test isolation requires POSIX process primitives)\n";
+            return 1;
+        }
+        // The test binary is a temporary that is run and then deleted, so there is nothing
+        // for '-o' to name. Rejected rather than ignored: silently accepting it looked like
+        // it had worked and left the user looking for a file that was never written.
+        if (options.output_explicit) {
+            llvm::errs() << "mirage: '-o' is not supported with 'mirage test'; the test binary is temporary\n"
+                            "       (use '--emit-ir' to inspect what was generated)\n";
             return 1;
         }
         // The reserved module supplying the harness. Appended AFTER any '--load' the user

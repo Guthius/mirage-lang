@@ -1,5 +1,9 @@
 # Mirage Language Specification
 
+> Describes the language as implemented on branch `fix/todo-resolution`. When behaviour and
+> this document disagree, that is a bug in one of them — please report which. Sections are
+> stable; new ones are appended rather than renumbered, so existing links keep working.
+
 ## Overview
 
 Mirage is a compiled, statically-typed systems language that targets native code via LLVM IR. It is designed for low-level programming with a clean, expression-oriented syntax. Mirage compiles to native executables and can interoperate with C libraries via `ext fn` declarations.
@@ -444,6 +448,10 @@ A character literal is a single byte in single quotes, with the same escape sequ
 literals. It has type `u8` — there is no distinct `char` type; a character literal is simply
 convenient syntax for a `u8` value:
 
+A literal spanning more than one byte is an error (`'é'`, `'ab'`) —
+`multi-byte character literals are not supported`. Non-ASCII text belongs in a string
+literal, which is a `[]u8` of UTF-8 bytes and has no such restriction.
+
 ```mirage
 fn is_digit(c: u8) -> bool {
     return c >= '0' && c <= '9'
@@ -649,7 +657,7 @@ ternary). Semantics depend on whether `condition` is a compile-time constant:
 - **Runtime value**: behaves exactly like the ternary `?:` above — both
   branches are type-checked and emitted, and the result is chosen at runtime.
 
-See [Compile-Time Configuration](#compile-time-configuration) for how this
+See [Compile-Time Configuration](#12-compile-time-configuration) for how this
 combines with `$option` and `#link`, and the `when` *statement* (a related
 but distinct construct — see [Statements](#6-statements)).
 
@@ -4147,6 +4155,11 @@ Compiles `<module>`, discovers every `@test` function in the program, and runs t
 
 `mirage test` is refused with `--freestanding`, and for any wasm target. Test isolation
 forks a child process per case, which neither has.
+
+`-o` is rejected under `test`: the compiled test binary is a temporary that is run and then
+deleted, so there is no output to name. `--emit-ir` works and is the way to inspect the
+generated per-test wrappers and the `Test_Info` constant — it prints the IR and does not run
+anything.
 
 ### Mode-dependent body checking
 

@@ -110,7 +110,8 @@ fn addition_works() -> error(Check) {
 ```
 
 A `@test` takes no parameters and returns exactly `error(...)`; the Ok/Failed tag is the
-result. The runtime half lives in the standard library's `core/testing`, which the compiler
+result. `-o` is rejected under `test` (the binary is a temporary); `--emit-ir` shows the
+generated per-test wrappers without running anything. The runtime half lives in the standard library's `core/testing`, which the compiler
 loads automatically. `--load <path>` additionally compiles a module nothing imports —
 useful for tests that live outside the import graph, and for `@init`-based driver
 registration.

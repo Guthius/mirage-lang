@@ -4419,7 +4419,13 @@ namespace sema {
                             returns.pop_back();
                         }
                         if (returns.size() > 1) {
-                            return error(diag, v->location, "multi-value capture is not yet supported here");
+                            // Not an unfinished feature: a multi-return call yields several
+                            // values and this position accepts one. The language's answer is a
+                            // group declaration, so name it rather than implying something is
+                            // coming later.
+                            return error(diag, v->location,
+                                "a multi-return call cannot be used where a single value is expected; "
+                                "destructure it with a group declaration ('const a, b := f()')");
                         }
                         return returns.empty() ? ResolvedType{.kind = TypeKind::Void} : returns.front();
                     };

@@ -264,6 +264,18 @@ def case_driver():
     r6 = subprocess.run([str(MIRAGE), "frobnicate", "x"], capture_output=True, text=True, timeout=30)
     check("expected 'build', 'run' or 'test'" in r6.stderr, "the unknown-action message lists 'test'")
 
+    # '-o' has nothing to name under 'test' -- the binary is a temporary that is run and
+    # deleted. Rejected rather than ignored, which looked like it had worked.
+    r7 = run("test", one("@test\nfn t() -> error(E) { return_ok }\n"), "-o", "/tmp/mirage-test-out")
+    check(r7.returncode != 0 and "'-o' is not supported with 'mirage test'" in r7.stderr,
+          "'-o' is rejected under 'test' rather than silently ignored")
+
+    # '--emit-ir' is how you inspect the generated wrappers; it prints and does not run.
+    r8 = run("test", one("@test\nfn t() -> error(E) { return_ok }\n"), "--emit-ir")
+    check(r8.returncode == 0 and "__mirage_test_wrapper_0" in r8.stdout,
+          "'--emit-ir' under 'test' shows the synthesized per-test wrapper")
+    check("running 1 test" not in r8.stdout, "and does not run the tests")
+
 
 def case_missing_contract():
     """A missing or reshaped 'core/testing' is a driver error, not a codegen failure."""
