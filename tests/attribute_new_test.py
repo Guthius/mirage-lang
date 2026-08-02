@@ -241,6 +241,28 @@ def case_callconv():
                  "pub fn main() -> i32 { mut t: T = default  return t.get() }\n",
                  "not supported on impl methods in v1", "'@callconv' on an impl method is rejected")
 
+    # A GENERIC type's methods are never signature-resolved, so they used to escape
+    # attribute validation entirely -- '@export' there compiled silently and emitted the
+    # ordinary mangled monomorphization, which is neither validated nor honoured.
+    GENERIC_BOX = ("pub type Box[T: type] = struct { v: T }\n"
+                   "impl Box[T: type] {{\n  {attr}\n  pub fn get(self) -> T {{ return self.v }}\n}}\n"
+                   "pub fn main() -> i32 {{ mut b: Box[i32] = default  return b.get() }}\n")
+    expect_error(GENERIC_BOX.format(attr='@export("boxget")'),
+                 "'@export' is not allowed on a method of a generic type",
+                 "'@export' on a generic type's method is rejected")
+    expect_error(GENERIC_BOX.format(attr="@cdecl"),
+                 "'@callconv' is not allowed on a method of a generic type",
+                 "'@callconv' on a generic type's method is rejected")
+    expect_ok(GENERIC_BOX.format(attr="@always_inline"),
+              "an attribute that IS meaningful on a template still works there")
+
+    expect_error("pub type Show = trait { fn show(self) -> i32 }\n"
+                 "pub type Box[T: type] = struct { v: T }\n"
+                 'impl Show for Box[T: type] {\n  @export("boxshow")\n  fn show(self) -> i32 { return 1 }\n}\n'
+                 "pub fn main() -> i32 { mut b: Box[i32] = default  const h: Show = &b  return h.show() }\n",
+                 "'@export' is not allowed on a method of a generic type",
+                 "same for a trait impl on a generic type")
+
 
 # ---------------------------------------------------------------- @import
 

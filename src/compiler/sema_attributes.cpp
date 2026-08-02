@@ -287,6 +287,29 @@ namespace sema {
             CallConv call_conv = CallConv::Mirage;
         };
 
+        // Attributes that cannot apply to a template -- one declaration, many
+        // instantiations, so there is no single symbol to name or convention to fix. Split
+        // out because a generic TYPE's methods are never signature-resolved (see
+        // resolve_impl_signatures_for_module's skip), so validate_common_attributes cannot
+        // run on them at all: it reads resolved param/return types that do not exist. These
+        // two checks need nothing but the attribute list.
+        //
+        // Without this the attributes were neither validated nor honoured -- '@export' on a
+        // generic type's method compiled silently and emitted the ordinary mangled
+        // monomorphization, which is the worst of both answers.
+        void reject_template_only_attributes(const std::vector<ast::Attribute> &attrs, const char *what, DiagnosticEngine &diag) {
+            if (const auto *export_attr = find_attribute(attrs, "export")) {
+                diag.report_error(DiagnosticStage::Sema, export_attr->location, std::format(
+                    "'@export' is not allowed on {}; each instantiation would need a distinct export name", what));
+            }
+            const auto *callconv = find_attribute(attrs, "callconv");
+            const auto *cdecl_attr = find_attribute(attrs, "cdecl");
+            if (const auto *conv = callconv ? callconv : cdecl_attr) {
+                diag.report_error(DiagnosticStage::Sema, conv->location, std::format(
+                    "'@callconv' is not allowed on {}", what));
+            }
+        }
+
         // Covers the attribute checks that apply identically regardless of whether the
         // declaration is a free function, a bare-impl method, or a trait-impl method, plus
         // their mutual conflicts that aren't '@init'-specific.
@@ -529,7 +552,25 @@ namespace sema {
     // '@init' handling: it's already a declare-time error for methods (sema_declare.cpp), so
     // it never legitimately reaches here.
     void validate_method_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag) {
-        for (auto &method_map : module.methods | std::views::values) {
+        for (auto &[type_name, method_map] : module.methods) {
+            // A generic TYPE's methods are never signature-resolved (one signature per
+            // instantiation; see resolve_impl_signatures_for_module), so the loop below
+            // skips them and they would escape attribute validation entirely. Catch the
+            // attributes that need no resolved types here instead.
+            const auto type_is_generic = [&] {
+                const auto sym_it = module.symbols.find(type_name);
+                if (sym_it == module.symbols.end()) return false;
+                const auto *ts = std::get_if<TypeSymbol>(&sym_it->second);
+                return ts && ts->decl && !ts->decl->generic_params.empty();
+            }();
+            if (type_is_generic) {
+                for (auto &info : method_map | std::views::values) {
+                    if (!info.decl || info.decl->attributes.empty()) continue;
+                    reject_template_only_attributes(info.decl->attributes, "a method of a generic type", diag);
+                }
+                continue;
+            }
+
             for (auto &info : method_map | std::views::values) {
                 if (!info.is_resolved || !info.decl || info.decl->attributes.empty()) continue;
                 // A method of a generic type (or in a generic 'impl' block) is a template in
@@ -667,7 +708,14 @@ namespace sema {
         for (auto &impls : program.trait_impls_by_type | std::views::values) {
             for (auto &impl_info : impls) {
                 for (auto &info : impl_info.methods | std::views::values) {
-                    if (!info.is_resolved || !info.decl || info.decl->attributes.empty()) continue;
+                    if (!info.decl || info.decl->attributes.empty()) continue;
+                    // Mirrors validate_method_attributes_for_module: an unresolved
+                    // trait-impl method is a template, so the two template-illegal
+                    // attributes are still reported even though the rest cannot run.
+                    if (!info.is_resolved) {
+                        reject_template_only_attributes(info.decl->attributes, "a method of a generic type", diag);
+                        continue;
+                    }
                     const auto is_generic = info.impl_generic_params != nullptr && !info.impl_generic_params->empty();
                     const auto facts = validate_common_attributes(info.decl->attributes, info.param_types, info.return_types,
                                                                    info.decl->name, is_generic, /*is_method=*/true,
