@@ -16,7 +16,20 @@ namespace sema {
         return {};
     }
 
-    auto declare_symbol(SymbolTable &symbol_table, std::string name, Symbol symbol, const SourceLocation &loc, DiagnosticEngine &diag) -> bool {
+    auto declare_symbol(SymbolTable &symbol_table, std::string name, Symbol symbol, const SourceLocation &loc, Program &sema_program, DiagnosticEngine &diag) -> bool {
+        // Scratch-checking a '#compile_only_if'-excluded file: the file's own declaration
+        // SHADOWS any same-named symbol the module's included files declared — the
+        // platform-file idiom is exactly two files declaring the same name under opposite
+        // conditions, so a redefinition error here would fire on every build. The whole
+        // ProgramModule is snapshot-restored when the file's check finishes, so the
+        // overwrite never outlives the scratch pass. A second declaration from the SAME
+        // excluded file (already in overlay_declared_names) falls through to the normal
+        // redefinition error below.
+        if (sema_program.checking_excluded_file && !sema_program.overlay_declared_names.contains(name)) {
+            sema_program.overlay_declared_names.insert(name);
+            symbol_table.insert_or_assign(std::move(name), std::move(symbol));
+            return true;
+        }
         if (symbol_table.contains(name)) {
             diag.report_error(DiagnosticStage::Sema, loc, std::format("redefinition of '{}'", name));
             return false;
@@ -105,7 +118,7 @@ namespace sema {
                 // sema error, reported where the NamedType is resolved.
                 declare_symbol(module.symbols, decl.name,
                     TypeSymbol{.decl = &decl, .resolved = std::nullopt, .is_pub = decl.is_pub, .location = decl.location},
-                    decl.location, diag);
+                    decl.location, sema_program, diag);
                 return;
             }
 
@@ -152,7 +165,7 @@ namespace sema {
                         [&module_path] { return BitsetInfo{.module_path = module_path}; });
             }
 
-            if (!declare_symbol(module.symbols, decl.name, TypeSymbol{.decl = &decl, .resolved = resolved, .is_pub = decl.is_pub, .location = decl.location}, decl.location, diag)) {
+            if (!declare_symbol(module.symbols, decl.name, TypeSymbol{.decl = &decl, .resolved = resolved, .is_pub = decl.is_pub, .location = decl.location}, decl.location, sema_program, diag)) {
                 return;
             }
 
@@ -178,7 +191,7 @@ namespace sema {
                             .module_path = sentinel_path,
                             .is_pub = decl.is_pub,
                         },
-                        decl.location, diag);
+                        decl.location, sema_program, diag);
                     sema_program.modules[sentinel_path]; // default-constructs an empty ProgramModule if absent
                 } else {
                     declare_symbol(
@@ -188,7 +201,7 @@ namespace sema {
                             .module_path = resolved_path,
                             .is_pub = decl.is_pub,
                         },
-                        decl.location, diag);
+                        decl.location, sema_program, diag);
                 }
                 return;
             }
@@ -224,7 +237,7 @@ namespace sema {
                     .is_pub = decl.is_pub,
                     .is_resolved = false,
                 },
-                decl.location, diag);
+                decl.location, sema_program, diag);
         }
 
         // Builds the bare-import-vs-bare-import collision diagnostic: names both source
@@ -297,11 +310,20 @@ namespace sema {
                 if (std::holds_alternative<ImportSymbol>(target_sym)) continue;
 
                 if (const auto prior = module.bare_import_origins.find(name); prior != module.bare_import_origins.end()) {
-                    report_bare_import_collision(diag, decl.location, name, decl.path, prior->second.source_path);
-                    continue;
+                    // Scratch-checking an excluded file: an included file's bare-import alias
+                    // is shadowable exactly like its ordinary symbols (see declare_symbol's
+                    // overlay branch) — drop the stale origin record so the alias declared
+                    // just below owns the name for the rest of this file's scratch pass. A
+                    // collision with an alias THIS file already declared is still real.
+                    if (sema_program.checking_excluded_file && !sema_program.overlay_declared_names.contains(name)) {
+                        module.bare_import_origins.erase(prior);
+                    } else {
+                        report_bare_import_collision(diag, decl.location, name, decl.path, prior->second.source_path);
+                        continue;
+                    }
                 }
 
-                if (!declare_symbol(module.symbols, name, target_sym, decl.location, diag)) {
+                if (!declare_symbol(module.symbols, name, target_sym, decl.location, sema_program, diag)) {
                     continue; // generic "redefinition of 'name'" — collides with a local decl
                 }
                 std::visit([](auto &s) { s.is_pub = false; }, module.symbols.at(name));
@@ -628,7 +650,11 @@ namespace sema {
             return *str;
         }
 
-        void declare_link_decl(const ast::LinkDecl &link_decl, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const bool collect) {
+        void declare_link_decl(const ast::LinkDecl &link_decl, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, bool collect) {
+            // A '#link' in a '#compile_only_if'-excluded file (including inside a live
+            // 'when' branch there, which is why the caller's 'collect' can't decide this
+            // alone) is type-checked like everything else in the file but must not link.
+            collect = collect && !sema_program.checking_excluded_file;
             const auto data = resolve_constant_u8_slice_arg(link_decl.data, link_decl.location, "'#link' data",
                                                             module_path, sema_program, diag, collect);
             if (!data) return;
@@ -672,7 +698,11 @@ namespace sema {
         // here (per the module-scope 'when' rule every other directive follows) — 'live=false'
         // just skips the actual diag.report_error/diag.warn call, mirroring declare_link_decl's
         // 'collect' parameter above.
-        void declare_diagnostic_decl(const ast::DiagnosticDecl &decl, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const bool live) {
+        void declare_diagnostic_decl(const ast::DiagnosticDecl &decl, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, bool live) {
+            // Same rule as declare_link_decl above: an excluded file's '#error'/'#warn' is
+            // type-checked but never fires — the file is excluded, so its diagnostics
+            // directives are as dead as its code.
+            live = live && !sema_program.checking_excluded_file;
             const auto directive = decl.kind == ast::DiagnosticDirectiveKind::Error ? "#error" : "#warn";
 
             const auto message = resolve_constant_u8_slice_arg(decl.message, decl.location,
@@ -750,13 +780,13 @@ namespace sema {
                         // the call site as a confusing "generic argument 1 for 'f' must be a
                         // compile-time constant expression of type 'Thing'".
                         validate_generic_param_types(v.generic_params, diag);
-                        declare_symbol(module.symbols, v.name, FunctionSymbol{.decl = &v, .is_pub = v.is_pub}, v.location, diag);
+                        declare_symbol(module.symbols, v.name, FunctionSymbol{.decl = &v, .is_pub = v.is_pub}, v.location, sema_program, diag);
                     } else if constexpr (std::is_same_v<V, ast::ExtFunctionDecl>) {
-                        declare_symbol(module.symbols, v.name, ExtFunctionSymbol{.decl = &v, .is_pub = v.is_pub}, v.location, diag);
+                        declare_symbol(module.symbols, v.name, ExtFunctionSymbol{.decl = &v, .is_pub = v.is_pub}, v.location, sema_program, diag);
                     } else if constexpr (std::is_same_v<V, ast::VarDecl>) {
                         declare_global(v, program, module_path, module, sema_program, diag);
                     } else if constexpr (std::is_same_v<V, ast::MacroDecl>) {
-                        declare_symbol(module.symbols, v.name, MacroSymbol{.decl = &v, .is_pub = v.is_pub, .is_resolved = false}, v.location, diag);
+                        declare_symbol(module.symbols, v.name, MacroSymbol{.decl = &v, .is_pub = v.is_pub, .is_resolved = false}, v.location, sema_program, diag);
                     } else if constexpr (std::is_same_v<V, ast::TypeDecl>) {
                         declare_type(v, module_path, module, sema_program, diag);
                     } else if constexpr (std::is_same_v<V, ast::BareImportDecl>) {
@@ -800,14 +830,23 @@ namespace sema {
                             // kind. This map is keyed by (type, method name) across the whole
                             // module, so it catches all three collision shapes: twice in one
                             // impl block, across two 'impl TYPE {}' blocks, and across the
-                            // separate .mir files merged into one module directory.
+                            // separate (included) .mir files of one module directory.
                             //
                             // The first definition wins, matching redefinition handling
                             // elsewhere. Silently keeping the last meant the earlier body was
                             // never type-checked or emitted, and calls resolved to whichever
-                            // definition happened to be declared last in file-merge order.
+                            // definition happened to be declared last in file order.
                             auto &type_methods = module.methods[type_name];
-                            if (type_methods.contains(fn.name)) {
+                            // Overlay shadowing for an excluded file's impl methods, mirroring
+                            // declare_symbol's overlay branch: an included file's same-keyed
+                            // method is displaced for the scratch pass (snapshot-restored
+                            // after); a duplicate within the excluded file itself still errors.
+                            const auto overlay_key = std::make_pair(type_name, fn.name);
+                            if (sema_program.checking_excluded_file &&
+                                !sema_program.overlay_declared_methods.contains(overlay_key)) {
+                                sema_program.overlay_declared_methods.insert(overlay_key);
+                                type_methods.erase(fn.name);
+                            } else if (type_methods.contains(fn.name)) {
                                 diag.report_error(DiagnosticStage::Sema, fn.location,
                                     std::format("duplicate method '{}' for type '{}'", fn.name, type_name));
                                 continue;
@@ -828,6 +867,11 @@ namespace sema {
                         declare_diagnostic_decl(v, module_path, sema_program, diag, /*live=*/true);
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenDecl>>) {
                         declare_when_decl(*v, program, module_path, module, sema_program, diag);
+                    } else if constexpr (std::is_same_v<V, ast::CompileOnlyIfDecl>) {
+                        // Handled at the FILE level by build_symbol_table_for_module (Pass 1
+                        // evaluates the condition before this file's decls are declared at
+                        // all); reaching one here is a no-op, not an error — the directive
+                        // may sit anywhere among the file's top-level declarations.
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmStmt>>) {
                         // The parser accepts 'asm {...}' here purely so this diagnostic can name
                         // the exact construct, mirroring LinkDecl/DiagnosticDecl's mirror-image
@@ -841,9 +885,132 @@ namespace sema {
         }
     }
 
-    void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, const ast::Module &decls, DiagnosticEngine &diag) {
-        for (auto &decl : decls) {
+    // Passes 1 and 2 of the per-file inclusion model. For each file (in sorted-path
+    // order, the same order the resolver produced): Pass 1 finds the file's
+    // '#compile_only_if' directive, validates there is at most one, and folds its
+    // condition with the same machinery module-scope 'when' uses; Pass 2 declares the
+    // symbols of INCLUDED files only. An excluded file's path is recorded in
+    // ProgramModule::excluded_files — its declarations are never declared here, so no
+    // other file or module can reference them and codegen never sees them — and the
+    // file is fully type-checked later by check_excluded_files_for_program (sema.cpp),
+    // Pass 3. Because files are processed in order, a condition may reference consts
+    // declared by any earlier-sorted file of this module (or, via
+    // ensure_condition_modules_declared, any other module) — but not its own file's.
+    void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, const ast::Module &files, DiagnosticEngine &diag) {
+        for (const auto &file : files) {
+            const ast::CompileOnlyIfDecl *directive = nullptr;
+            for (const auto &decl : file.declarations) {
+                const auto *coi = std::get_if<ast::CompileOnlyIfDecl>(&decl);
+                if (!coi) continue;
+                if (directive) {
+                    diag.report_error(DiagnosticStage::Sema, coi->location,
+                        "a file may only have one '#compile_only_if' directive.");
+                    continue;
+                }
+                directive = coi;
+            }
+
+            bool included = true;
+            if (directive) {
+                // Same fold sequence as declare_when_decl above, for the same reasons.
+                ensure_condition_modules_declared(directive->condition, program, module_path, module, sema_program, diag);
+
+                LocalScope empty;
+                const auto cond_ty = check_expr(directive->condition, empty, module_path, sema_program, diag, ResolvedType{.kind = TypeKind::Bool}, 0, -1, nullptr);
+
+                // Stricter than 'when' (which inherits the evaluator's any-nonzero-integer
+                // truthiness): the spec pins this directive's condition to 'bool'. Invalid
+                // means check_expr already reported the real problem.
+                if (cond_ty.kind != TypeKind::Bool && cond_ty.kind != TypeKind::Invalid) {
+                    diag.report_error(DiagnosticStage::Sema, directive->location,
+                        "'#compile_only_if' condition must be a 'bool' expression.");
+                } else if (!is_constant_expr(directive->condition, module_path, sema_program)) {
+                    diag.report_error(DiagnosticStage::Sema, directive->location,
+                        "'#compile_only_if' condition must be a compile-time constant expression.");
+                } else {
+                    // Mirrors declare_when_decl: a constant condition that fails to fold is
+                    // an evaluator bug and must be reported, never silently treated as false.
+                    const auto folded = evaluate_const_value(directive->condition, module_path, sema_program, diag);
+                    if (const auto *iv = folded ? std::get_if<int64_t>(&*folded) : nullptr) {
+                        included = (*iv != 0);
+                    } else if (!folded) {
+                        diag.report_error(DiagnosticStage::Sema, directive->location,
+                            "internal error: '#compile_only_if' condition is a constant expression but could not be evaluated");
+                    }
+                }
+            }
+
+            if (!included) {
+                module.excluded_files.insert(file.file_path);
+                continue;
+            }
+
+            for (const auto &decl : file.declarations) {
+                declare_one_decl(decl, program, module_path, module, sema_program, diag);
+            }
+        }
+    }
+
+    // The name a top-level decl publishes into the module symbol table, or nullptr for
+    // kinds that publish none (impl blocks, directives, 'when', bare imports — whose
+    // alias names come from the TARGET module's pub set, not from the decl itself).
+    // Used only by declare_excluded_file_decls below.
+    namespace {
+        auto top_level_decl_name(const ast::Decl &decl) -> const std::string * {
+            return std::visit([]<typename T>(const T &v) -> const std::string * {
+                using V = std::decay_t<T>;
+                if constexpr (std::is_same_v<V, ast::FunctionDecl> || std::is_same_v<V, ast::ExtFunctionDecl> ||
+                              std::is_same_v<V, ast::VarDecl> || std::is_same_v<V, ast::MacroDecl> ||
+                              std::is_same_v<V, ast::TypeDecl>) {
+                    return &v.name;
+                } else {
+                    return nullptr;
+                }
+            }, decl);
+        }
+    }
+
+    // Scratch-declares one '#compile_only_if'-excluded file's declarations into its
+    // module's REAL symbol table — shadowing included files' same-named symbols (see
+    // declare_symbol's overlay branch) — so Pass 3 can type-check the file against the
+    // complete symbol table built in Pass 2. The caller (check_one_excluded_file,
+    // sema.cpp) snapshots the ProgramModule first and restores it afterwards; nothing
+    // declared here survives the file's check. TraitImplDecls are skipped — they are
+    // registered program-wide with coherence/duplicate checks an excluded file must not
+    // participate in (the one deliberate depth gap in excluded-file checking; see
+    // spec.md §11).
+    void declare_excluded_file_decls(const ast::Program &program, const std::string &module_path, const ast::FileAST &file, Program &sema_program, DiagnosticEngine &diag) {
+        for (const auto &decl : file.declarations) {
+            if (std::holds_alternative<ast::TraitImplDecl>(decl)) continue;
+            // Re-fetched per decl: declaring can insert modules (unresolved-import
+            // sentinels) and rehash Program::modules.
+            auto &module = sema_program.modules.at(module_path);
             declare_one_decl(decl, program, module_path, module, sema_program, diag);
+            // If this decl shadowed a bare-import ALIAS, drop the alias's origin record
+            // too: the bulk *_for_module passes redirect any name in bare_import_origins
+            // back to its origin symbol, which would clobber the overlay symbol the body
+            // checks are about to rely on. (declare_bare_import handles the alias-vs-alias
+            // case itself; this covers an ordinary named decl displacing an alias.)
+            if (const auto *name = top_level_decl_name(decl)) {
+                sema_program.modules.at(module_path).bare_import_origins.erase(*name);
+            }
+        }
+
+        // Mirror ensure_module_declared's eager-layout loop for the overlay's own type
+        // symbols: Pass 3 checks bodies immediately after this, and a just-declared
+        // enum/struct/union needs full layout the same way a module declared on demand
+        // does. layout_done guards make repeats no-ops.
+        const std::vector<std::string> overlay_names(sema_program.overlay_declared_names.begin(),
+                                                     sema_program.overlay_declared_names.end());
+        for (const auto &name : overlay_names) {
+            const auto mod_it = sema_program.modules.find(module_path);
+            if (mod_it == sema_program.modules.end()) continue;
+            const auto sym_it = mod_it->second.symbols.find(name);
+            if (sym_it == mod_it->second.symbols.end()) continue;
+            if (const auto *ts = std::get_if<TypeSymbol>(&sym_it->second)) {
+                if (!ts->decl || !ts->decl->generic_params.empty()) continue;
+                resolve_type_symbol(module_path, name, sema_program, diag, ts->decl->location, &program);
+            }
         }
     }
 
@@ -926,140 +1093,150 @@ namespace sema {
     }
 
     void register_trait_impls_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag) {
-        for (auto &[module_path, decls] : ast_program.modules) {
-            for (auto &decl : decls) {
-                const auto *timpl = std::get_if<ast::TraitImplDecl>(&decl);
-                if (!timpl) continue;
-
-                const auto trait_ref = resolve_type_ref(module_path, timpl->trait_name, sema_program, diag);
-                const auto type_ref = resolve_type_ref(module_path, timpl->type_name, sema_program, diag);
-                if (!trait_ref || !type_ref) continue;
-
-                if (!trait_ref->symbol->resolved || trait_ref->symbol->resolved->kind != TypeKind::Trait) {
-                    diag.report_error(DiagnosticStage::Sema, timpl->trait_name.location, std::format("'{}' is not a trait", trait_ref->name));
+        for (auto &[module_path, files] : ast_program.modules) {
+            for (const auto &file : files) {
+                // A '#compile_only_if'-excluded file's trait impls are never registered:
+                // exclusion exists precisely so two platform files can implement the same
+                // trait for the same type under opposite conditions, which the program-wide
+                // duplicate-impl check below would otherwise reject on every build.
+                if (const auto mod_it = sema_program.modules.find(module_path);
+                    mod_it != sema_program.modules.end() && mod_it->second.excluded_files.contains(file.file_path)) {
                     continue;
                 }
+                for (auto &decl : file.declarations) {
+                    const auto *timpl = std::get_if<ast::TraitImplDecl>(&decl);
+                    if (!timpl) continue;
 
-                // A generic type's TypeSymbol has no 'resolved' ResolvedType of its own (see
-                // declare_type) — 'List' alone is never itself a valid type, but it IS a
-                // legal 'impl TRAIT for List[T: type] { ... }' target, parametrizing the
-                // TYPE side only (traits themselves are not made generic).
-                const bool type_is_generic_decl = type_ref->symbol->decl && !type_ref->symbol->decl->generic_params.empty();
-                if (!type_is_generic_decl) {
-                    // Whitelist rather than blacklist: only Trait used to be rejected, so a
-                    // pointer/function/slice alias ('type P = *i32') was silently accepted as
-                    // an impl target — machinery downstream (vtables for a pointee-less
-                    // receiver, find_method's full-scan fallback) was never designed for it.
-                    const auto kind = type_ref->symbol->resolved ? type_ref->symbol->resolved->kind : TypeKind::Invalid;
-                    const bool valid_target = kind == TypeKind::Struct || kind == TypeKind::Enum || kind == TypeKind::Union;
-                    if (!valid_target) {
-                        diag.report_error(DiagnosticStage::Sema, timpl->type_name.location, std::format("'{}' is not a struct, enum, or union type", type_ref->name));
-                        continue;
-                    }
-                }
+                    const auto trait_ref = resolve_type_ref(module_path, timpl->trait_name, sema_program, diag);
+                    const auto type_ref = resolve_type_ref(module_path, timpl->type_name, sema_program, diag);
+                    if (!trait_ref || !type_ref) continue;
 
-                validate_generic_param_types(timpl->generic_params, diag);
-                const size_t target_arity = type_is_generic_decl ? type_ref->symbol->decl->generic_params.size() : 0;
-                if (timpl->generic_params.size() != target_arity) {
-                    diag.report_error(DiagnosticStage::Sema, timpl->location, std::format(
-                        "'impl {} for {}' has {} generic parameter(s), but '{}' is declared with {} — impl "
-                        "generic parameter lists must match the target type's own arity exactly",
-                        trait_ref->name, type_ref->name, timpl->generic_params.size(), type_ref->name, target_arity));
-                    continue;
-                }
-
-                const int trait_index = trait_ref->symbol->resolved->trait_index;
-
-                // Coherence: the impl must live in the trait's module or the type's module.
-                if (module_path != trait_ref->module_path && module_path != type_ref->module_path) {
-                    diag.report_error(DiagnosticStage::Sema, timpl->location,
-                        std::format("orphan impl: 'impl {} for {}' must be declared in the module that defines '{}' or the module that defines '{}'",
-                            trait_ref->name, type_ref->name, trait_ref->name, type_ref->name));
-                    continue;
-                }
-
-                // Duplicate-impl check.
-                auto dedup_key = std::make_tuple(trait_ref->module_path, trait_ref->name, type_ref->module_path, type_ref->name);
-                if (sema_program.trait_impl_registry.contains(dedup_key)) {
-                    diag.report_error(DiagnosticStage::Sema, timpl->location,
-                        std::format("duplicate impl of trait '{}' for type '{}'", trait_ref->name, type_ref->name));
-                    continue;
-                }
-                sema_program.trait_impl_registry[dedup_key] = timpl->location;
-
-                TraitImplInfo impl_info{
-                    .trait_module = trait_ref->module_path,
-                    .trait_name = trait_ref->name,
-                    .trait_index = trait_index,
-                    .type_module = type_ref->module_path,
-                    .type_name = type_ref->name,
-                    .impl_module = module_path,
-                    .location = timpl->location,
-                };
-
-                bool ok = true;
-                for (auto &fn : timpl->functions) {
-                    // (a) collision within this trait impl block
-                    if (impl_info.methods.contains(fn.name)) {
-                        diag.report_error(DiagnosticStage::Sema, fn.location,
-                            std::format("duplicate method '{}' in 'impl {} for {}'", fn.name, trait_ref->name, type_ref->name));
-                        ok = false;
+                    if (!trait_ref->symbol->resolved || trait_ref->symbol->resolved->kind != TypeKind::Trait) {
+                        diag.report_error(DiagnosticStage::Sema, timpl->trait_name.location, std::format("'{}' is not a trait", trait_ref->name));
                         continue;
                     }
 
-                    // (b) collision against the type's bare impl methods (live in the type's own module)
-                    bool collided = false;
-                    if (const auto type_mod_it = sema_program.modules.find(type_ref->module_path); type_mod_it != sema_program.modules.end()) {
-                        if (const auto bare_it = type_mod_it->second.methods.find(type_ref->name); bare_it != type_mod_it->second.methods.end()) {
-                            if (bare_it->second.contains(fn.name)) {
-                                diag.report_error(DiagnosticStage::Sema, fn.location,
-                                    std::format("method '{}' conflicts with an existing method in 'impl {} {{ }}'", fn.name, type_ref->name));
-                                collided = true;
-                            }
+                    // A generic type's TypeSymbol has no 'resolved' ResolvedType of its own (see
+                    // declare_type) — 'List' alone is never itself a valid type, but it IS a
+                    // legal 'impl TRAIT for List[T: type] { ... }' target, parametrizing the
+                    // TYPE side only (traits themselves are not made generic).
+                    const bool type_is_generic_decl = type_ref->symbol->decl && !type_ref->symbol->decl->generic_params.empty();
+                    if (!type_is_generic_decl) {
+                        // Whitelist rather than blacklist: only Trait used to be rejected, so a
+                        // pointer/function/slice alias ('type P = *i32') was silently accepted as
+                        // an impl target — machinery downstream (vtables for a pointee-less
+                        // receiver, find_method's full-scan fallback) was never designed for it.
+                        const auto kind = type_ref->symbol->resolved ? type_ref->symbol->resolved->kind : TypeKind::Invalid;
+                        const bool valid_target = kind == TypeKind::Struct || kind == TypeKind::Enum || kind == TypeKind::Union;
+                        if (!valid_target) {
+                            diag.report_error(DiagnosticStage::Sema, timpl->type_name.location, std::format("'{}' is not a struct, enum, or union type", type_ref->name));
+                            continue;
                         }
                     }
 
-                    // (c) collision against other trait impls already registered for this type
-                    if (!collided) {
-                        if (const auto existing_it = sema_program.trait_impls_by_type.find({type_ref->module_path, type_ref->name});
-                            existing_it != sema_program.trait_impls_by_type.end()) {
-                            for (auto &other_impl : existing_it->second) {
-                                if (other_impl.methods.contains(fn.name)) {
+                    validate_generic_param_types(timpl->generic_params, diag);
+                    const size_t target_arity = type_is_generic_decl ? type_ref->symbol->decl->generic_params.size() : 0;
+                    if (timpl->generic_params.size() != target_arity) {
+                        diag.report_error(DiagnosticStage::Sema, timpl->location, std::format(
+                            "'impl {} for {}' has {} generic parameter(s), but '{}' is declared with {} — impl "
+                            "generic parameter lists must match the target type's own arity exactly",
+                            trait_ref->name, type_ref->name, timpl->generic_params.size(), type_ref->name, target_arity));
+                        continue;
+                    }
+
+                    const int trait_index = trait_ref->symbol->resolved->trait_index;
+
+                    // Coherence: the impl must live in the trait's module or the type's module.
+                    if (module_path != trait_ref->module_path && module_path != type_ref->module_path) {
+                        diag.report_error(DiagnosticStage::Sema, timpl->location,
+                            std::format("orphan impl: 'impl {} for {}' must be declared in the module that defines '{}' or the module that defines '{}'",
+                                trait_ref->name, type_ref->name, trait_ref->name, type_ref->name));
+                        continue;
+                    }
+
+                    // Duplicate-impl check.
+                    auto dedup_key = std::make_tuple(trait_ref->module_path, trait_ref->name, type_ref->module_path, type_ref->name);
+                    if (sema_program.trait_impl_registry.contains(dedup_key)) {
+                        diag.report_error(DiagnosticStage::Sema, timpl->location,
+                            std::format("duplicate impl of trait '{}' for type '{}'", trait_ref->name, type_ref->name));
+                        continue;
+                    }
+                    sema_program.trait_impl_registry[dedup_key] = timpl->location;
+
+                    TraitImplInfo impl_info{
+                        .trait_module = trait_ref->module_path,
+                        .trait_name = trait_ref->name,
+                        .trait_index = trait_index,
+                        .type_module = type_ref->module_path,
+                        .type_name = type_ref->name,
+                        .impl_module = module_path,
+                        .location = timpl->location,
+                    };
+
+                    bool ok = true;
+                    for (auto &fn : timpl->functions) {
+                        // (a) collision within this trait impl block
+                        if (impl_info.methods.contains(fn.name)) {
+                            diag.report_error(DiagnosticStage::Sema, fn.location,
+                                std::format("duplicate method '{}' in 'impl {} for {}'", fn.name, trait_ref->name, type_ref->name));
+                            ok = false;
+                            continue;
+                        }
+
+                        // (b) collision against the type's bare impl methods (live in the type's own module)
+                        bool collided = false;
+                        if (const auto type_mod_it = sema_program.modules.find(type_ref->module_path); type_mod_it != sema_program.modules.end()) {
+                            if (const auto bare_it = type_mod_it->second.methods.find(type_ref->name); bare_it != type_mod_it->second.methods.end()) {
+                                if (bare_it->second.contains(fn.name)) {
                                     diag.report_error(DiagnosticStage::Sema, fn.location,
-                                        std::format("method '{}' conflicts with 'impl {} for {}'", fn.name, other_impl.trait_name, type_ref->name));
+                                        std::format("method '{}' conflicts with an existing method in 'impl {} {{ }}'", fn.name, type_ref->name));
                                     collided = true;
-                                    break;
                                 }
                             }
                         }
+
+                        // (c) collision against other trait impls already registered for this type
+                        if (!collided) {
+                            if (const auto existing_it = sema_program.trait_impls_by_type.find({type_ref->module_path, type_ref->name});
+                                existing_it != sema_program.trait_impls_by_type.end()) {
+                                for (auto &other_impl : existing_it->second) {
+                                    if (other_impl.methods.contains(fn.name)) {
+                                        diag.report_error(DiagnosticStage::Sema, fn.location,
+                                            std::format("method '{}' conflicts with 'impl {} for {}'", fn.name, other_impl.trait_name, type_ref->name));
+                                        collided = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (collided) {
+                            ok = false;
+                            continue;
+                        }
+
+                        if (find_attribute(fn.attributes, "init")) {
+                            diag.report_error(DiagnosticStage::Sema, fn.location,
+                                "'@init' is not allowed on impl methods; declare a module-scope function instead");
+                        }
+
+                        impl_info.methods[fn.name] = MethodInfo{
+                            .decl = &fn,
+                            .impl_module = module_path,
+                            .type_name = type_ref->name,
+                            .impl_generic_params = timpl->generic_params.empty() ? nullptr : &timpl->generic_params,
+                            .is_mut_self = fn.is_mut_self,
+                            .is_pub = fn.is_pub,
+                            .is_resolved = false,
+                            .trait_name = trait_ref->name,
+                            .trait_module = trait_ref->module_path,
+                        };
                     }
 
-                    if (collided) {
-                        ok = false;
-                        continue;
-                    }
+                    if (!ok) continue; // a colliding impl is dropped rather than partially registered
 
-                    if (find_attribute(fn.attributes, "init")) {
-                        diag.report_error(DiagnosticStage::Sema, fn.location,
-                            "'@init' is not allowed on impl methods; declare a module-scope function instead");
-                    }
-
-                    impl_info.methods[fn.name] = MethodInfo{
-                        .decl = &fn,
-                        .impl_module = module_path,
-                        .type_name = type_ref->name,
-                        .impl_generic_params = timpl->generic_params.empty() ? nullptr : &timpl->generic_params,
-                        .is_mut_self = fn.is_mut_self,
-                        .is_pub = fn.is_pub,
-                        .is_resolved = false,
-                        .trait_name = trait_ref->name,
-                        .trait_module = trait_ref->module_path,
-                    };
+                    sema_program.trait_impls_by_type[{type_ref->module_path, type_ref->name}].push_back(std::move(impl_info));
                 }
-
-                if (!ok) continue; // a colliding impl is dropped rather than partially registered
-
-                sema_program.trait_impls_by_type[{type_ref->module_path, type_ref->name}].push_back(std::move(impl_info));
             }
         }
     }

@@ -1,0 +1,9 @@
+// An excluded file is still fully type-checked — that is the deliberate design that
+// keeps platform-gated code from rotting. excluded.mir's condition is constant false,
+// so its code is never declared or emitted, yet its type error must still fail the
+// build.
+// Expected: build fails with "unknown identifier 'undefined_identifier'" anchored in
+// excluded.mir.
+
+pub fn main() {
+}

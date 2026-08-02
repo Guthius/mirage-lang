@@ -1,0 +1,8 @@
+// '#compile_only_if' is a file-level directive: statement position is a PARSE error
+// (unlike '#link'/'#error'/'#warn', which parse there and are rejected by sema).
+// Expected: build fails with "'#compile_only_if' is a file-level directive and may
+// only appear at module scope."
+
+pub fn main() {
+    #compile_only_if(true)
+}

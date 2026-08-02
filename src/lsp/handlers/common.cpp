@@ -758,7 +758,7 @@ namespace lsp::handlers {
             }
         };
 
-        for (const auto &decl : module) {
+        for (const auto &decl : ast::all_decls(module)) {
             if (const auto *fn = std::get_if<ast::FunctionDecl>(&decl)) {
                 const auto sym_it = sema_module.symbols.find(fn->name);
                 const auto *sym = sym_it != sema_module.symbols.end() ? std::get_if<sema::FunctionSymbol>(&sym_it->second) : nullptr;
@@ -1327,7 +1327,7 @@ namespace lsp::handlers {
     // for FunctionDecl/ImplDecl::Function, never ExtFunctionDecl/MacroDecl - see its own doc
     // comment above).
     auto find_expr_by_location_in_module(const ast::Module &module, const SourceLocation &target) -> const ast::Expr * {
-        for (const auto &decl : module) {
+        for (const auto &decl : ast::all_decls(module)) {
             if (const auto *var = std::get_if<ast::VarDecl>(&decl)) {
                 if (var->init) {
                     if (const auto *found = find_expr_by_location(*var->init, target)) return found;
@@ -1359,7 +1359,7 @@ namespace lsp::handlers {
             return name_len > 0 && loc.line == line && column >= loc.column && column < loc.column + name_len;
         };
 
-        for (const auto &decl : module) {
+        for (const auto &decl : ast::all_decls(module)) {
             const auto *type_decl = std::get_if<ast::TypeDecl>(&decl);
             if (!type_decl) continue;
 

@@ -216,7 +216,7 @@ namespace lsp::handlers {
     }
 
     void walk_module_bodies(const ast::Module &module, const AstVisitor &visitor) {
-        for (const auto &decl : module) {
+        for (const auto &decl : ast::all_decls(module)) {
             if (const auto *fn = std::get_if<ast::FunctionDecl>(&decl)) {
                 visitor.on_body_begin(fn, nullptr);
                 walk_stmt(fn->body, visitor);

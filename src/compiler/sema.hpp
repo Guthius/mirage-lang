@@ -480,6 +480,12 @@ namespace sema {
         // try_resolve_namespace_chain only has access to sema::Program, not the
         // ast::Program::module_imports map the resolution needs.
         std::unordered_map<const ast::ImportExpr *, std::string> inline_import_paths;
+        // File paths (ast::FileAST::file_path) of this module's files whose
+        // '#compile_only_if' condition folded to false. Decided in Pass 1 of
+        // build_symbol_table_for_module; the file's symbols were never declared (so
+        // nothing else can reference them and codegen never sees them), but the file is
+        // still fully type-checked later by check_excluded_files_for_program.
+        std::set<std::string> excluded_files;
         bool ok = false;
     };
 
@@ -577,6 +583,24 @@ namespace sema {
         // see ensure_module_declared (sema_declare.cpp) for why this must be reentrant
         // rather than a single flat loop over Program::modules.
         std::set<std::string> modules_declared;
+
+        // True only while check_excluded_files_for_program (sema.cpp) is scratch-checking a
+        // '#compile_only_if'-excluded file. Consulted at the sites where "fully type-checked
+        // but contributes nothing" needs enforcing: declare_link_decl skips collection,
+        // declare_diagnostic_decl skips firing, and check_expr's TypeInfoOfExpr/'any'
+        // handling skips types_needing_info registration (so an excluded file can never
+        // cause a Type_Info global to be emitted). Everything else the scratch check writes
+        // is either rolled back wholesale (the module's ProgramModule is snapshot-restored)
+        // or truncated (generic function instances) when the file's check finishes.
+        bool checking_excluded_file = false;
+        // Symbol names / (type name, method name) pairs declared by the CURRENT excluded
+        // file's scratch batch. Lets declare_symbol (and declare_one_decl's impl-method
+        // registration) distinguish the excluded file shadowing an included file's
+        // same-named symbol — allowed, that is the platform-file idiom's whole point —
+        // from a genuine duplicate within the excluded file itself, which still gets the
+        // normal redefinition error. Cleared per file; meaningless outside the pass.
+        std::set<std::string> overlay_declared_names;
+        std::set<std::pair<std::string, std::string>> overlay_declared_methods;
 
         // (module_path, function_name) pairs, in the exact order the synthesized '_init'
         // (codegen.cpp) must call them: modules topologically sorted by actual cross-module

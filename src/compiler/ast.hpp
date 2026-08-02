@@ -725,6 +725,19 @@ namespace ast {
         SourceLocation location;
     };
 
+    // '#compile_only_if(condition)' — a FILE-level directive: gates whether the containing
+    // file's symbols are declared and its code emitted (sema evaluates 'condition' as a
+    // compile-time constant bool). It does NOT skip parsing or type-checking — an excluded
+    // file is still fully checked so platform-specific code cannot silently rot. At most
+    // one per file (a sema error otherwise); may appear anywhere among the file's top-level
+    // declarations. Unlike '#link'/'#error'/'#warn' it is a PARSE error in statement
+    // position and inside 'when' blocks (see parse_stmt/parse_when_decl_body), and 'pub'
+    // on it is a parse error too.
+    struct CompileOnlyIfDecl {
+        Expr condition;
+        SourceLocation location;
+    };
+
     struct ExprStmt {
         Expr expr;
         SourceLocation location;
@@ -1058,7 +1071,8 @@ namespace ast {
     struct WhenDecl;
 
     using Decl = std::variant<FunctionDecl, ExtFunctionDecl, VarDecl, MacroDecl, TypeDecl, ImplDecl, TraitImplDecl,
-                               LinkDecl, DiagnosticDecl, BareImportDecl, std::unique_ptr<WhenDecl>, std::unique_ptr<AsmStmt>>;
+                               LinkDecl, DiagnosticDecl, BareImportDecl, CompileOnlyIfDecl, std::unique_ptr<WhenDecl>,
+                               std::unique_ptr<AsmStmt>>;
 
     struct WhenDecl {
         Expr condition;

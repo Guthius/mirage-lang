@@ -3,10 +3,31 @@
 #include "ast.hpp"
 #include "diagnostic_engine.hpp"
 
+#include <ranges>
 #include <unordered_map>
 
 namespace ast {
-    using Module = std::vector<Decl>;
+    // One parsed '.mir' file. A module is a directory of these; the resolver keeps the
+    // per-file structure (rather than merging every file's declarations into one flat
+    // list) because '#compile_only_if' gates inclusion per FILE — sema needs to know
+    // which declarations came from which file to exclude a file's symbols while still
+    // type-checking its contents.
+    struct FileAST {
+        std::string file_path;                // canonical path, same string the file's token locations carry
+        std::vector<Decl> declarations;
+        SourceLocation location;              // start of the file (line 1, column 1)
+    };
+
+    using Module = std::vector<FileAST>;
+
+    // Flat view over every declaration in a module, in file order (files are sorted by
+    // path; declarations keep source order). For consumers that don't care about file
+    // boundaries — symbol walks, searches — so the per-file split doesn't force nested
+    // loops everywhere.
+    inline auto all_decls(const Module &module) {
+        return module | std::views::transform([](const FileAST &f) -> const std::vector<Decl> & { return f.declarations; }) |
+               std::views::join;
+    }
 
     struct Program {
         std::unordered_map<std::string, Module> modules;

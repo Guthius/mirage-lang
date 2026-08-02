@@ -1,0 +1,8 @@
+// A '#compile_only_if' condition must fold to a 'bool' — stricter than 'when', which
+// inherits the evaluator's any-nonzero-integer truthiness.
+// Expected: build fails with "'#compile_only_if' condition must be a 'bool' expression."
+
+#compile_only_if(42)
+
+pub fn main() {
+}

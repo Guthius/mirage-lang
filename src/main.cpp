@@ -469,6 +469,8 @@ namespace {
                     out << "when "; dump_expr(v->condition, out); out << " {\n";
                     for (auto &d : v->then_decls) dump_decl(d, out);
                     out << "}\n";
+                } else if constexpr (std::is_same_v<V, ast::CompileOnlyIfDecl>) {
+                    out << "#compile_only_if("; dump_expr(v.condition, out); out << ")\n";
                 } else {
                     out << "<decl>\n";
                 }
@@ -515,7 +517,7 @@ auto main(const int argc, char *argv[]) -> int {
 
     if (options.dump_ast) {
         if (const auto root_it = ast.modules.find(ast.root_module_path); root_it != ast.modules.end()) {
-            for (const auto &decl : root_it->second) {
+            for (const auto &decl : ast::all_decls(root_it->second)) {
                 dump_decl(decl, llvm::outs());
             }
         }

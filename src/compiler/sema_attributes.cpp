@@ -489,12 +489,20 @@ namespace sema {
         std::map<std::string, std::vector<InitFn>> by_module; // preserves ast::Module's source order
         std::set<std::string> has_init;
 
-        for (const auto &[module_path, decls] : ast_program.modules) {
-            for (const auto &decl : decls) {
-                if (const auto *fn_decl = std::get_if<ast::FunctionDecl>(&decl)) {
-                    if (find_attribute(fn_decl->attributes, "init")) {
-                        by_module[module_path].push_back(InitFn{.name = fn_decl->name, .decl = fn_decl});
-                        has_init.insert(module_path);
+        for (const auto &[module_path, files] : ast_program.modules) {
+            for (const auto &file : files) {
+                // A '#compile_only_if'-excluded file's '@init' functions were never
+                // declared, so they must not enter the init call order either.
+                if (const auto mod_it = sema_program.modules.find(module_path);
+                    mod_it != sema_program.modules.end() && mod_it->second.excluded_files.contains(file.file_path)) {
+                    continue;
+                }
+                for (const auto &decl : file.declarations) {
+                    if (const auto *fn_decl = std::get_if<ast::FunctionDecl>(&decl)) {
+                        if (find_attribute(fn_decl->attributes, "init")) {
+                            by_module[module_path].push_back(InitFn{.name = fn_decl->name, .decl = fn_decl});
+                            has_init.insert(module_path);
+                        }
                     }
                 }
             }

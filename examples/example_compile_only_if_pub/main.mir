@@ -1,0 +1,7 @@
+// '#compile_only_if' has no visibility concept — 'pub' on it is a parse error.
+// Expected: build fails with "'#compile_only_if' directives cannot be 'pub'"
+
+pub #compile_only_if(true)
+
+pub fn main() {
+}

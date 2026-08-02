@@ -1,0 +1,13 @@
+// Local stand-in for the stdlib's Core/Compiler/Options module (same rationale as
+// example_raylib_link/opts): lets '#compile_only_if(target_os == .X)' be exercised
+// end-to-end without an external stdlib checkout.
+
+pub type OperatingSystem = enum(i32) {
+    Linux = 0
+    Windows = 1
+    MacOS = 2
+    Wasm32 = 3
+    Other = 4
+}
+
+pub const target_os: OperatingSystem = $option("build/target_os", .Linux)

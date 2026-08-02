@@ -1,0 +1,2 @@
+// Sorts before main.mir, so main.mir's '#compile_only_if' condition can see it.
+pub mut runtime_flag := true

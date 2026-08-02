@@ -292,6 +292,40 @@
     "diag": "examples/example_char_literal_multibyte/main.mir:9:17: error: multi-byte character literals are not supported",
     "exit": 1
   },
+  "example_compile_only_if": {
+    "action": "run",
+    "exit": 5
+  },
+  "example_compile_only_if_duplicate": {
+    "action": "build",
+    "diag": "examples/example_compile_only_if_duplicate/main.mir:6:1: error: a file may only have one '#compile_only_if' directive.",
+    "exit": 1
+  },
+  "example_compile_only_if_excluded_error": {
+    "action": "build",
+    "diag": "examples/example_compile_only_if_excluded_error/excluded.mir:4:12: error: unknown identifier 'undefined_identifier'",
+    "exit": 1
+  },
+  "example_compile_only_if_nonbool": {
+    "action": "build",
+    "diag": "examples/example_compile_only_if_nonbool/main.mir:5:1: error: '#compile_only_if' condition must be a 'bool' expression.",
+    "exit": 1
+  },
+  "example_compile_only_if_nonconst": {
+    "action": "build",
+    "diag": "examples/example_compile_only_if_nonconst/main.mir:6:1: error: '#compile_only_if' condition must be a compile-time constant expression.",
+    "exit": 1
+  },
+  "example_compile_only_if_pub": {
+    "action": "build",
+    "diag": "examples/example_compile_only_if_pub/main.mir:4:5: error: '#compile_only_if' directives cannot be 'pub'",
+    "exit": 1
+  },
+  "example_compile_only_if_stmt": {
+    "action": "build",
+    "diag": "examples/example_compile_only_if_stmt/main.mir:7:5: error: '#compile_only_if' is a file-level directive and may only appear at module scope.",
+    "exit": 1
+  },
   "example_const_fold_overflow": {
     "action": "build",
     "diag": "examples/example_const_fold_overflow/main.mir:26:9: error: match arm pattern could not be folded to an integer constant (an overflowing division, a shift of 64 or more, or a constant that is not an integer)",

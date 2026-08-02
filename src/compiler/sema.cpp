@@ -5,7 +5,9 @@
 #include <ranges>
 
 namespace sema {
-    void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, const ast::Module &decls, DiagnosticEngine &diagnostics);
+    void build_symbol_table_for_module(const ast::Program &program, const std::string &module_path, ProgramModule &module, Program &sema_program, const ast::Module &files, DiagnosticEngine &diagnostics);
+    void declare_excluded_file_decls(const ast::Program &program, const std::string &module_path, const ast::FileAST &file, Program &sema_program, DiagnosticEngine &diag);
+    void eager_check_generic_template_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag);
     void register_trait_impls_for_program(const ast::Program &ast_program, Program &sema_program, DiagnosticEngine &diag);
     void ensure_module_declared(const ast::Program &program, const std::string &module_path, Program &sema_program, DiagnosticEngine &diag, const SourceLocation &trigger_location = {});
     void validate_attributes_for_module(const std::string &module_path, ProgramModule &module, Program &program, DiagnosticEngine &diag);
@@ -746,6 +748,122 @@ namespace sema {
                 }
             }
         }
+
+        // Pass 3 for one '#compile_only_if'-excluded file: scratch-declare its symbols
+        // over the module's real table (shadowing included files' same-named symbols),
+        // run the same signature/value/body checks its declarations would get if
+        // included, then restore the module and truncate any generic-function instances
+        // the scratch created. Net effect: the file's diagnostics land normally — so
+        // platform-gated code cannot silently rot — while it contributes NOTHING codegen
+        // can see: no symbols (module snapshot-restored), no generic instances
+        // (truncated), no Type_Info registrations, '#link's, or '#error'/'#warn' firings
+        // (suppressed via Program::checking_excluded_file).
+        void check_one_excluded_file(const ast::Program &ast_program, const std::string &module_path, const ast::FileAST &file, Program &program, DiagnosticEngine &diag) {
+            auto module_snapshot = program.modules.at(module_path);
+            const size_t instances_before = program.generic_fn_instances.size();
+
+            program.checking_excluded_file = true;
+            program.overlay_declared_names.clear();
+            program.overlay_declared_methods.clear();
+
+            declare_excluded_file_decls(ast_program, module_path, file, program, diag);
+
+            // The same *_for_module passes check_program already ran over this module.
+            // Every per-symbol resolution is memoized (is_resolved / layout_done guards),
+            // so the re-run only does new work: the overlay's own symbols.
+            resolve_signatures_for_module(module_path, program.modules.at(module_path), program, diag);
+            resolve_impl_signatures_for_module(module_path, program.modules.at(module_path), program, diag);
+            resolve_values_for_module(module_path, program.modules.at(module_path), program, diag);
+            check_struct_field_defaults_for_module(module_path, program.modules.at(module_path), program, diag);
+
+            // Bodies — restricted to the overlay's own functions/methods (the module's
+            // included bodies were already checked once; re-checking them would repeat
+            // their diagnostics). Mirrors check_bodies_for_module's loops, including the
+            // rehash-safety idiom of re-looking everything up per iteration.
+            const std::vector<std::string> overlay_names(program.overlay_declared_names.begin(),
+                                                         program.overlay_declared_names.end());
+            for (const auto &name : overlay_names) {
+                const auto [mod, sym] = module_symbol_for(program, module_path, name);
+                if (!mod || !sym) continue;
+                if (mod->bare_import_origins.contains(name)) continue;
+                // A generic declaration's one-time eager template check normally runs
+                // program-wide (check_generic_templates_for_program) — before excluded
+                // files are scratch-declared, so it never saw this file's. Covers both
+                // generic types (bound validation + method bodies) and generic functions.
+                if (const auto *ts = std::get_if<TypeSymbol>(sym); ts && ts->decl && !ts->decl->generic_params.empty()) {
+                    eager_check_generic_template_symbol(module_path, name, program, diag);
+                    continue;
+                }
+                const auto *fn = std::get_if<FunctionSymbol>(sym);
+                if (!fn || !fn->decl) continue;
+                if (!fn->decl->generic_params.empty()) {
+                    eager_check_generic_template_symbol(module_path, name, program, diag);
+                    continue;
+                }
+
+                LocalScope locals = globals_in_scope(*mod);
+                for (size_t i = 0; i < fn->decl->params.size(); ++i) {
+                    locals[fn->decl->params[i].name] = LocalBinding{.type = fn->params[i], .is_mut = fn->decl->params[i].is_mut};
+                }
+                const auto *decl = fn->decl;
+                const auto return_types = fn->return_types;
+
+                check_stmt(decl->body, locals, module_path, program, diag, return_types, 0);
+                warn_if_may_fall_through("function", decl->name, decl->body, return_types, decl->location, diag);
+            }
+
+            const std::vector<std::pair<std::string, std::string>> overlay_methods(
+                program.overlay_declared_methods.begin(), program.overlay_declared_methods.end());
+            for (const auto &[type_name, method_name] : overlay_methods) {
+                const auto mod_it = program.modules.find(module_path);
+                if (mod_it == program.modules.end()) continue;
+                const auto type_it = mod_it->second.methods.find(type_name);
+                if (type_it == mod_it->second.methods.end()) continue;
+                const auto method_it = type_it->second.find(method_name);
+                if (method_it == type_it->second.end()) continue;
+                if (!method_it->second.is_resolved) continue;
+                check_method_body(method_it->second, module_path, mod_it->second, program, diag);
+            }
+
+            program.checking_excluded_file = false;
+            program.overlay_declared_names.clear();
+            program.overlay_declared_methods.clear();
+            program.modules.at(module_path) = std::move(module_snapshot);
+
+            // Generic instances requested only by the excluded file's code must not be
+            // emitted. Instances are append-only, and every legitimate instance already
+            // exists (this pass runs after all body/template passes), so everything past
+            // the snapshot point belongs to this file — drop it, and scrub the
+            // index-keyed side records that would otherwise dangle.
+            if (program.generic_fn_instances.size() > instances_before) {
+                program.generic_fn_instances.resize(instances_before);
+                std::erase_if(program.generic_fn_instance_exprs, [&](const auto &kv) { return kv.first >= instances_before; });
+                std::erase_if(program.generic_fn_instances_needed, [&](const size_t idx) { return idx >= instances_before; });
+                std::erase_if(program.template_fn_instance_for_decl, [&](const auto &kv) { return kv.second >= instances_before; });
+            }
+        }
+
+        // Pass 3 driver: type-checks every '#compile_only_if'-excluded file, one at a
+        // time (each file is checked in isolation — two excluded files never see each
+        // other's symbols, exactly as two opposite-condition platform files must not).
+        void check_excluded_files_for_program(const ast::Program &ast_program, Program &program, DiagnosticEngine &diag) {
+            // Sorted so diagnostic order can't vary with Program::modules' unordered
+            // iteration order.
+            std::vector<std::string> module_paths;
+            for (const auto &path : ast_program.modules | std::views::keys) module_paths.push_back(path);
+            std::ranges::sort(module_paths);
+
+            for (const auto &module_path : module_paths) {
+                const auto mod_it = program.modules.find(module_path);
+                if (mod_it == program.modules.end() || mod_it->second.excluded_files.empty()) continue;
+                const auto excluded = mod_it->second.excluded_files; // copied: the module is snapshot-restored per file
+
+                for (const auto &file : ast_program.modules.at(module_path)) {
+                    if (!excluded.contains(file.file_path)) continue;
+                    check_one_excluded_file(ast_program, module_path, file, program, diag);
+                }
+            }
+        }
     }
 
     auto check_program(const ast::Program &program, DiagnosticEngine &diag, const Options &options) -> Program {
@@ -820,6 +938,13 @@ namespace sema {
         // bound, so unlike check_struct_field_defaults_for_module above this walks
         // monomorphized slots rather than declarations.
         check_generic_struct_field_defaults_for_program(out, diag);
+
+        // Pass 3 of the '#compile_only_if' model: type-check excluded files. Positioned
+        // after every pass that can create legitimate generic instances (bodies, trait
+        // impls, eager templates, generic field defaults) — check_one_excluded_file
+        // truncates the instance list back to its entry size, which is only sound if
+        // nothing after it appends instances the program actually needs.
+        check_excluded_files_for_program(program, out, diag);
 
         // Runs last: the cross-module '@init' reference walk doesn't need type-checked
         // bodies, but keeping it after every other pass makes "last" unambiguous.

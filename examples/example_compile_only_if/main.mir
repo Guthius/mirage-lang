@@ -1,0 +1,4 @@
+pub fn main() -> i32 {
+    const name := platform_name()
+    return cast(len(name), i32)
+}

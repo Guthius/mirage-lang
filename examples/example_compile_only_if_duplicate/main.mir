@@ -1,0 +1,9 @@
+// '#compile_only_if' may appear at most once per file — a second directive is a sema
+// error, whichever branch either would select.
+// Expected: build fails with "a file may only have one '#compile_only_if' directive."
+
+#compile_only_if(true)
+#compile_only_if(true)
+
+pub fn main() {
+}

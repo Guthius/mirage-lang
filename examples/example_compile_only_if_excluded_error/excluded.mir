@@ -1,0 +1,5 @@
+#compile_only_if(false)
+
+pub fn broken() -> i32 {
+    return undefined_identifier
+}

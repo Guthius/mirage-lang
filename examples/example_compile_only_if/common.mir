@@ -1,0 +1,17 @@
+// example_compile_only_if — the '#compile_only_if' file-level conditional-compilation
+// shape from the feature's definition of done. This module has two platform files
+// (linux_only.mir / wasm_only.mir) declaring the SAME 'pub fn platform_name()' under
+// opposite conditions; exactly one is included per build, selected by
+// '--opt build/target_os=...'. The excluded file is still fully type-checked.
+//
+// Expected: 'mirage run' exits with len(platform_name()) — 5 ("linux") under the
+// default/Linux options, 4 ("wasm") under '--opt build/target_os=Wasm32'.
+//
+// This file sorts before both platform files, so their conditions can reference the
+// bare 'target_os' const declared here.
+
+const target_os := import("opts").target_os
+
+pub fn greet() -> []u8 {
+    return "hello"
+}

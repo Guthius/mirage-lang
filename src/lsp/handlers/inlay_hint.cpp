@@ -172,7 +172,8 @@ namespace lsp::handlers {
             return scoped;
         };
 
-        // A directory-module merges every '.mir' file in it into one ast::Module, so
+        // A directory-module's ast::Module holds every '.mir' file in it (per-file since
+        // '#compile_only_if', but walk_module_bodies flattens across files), so
         // walk_module_bodies() below walks declarations from every file in the directory, not
         // just the one currently open (`path`/`source_file`) - a node's line number alone can
         // coincidentally fall inside the requested range even though it belongs to a

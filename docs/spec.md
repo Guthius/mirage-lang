@@ -1855,6 +1855,81 @@ The ordinary collision rule still applies to any individual bare-imported name
 that happens to collide with anything else in the module — including the bound
 import's own namespace name, if one happens to coincide.
 
+### Conditional File Inclusion: `#compile_only_if`
+
+```mirage
+#compile_only_if(target_os == .Wasm32 || target_os == .Wasm64p32)
+
+ext fn js_console_log(msg: *u8, length: usize)
+ext fn js_get_timestamp() -> f64
+```
+
+A module-scope directive that conditions whether its **entire file's** symbols
+are declared and its code emitted. The condition is a compile-time constant
+`bool` expression, folded with the same evaluator as `when` conditions and
+`$option` values. It does **not** skip parsing or type-checking — an excluded
+file is always fully processed, so platform-specific code cannot silently rot
+while developing on a different target (the same anti-rot rule module-scope
+`when` follows for its unselected branches).
+
+**Placement.** At most one per file — a second is a sema error
+(`a file may only have one '#compile_only_if' directive.`). It is not
+position-sensitive: it may appear anywhere among the file's top-level
+declarations, not only at the top. It is a **parse** error in statement
+position and inside `when` blocks
+(`'#compile_only_if' is a file-level directive and may only appear at module
+scope.`), and `pub` on it is a parse error
+(`'#compile_only_if' directives cannot be 'pub'`) — the directive has no
+visibility concept.
+
+**The condition** is evaluated in module scope, before the file's own
+declarations are declared. It may reference `$option`/`$env` values, `const`
+declarations from other modules (imported via
+`const opts := import("Core/Compiler/Options")`), and compile-time constants
+declared by this module's *other* files that sort earlier by path — but never
+runtime values (non-constant conditions are a sema error) and never the
+file's own declarations. A condition that folds to a non-`bool` constant is a
+sema error — stricter than `when`, which tolerates the evaluator's
+any-nonzero-integer truthiness.
+
+**Per-file processing model.** A module is a directory of files; each file
+keeps its own declaration list through the whole front end, and sema
+processes a module's files in three passes:
+
+1. **Determine inclusion** — per file, in sorted-path order: fold the
+   `#compile_only_if` condition if present; `true` (or no directive) marks
+   the file *included*, `false` marks it *excluded*.
+2. **Declare included files** — only included files' declarations enter the
+   module's symbol table (and trait-impl/`@init` registries).
+3. **Type-check everything** — included files check as usual; each excluded
+   file is then checked, one file at a time, against the complete symbol
+   table from pass 2. Within its own check, an excluded file sees its own
+   declarations too, and they *shadow* same-named symbols from included
+   files — so two platform files declaring the same `pub fn platform_name()`
+   under opposite conditions each type-check cleanly. Type errors in
+   excluded files are reported normally.
+
+**An excluded file contributes nothing to the build**: no symbols (nothing
+else can reference them — calls resolve to whichever platform file *was*
+included, or fail as ordinary unknown identifiers), no code or `Type_Info`
+RTTI in codegen, no `#link` directives, no `#error`/`#warn` firings, and no
+`@init` registrations. Its imports still resolve and load (the file is still
+processed), and its `when` blocks still fold — but as dead, check-only
+branches.
+
+One deliberate depth gap: `impl TRAIT for TYPE` blocks in an excluded file
+are *not* deep-checked — trait impls are registered program-wide with
+coherence and duplicate-impl checks an excluded file must not participate in
+(the whole point is that two platform files may implement the same trait for
+the same type), so they are only fully checked when their file is included.
+
+**`#compile_only_if` and `when` are complementary, not redundant**: the
+directive gates an entire file (coarse-grained; skips codegen for the whole
+file, always type-checks), while `when` gates individual declarations or
+statements within a file (fine-grained; both branches always type-checked).
+A file with `#compile_only_if` may also contain `when` blocks; both operate
+independently.
+
 ---
 
 ## 12. Compile-Time Configuration
@@ -1866,7 +1941,11 @@ diagnostics: `$option`, `$env`, `#link`, `#error`, `#warn`, the `when`
 statement, and the `when` expression. `$option`/`$env` produce a value and
 use the `$` sigil; `#link`/`#error`/`#warn` are directives with no value
 and use the `#` sigil — together these five form one coupled "Compile-Time
-Configuration" family despite the two different sigils.
+Configuration" family despite the two different sigils. The `#` sigil is
+also used by the file-level `#compile_only_if` directive, which gates whole
+files rather than individual declarations — see
+[Conditional File Inclusion](#conditional-file-inclusion-compile_only_if)
+under Modules.
 
 ### `$option`
 

@@ -1041,6 +1041,32 @@ namespace ast {
                    parser.peek().lexeme == "link";
         }
 
+        // Whether a '#compile_only_if(...)' directive starts at the CURRENT token (the '#'
+        // itself, not yet consumed). Mirrors peek_link_decl above; 'compile_only_if' (like
+        // 'link'/'warn') is a plain identifier after '#', not a keyword.
+        auto peek_compile_only_if_decl(const Parser &parser) -> bool {
+            return parser.check(TokenKind::Hash) && parser.peek().kind == TokenKind::Identifier &&
+                   parser.peek().lexeme == "compile_only_if";
+        }
+
+        // '#compile_only_if(condition)' — a file-level directive (see CompileOnlyIfDecl's
+        // doc comment in ast.hpp). The caller has already confirmed the lookahead via
+        // peek_compile_only_if_decl, so this only consumes and shapes the node.
+        auto parse_compile_only_if_decl(Parser &parser) -> CompileOnlyIfDecl {
+            const auto location = parser.current_location();
+            parser.expect(TokenKind::Hash, "'#'");
+            parser.advance(); // consume 'compile_only_if'
+
+            parser.expect(TokenKind::LParen, "'('");
+            auto condition = parse_expr(parser);
+            parser.expect(TokenKind::RParen, "')'");
+
+            return CompileOnlyIfDecl{
+                .condition = std::move(condition),
+                .location = location,
+            };
+        }
+
         // Reports a parser-stage "unknown attribute" error if 'name' isn't one of the five
         // known declaration-attribute names (see Attribute's doc comment in ast.hpp) — a pure
         // lexical fact, checked identically for both the bare/single-with-args form and the
@@ -3386,6 +3412,19 @@ namespace ast {
             return parse_diagnostic_decl(parser, *directive_kind);
         }
 
+        // '#compile_only_if(...)' in statement position is a PARSE error (unlike
+        // '#link'/'#error'/'#warn' above, which parse permissively and are rejected by
+        // sema): the directive gates a whole file, so a statement-position occurrence is
+        // never meaningful to any later phase. Recovery still consumes the full directive
+        // form and keeps its condition as an ordinary expr-stmt so parsing doesn't desync.
+        if (peek_compile_only_if_decl(parser)) {
+            const auto location = parser.current_location();
+            parser.report_error(location,
+                "'#compile_only_if' is a file-level directive and may only appear at module scope.");
+            auto directive = parse_compile_only_if_decl(parser);
+            return ExprStmt{.expr = std::move(directive.condition), .location = location};
+        }
+
         if (parser.check(TokenKind::KwFor)) {
             return parse_for_in_stmt(parser);
         }
@@ -3596,6 +3635,15 @@ namespace ast {
             const LoopProgressGuard progress_guard(parser);
 
             if (auto d = parse_decl(parser)) {
+                // '#compile_only_if' gates a whole FILE; nesting it under a 'when' condition
+                // is contradictory, so it is a PARSE error here (not a sema allow-list
+                // rejection like the other decl kinds) — parse_decl already consumed the
+                // full directive form, so dropping the node recovers cleanly.
+                if (const auto *coi = std::get_if<CompileOnlyIfDecl>(&*d)) {
+                    parser.report_error(coi->location,
+                        "'#compile_only_if' is a file-level directive and may only appear at module scope.");
+                    continue;
+                }
                 decls.push_back(std::move(*d));
             }
         }
@@ -3696,6 +3744,14 @@ namespace ast {
                         *directive_kind == DiagnosticDirectiveKind::Error ? "error" : "warn"));
             }
             return Decl{parse_diagnostic_decl(parser, *directive_kind)};
+        }
+
+        if (peek_compile_only_if_decl(parser)) {
+            if (is_pub) {
+                parser.report_error(parser.current_location(),
+                    "'#compile_only_if' directives cannot be 'pub'");
+            }
+            return Decl{parse_compile_only_if_decl(parser)};
         }
 
         // 'asm' is never legal at module scope, but it parses successfully here too (exactly

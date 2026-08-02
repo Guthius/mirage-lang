@@ -17,6 +17,9 @@ declaration   ::= [ attribute ] [ 'pub' ] fn_decl   (* attribute: also legal on 
                | impl_decl           (* impl cannot be pub *)
                | link_decl           (* cannot be pub *)
                | diagnostic_decl     (* cannot be pub *)
+               | compile_only_if_decl (* 'pub' on it is a PARSE error; module scope only —
+                                         unlike link_decl/diagnostic_decl, statement
+                                         position and 'when' blocks are PARSE errors too *)
                | when_decl           (* cannot be pub *)
                | bare_import_decl    (* cannot be pub; module scope only — unlike
                                          link_decl/diagnostic_decl/asm_stmt above, a bare
@@ -223,6 +226,23 @@ constant `[]u8` expression, exactly like `link_decl`'s `data` above. Legal
 at module scope or inside a module-scope `when` block; legal nowhere else
 (a sema error, not a parse error — see spec.md), mirroring `link_decl`
 exactly.
+
+### Compile-Only-If Declaration
+
+```ebnf
+compile_only_if_decl ::= '#compile_only_if' '(' expr ')'
+```
+
+`#` is a sigil, not part of an identifier; `compile_only_if` (like `link` and
+`warn` above) is parsed as a plain identifier immediately following it, not a
+reserved keyword. A FILE-level directive: `expr` must be a compile-time
+constant `bool` expression, and it decides whether the containing file's
+symbols are declared and its code emitted (the file is always parsed and
+type-checked either way — see spec.md's "Modules" section for the per-file
+inclusion model). At most one per file (a sema error otherwise), anywhere
+among the file's top-level declarations — it is not position-sensitive.
+Unlike `link_decl`/`diagnostic_decl`, it is a PARSE error in statement
+position and inside `when` blocks, and `pub` on it is a parse error too.
 
 ### When Declaration
 

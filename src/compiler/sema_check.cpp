@@ -2294,6 +2294,8 @@ namespace sema {
     // Opaque arguments it resolves param/return types (so the body sees correctly-typed
     // locals) and then, being suppressed, skips caching, emission-marking and body-checking —
     // leaving the body for this pass to drive explicitly.
+    void eager_check_generic_template_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag);
+
     void check_generic_templates_for_program(Program &program, DiagnosticEngine &diag) {
         if (!program.options.eager_generic_check) return;
 
@@ -2323,39 +2325,57 @@ namespace sema {
         std::ranges::sort(type_targets);
 
         for (const auto &[path, name] : type_targets) {
-            const auto mod_it = program.modules.find(path);
-            if (mod_it == program.modules.end()) continue;
-            const auto sym_it = mod_it->second.symbols.find(name);
-            if (sym_it == mod_it->second.symbols.end()) continue;
-            const auto *ts = std::get_if<TypeSymbol>(&sym_it->second);
-            if (!ts || !ts->decl) continue;
-            for (const auto &param : ts->decl->generic_params) {
-                generic_param_bound_trait_index(param, path, program, diag, /*report=*/true);
-            }
-            check_generic_type_method_bodies(path, name, program, diag);
+            eager_check_generic_template_symbol(path, name, program, diag);
         }
+
+        for (const auto &[path, name] : targets) {
+            eager_check_generic_template_symbol(path, name, program, diag);
+        }
+    }
+
+    // The per-symbol body of check_generic_templates_for_program above, external linkage
+    // so check_one_excluded_file (sema.cpp) can reuse it: a '#compile_only_if'-excluded
+    // file's generic declarations are invisible to the program-wide pass — it runs
+    // before excluded files are scratch-declared — so Pass 3 eager-checks them one
+    // symbol at a time (the instances it creates are truncated when the file's check
+    // finishes). Dispatches on what '(module_path, name)' currently resolves to; a
+    // no-op for anything that isn't a generic type/function declaration.
+    void eager_check_generic_template_symbol(const std::string &module_path, const std::string &name, Program &program, DiagnosticEngine &diag) {
+        if (!program.options.eager_generic_check) return;
+
+        // Re-looked-up rather than captured: instantiating can insert into
+        // Program::modules and invalidate any held reference.
+        {
+            const auto mod_it = program.modules.find(module_path);
+            if (mod_it == program.modules.end()) return;
+            const auto sym_it = mod_it->second.symbols.find(name);
+            if (sym_it == mod_it->second.symbols.end()) return;
+            if (const auto *ts = std::get_if<TypeSymbol>(&sym_it->second); ts && ts->decl && !ts->decl->generic_params.empty()) {
+                for (const auto &param : ts->decl->generic_params) {
+                    generic_param_bound_trait_index(param, module_path, program, diag, /*report=*/true);
+                }
+                check_generic_type_method_bodies(module_path, name, program, diag);
+                return;
+            }
+        }
+
+        const auto mod_it = program.modules.find(module_path);
+        if (mod_it == program.modules.end()) return;
+        const auto sym_it = mod_it->second.symbols.find(name);
+        if (sym_it == mod_it->second.symbols.end()) return;
+        const auto *fn = std::get_if<FunctionSymbol>(&sym_it->second);
+        if (!fn || !fn->decl || fn->decl->generic_params.empty()) return;
+        const auto &decl = *fn->decl;
 
         const ScopedTemplateCheck template_check(program);
-        for (const auto &[path, name] : targets) {
-            // Re-looked-up rather than captured: the loop body can insert into
-            // Program::modules and invalidate any held reference.
-            const auto mod_it = program.modules.find(path);
-            if (mod_it == program.modules.end()) continue;
-            const auto sym_it = mod_it->second.symbols.find(name);
-            if (sym_it == mod_it->second.symbols.end()) continue;
-            const auto *fn = std::get_if<FunctionSymbol>(&sym_it->second);
-            if (!fn || !fn->decl) continue;
-            const auto &decl = *fn->decl;
-
-            auto args = opaque_args_for(decl.generic_params, program, path, diag, /*report_bad_bounds=*/true);
-            const size_t idx = instantiate_generic_function(program, diag, path, name, std::move(args), decl.location);
-            // Recorded before the body is checked, so it is THIS instance — the one whose body
-            // this pass is about to fill in — that gets registered, not whichever suppressed
-            // instance a nested 'g[T](...)' elsewhere may have created for the same decl. See
-            // Program::template_fn_instance_for_decl.
-            program.template_fn_instance_for_decl[&decl] = idx;
-            check_generic_function_instance_body(idx, program, diag);
-        }
+        auto args = opaque_args_for(decl.generic_params, program, module_path, diag, /*report_bad_bounds=*/true);
+        const size_t idx = instantiate_generic_function(program, diag, module_path, name, std::move(args), decl.location);
+        // Recorded before the body is checked, so it is THIS instance — the one whose body
+        // this pass is about to fill in — that gets registered, not whichever suppressed
+        // instance a nested 'g[T](...)' elsewhere may have created for the same decl. See
+        // Program::template_fn_instance_for_decl.
+        program.template_fn_instance_for_decl[&decl] = idx;
+        check_generic_function_instance_body(idx, program, diag);
     }
 
     // Resolves an explicit generic_args list ('make_list[i32]', 'Fixed[u8, 16]') against
@@ -3812,8 +3832,12 @@ namespace sema {
             // handed to type_info_of indirectly (or reach it via any other runtime
             // control flow), and the runtime binary-search table has no other way to
             // learn about this type. See declare_type_info_globals in codegen.cpp.
-            program.types_needing_info.insert(id);
-            program.types_needing_info_types[id] = operand_type;
+            // Unless this expression sits in a '#compile_only_if'-excluded file's scratch
+            // check — an excluded file must never cause a Type_Info global to be emitted.
+            if (!program.checking_excluded_file) {
+                program.types_needing_info.insert(id);
+                program.types_needing_info_types[id] = operand_type;
+            }
         }
         expr_tables_for_write(program, module_path).expr_type_of_operand_type[get_expr_key(expr)] = operand_type;
         return ResolvedType{.kind = TypeKind::Type};
@@ -4330,8 +4354,10 @@ namespace sema {
                         if (!contains_opaque(inner_ty, program)) { // see the TypeOfExpr case above
                             const auto id = intern_type_id(program, inner_ty);
                             expr_tables_for_write(program, module_path).expr_type_info_const_id[get_expr_key(expr)] = id;
-                            program.types_needing_info.insert(id);
-                            program.types_needing_info_types[id] = inner_ty;
+                            if (!program.checking_excluded_file) { // see the TypeOfExpr case above
+                                program.types_needing_info.insert(id);
+                                program.types_needing_info_types[id] = inner_ty;
+                            }
                         }
                     }
                     return ResolvedType{.kind = TypeKind::Anyptr};
@@ -4720,8 +4746,10 @@ namespace sema {
             const bool source_is_constant = is_constant_expr(expr, module_path, program);
 
             const auto id = intern_type_id(program, ty);
-            program.types_needing_info.insert(id);
-            program.types_needing_info_types[id] = ty;
+            if (!program.checking_excluded_file) { // see the TypeOfExpr case above
+                program.types_needing_info.insert(id);
+                program.types_needing_info_types[id] = ty;
+            }
             expr_tables_for_write(program, module_path).expr_any_coercions[get_expr_key(expr)] =
                 AnyCoercion{.source_type = ty, .source_is_constant = source_is_constant};
             return *expected_in;

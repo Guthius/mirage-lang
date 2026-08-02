@@ -1,0 +1,9 @@
+// A '#compile_only_if' condition must be a compile-time constant expression — a 'mut'
+// global (declared in a_globals.mir) is a runtime value.
+// Expected: build fails with "'#compile_only_if' condition must be a compile-time
+// constant expression."
+
+#compile_only_if(runtime_flag)
+
+pub fn main() {
+}

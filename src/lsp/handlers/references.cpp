@@ -330,7 +330,7 @@ namespace lsp::handlers {
     // this search workspace-wide rather than import-closure-wide.
     void collect_references_in_program(analysis::ProgramResult &result, const MatchTarget &target,
                                         const bool include_declaration, std::vector<json> &out) {
-        for (const auto &[mod_path, decls] : result.ast_program.modules) {
+        for (const auto &[mod_path, module_files] : result.ast_program.modules) {
             const auto sema_mod_it = result.sema_program.modules.find(mod_path);
             if (sema_mod_it == result.sema_program.modules.end()) continue;
 
@@ -401,7 +401,7 @@ namespace lsp::handlers {
                 }, Scope{}, ctx, mod_path, result.sema_program, target, out);
             };
 
-            for (const auto &decl : decls) {
+            for (const auto &decl : ast::all_decls(module_files)) {
                 walk_annotation_types(decl);
                 if (const auto *fn = std::get_if<ast::FunctionDecl>(&decl)) {
                     std::vector<ParamInfo> params;

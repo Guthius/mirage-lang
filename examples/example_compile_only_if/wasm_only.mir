@@ -1,0 +1,15 @@
+// The directive is deliberately NOT the first declaration: '#compile_only_if' is not
+// position-sensitive, it may appear anywhere among a file's top-level declarations.
+
+ext fn js_console_log(msg: *u8, length: usize)
+
+#compile_only_if(target_os == .Wasm32)
+
+// A real (harmless) library, distinct from linux_only.mir's 'm': the python test tells
+// the two builds apart by which of the two systems libs --print-link-directives lists,
+// while both remain natively linkable so 'mirage run' works in either configuration.
+#link(system, "pthread")
+
+pub fn platform_name() -> []u8 {
+    return "wasm"
+}

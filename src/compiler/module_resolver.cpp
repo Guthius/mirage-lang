@@ -27,7 +27,7 @@ namespace ast {
             }
             std::sort(files.begin(), files.end());
 
-            Module combined;
+            Module module;
             for (const auto &file : files) {
                 const auto source_file = source_manager.load(file.string(), diagnostics);
                 // An empty .mir file is legal and contributes nothing. A file that failed to
@@ -39,16 +39,25 @@ namespace ast {
                 if (diagnostics.error_count() > errors_before) continue;
                 program.file_count += 1;
                 program.token_count += tokens.size();
-                auto decls = parse(tokens, diagnostics);
-                combined.insert(combined.end(), std::make_move_iterator(decls.begin()), std::make_move_iterator(decls.end()));
+                module.push_back(FileAST{
+                    // source_file.filename views SourceManager-owned storage (stable for the
+                    // life of the compilation — see SourceManager's lifetime contract), the
+                    // same storage every token location in this file points into.
+                    .file_path = std::string(source_file.filename),
+                    .declarations = parse(tokens, diagnostics),
+                    .location = SourceLocation{.filename = source_file.filename},
+                });
             }
-            return combined;
+            return module;
         }
 
+        // Walks every file's declarations — including files a '#compile_only_if' will later
+        // exclude: inclusion is a sema decision, and excluded files are still fully
+        // type-checked, so their imports must resolve (and load) like anyone else's.
         auto find_import_strings(const Module &module) -> std::vector<std::pair<std::string, SourceLocation>> {
             std::vector<std::pair<std::string, SourceLocation>> found;
 
-            for (auto &decl : module) {
+            for (auto &decl : all_decls(module)) {
                 if (auto *var_decl = std::get_if<VarDecl>(&decl); var_decl && var_decl->init) {
                     if (const auto *import_stmt = find_leaf_import(*var_decl->init)) {
                         found.emplace_back(import_stmt->module_name, import_stmt->location);

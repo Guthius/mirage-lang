@@ -1,0 +1,11 @@
+#compile_only_if(target_os == .Linux)
+
+// '#link(system, "m")' doubles as the "excluded files contribute no '#link's" probe:
+// tests/compile_only_if_test.py asserts it appears in --print-link-directives exactly
+// when this file is included, and that wasm_only.mir's 'pthread' does exactly when
+// THAT file is (both libs are real, so 'mirage run' links in either configuration).
+#link(system, "m")
+
+pub fn platform_name() -> []u8 {
+    return "linux"
+}
