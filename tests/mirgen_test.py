@@ -439,6 +439,22 @@ def case_trait_dispatch():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_compound_assignment():
+    """'x += 2' is load/apply/store. It used to lower as a plain store of the RHS --
+    silently, since the MIR was type-correct and nothing executes it yet."""
+    r = emit_mir("pub fn main() -> i32 {\n"
+                 "  mut x: i32 = 40\n  x += 2\n"
+                 "  mut u: u32 = 8\n  u >>= 1\n"
+                 "  mut s: i32 = -8\n  s >>= 1\n"
+                 "  return x + cast(u, i32) + s - 42\n}\n")
+    check(r.returncode == 0, f"compound assignment lowers ({r.stderr.strip()[:140]})")
+    check(re.search(r"load %\d+\n\s+%\d+: i32 = add", r.stdout) is not None,
+          "'+=' loads the old value and adds")
+    check("lshr" in r.stdout, "'>>=' on an unsigned target is a logical shift")
+    check("ashr" in r.stdout, "'>>=' on a signed target is an arithmetic shift")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_defer_ternary_sizeof():
     """'defer' bodies run in LIFO order at every exit path: the block's end, every
     'return', and 'break'/'continue' (down to the loop body's scope). A ternary is
@@ -572,6 +588,7 @@ def main() -> int:
     case_slice_array_coercions()
     case_try_propagation()
     case_trait_dispatch()
+    case_compound_assignment()
     case_defer_ternary_sizeof()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()

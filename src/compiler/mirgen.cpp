@@ -2857,9 +2857,88 @@ namespace mirgen {
                 const auto value = emit_expr(b, assign.value);
                 if (value == mir::NO_VALUE) return mir::NO_VALUE;
 
+                // A compound assignment reads the old value and applies the operation; the
+                // RHS is used RAW for a pointer step ('p += n' scales by the pointee, and
+                // coercing n to Ptr first would be nonsense).
+                if (assign.op != ast::AssignOp::Assign) {
+                    const auto result = compound_assign_value(b, assign, address, value, target_type);
+                    if (result == mir::NO_VALUE) return mir::NO_VALUE;
+                    b.store(address, result);
+                    return result;
+                }
+
                 const auto stored = coerce(b, value, target_type, expr_type(assign.value));
                 b.store(address, stored);
                 return stored;
+            }
+
+            // 'target OP= value' lowered as load/apply/store. Bitset '+=' and '-=' are the
+            // SET operations (union, difference), '~=' is toggle; a pointer steps by its
+            // pointee's size; everything else is the corresponding scalar arithmetic with
+            // the target's signedness.
+            auto compound_assign_value(mir::Builder &b, const ast::AssignExpr &assign, const mir::ValueId address,
+                                        const mir::ValueId value, const sema::ResolvedType &target_type) -> mir::ValueId {
+                using A = ast::AssignOp;
+                const auto value_type = expr_type(assign.value);
+
+                if ((target_type.kind == sema::TypeKind::Pointer || target_type.kind == sema::TypeKind::Anyptr) &&
+                    (assign.op == A::AddAssign || assign.op == A::SubAssign)) {
+                    const auto old = b.load(mir::Ty::Ptr, address);
+                    return emit_pointer_offset(b, old, value, target_type, value_type,
+                                                assign.op == A::SubAssign);
+                }
+
+                const auto ty = scalar_type(target_type);
+                if (ty == mir::Ty::Void) {
+                    unsupported("a compound assignment to this target", assign.location);
+                    return mir::NO_VALUE;
+                }
+                const auto old = b.load(ty, address);
+                const auto rhs = coerce_to(b, value, ty, signed_type(value_type));
+
+                if (target_type.kind == sema::TypeKind::Bitset) {
+                    switch (assign.op) {
+                    case A::AddAssign: case A::OrAssign:
+                        return b.binary(mir::Op::Or, ty, old, rhs);
+                    case A::SubAssign:
+                        return b.binary(mir::Op::And, ty, old, b.unary(mir::Op::Not, ty, rhs));
+                    case A::ToggleAssign: case A::XorAssign:
+                        return b.binary(mir::Op::Xor, ty, old, rhs);
+                    case A::AndAssign:
+                        return b.binary(mir::Op::And, ty, old, rhs);
+                    default:
+                        unsupported("this compound assignment on a bitset", assign.location);
+                        return mir::NO_VALUE;
+                    }
+                }
+
+                if (mir::is_float(ty)) {
+                    switch (assign.op) {
+                    case A::AddAssign: return b.binary(mir::Op::FAdd, ty, old, rhs);
+                    case A::SubAssign: return b.binary(mir::Op::FSub, ty, old, rhs);
+                    case A::MulAssign: return b.binary(mir::Op::FMul, ty, old, rhs);
+                    case A::DivAssign: return b.binary(mir::Op::FDiv, ty, old, rhs);
+                    default:
+                        unsupported("this compound assignment on a float", assign.location);
+                        return mir::NO_VALUE;
+                    }
+                }
+
+                const bool is_signed = signed_type(target_type);
+                switch (assign.op) {
+                case A::AddAssign: return b.binary(mir::Op::Add, ty, old, rhs);
+                case A::SubAssign: return b.binary(mir::Op::Sub, ty, old, rhs);
+                case A::MulAssign: return b.binary(mir::Op::Mul, ty, old, rhs);
+                case A::DivAssign: return b.binary(is_signed ? mir::Op::SDiv : mir::Op::UDiv, ty, old, rhs);
+                case A::AndAssign: return b.binary(mir::Op::And, ty, old, rhs);
+                case A::OrAssign:  return b.binary(mir::Op::Or, ty, old, rhs);
+                case A::XorAssign: return b.binary(mir::Op::Xor, ty, old, rhs);
+                case A::ShlAssign: return b.binary(mir::Op::Shl, ty, old, rhs);
+                case A::ShrAssign: return b.binary(is_signed ? mir::Op::AShr : mir::Op::LShr, ty, old, rhs);
+                default:
+                    unsupported("this compound assignment", assign.location);
+                    return mir::NO_VALUE;
+                }
             }
 
             auto emit_call(mir::Builder &b, const ast::CallExpr &call, const ast::Expr &expr) -> mir::ValueId {
