@@ -484,6 +484,29 @@ def case_defer_ternary_sizeof():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_bitsets_and_slice_casts():
+    """A bitset value is its storage integer; a member is its one-bit mask
+    (1 << (enum value + 1)); '+='/'-=' are set union/difference; 'in' is
+    '(set & mask) == mask'. A slice-forming cast builds a (data, len) header, and the
+    explicit length wins over the operand's own extent."""
+    r = emit_mir("pub type Mode = enum { Read  Write  Exec }\n"
+                 "pub type Modes = bitset(Mode, u8)\n"
+                 "pub fn main() -> i32 {\n"
+                 "  mut m: Modes = {.Read, .Write}\n"
+                 "  m += .Exec\n  m -= .Write\n"
+                 "  mut total: i32 = 0\n"
+                 "  if .Read in m { total += 1 }\n"
+                 "  mut buf: [4]u8 = {7, 8, 9, 10}\n"
+                 "  const s := cast(&buf[0], []u8, 2)\n"
+                 "  return total + cast(len(s), i32)\n}\n")
+    check(r.returncode == 0, f"bitsets and slice casts lower ({r.stderr.strip()[:140]})")
+    check("const.int 6" in r.stdout, "'{.Read, .Write}' folds to one mask constant (2|4)")
+    check("or " in r.stdout or re.search(r"= or %", r.stdout) is not None,
+          "'+=' on a bitset is a set union")
+    check(re.search(r"= not %", r.stdout) is not None, "'-=' clears via and-not")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_switch_and_conditions():
     r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
                  "pub fn main() -> i32 {\n"
@@ -590,6 +613,7 @@ def main() -> int:
     case_trait_dispatch()
     case_compound_assignment()
     case_defer_ternary_sizeof()
+    case_bitsets_and_slice_casts()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()

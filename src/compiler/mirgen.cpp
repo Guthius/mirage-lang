@@ -2753,6 +2753,13 @@ namespace mirgen {
                     return b.compare(is_float ? mir::Op::FCmpOgt : (is_signed ? mir::Op::ICmpSgt : mir::Op::ICmpUgt), lhs, rhs);
                 case Bop::GreaterEqual:
                     return b.compare(is_float ? mir::Op::FCmpOge : (is_signed ? mir::Op::ICmpSge : mir::Op::ICmpUge), lhs, rhs);
+                case Bop::In: {
+                    // Bitset membership: single-member '.A in modes' and subset
+                    // '{.A,.B} in modes' both reduce to '(rhs & mask) == mask' -- a single
+                    // member IS its one-bit mask, and for one bit the forms are equivalent.
+                    const auto masked = b.binary(mir::Op::And, ty, rhs, lhs);
+                    return b.compare(mir::Op::ICmpEq, masked, lhs);
+                }
                 default:
                     unsupported("this binary operator", bin.location);
                     return mir::NO_VALUE;
@@ -3068,21 +3075,68 @@ namespace mirgen {
             }
 
             // 'cast(value, T)'. sema already decided the conversion is legal; this only makes
-            // the representations agree. The three-argument slice form needs the aggregate
-            // work and is reported rather than silently producing a bare pointer.
+            // the representations agree. A slice target builds the (data, len) header; the
+            // explicit length wins over the operand's own extent for EVERY operand shape
+            // (see codegen's emit_slice_cast and mirage303's ISSUES.md #6).
             auto emit_cast(mir::Builder &b, const ast::CastExpr &cast, const ast::Expr &expr) -> mir::ValueId {
-                if (cast.len_expr) {
-                    unsupported("a slice-forming 'cast'", cast.location);
-                    return mir::NO_VALUE;
-                }
                 const auto target = expr_type(expr);
-                if (!is_scalar(target)) {
+                if (target.kind == sema::TypeKind::Slice) {
+                    return emit_slice_cast(b, cast, target);
+                }
+                if (cast.len_expr || !is_scalar(target)) {
                     unsupported("a cast to an aggregate type", cast.location);
                     return mir::NO_VALUE;
                 }
+                const auto from = expr_type(cast.value);
                 const auto value = emit_expr(b, cast.value);
                 if (value == mir::NO_VALUE) return mir::NO_VALUE;
-                return coerce_to(b, value, scalar_type(target), signed_type(expr_type(cast.value)));
+                // A slice or array operand casting to a pointer hands over its data word /
+                // base address, not the header's address.
+                if (scalar_type(target) == mir::Ty::Ptr &&
+                    (from.kind == sema::TypeKind::Slice || from.kind == sema::TypeKind::Array)) {
+                    return coerce_arg(b, value, target, from);
+                }
+                return coerce_to(b, value, scalar_type(target), signed_type(from));
+            }
+
+            auto emit_slice_cast(mir::Builder &b, const ast::CastExpr &cast, const sema::ResolvedType &target) -> mir::ValueId {
+                const auto usize = usize_ty();
+                const auto from = expr_type(cast.value);
+
+                const auto source = emit_expr(b, cast.value);
+                if (source == mir::NO_VALUE) return mir::NO_VALUE;
+
+                mir::ValueId explicit_len = mir::NO_VALUE;
+                if (cast.len_expr) {
+                    const auto len = emit_expr(b, *cast.len_expr);
+                    if (len == mir::NO_VALUE) return mir::NO_VALUE;
+                    explicit_len = coerce_to(b, len, usize, signed_type(expr_type(*cast.len_expr)));
+                }
+
+                mir::ValueId data = source;
+                mir::ValueId count = explicit_len;
+                if (from.kind == sema::TypeKind::Array) {
+                    // The array's address IS the data pointer; its declared count is the
+                    // default length.
+                    if (count == mir::NO_VALUE) {
+                        const auto *info = sema_.array_at(from.array_index);
+                        count = b.const_int(usize, info ? static_cast<int64_t>(info->count) : 0);
+                    }
+                } else if (from.kind == sema::TypeKind::Slice) {
+                    // A same-representation reinterpret with no explicit length passes the
+                    // header through verbatim, count field included -- codegen does the same.
+                    if (count == mir::NO_VALUE) return source;
+                    data = b.load(mir::Ty::Ptr, source);
+                } else {
+                    // A bare pointer: zero-length unless told otherwise.
+                    if (count == mir::NO_VALUE) count = b.const_int(usize, 0);
+                }
+
+                const auto slot = b.add_slot(pointer_bytes() * 2, pointer_bytes(), "slice");
+                const auto base = b.slot_addr(slot);
+                b.store(base, data);
+                b.store(b.ptr_add_const(base, pointer_bytes()), count);
+                return base;
             }
 
             // 'len(x)'. An array's length is a compile-time constant; a slice carries it in
@@ -3363,9 +3417,29 @@ namespace mirgen {
             auto emit_braced_initializer(mir::Builder &b, const ast::BracedInitializerExpr &init,
                                           const ast::Expr &expr) -> mir::ValueId {
                 const auto type = expr_type(expr);
+                if (const auto *bitset = std::get_if<ast::BitsetExpr>(&init)) {
+                    // A bitset literal folds to its storage integer: each member's mask is
+                    // '1 << (enum value + 1)' by construction (codegen's bitset_member_mask).
+                    if (type.kind == sema::TypeKind::Bitset) {
+                        if (const auto *info = sema_.bitset_at(type.bitset_index)) {
+                            if (const auto *members = sema_.enum_at(info->member_enum_type.enum_index)) {
+                                uint64_t folded = 0;
+                                for (const auto &member : bitset->members) {
+                                    const auto field = std::ranges::find(members->fields, member.name,
+                                                                          &sema::EnumFieldInfo::name);
+                                    if (field != members->fields.end()) {
+                                        folded |= uint64_t{1} << (field->value + 1);
+                                    }
+                                }
+                                return b.const_int(scalar_type(type), static_cast<int64_t>(folded));
+                            }
+                        }
+                    }
+                    unsupported("a bitset literal of this type", bitset->location);
+                    return mir::NO_VALUE;
+                }
                 if (is_scalar(type)) {
-                    // A bitset literal lowers to its storage integer, not to memory.
-                    unsupported("a bitset literal", sema::get_expr_location(expr));
+                    unsupported("this braced initializer", sema::get_expr_location(expr));
                     return mir::NO_VALUE;
                 }
                 if (type.kind != sema::TypeKind::Struct && type.kind != sema::TypeKind::Array) {
@@ -3515,6 +3589,20 @@ namespace mirgen {
                         for (const auto &field : info->fields) {
                             if (field.name == dot.name) {
                                 return b.const_int(scalar_type(type), field.value);
+                            }
+                        }
+                    }
+                }
+                // A bitset-typed member reference IS its one-bit mask, so '.A in modes' and
+                // 'flags += .A' need no special casing at their operators.
+                if (type.kind == sema::TypeKind::Bitset) {
+                    if (const auto *info = sema_.bitset_at(type.bitset_index)) {
+                        if (const auto *members = sema_.enum_at(info->member_enum_type.enum_index)) {
+                            const auto field = std::ranges::find(members->fields, dot.name,
+                                                                  &sema::EnumFieldInfo::name);
+                            if (field != members->fields.end()) {
+                                return b.const_int(scalar_type(type),
+                                    static_cast<int64_t>(uint64_t{1} << (field->value + 1)));
                             }
                         }
                     }

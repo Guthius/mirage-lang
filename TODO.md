@@ -218,6 +218,21 @@ Done:
   method calls (`try_get` 12, `get`, `put`, ...), slice-forming casts (9), inline
   `asm` (9+7), bitset literals (9).
 
+- **Stage 2, fifteenth increment** — bitsets (literals folding to one mask constant,
+  member references AS their one-bit `1 << (value + 1)` masks, `in` as
+  `(set & mask) == mask`, `+=`/`-=` as set union/difference) and slice-forming casts
+  (the `(data, len)` header, with the explicit length winning over the operand's own
+  extent for every operand shape — the mirage303 ISSUES.md #6 rule). Plus a compound-
+  assignment fix committed separately: `emit_assign` never read `AssignExpr::op`, so
+  `x += 2` lowered as `x = 2` — type-correct MIR, invisible to the verifier, found by
+  reading against codegen.
+
+  **Coverage: 77 of 271; zero verifier failures.**
+
+  Largest remaining blockers: generics (~55 combined: 28 "this call form" plus the
+  named generic-method calls), `type_info_of` (18), calls dropping an ignorable
+  error (13), inline `asm` (16), member accesses through generic types (9).
+
   Still entirely absent from stage 2: generics (monomorphized instances), inline
   `asm`, global initializers, `type_info_of`/reflection tables.
 
