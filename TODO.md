@@ -61,13 +61,21 @@ Done:
   lvalue, scalar casts, `default` on an aggregate (a slot memset), and named coverage
   reporting.
 
-  **Coverage: 19 of 271 corpus modules lower fully** (from 18). Module-level coverage lags
-  because most modules hit several blockers; the per-construct histogram is the better
-  signal — casts 103→0, member access 70→0, indexing 30→0, assignment targets 71→48.
+- **Stage 2, third increment** — aggregates as memory (`default` → memset, copy → memcpy,
+  an aggregate expression's value IS its address), string literals (interned private
+  constant globals, NUL-terminated so one global also backs a `*u8` for C), `len` on arrays
+  and slices, cross-module `mod.fn()` calls, and `++`/`--`.
 
-  Largest remaining blockers, by occurrence: aggregate variable initializers (156), call
-  forms beyond same-module direct calls (109), string literals (91), `switch`/`match` (73),
-  `len` (51), aggregate assignment (48).
+  **Coverage: 22 of 271 corpus modules lower fully** (from 18 at the start of the session).
+  Module-level coverage lags badly because most modules hit several blockers at once; the
+  per-construct histogram is the real signal. Cleared this session: casts 103→0, member
+  access 70→0, indexing 30→0, string literals 91→0, `len` 51→0, aggregate initializers
+  156→0, aggregate assignment 48→0, cross-module calls resolved.
+
+  Largest remaining blockers, by occurrence: method calls (80), braced initializers /
+  struct literals (67), `return_err` (62), `return_ok` (50), `switch` (45), `match` (30),
+  calls through a function pointer (28), non-integer conditions (23), `type_of` (22),
+  group declarations (21).
 
 Remaining:
 

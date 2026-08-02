@@ -81,6 +81,9 @@ namespace mirgen {
             // and applied once at the end rather than marked inline, because the marking
             // walk (mark_root_slot_escaping) has no builder to hand.
             std::set<uint32_t> slots_escaping_;
+            // String literals interned by content: one global per distinct string, matching
+            // codegen. Module-scoped, not per function.
+            std::unordered_map<std::string, uint32_t> string_globals_;
 
             static auto key(const std::string_view module_path, const std::string_view name) -> std::string {
                 return std::string(module_path) + "\n" + std::string(name);
@@ -374,23 +377,26 @@ namespace mirgen {
                         emit_while(b, *v, fn);
 
                     } else {
-                        unsupported(std::format("the '{}' statement", stmt_kind_name<V>()), stmt_location(stmt));
+                        unsupported(stmt_kind_name<V>(), stmt_location(stmt));
                     }
                 }, stmt);
             }
 
             template <typename V>
             static auto stmt_kind_name() -> const char * {
-                if constexpr (std::is_same_v<V, std::unique_ptr<ast::ForInStmt>>) return "for-in";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SwitchStmt>>) return "switch";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::DeferStmt>>) return "defer";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenStmt>>) return "when";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmStmt>>) return "asm";
-                else if constexpr (std::is_same_v<V, ast::BreakStmt>) return "break";
-                else if constexpr (std::is_same_v<V, ast::ContinueStmt>) return "continue";
+                if constexpr (std::is_same_v<V, std::unique_ptr<ast::ForInStmt>>) return "a 'for-in' loop";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SwitchStmt>>) return "a 'switch' statement";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::DeferStmt>>) return "'defer'";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenStmt>>) return "a 'when' statement";
+                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmStmt>>) return "an 'asm' block";
+                else if constexpr (std::is_same_v<V, ast::BreakStmt>) return "'break'";
+                else if constexpr (std::is_same_v<V, ast::ContinueStmt>) return "'continue'";
                 else if constexpr (std::is_same_v<V, ast::VarDeclGroupStmt>) return "a group declaration";
                 else if constexpr (std::is_same_v<V, ast::LinkDecl>) return "'#link'";
-                else return "an unnamed statement";
+                else if constexpr (std::is_same_v<V, ast::ReturnErrStmt>) return "'return_err'";
+                else if constexpr (std::is_same_v<V, ast::ReturnOkStmt>) return "'return_ok'";
+                else if constexpr (std::is_same_v<V, ast::DiagnosticDecl>) return "'#error'/'#warn'";
+                else return "an unrecognized statement";
             }
 
             static auto stmt_location(const ast::Stmt &stmt) -> SourceLocation {
@@ -415,12 +421,19 @@ namespace mirgen {
                     // 'default' on an aggregate is a zero fill of the slot: a memset of a
                     // size sema already computed, needing no aggregate value form.
                     if (std::holds_alternative<ast::DefaultExpr>(*decl.init)) {
-                        const auto usize = options_.pointer_bits == 64 ? mir::Ty::I64 : mir::Ty::I32;
                         b.mem_set(b.slot_addr(slot), b.const_int(mir::Ty::I8, 0),
-                                   b.const_int(usize, size_of(resolved)));
+                                   b.const_int(usize_ty(), size_of(resolved)));
                         return;
                     }
-                    unsupported("an aggregate variable initializer", decl.location);
+                    // Any other aggregate initializer is a byte copy from whatever the
+                    // initializer produced -- an aggregate expression's value IS its address,
+                    // so this is the same operation aggregate assignment performs.
+                    const auto source = emit_expr(b, *decl.init);
+                    if (source == mir::NO_VALUE) {
+                        // emit_expr already reported the construct it could not lower.
+                        return;
+                    }
+                    b.mem_copy(b.slot_addr(slot), source, b.const_int(usize_ty(), size_of(resolved)));
                     return;
                 }
                 const auto value = emit_expr(b, *decl.init);
@@ -773,6 +786,15 @@ namespace mirgen {
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
                         return emit_cast(b, *v, expr);
 
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) {
+                        return emit_incr_decr(b, *v);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) {
+                        return emit_len(b, *v);
+
+                    } else if constexpr (std::is_same_v<V, ast::LiteralStringExpr>) {
+                        return emit_string_literal(b, v.value);
+
                     } else {
                         unsupported(expr_kind_name<V>(), loc);
                         return mir::NO_VALUE;
@@ -941,14 +963,22 @@ namespace mirgen {
 
             auto emit_assign(mir::Builder &b, const ast::AssignExpr &assign) -> mir::ValueId {
                 const auto target_type = lvalue_type(assign.target);
+                const auto address = emit_address(b, assign.target);
+
                 if (!is_scalar(target_type)) {
-                    // An aggregate assignment is a memcpy of a sema-known size; the value
-                    // side needs the aggregate work that is still to come.
-                    unsupported("assigning an aggregate", assign.location);
-                    return mir::NO_VALUE;
+                    // An aggregate assignment is a byte copy of a size sema already computed.
+                    // The source's "value" is its address, which is what every aggregate
+                    // expression yields.
+                    if (address == mir::NO_VALUE) {
+                        unsupported("assignment to this target", assign.location);
+                        return mir::NO_VALUE;
+                    }
+                    const auto source = emit_expr(b, assign.value);
+                    if (source == mir::NO_VALUE) return mir::NO_VALUE;
+                    b.mem_copy(address, source, b.const_int(usize_ty(), size_of(target_type)));
+                    return address;
                 }
 
-                const auto address = emit_address(b, assign.target);
                 if (address == mir::NO_VALUE) {
                     unsupported("assignment to this target", assign.location);
                     return mir::NO_VALUE;
@@ -962,14 +992,35 @@ namespace mirgen {
             }
 
             auto emit_call(mir::Builder &b, const ast::CallExpr &call, const ast::Expr &expr) -> mir::ValueId {
-                const auto *callee = std::get_if<ast::IdentExpr>(&call.callee);
-                if (!callee || !module_path_) {
+                if (!module_path_) {
                     unsupported("this call form", call.location);
                     return mir::NO_VALUE;
                 }
-                const auto it = function_index_.find(key(*module_path_, callee->name));
+
+                // Two callee shapes lower here: a bare name in this module, and a
+                // namespace-qualified 'mod.fn' -- which is an ordinary direct call once the
+                // import binding names the target module. Method calls and calls through a
+                // function pointer still need their own handling.
+                auto it = function_index_.end();
+                std::string callee_name;
+                if (const auto *ident = std::get_if<ast::IdentExpr>(&call.callee)) {
+                    callee_name = ident->name;
+                    it = function_index_.find(key(*module_path_, callee_name));
+                } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
+                    if (const auto *target = namespace_target((*member)->object)) {
+                        callee_name = (*member)->member;
+                        it = function_index_.find(key(*target, callee_name));
+                    } else {
+                        unsupported("a method call", call.location);
+                        return mir::NO_VALUE;
+                    }
+                } else {
+                    unsupported("a call through a function pointer", call.location);
+                    return mir::NO_VALUE;
+                }
+
                 if (it == function_index_.end()) {
-                    unsupported(std::format("a call to '{}'", callee->name), call.location);
+                    unsupported(std::format("a call to '{}'", callee_name), call.location);
                     return mir::NO_VALUE;
                 }
 
@@ -1040,6 +1091,122 @@ namespace mirgen {
                 const auto value = emit_expr(b, cast.value);
                 if (value == mir::NO_VALUE) return mir::NO_VALUE;
                 return coerce_to(b, value, scalar_type(target), signed_type(expr_type(cast.value)));
+            }
+
+            // 'len(x)'. An array's length is a compile-time constant; a slice carries it in
+            // the second word of its two-word representation (data pointer first).
+            auto emit_len(mir::Builder &b, const ast::LenExpr &len) -> mir::ValueId {
+                const auto usize = usize_ty();
+                const auto operand_type = expr_type(len.operand);
+
+                if (operand_type.kind == sema::TypeKind::Array) {
+                    if (const auto *info = sema_.array_at(operand_type.array_index)) {
+                        return b.const_int(usize, static_cast<int64_t>(info->count));
+                    }
+                } else if (operand_type.kind == sema::TypeKind::Slice) {
+                    const auto address = emit_address(b, len.operand);
+                    if (address != mir::NO_VALUE) {
+                        return b.load(usize, b.ptr_add_const(address, pointer_bytes()));
+                    }
+                    // A slice temporary (a literal, a call result) has no address; its value
+                    // IS the address of its two-word representation.
+                    const auto value = emit_expr(b, len.operand);
+                    if (value != mir::NO_VALUE) {
+                        return b.load(usize, b.ptr_add_const(value, pointer_bytes()));
+                    }
+                }
+                unsupported("'len' on this operand", len.location);
+                return mir::NO_VALUE;
+            }
+
+            // A string literal is a '[]u8' — a two-word (data, length) value. The bytes go in
+            // a private constant global; the slice itself is built in a slot, because an
+            // aggregate has no MIR value form.
+            //
+            // Interned by content, matching codegen: the same literal appearing twice must
+            // not produce two globals.
+            auto emit_string_literal(mir::Builder &b, const std::string &text) -> mir::ValueId {
+                uint32_t data_index = 0;
+                if (const auto it = string_globals_.find(text); it != string_globals_.end()) {
+                    data_index = it->second;
+                } else {
+                    mir::Global g;
+                    g.name = std::format(".str.{}", string_globals_.size());
+                    g.linkage = mir::Linkage::Internal;
+                    g.is_constant = true;
+                    g.init.assign(text.begin(), text.end());
+                    // NUL-terminated so the same global can back a '*u8' passed to C, which
+                    // is what codegen does and what every 'ext fn' string argument expects.
+                    g.init.push_back(0);
+                    g.size = static_cast<uint32_t>(g.init.size());
+                    g.align = 1;
+                    result_.module.globals.push_back(std::move(g));
+                    data_index = static_cast<uint32_t>(result_.module.globals.size() - 1);
+                    string_globals_[text] = data_index;
+                }
+
+                const auto usize = usize_ty();
+                const auto slot = b.add_slot(pointer_bytes() * 2, pointer_bytes(), "str");
+                const auto base = b.slot_addr(slot);
+                b.store(base, b.global_addr(data_index));
+                b.store(b.ptr_add_const(base, pointer_bytes()),
+                         b.const_int(usize, static_cast<int64_t>(text.size())));
+                return base;
+            }
+
+            [[nodiscard]] auto usize_ty() const -> mir::Ty {
+                return options_.pointer_bits == 64 ? mir::Ty::I64 : mir::Ty::I32;
+            }
+            [[nodiscard]] auto pointer_bytes() const -> uint32_t { return options_.pointer_bits / 8; }
+
+            // The module a namespace-qualified name refers to, e.g. the 'io' in 'io.print'.
+            // An import binds a name to a module path in the symbol table; nothing else can
+            // produce a Namespace-typed identifier.
+            [[nodiscard]] auto namespace_target(const ast::Expr &object) const -> const std::string * {
+                const auto *ident = std::get_if<ast::IdentExpr>(&object);
+                if (!ident || !module_) return nullptr;
+                const auto it = module_->symbols.find(ident->name);
+                if (it == module_->symbols.end()) return nullptr;
+                const auto *import = std::get_if<sema::ImportSymbol>(&it->second);
+                return import ? &import->module_path : nullptr;
+            }
+
+            // '++' / '--'. A read-modify-write through an lvalue, which emit_address already
+            // provides. A pointer steps by its pointee's size; everything else by one.
+            auto emit_incr_decr(mir::Builder &b, const ast::IncrDecrExpr &incr) -> mir::ValueId {
+                const auto type = lvalue_type(incr.operand);
+                if (!is_scalar(type)) {
+                    unsupported("'++' / '--' on this operand", incr.location);
+                    return mir::NO_VALUE;
+                }
+                const auto address = emit_address(b, incr.operand);
+                if (address == mir::NO_VALUE) {
+                    unsupported("'++' / '--' on this operand", incr.location);
+                    return mir::NO_VALUE;
+                }
+
+                const auto ty = scalar_type(type);
+                const auto old_value = b.load(ty, address);
+
+                int64_t step = 1;
+                if (type.kind == sema::TypeKind::Pointer) {
+                    if (const auto *pointee = sema_.pointee_at(type.pointee_index)) {
+                        step = std::max(1u, size_of(*pointee));
+                    }
+                }
+
+                mir::ValueId updated;
+                if (ty == mir::Ty::Ptr) {
+                    // Pointer arithmetic is byte arithmetic on an address, not an integer op.
+                    updated = b.ptr_add_const(old_value, incr.is_increment ? step : -step);
+                } else {
+                    updated = b.binary(incr.is_increment ? mir::Op::Add : mir::Op::Sub, ty,
+                                        old_value, b.const_int(ty, step));
+                }
+                b.store(address, updated);
+                // Mirage's '++'/'--' are statements in practice; yielding the NEW value is
+                // the conservative choice and matches what an assignment expression returns.
+                return updated;
             }
 
             // ---- coercion ----------------------------------------------------------

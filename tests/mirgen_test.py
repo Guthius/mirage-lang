@@ -98,10 +98,11 @@ def case_unsigned_and_float_operators():
 
 def case_unsupported_is_reported_not_skipped():
     """The property that matters while coverage is partial."""
-    # A string literal needs constant global data, which is still to come. Kept as the
-    # probe here BECAUSE it is still unlowered -- when that changes, this test should be
-    # pointed at whatever is unlowered then, not deleted.
-    r = emit_mir('pub fn main() -> i32 {\n  const s := "hello"\n  return 0\n}\n')
+    # 'defer' is the probe BECAUSE it is still unlowered -- when that changes, point this
+    # at whatever is unlowered then rather than deleting it. The property under test is that
+    # mirgen refuses loudly, not that any particular construct is missing.
+    r = emit_mir("ext fn close(fd: i32) -> i32\n"
+                 "pub fn main() -> i32 {\n  defer { close(1) }\n  return 0\n}\n")
     check(r.returncode != 0, "a construct mirgen cannot lower fails the build")
     check("native backend cannot lower" in r.stderr,
           "and says so, naming the native backend")
@@ -154,6 +155,53 @@ def case_casts():
           "a bool always zero-extends ('true' must widen to 1, never -1)")
 
 
+def case_aggregates_are_memory():
+    """Aggregates have no MIR value form, so every aggregate operation is a byte move of a
+    size sema already computed. 'default' is a memset, copy is a memcpy, and an aggregate
+    expression's "value" is its address."""
+    r = emit_mir("pub type Point = struct { x: i32  y: i32 }\n"
+                 "pub fn main() -> i32 {\n"
+                 "  mut a: Point = default\n  a.x = 2\n"
+                 "  mut b: Point = default\n  b = a\n"
+                 "  return b.x\n}\n")
+    check(r.returncode == 0, f"aggregate default and copy lower ({r.stderr.strip()[:140]})")
+    check("mem.set" in r.stdout, "'default' is a zero fill")
+    check("mem.copy" in r.stdout, "aggregate assignment is a byte copy")
+
+
+def case_strings_and_len():
+    r = emit_mir("pub fn main() -> i32 {\n"
+                 "  mut arr: [3]i32 = default\n  const n := len(arr)\n"
+                 '  const s := "hello"\n  const m := len(s)\n'
+                 "  return cast(n + m, i32)\n}\n")
+    check(r.returncode == 0, f"string literals and 'len' lower ({r.stderr.strip()[:140]})")
+    check("const @.str.0: size 6" in r.stdout,
+          "a string literal becomes a private constant global, NUL-terminated for C")
+    check("global.addr @.str.0" in r.stdout, "and the slice points at it")
+    # An array's length is known at compile time; a slice's is loaded from its second word.
+    check("const.int 3" in r.stdout, "an array's 'len' folds to a constant")
+
+    # The same literal twice must produce ONE global, as codegen interns them.
+    r2 = emit_mir('pub fn main() -> i32 {\n  const a := "dup"\n  const b := "dup"\n  return 0\n}\n')
+    check(r2.stdout.count("const @.str.") == 1, "identical string literals are interned")
+
+
+def case_cross_module_calls():
+    """'mod.fn()' is an ordinary direct call once the import binding names the target."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "helper").mkdir()
+        (root / "helper" / "helper.mir").write_text("pub fn triple(v: i32) -> i32 { return v * 3 }\n")
+        (root / "main.mir").write_text('const h := import("helper")\n'
+                                        "pub fn main() -> i32 { return h.triple(4) }\n")
+        r = subprocess.run([str(MIRAGE), "build", str(root), "--emit-mir"],
+                            capture_output=True, text=True, timeout=60, cwd=REPO_ROOT)
+    check(r.returncode == 0, f"a cross-module call lowers ({r.stderr.strip()[:140]})")
+    check("call @__mir_" in r.stdout and "triple" in r.stdout,
+          "and resolves to the target module's mangled symbol")
+
+
 def case_mir_goes_to_stdout():
     """'--emit-mir > out.mir' has to produce a valid file, as '--emit-ir' does."""
     r = emit_mir("pub fn main() -> i32 { return 0 }\n")
@@ -173,6 +221,9 @@ def main() -> int:
     case_unsigned_and_float_operators()
     case_lvalues()
     case_casts()
+    case_aggregates_are_memory()
+    case_strings_and_len()
+    case_cross_module_calls()
     case_unsupported_is_reported_not_skipped()
     case_mir_goes_to_stdout()
 
