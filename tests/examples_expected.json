@@ -278,6 +278,15 @@
     "action": "run",
     "exit": 112
   },
+  "example_cast_slice_length": {
+    "action": "run",
+    "exit": 0
+  },
+  "example_cast_slice_length_oob": {
+    "action": "build",
+    "diag": "examples/example_cast_slice_length_oob/main.mir:10:16: error: cast length 100 is out of range for an array of 16 element(s)",
+    "exit": 1
+  },
   "example_char_literal_multibyte": {
     "action": "build",
     "diag": "examples/example_char_literal_multibyte/main.mir:9:17: error: multi-byte character literals are not supported",
@@ -619,6 +628,10 @@
     "action": "run",
     "exit": 30
   },
+  "example_global_fn_ptr_call": {
+    "action": "run",
+    "exit": 3
+  },
   "example_global_slice_element_mismatch": {
     "action": "build",
     "diag": "examples/example_global_slice_element_mismatch/main.mir:9:1: error: type mismatch in variable declaration",
@@ -844,6 +857,10 @@
     "action": "build",
     "diag": "examples/example_struct_unknown_qualifier/main.mir:7:17: error: expected 'packed' in struct qualifier list, got 'align'",
     "exit": 1
+  },
+  "example_switch_arm_return": {
+    "action": "run",
+    "exit": 6
   },
   "example_switch_loop_stack": {
     "action": "run",

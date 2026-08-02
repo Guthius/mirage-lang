@@ -2172,9 +2172,26 @@ namespace ast {
             };
         }
 
+        // See Parser::comma_terminates_stmt (ast_parser.hpp) for what the flag means and why.
+        class ScopedCommaTerminatesStmt {
+          public:
+            ScopedCommaTerminatesStmt(Parser &parser, const bool value)
+                : parser_(parser), saved_(parser.comma_terminates_stmt) {
+                parser_.comma_terminates_stmt = value;
+            }
+            ~ScopedCommaTerminatesStmt() { parser_.comma_terminates_stmt = saved_; }
+            ScopedCommaTerminatesStmt(const ScopedCommaTerminatesStmt &) = delete;
+            auto operator=(const ScopedCommaTerminatesStmt &) -> ScopedCommaTerminatesStmt & = delete;
+
+          private:
+            Parser &parser_;
+            bool saved_;
+        };
+
         auto parse_block_stmt(Parser &parser) -> Stmt {
             const auto location = parser.current_location();
 
+            const ScopedCommaTerminatesStmt comma_scope(parser, false);
             parser.expect(TokenKind::LBrace, "'{'");
 
             std::vector<Stmt> stmts;
@@ -2482,7 +2499,7 @@ namespace ast {
             if (can_start_expr(parser.current().kind)) {
                 values.push_back(parse_expr(parser));
 
-                while (parser.match(TokenKind::Comma)) {
+                while (!parser.comma_terminates_stmt && parser.match(TokenKind::Comma)) {
                     values.push_back(parse_expr(parser));
                 }
             } else {
@@ -3268,6 +3285,9 @@ namespace ast {
             auto arm_pattern = parse_match_arm_pattern(parser);
 
             parser.expect(TokenKind::Colon, "':'");
+            // An unbraced arm body ends at the arm-separator comma; a braced one resets the
+            // flag itself (parse_block_stmt), keeping 'return a, b' legal inside it.
+            const ScopedCommaTerminatesStmt comma_scope(parser, !parser.check(TokenKind::LBrace));
             auto body = parse_stmt(parser);
 
             arms.push_back(SwitchStmt::Arm{

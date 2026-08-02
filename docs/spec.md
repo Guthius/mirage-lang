@@ -734,6 +734,12 @@ Valid casts:
 - `anyptr` ↔ function pointer type
 - Array → slice (same element type)
 - Pointer/anyptr → slice (requires length expression)
+
+When casting to a slice, an explicit `length` is honored for every operand shape:
+`cast(arr, []T, n)` and `cast(s, []T, n)` yield an `n`-element view of the array's
+(or slice's) leading elements, exactly like `arr[..n]`. Without a length, an array
+or slice operand yields a view of the whole operand. A constant length that exceeds
+a constant-sized array operand is a compile-time error.
 - `any` → a pointer type or `anyptr` only — extracts the fat value's data word; no other target type is legal (`cast(any_value, i32)` is a sema error). See [The `any` Type](#1-primitive-types) above.
 
 ### `size_of`
@@ -1088,6 +1094,10 @@ switch operand {
 ```
 
 Statement-level counterpart to `match`. No exhaustiveness requirement. Arm bodies are statements (not expressions). `break`/`continue` inside arms bind to the enclosing loop, not the switch. No fallthrough. See [Match and Switch](#8-match-and-switch) for pattern details.
+
+In an unbraced arm body, a top-level `,` is always the arm separator: `0: return 1,` returns
+one value and ends the arm. A multi-value `return a, b` inside an arm needs a braced body —
+`0: { return a, b },` — where commas keep their ordinary meaning.
 
 ### Variable Declaration Statement
 

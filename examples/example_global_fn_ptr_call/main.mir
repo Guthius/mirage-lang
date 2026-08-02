@@ -1,0 +1,26 @@
+// example_global_fn_ptr_call — calling a function pointer stored in a module-level GLOBAL
+// must emit a real indirect call. Sema checked these through the local-fn-ptr path (bodies
+// see their module's globals via globals_in_scope), but codegen classified the callee as a
+// plain ModuleSymbol, matched no symbol variant, and silently emitted NO call — the caller
+// compiled to 'ret void' and the program "ran" doing nothing (ISSUES.md #5, mirage303).
+// The cross-module namespace-qualified form ('lib.hook(...)') is exercised too — it was
+// rejected outright by sema ("'hook' is not callable") before the same fix.
+//
+// Expected: exit code 3 — my_hook() ran (1) + lib.hook(2) doubled its argument via twice().
+
+const lib := import("lib")
+
+pub mut hook: fn() = nil
+mut ran: i32 = 0
+
+fn my_hook() { ran = 1 }
+fn twice(x: i32) -> i32 { return x * 2 }
+fn call_it() { hook() }
+
+pub fn main() -> i32 {
+    hook = my_hook
+    call_it()
+    lib.hook = twice
+    if lib.hook == nil { return 100 }
+    return ran + lib.hook(2) - 2
+}

@@ -873,6 +873,18 @@ namespace sema {
                                 auto &resolved_macro = resolve_macro_symbol(*target_module, fn_name, program, diag, call.location);
                                 check_call_args(call.args, resolved_macro.params, false, locals, module_path, program, diag, call.location, fn_name, loop_depth, defer_loop_base, fn_error_type);
                                 return {resolved_macro.result_type};
+                            } else if constexpr (std::is_same_v<S, GlobalSymbol>) {
+                                // A pub global holding a function pointer is callable through
+                                // its namespace, same as the local-fn-ptr form below (a module's
+                                // own globals arrive there via globals_in_scope).
+                                if (!sym.is_pub) return fail(std::format("'{}' is not pub", fn_name));
+                                const auto ty = resolve_global_symbol(*target_module, fn_name, program, diag, call.location);
+                                if (ty.kind != TypeKind::Function) {
+                                    return fail(std::format("'{}' is not callable", fn_name));
+                                }
+                                const auto &sig = fn_sig(ty, program);
+                                check_call_args(call.args, sig.param_types, sig.is_variadic, locals, module_path, program, diag, call.location, fn_name, loop_depth, defer_loop_base, fn_error_type);
+                                return sig.return_types;
                             } else {
                                 return fail(std::format("'{}' is not callable", fn_name));
                             }
@@ -4375,6 +4387,20 @@ namespace sema {
                         const auto len_ty = check_expr(*v->len_expr, locals, module_path, program, diag, ResolvedType{.kind = TypeKind::USize}, loop_depth, defer_loop_base, fn_error_type);
                         if (!len_ty.is_integer()) {
                             error(diag, v->location, "cast length must be an integer expression");
+                        }
+                        // The explicit length is honored for an array operand too (it used to
+                        // be silently ignored), so a constant length that can never fit is a
+                        // compile-time error rather than an out-of-bounds slice at runtime.
+                        if (from.kind == TypeKind::Array) {
+                            if (const auto *array_info = program.array_at(from.array_index)) {
+                                if (const auto folded = evaluate_integer_constant(*v->len_expr, module_path, program, diag)) {
+                                    if (*folded < 0 || static_cast<uint64_t>(*folded) > array_info->count) {
+                                        error(diag, v->location, std::format(
+                                            "cast length {} is out of range for an array of {} element(s)",
+                                            *folded, array_info->count));
+                                    }
+                                }
+                            }
                         }
                     } else if (to.kind == TypeKind::Slice && from.kind != TypeKind::Array && from.kind != TypeKind::Slice) {
                         error(diag, v->location, "cast to slice from a pointer requires a length expression");

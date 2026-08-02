@@ -1,0 +1,12 @@
+// example_cast_slice_length_oob — REJECTION CASE. Now that 'cast(array, []T, n)' honors
+// 'n', a CONSTANT length that can never fit the array is a compile-time error instead of
+// an out-of-bounds slice at runtime (follow-up to example_cast_slice_length; ISSUES.md #6).
+//
+// Expected: compilation fails with
+//   error: cast length 100 is out of range for an array of 16 element(s)
+
+pub fn main() -> i32 {
+    mut buf: [16]u8 = {0...}
+    const s := cast(buf, []u8, 100)
+    return len(s)
+}

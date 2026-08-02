@@ -1,0 +1,23 @@
+// example_cast_slice_length — the explicit length in 'cast(operand, []T, n)' must be
+// honored for EVERY operand shape. With an array (or slice) operand it used to be
+// silently ignored: 'cast(buf, []u8, 2)' over a [16]u8 handed back a 16-element slice —
+// a memory-safety footgun that shipped ~1000 stray NUL bytes per text field in mirage303's
+// login packets (ISSUES.md #6).
+//
+// Expected: exit code 0 — every slice below has exactly the requested length.
+
+pub fn main() -> i32 {
+    mut buf: [16]u8 = {0...}
+    buf[0] = 7
+    const whole := cast(buf, []u8)      // no length: still the full array
+    if len(whole) != 16 { return 1 }
+    const first2 := cast(buf, []u8, 2)  // array operand: length honored
+    if len(first2) != 2 { return 2 }
+    if first2[0] != 7 { return 3 }
+    const sub := cast(whole, []u8, 4)   // slice operand: length honored
+    if len(sub) != 4 { return 4 }
+    if sub[0] != 7 { return 5 }
+    const viaptr := cast(&buf[0], []u8, 2)  // pointer operand: unchanged
+    if len(viaptr) != 2 { return 6 }
+    return 0
+}

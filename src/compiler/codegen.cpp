@@ -4204,6 +4204,7 @@ namespace codegen {
                     Unresolved,       // already reported by resolve_callee
                     GenericInstance,  // sema resolved this to a monomorphized instance
                     LocalFnPtr,       // a local holding a function pointer
+                    GlobalFnPtr,      // a module-level global holding a function pointer
                     TraitDispatch,    // dynamic dispatch through a trait handle
                     Method,           // a concrete method on the receiver
                     StructFieldFnPtr, // a struct field holding a function pointer
@@ -4216,10 +4217,25 @@ namespace codegen {
                 sema::TraitDispatchInfo trait_dispatch{};      // TraitDispatch
                 sema::ResolvedType obj_type{};                 // Method: the receiver AS WRITTEN,
                 sema::ResolvedType receiver_type{};            //   and with one pointer stripped
-                int fn_index = -1;                             // LocalFnPtr/StructFieldFnPtr/ExprFnPtr
-                std::string module_path;                       // ModuleSymbol
-                std::string name;                              // ModuleSymbol
+                int fn_index = -1;                             // LocalFnPtr/GlobalFnPtr/StructFieldFnPtr/ExprFnPtr
+                std::string module_path;                       // ModuleSymbol/GlobalFnPtr
+                std::string name;                              // ModuleSymbol/GlobalFnPtr
             };
+
+            // Sema checks these calls through the "local fn ptr" path (every body's scope is
+            // seeded with the module's globals — see sema.cpp's globals_in_scope), so a
+            // ModuleSymbol classification here that emit_call cannot handle would compile
+            // cleanly and silently emit NO call at all. Classify it explicitly instead.
+            auto try_global_fn_ptr(CalleeTarget &t) -> bool {
+                const auto &mod = module_for(t.module_path);
+                const auto sym_it = mod.symbols.find(t.name);
+                if (sym_it == mod.symbols.end()) return false;
+                const auto *global = std::get_if<sema::GlobalSymbol>(&sym_it->second);
+                if (!global || global->type.kind != sema::TypeKind::Function) return false;
+                t.kind = CalleeTarget::Kind::GlobalFnPtr;
+                t.fn_index = global->type.fn_index;
+                return true;
+            }
 
             // 'report' distinguishes the two callers' error wording for an unusable callee;
             // both otherwise make the identical decision.
@@ -4249,6 +4265,7 @@ namespace codegen {
                     t.kind = CalleeTarget::Kind::ModuleSymbol;
                     t.module_path = *current_module_path_;
                     t.name = ident->name;
+                    try_global_fn_ptr(t);
                     return t;
                 }
 
@@ -4257,6 +4274,7 @@ namespace codegen {
                         t.kind = CalleeTarget::Kind::ModuleSymbol;
                         t.module_path = *ns;
                         t.name = (*member)->member;
+                        try_global_fn_ptr(t);
                         return t;
                     }
 
@@ -4312,6 +4330,11 @@ namespace codegen {
                 case CalleeTarget::Kind::LocalFnPtr: {
                     const auto &sig = sema_program_.fn_signatures.at(target.fn_index);
                     auto *fn_ptr = builder_.CreateLoad(llvm::PointerType::getUnqual(*context_), locals_.at(target.name).alloca);
+                    return emit_indirect_call(call, fn_ptr, sig);
+                }
+                case CalleeTarget::Kind::GlobalFnPtr: {
+                    const auto &sig = sema_program_.fn_signatures.at(target.fn_index);
+                    auto *fn_ptr = builder_.CreateLoad(llvm::PointerType::getUnqual(*context_), globals_.at(global_key(target.module_path, target.name)));
                     return emit_indirect_call(call, fn_ptr, sig);
                 }
                 case CalleeTarget::Kind::TraitDispatch:
@@ -4505,6 +4528,7 @@ namespace codegen {
                     return {instance.module_path, instance.return_types};
                 }
                 case CalleeTarget::Kind::LocalFnPtr:
+                case CalleeTarget::Kind::GlobalFnPtr:
                 case CalleeTarget::Kind::StructFieldFnPtr:
                 case CalleeTarget::Kind::ExprFnPtr:
                     return sig_returns(target.fn_index);
@@ -5117,11 +5141,28 @@ namespace codegen {
 
             auto emit_slice_cast(const ast::CastExpr &expr, const sema::ResolvedType &from, const sema::ResolvedType &to) -> llvm::Value * {
                 const auto type_module = type_module_for_ast_type(expr.as_type, *current_module_path_, to);
+                // An explicit length wins over the operand's own extent for EVERY operand
+                // shape: 'cast(buf, []u8, n)' over an array (or a slice) used to silently
+                // ignore 'n' and hand back the operand's full length — a memory-safety
+                // footgun, not a diagnostic (ISSUES.md #6, mirage303).
                 if (from.kind == sema::TypeKind::Array) {
-                    return emit_array_to_slice(expr.value, from, to, expr_type_module_hint(expr.value));
+                    if (!expr.len_expr) {
+                        return emit_array_to_slice(expr.value, from, to, expr_type_module_hint(expr.value));
+                    }
+                    const auto array_module = expr_type_module_hint(expr.value);
+                    auto lv = emit_lvalue(expr.value);
+                    auto *ptr = builder_.CreateInBoundsGEP(
+                        llvm_type(array_module, from), lv.ptr,
+                        {builder_.getInt32(0), builder_.getInt64(0)});
+                    return build_slice_value(ptr, emit_expr(*expr.len_expr), to, type_module);
                 }
                 if (from.kind == sema::TypeKind::Slice) {
-                    return emit_expr(expr.value);
+                    if (!expr.len_expr) {
+                        return emit_expr(expr.value);
+                    }
+                    auto *slice = emit_expr(expr.value);
+                    auto *base = builder_.CreateExtractValue(slice, {0});
+                    return build_slice_value(base, emit_expr(*expr.len_expr), to, type_module);
                 }
                 auto *ptr = emit_expr(expr.value);
                 auto *count = expr.len_expr ? emit_expr(*expr.len_expr) : builder_.getInt64(0);

@@ -1,0 +1,29 @@
+// example_switch_arm_return — in an UNBRACED switch arm body, a top-level ',' is the arm
+// separator. 'return 0x800000,' used to consume that comma as a multi-return value
+// separator ('return a, b') and cascade parse errors into the next arm's ':' — forcing
+// every return-statement arm into a braced body or the match form (ISSUES.md #3,
+// mirage303's QBColor). A braced arm still supports a real multi-value return.
+//
+// Expected: exit code 6 — pick(0) + pick(1) + pick(2) + both values of two(0).
+
+fn pick(c: i32) -> i32 {
+    switch c {
+        0: return 0,
+        1: return 1,
+        2: return 2,
+    }
+    return -100
+}
+
+fn two(c: i32) -> (i32, i32) {
+    switch c {
+        0: { return 1, 2 },       // braced body: ',' keeps its multi-return meaning
+        1: if c > 0 { return 3, 4 },
+    }
+    return -100, -100
+}
+
+pub fn main() -> i32 {
+    const a, b := two(0)
+    return pick(0) + pick(1) + pick(2) + a + b
+}

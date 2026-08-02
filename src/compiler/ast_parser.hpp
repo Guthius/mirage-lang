@@ -35,5 +35,13 @@ namespace ast {
         virtual auto expect_identifier() -> const std::string & = 0;
         virtual auto report_error(SourceLocation location, std::string message) -> void = 0;
         virtual auto has_reached_max_errors() const -> bool = 0;
+
+        // Set while parsing the UNBRACED body of a switch arm, where a top-level ',' is the
+        // arm separator: comma-greedy statements (a multi-value 'return'/'return_ok') must
+        // stop at it instead of consuming it as a value separator ('0: return 1,' used to
+        // swallow the comma and cascade parse errors into the next arm). Cleared for the
+        // duration of any braced block — '0: { return a, b },' keeps the multi-return
+        // reading. Managed via ScopedCommaTerminatesStmt (ast.cpp), never written directly.
+        bool comma_terminates_stmt = false;
     };
 }
