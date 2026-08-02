@@ -165,7 +165,7 @@
     "directives": {
       "patterns": [
         {
-          "match": "\\$(option|env)\\b",
+          "match": "\\$(option|env|rtti_enabled)\\b",
           "name": "keyword.other.directive.mirage"
         },
         {
@@ -177,7 +177,7 @@
     "attributes": {
       "patterns": [
         {
-          "match": "@(no_return|naked|always_inline|section|init)\\b",
+          "match": "@(no_return|naked|always_inline|section|init|no_discard|export|callconv|cdecl|import|test)\\b",
           "name": "storage.type.annotation.mirage"
         },
         {
@@ -192,7 +192,7 @@
           "name": "meta.attribute-group.mirage",
           "patterns": [
             {
-              "match": "\\b(no_return|naked|always_inline|section|init)\\b",
+              "match": "\\b(no_return|naked|always_inline|section|init|no_discard|export|callconv|cdecl|import|test)\\b",
               "name": "storage.type.annotation.mirage"
             },
             { "include": "#punctuation" }

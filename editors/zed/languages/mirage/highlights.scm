@@ -133,5 +133,12 @@
 
 ["(" ")" "[" "]" "{" "}"] @punctuation.bracket
 
+; Declaration attributes ('@no_discard', '@export("x")', '@(export, cdecl)'). The compiler
+; validates the NAME against a fixed set; the grammar only knows the shape, so every name is
+; highlighted the same way here. That is deliberate: the set grows in the compiler without
+; this file or the generated parser needing to change.
+(attribute) @attribute
+(attribute_name) @attribute
+
 ; Fallback - keep last so more specific patterns above win.
 (identifier) @variable
