@@ -96,7 +96,10 @@ Done:
   and calls through a function pointer (`call.indirect`, carrying its signature explicitly
   because wasm needs it as a type index).
 
-  **Coverage: 28 of 271 corpus modules lower fully.**
+- **Stage 2, eighth increment** — `when` statements, which sema has already folded: only
+  the selected branch is emitted, and no runtime control flow at all.
+
+  **Coverage: 31 of 271 corpus modules lower fully.**
 
   Largest remaining blockers: multi-return in all its forms (`-> (T, error(E))` returns,
   `return_ok` with value slots, group declarations — ~99 combined, and one lowering that

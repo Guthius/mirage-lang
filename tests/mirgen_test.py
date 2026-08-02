@@ -308,6 +308,18 @@ def case_indirect_calls_and_constants():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_when_emits_only_the_live_branch():
+    """'when' is resolved at compile time: sema folded the condition, so lowering emits one
+    branch and NO control flow. The dead branch is type-checked (the language's
+    both-branches rule) but must not be emitted -- that is the whole point of 'when'."""
+    r = emit_mir("pub fn main() -> i32 {\n  mut r: i32 = 0\n"
+                 "  when size_of(usize) == 8 { r = 64 } else { r = 32 }\n  return r\n}\n")
+    check(r.returncode == 0, f"'when' lowers ({r.stderr.strip()[:140]})")
+    check("const.int 64" in r.stdout, "the selected branch is emitted")
+    check("const.int 32" not in r.stdout, "and the dead branch is NOT")
+    check("branch" not in r.stdout, "no runtime control flow is emitted at all")
+
+
 def case_mir_goes_to_stdout():
     """'--emit-mir > out.mir' has to produce a valid file, as '--emit-ir' does."""
     r = emit_mir("pub fn main() -> i32 { return 0 }\n")
@@ -336,6 +348,7 @@ def main() -> int:
     case_error_returns()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
+    case_when_emits_only_the_live_branch()
     case_unsupported_is_reported_not_skipped()
     case_mir_goes_to_stdout()
 

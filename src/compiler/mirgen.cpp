@@ -552,6 +552,9 @@ namespace mirgen {
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhileStmt>>) {
                         emit_while(b, *v, returns);
 
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenStmt>>) {
+                        emit_when(b, *v, returns);
+
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SwitchStmt>>) {
                         emit_switch(b, *v, returns);
 
@@ -853,6 +856,49 @@ namespace mirgen {
                     }
                 }
                 return std::nullopt;
+            }
+
+            // 'when' is resolved entirely at compile time: sema folded the condition and
+            // recorded which branch was selected, so lowering emits ONLY that branch and no
+            // control flow at all.
+            //
+            // The unselected branch is deliberately not emitted even though sema
+            // type-checked it (the "both branches are always checked" rule) -- checking and
+            // emitting are different questions, and emitting the dead side is exactly what
+            // '#compile_only_if'/'when' exist to avoid.
+            void emit_when(mir::Builder &b, const ast::WhenStmt &stmt,
+                            const std::vector<sema::ResolvedType> &returns) {
+                const auto it = exprs_ ? exprs_->when_stmt_selected.find(&stmt)
+                                        : std::unordered_map<const ast::WhenStmt *, bool>::const_iterator{};
+                if (!exprs_ || it == exprs_->when_stmt_selected.end()) {
+                    // sema records this for every 'when' it checked; a miss means the
+                    // statement was never checked, which is a bug rather than a shape mirgen
+                    // does not handle.
+                    unsupported("a 'when' whose condition sema did not fold", stmt.location);
+                    return;
+                }
+
+                if (it->second) {
+                    for (const auto &s : stmt.then_block.stmts) {
+                        emit_stmt(b, s, returns);
+                        if (b.block_is_terminated()) break;
+                    }
+                    return;
+                }
+                if (!stmt.else_branch) {
+                    return;
+                }
+                std::visit([&]<typename E>(const E &branch) {
+                    if constexpr (std::is_same_v<std::decay_t<E>, ast::BlockStmt>) {
+                        for (const auto &s : branch.stmts) {
+                            emit_stmt(b, s, returns);
+                            if (b.block_is_terminated()) break;
+                        }
+                    } else {
+                        // 'else when' — the same fold decides the chain one link down.
+                        emit_when(b, *branch, returns);
+                    }
+                }, *stmt.else_branch);
             }
 
             void emit_if(mir::Builder &b, const ast::IfStmt &stmt, const std::vector<sema::ResolvedType> &returns) {
