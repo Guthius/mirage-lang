@@ -206,7 +206,13 @@ namespace codegen {
                   module_(std::make_unique<llvm::Module>("mirage", *context_)),
                   builder_(*context_) {
                 if (!options_.target_triple.empty()) {
+                    // LLVM 21 changed Module's triple from a string to llvm::Triple; the
+                    // guard keeps LLVM 18 (CI) building.
+#if LLVM_VERSION_MAJOR >= 21
                     module_->setTargetTriple(llvm::Triple(options_.target_triple));
+#else
+                    module_->setTargetTriple(options_.target_triple);
+#endif
                 }
                 if (!options_.data_layout.empty()) {
                     module_->setDataLayout(options_.data_layout);
@@ -239,7 +245,7 @@ namespace codegen {
                 // wasm32 (a synthesized C 'main', the WebAssembly ABI). Anything else is
                 // refused here rather than mis-emitted — before this gate existed the driver
                 // put x86 inline asm into an aarch64 module and failed at assembly time.
-                if (const auto &triple = module_->getTargetTriple(); !options_.target_triple.empty()) {
+                if (const llvm::Triple triple{module_->getTargetTriple()}; !options_.target_triple.empty()) {
                     const bool x86_64_linux = triple.getArch() == llvm::Triple::x86_64 && triple.isOSLinux();
                     if (!x86_64_linux && !is_wasm_target()) {
                         report_codegen_error(diag_, {}, std::format(
@@ -564,7 +570,7 @@ namespace codegen {
             // WebAssembly rules rather than SysV eightbytes), and the freestanding refusal in
             // run(). An empty target triple (the unit tests' shape) reads as not-wasm.
             [[nodiscard]] auto is_wasm_target() const -> bool {
-                return module_->getTargetTriple().isWasm();
+                return llvm::Triple{module_->getTargetTriple()}.isWasm();
             }
 
             // 'mirage test'. The driver only fills testing_module_path for that action, and

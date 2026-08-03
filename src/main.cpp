@@ -284,7 +284,9 @@ namespace {
         }
 
         std::string error;
-        const auto *target = llvm::TargetRegistry::lookupTarget(target_triple, error);
+        // The StringRef overload exists in every LLVM this builds against; the
+        // Triple overload only arrived in LLVM 21 (CI runs 18).
+        const auto *target = llvm::TargetRegistry::lookupTarget(target_triple.getTriple(), error);
         if (!target) {
             llvm::errs() << "mirage: " << error << "\n";
             return nullptr;
@@ -791,7 +793,7 @@ auto main(const int argc, char *argv[]) -> int {
     const auto sema = sema::check_program(ast, diag, sema::Options{
         .opt_values = options.opt_values,
         .eager_generic_check = options.eager_generic_check,
-        .pointer_size = target_triple.getArchPointerBitWidth() / 8,
+        .pointer_size = target_triple.isArch64Bit() ? 8u : 4u,
         .rtti_enabled = !options.nortti,
         .test_mode = options.action == Action::Test,
     });
@@ -853,7 +855,7 @@ auto main(const int argc, char *argv[]) -> int {
     if (options.emit_mir) {
         auto lowered = mirgen::generate(ast, sema, diag, mirgen::Options{
             .noinit = options.noinit,
-            .pointer_bits = target_triple.getArchPointerBitWidth(),
+            .pointer_bits = target_triple.isArch64Bit() ? 64u : 32u,
         });
         if (options.mir_opt && lowered.ok) {
             mir::promote_slots(lowered.module);
@@ -907,7 +909,7 @@ auto main(const int argc, char *argv[]) -> int {
             .noinit = options.noinit,
             .validate_entry = !options.freestanding,
             .testing_module_path = testing_module_path, // resolved above; empty unless 'test'
-            .pointer_bits = target_triple.getArchPointerBitWidth(),
+            .pointer_bits = target_triple.isArch64Bit() ? 64u : 32u,
         });
         if (!lowered.ok) {
             if (!lowered.unsupported.empty()) {

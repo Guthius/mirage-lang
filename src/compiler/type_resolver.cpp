@@ -26,22 +26,26 @@ namespace sema {
         const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr);
         if (!member) return std::nullopt;
 
+        // Iterative on purpose: the deducing-this recursive lambda this used to
+        // be crashes clang 18's code generator ("cannot compile this l-value
+        // expression yet"), which is what CI builds with. Walk leaf-to-root,
+        // then reverse into source order.
         std::vector<std::pair<std::string, SourceLocation>> parts;
-        const auto collect = [&](this const auto &self, const ast::Expr &e) -> bool {
-            if (const auto *inner_ident = std::get_if<ast::IdentExpr>(&e)) {
-                parts.emplace_back(inner_ident->name, inner_ident->location);
-                return true;
-            }
-            if (const auto *inner_member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&e)) {
-                if (!self((*inner_member)->object)) return false;
-                parts.emplace_back((*inner_member)->member, (*inner_member)->location);
-                return true;
-            }
-            return false;
-        };
-
-        if (!collect((*member)->object)) return std::nullopt;
         parts.emplace_back((*member)->member, (*member)->location);
+        const ast::Expr *cursor = &(*member)->object;
+        while (true) {
+            if (const auto *inner_ident = std::get_if<ast::IdentExpr>(cursor)) {
+                parts.emplace_back(inner_ident->name, inner_ident->location);
+                break;
+            }
+            if (const auto *inner_member = std::get_if<std::unique_ptr<ast::MemberExpr>>(cursor)) {
+                parts.emplace_back((*inner_member)->member, (*inner_member)->location);
+                cursor = &(*inner_member)->object;
+                continue;
+            }
+            return std::nullopt;
+        }
+        std::ranges::reverse(parts);
 
         ast::NamedType result{.name = parts.front().first, .location = parts.front().second};
         ast::NamedType *tail = &result;
@@ -977,22 +981,27 @@ namespace sema {
             }
 
             static auto as_named_member(const ast::MemberExpr &member) -> ast::NamedType {
+                // Iterative for the same reason as reinterpret_expr_as_type_name:
+                // the recursive deducing-this lambda crashes clang 18's codegen.
                 std::vector<std::pair<std::string, SourceLocation>> parts;
-                const auto collect = [&](this const auto &self, const ast::Expr &expr) -> bool {
-                    if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
-                        parts.emplace_back(ident->name, ident->location);
-                        return true;
-                    }
-                    if (const auto *inner = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr)) {
-                        if (!self((*inner)->object)) return false;
-                        parts.emplace_back((*inner)->member, (*inner)->location);
-                        return true;
-                    }
-                    return false;
-                };
-
-                if (!collect(member.object)) return ast::NamedType{.name = member.member, .location = member.location};
                 parts.emplace_back(member.member, member.location);
+                const ast::Expr *cursor = &member.object;
+                bool collected = true;
+                while (true) {
+                    if (const auto *ident = std::get_if<ast::IdentExpr>(cursor)) {
+                        parts.emplace_back(ident->name, ident->location);
+                        break;
+                    }
+                    if (const auto *inner = std::get_if<std::unique_ptr<ast::MemberExpr>>(cursor)) {
+                        parts.emplace_back((*inner)->member, (*inner)->location);
+                        cursor = &(*inner)->object;
+                        continue;
+                    }
+                    collected = false;
+                    break;
+                }
+                if (!collected) return ast::NamedType{.name = member.member, .location = member.location};
+                std::ranges::reverse(parts);
 
                 ast::NamedType result{
                     .name = parts.front().first,
