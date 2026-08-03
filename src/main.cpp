@@ -284,9 +284,13 @@ namespace {
         }
 
         std::string error;
-        // The StringRef overload exists in every LLVM this builds against; the
-        // Triple overload only arrived in LLVM 21 (CI runs 18).
+        // The Triple overload only arrived in LLVM 21 (CI runs 18), and 22
+        // deprecates the StringRef one — so both spellings stay, guarded.
+#if LLVM_VERSION_MAJOR >= 21
+        const auto *target = llvm::TargetRegistry::lookupTarget(target_triple, error);
+#else
         const auto *target = llvm::TargetRegistry::lookupTarget(target_triple.getTriple(), error);
+#endif
         if (!target) {
             llvm::errs() << "mirage: " << error << "\n";
             return nullptr;
@@ -903,8 +907,23 @@ auto main(const int argc, char *argv[]) -> int {
         }
     }
 
+    // The front-end banner, shared by both backends (it used to live inside the
+    // LLVM path, so flipping the default silently dropped the file/token counts
+    // and the parsing/sema timings). stderr, as ever: stdout carries only what
+    // was asked for. Each backend appends its own 'codegen' line below.
+    const auto to_ms = [](auto elapsed) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    };
+    llvm::errs() << std::format(
+        "Processed {} file(s), {} token(s)\n"
+        "  parsing: {}ms\n"
+        "  sema:    {}ms\n",
+        ast.file_count, ast.token_count,
+        to_ms(parse_elapsed), to_ms(sema_elapsed));
+
     if (options.backend == "native") {
         const bool wasm_target = target_triple.getArch() == llvm::Triple::wasm32;
+        const auto codegen_start = std::chrono::steady_clock::now();
         auto lowered = mirgen::generate(ast, sema, diag, mirgen::Options{
             .noinit = options.noinit,
             .validate_entry = !options.freestanding,
@@ -927,6 +946,8 @@ auto main(const int argc, char *argv[]) -> int {
                          << error.message << "\n";
             return 1;
         }
+        llvm::errs() << std::format("  codegen: {}ms\n",
+                                     to_ms(std::chrono::steady_clock::now() - codegen_start));
 
         if (wasm_target) {
             const auto object_start = std::chrono::steady_clock::now();
@@ -1039,22 +1060,9 @@ auto main(const int argc, char *argv[]) -> int {
         return 1;
     }
     const auto codegen_elapsed = std::chrono::steady_clock::now() - codegen_start;
-
-    const auto to_ms = [](auto elapsed) {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-    };
-    // Progress and timing reporting goes to stderr, not stdout. stdout carries only
-    // what was actually asked for -- the IR under --emit-ir, the AST under --dump-ast,
-    // the directive list under --print-link-directives, and under 'run' the compiled
-    // program's own output. Otherwise 'mirage build p --emit-ir > out.ll' prepends this
-    // banner to the module and produces a file that is not valid LLVM IR.
-    llvm::errs() << std::format(
-        "Processed {} file(s), {} token(s)\n"
-        "  parsing: {}ms\n"
-        "  sema:    {}ms\n"
-        "  codegen: {}ms\n",
-        ast.file_count, ast.token_count,
-        to_ms(parse_elapsed), to_ms(sema_elapsed), to_ms(codegen_elapsed));
+    // The file/token counts and parsing/sema timings were already printed by the
+    // shared banner above the backend split; only this path's own stage remains.
+    llvm::errs() << std::format("  codegen: {}ms\n", to_ms(codegen_elapsed));
 
     if (options.emit_ir) {
         llvm_module->print(llvm::outs(), nullptr);
