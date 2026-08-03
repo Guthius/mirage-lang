@@ -5,7 +5,16 @@ lines, plus the object-emission and target-selection code in `src/main.cpp`). It
 replaced by a Mirage-specific IR and native object generation for `x86_64` and `wasm`, so
 that the compiler is standalone — no LLVM, no external toolchain beyond a linker.
 
-**Status (2026-08-03).** Stages 1–7 are done. `--backend=native` is a complete pipeline —
+**Status (2026-08-03, second update).** Stages 1–10 are done, with stage 10's deletion
+half deliberately deferred: **`--backend=native` is now the DEFAULT** on the targets it
+owns (x86_64-linux and wasm32, both standalone and emscripten); `--backend=llvm` remains
+selectable through the soak period — the differential harnesses are most valuable
+exactly while the new default is newest — and `--emit-ir` forces the LLVM path, since
+it prints LLVM IR by definition. Other targets (an aarch64 cross-compile) auto-select
+LLVM unchanged. `codegen.cpp` and the LLVM dependency are deleted only after the soak.
+
+The original status paragraph, kept for the record: `--backend=native` is a complete
+pipeline —
 sema → MIR (`mirgen.cpp`) → `promote_slots` + `peephole` (`mir_passes.cpp`) → verify →
 then per target: x86-64 through linear-scan register allocation (`x86_regalloc.cpp`,
 with its machine-level interference verifier) → emission (`backend_x86.cpp`) → machine
@@ -260,6 +269,20 @@ algorithm's first full run.
 the LLVM dependency. `emcc` stays in the matrix as a linker for stage 8. Removing
 `find_package(LLVM)` should collapse build time and dependency footprint measurably — worth
 recording.
+
+— FLIPPED. The default is auto-selected: native where the native backend owns the
+target, LLVM elsewhere and under `--emit-ir`. The deletion half waits out the soak
+period per the revised decision. Getting mirage303 to RUN (not just build) natively
+was the real content of this stage: the loud-refusal inventory surfaced four missing
+lowerings (bare-imported constant references, asm operands naming module constants,
+inherent methods on trait types, integer literals in float contexts) and two silent
+miscompiles (positional struct literals zeroing — with the enclosing statement dropped
+without a diagnostic, the one contract violation found all effort — and `nil` assigned
+to a trait-handle field memcpy'ing THROUGH the null pointer). All six were invisible
+to the 74-fixture corpus; the consumer project was the instrument, exactly as
+validation #5 intended. mirage303 now compiles ~2× faster under the default than
+under LLVM and produces byte-identical startup behavior under linear, trivial and
+LLVM alike.
 
 ---
 

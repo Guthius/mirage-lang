@@ -1,9 +1,12 @@
 #include "mirgen.hpp"
 
+#include "module_resolver.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <optional>
@@ -47,7 +50,66 @@ namespace mirgen {
                 result_.module.pointer_bits = options.pointer_bits;
             }
 
+            // codegen's validate_hosted_main, transliterated: the entry point's
+            // shape rules must not depend on which backend enforces them. A
+            // generic or '@test' main previously aborted codegen with a bare
+            // .at() (TODO §7 item 5); here they were never rejected at all.
+            void validate_hosted_main() {
+                const auto fail = [&](const SourceLocation &loc, std::string message) {
+                    diag_.report_error(DiagnosticStage::Codegen, loc, std::move(message));
+                };
+                const auto root_it = sema_.modules.find(ast_.root_module_path);
+                if (root_it == sema_.modules.end()) return;
+                const auto sym_it = root_it->second.symbols.find("main");
+                const bool required = options_.testing_module_path.empty();
+                if (sym_it == root_it->second.symbols.end()) {
+                    if (required) {
+                        fail({}, std::format("hosted build requires 'pub fn main()' or "
+                                              "'pub fn main() -> i32' in the entry module '{}'",
+                                              ast_.root_module_path));
+                    }
+                    return;
+                }
+                const auto *main_fn = std::get_if<sema::FunctionSymbol>(&sym_it->second);
+                if (!main_fn) {
+                    fail({}, "'main' in the entry module must be a function");
+                    return;
+                }
+                const auto &decl = *main_fn->decl;
+                if (!decl.generic_params.empty()) {
+                    fail(decl.location, "hosted entry point must not be generic");
+                    return;
+                }
+                if (main_fn->is_test) {
+                    fail(decl.location, "'@test' is not allowed on the hosted entry point 'main'");
+                    return;
+                }
+                if (!main_fn->is_pub) {
+                    fail(decl.location, "hosted entry point must be declared 'pub fn main'");
+                    return;
+                }
+                if (!main_fn->params.empty()) {
+                    fail(decl.location, "hosted entry point must not have parameters");
+                    return;
+                }
+                const bool returns_void = main_fn->return_types.empty();
+                const bool returns_i32 = main_fn->return_types.size() == 1 &&
+                    main_fn->return_types.front().kind == sema::TypeKind::I32;
+                const bool returns_error = main_fn->return_types.size() == 1 &&
+                    main_fn->return_types.front().kind == sema::TypeKind::Union &&
+                    sema_.union_at(main_fn->return_types.front().union_index) &&
+                    sema_.union_at(main_fn->return_types.front().union_index)->is_error_union;
+                if (!returns_void && !returns_i32 && !returns_error) {
+                    fail(decl.location,
+                          "hosted entry point must return either no value, i32, or error");
+                }
+            }
+
             auto run() -> Result {
+                // The same entry-point validation codegen runs (validate_hosted_main):
+                // without it, a generic or '@test' main sailed through the native
+                // path that used to reject it only because LLVM's front half did.
+                if (options_.validate_entry) validate_hosted_main();
                 declare_globals();
                 declare_functions();
                 declare_methods();
@@ -278,6 +340,17 @@ namespace mirgen {
             }
 
             void declare_globals() {
+                // Two passes: every global gets its index FIRST, then initializers
+                // fold — a fold can reference another global by relocation ('const
+                // S: []i32 = A'), and symbol iteration order must not decide
+                // whether that reference resolves.
+                struct PendingInit {
+                    const std::string *path = nullptr;
+                    const sema::ProgramModule *mod = nullptr;
+                    const sema::GlobalSymbol *global = nullptr;
+                    uint32_t index = 0;
+                };
+                std::vector<PendingInit> pending;
                 for (const auto &[path_ptr, mod_ptr] : modules_in_order()) {
                     const auto &path = *path_ptr;
                     for (const auto &[name, sym] : mod_ptr->symbols) {
@@ -292,33 +365,41 @@ namespace mirgen {
                         g.size = size_of(global->type);
                         g.align = std::max(1u, align_of(global->type));
                         g.is_constant = !global->is_mut;
-                        // A foldable initializer becomes the global's bytes, through
-                        // sema's OWN folder for scalars -- so nothing here can disagree
-                        // with what a 'when' condition computed from the same expression.
-                        // Anything that does not fold stays zero-initialized, which is
-                        // what 'default' means anyway.
-                        if (global->decl && global->decl->init) {
-                            // The initializer's own module must be current: a
-                            // 'type_of(T)' operand resolves T through the symbol table,
-                            // and folding reads that module's records.
-                            const auto *saved_path = module_path_;
-                            const auto *saved_module = module_;
-                            const auto *saved_exprs = exprs_;
-                            module_path_ = &path;
-                            module_ = mod_ptr;
-                            exprs_ = &mod_ptr->exprs;
-                            auto blob = constant_blob(*global->decl->init, global->type, path);
-                            module_path_ = saved_path;
-                            module_ = saved_module;
-                            exprs_ = saved_exprs;
-                            if (blob) {
-                                g.init = std::move(blob->bytes);
-                                g.relocations = std::move(blob->relocs);
-                            }
-                        }
                         result_.module.globals.push_back(std::move(g));
-                        global_index_[key(path, name)] = static_cast<uint32_t>(result_.module.globals.size() - 1);
+                        const auto index = static_cast<uint32_t>(result_.module.globals.size() - 1);
+                        global_index_[key(path, name)] = index;
+                        pending.push_back({path_ptr, mod_ptr, global, index});
                     }
+                }
+                // A foldable initializer becomes the global's bytes, through sema's
+                // OWN folder for scalars -- so nothing here can disagree with what
+                // a 'when' condition computed from the same expression. Anything
+                // that does not fold stays zero-initialized, which is what
+                // 'default' means anyway — except that declared field defaults
+                // apply on top, exactly as codegen's emit_default_value does.
+                for (const auto &entry : pending) {
+                    auto &g = result_.module.globals[entry.index];
+                    const auto *saved_path = module_path_;
+                    const auto *saved_module = module_;
+                    const auto *saved_exprs = exprs_;
+                    module_path_ = entry.path;
+                    module_ = entry.mod;
+                    exprs_ = &entry.mod->exprs;
+                    if (entry.global->decl && entry.global->decl->init) {
+                        if (auto blob = constant_blob(*entry.global->decl->init,
+                                                       entry.global->type, *entry.path)) {
+                            g.init = std::move(blob->bytes);
+                            g.relocations = std::move(blob->relocs);
+                        }
+                    } else if (type_has_field_defaults(entry.global->type)) {
+                        if (auto blob = constant_default_blob(entry.global->type, *entry.path)) {
+                            g.init = std::move(blob->bytes);
+                            g.relocations = std::move(blob->relocs);
+                        }
+                    }
+                    module_path_ = saved_path;
+                    module_ = saved_module;
+                    exprs_ = saved_exprs;
                 }
             }
 
@@ -721,6 +802,91 @@ namespace mirgen {
                 return value;
             }
 
+            // Whether default-initializing 'type' writes anything beyond zeros —
+            // i.e. some struct field (recursively) declares an init expression.
+            // Guards the fill so the common all-zero case stays one memset.
+            [[nodiscard]] auto type_has_field_defaults(const sema::ResolvedType &type) const -> bool {
+                if (type.kind == sema::TypeKind::Struct) {
+                    const auto *info = sema_.struct_at(type.struct_index);
+                    if (!info) return false;
+                    for (const auto &field : info->fields) {
+                        if (field.init_expr != nullptr) return true;
+                        if (type_has_field_defaults(field.type)) return true;
+                    }
+                    return false;
+                }
+                if (type.kind == sema::TypeKind::Array) {
+                    const auto *info = sema_.array_at(type.array_index);
+                    return info && info->count > 0 && type_has_field_defaults(info->element_type);
+                }
+                return false;
+            }
+
+            // Writes 'type's declared field defaults over an ALREADY-ZEROED region
+            // at 'base' — codegen's emit_default_value semantics, which the native
+            // path silently lacked: 'mut x: Item' and '{3}' left defaulted fields
+            // at zero. 'supplied' (structs only) marks fields a literal already
+            // wrote, which keep their written values. Each default expression
+            // evaluates in the struct's OWN module, exactly like a defaulted
+            // argument evaluates in its callee's.
+            void emit_field_defaults(mir::Builder &b, const mir::ValueId base,
+                                      const sema::ResolvedType &type,
+                                      const std::vector<bool> *supplied = nullptr) {
+                if (type.kind == sema::TypeKind::Struct) {
+                    const auto *info = sema_.struct_at(type.struct_index);
+                    if (!info) return;
+                    for (size_t i = 0; i < info->fields.size(); ++i) {
+                        if (supplied && i < supplied->size() && (*supplied)[i]) continue;
+                        const auto &field = info->fields[i];
+                        const auto addr = field.offset == 0
+                            ? base : b.ptr_add_const(base, field.offset);
+                        if (field.init_expr != nullptr) {
+                            const auto mod = sema_.modules.find(info->module_path);
+                            if (mod == sema_.modules.end()) continue;
+                            const auto *saved_path = module_path_;
+                            const auto *saved_module = module_;
+                            const auto *saved_exprs = exprs_;
+                            auto saved_locals = std::move(locals_);
+                            auto saved_types = std::move(local_types_);
+                            module_path_ = &mod->first;
+                            module_ = &mod->second;
+                            exprs_ = &mod->second.exprs;
+                            locals_.clear();
+                            local_types_.clear();
+                            const auto value = emit_expr(b, *field.init_expr);
+                            if (value != mir::NO_VALUE) {
+                                const auto source = expr_type(*field.init_expr);
+                                if (is_scalar(field.type)) {
+                                    b.store(addr, coerce(b, value, field.type, source));
+                                } else {
+                                    store_aggregate_value(b, addr, field.type, value, source);
+                                }
+                            }
+                            module_path_ = saved_path;
+                            module_ = saved_module;
+                            exprs_ = saved_exprs;
+                            locals_ = std::move(saved_locals);
+                            local_types_ = std::move(saved_types);
+                        } else if (type_has_field_defaults(field.type)) {
+                            emit_field_defaults(b, addr, field.type);
+                        }
+                    }
+                    return;
+                }
+                if (type.kind == sema::TypeKind::Array) {
+                    const auto *info = sema_.array_at(type.array_index);
+                    if (!info || !type_has_field_defaults(info->element_type)) return;
+                    const auto align = std::max(1u, align_of(info->element_type));
+                    const auto stride = (std::max(1u, size_of(info->element_type)) + align - 1)
+                                        / align * align;
+                    for (uint64_t i = 0; i < info->count; ++i) {
+                        emit_field_defaults(b,
+                            b.ptr_add_const(base, static_cast<int64_t>(i * stride)),
+                            info->element_type);
+                    }
+                }
+            }
+
             // Representation changes between an argument's own type and the parameter's,
             // the argument-position half of store_aggregate_value: an array where a slice
             // is expected materializes a (data, len) header; a slice where a bare pointer
@@ -789,6 +955,9 @@ namespace mirgen {
                             f.linkage = fn->is_pub || entry || fn->export_name
                                 ? mir::Linkage::External : mir::Linkage::Internal;
                             f.conv = fn->call_conv == sema::CallConv::C ? mir::CallConv::C : mir::CallConv::Mirage;
+                            f.is_naked = fn->decl && std::ranges::any_of(
+                                fn->decl->attributes,
+                                [](const ast::Attribute &a) { return a.name == "naked"; });
                             std::optional<CAbiPlan> c_plan;
                             if (f.conv == mir::CallConv::C) {
                                 auto plan = build_c_abi_plan(fn->params, fn->return_types);
@@ -893,6 +1062,20 @@ namespace mirgen {
                             // instantiation is a separate function, which generics support
                             // will declare.
                             if (!info.is_resolved || !info.decl) continue;
+
+                            // '@naked' can never hold on a method: the implicit 'self'
+                            // receiver is a function argument, and a naked function must
+                            // not reference any. The LLVM path rejected this only as a
+                            // downstream module-verification failure; the native path
+                            // says why.
+                            if (std::ranges::any_of(info.decl->attributes,
+                                    [](const ast::Attribute &a) { return a.name == "naked"; })) {
+                                diag_.report_error(DiagnosticStage::Codegen, info.decl->location,
+                                    "'@naked' cannot apply to a method: the implicit 'self' "
+                                    "receiver is a function argument, which a naked function "
+                                    "must not reference");
+                                continue;
+                            }
 
                             const auto k = key_for_method(info);
                             mir::Function f;
@@ -1721,15 +1904,44 @@ namespace mirgen {
                 }
                 b.mem_set(b.slot_addr(slot), b.const_int(mir::Ty::I8, 0),
                            b.const_int(usize_ty(), std::max(1u, size_of(type))));
+                // Declared field defaults apply on top of the zeros — codegen's
+                // emit_default_value semantics.
+                if (type_has_field_defaults(type)) {
+                    emit_field_defaults(b, b.slot_addr(slot), type);
+                }
             }
 
             // Central writer for aggregate destinations, honoring the representation
             // changes 'assignable' permits between arrays and slices; a same-representation
             // source is one byte copy. Every aggregate store (assignment, initialization,
             // return slots) funnels through here so the coercion set cannot drift per site.
+            // Whether 'value' is defined by a const.null in the current function.
+            [[nodiscard]] static auto is_const_null(mir::Builder &b, const mir::ValueId value) -> bool {
+                const auto &def = b.function().values[value];
+                if (def.is_param || def.block >= b.function().blocks.size()) return false;
+                for (const auto &inst : b.function().blocks[def.block].insts) {
+                    if (inst.result == value) return inst.op == mir::Op::ConstNull;
+                }
+                return false;
+            }
+
             void store_aggregate_value(mir::Builder &b, const mir::ValueId dest, const sema::ResolvedType &target,
                                         const mir::ValueId source, const sema::ResolvedType &source_type) {
                 const auto usize = usize_ty();
+
+                // 'handle = nil' (or any nullable aggregate assigned nil): sema
+                // types the literal as the TARGET, so the "aggregate value" here
+                // is a null POINTER, not the address of a zeroed blob — copying
+                // THROUGH it dereferenced null. The store of nil is a zero fill
+                // of the destination, as codegen emits. Recognized from the
+                // value's own definition, since no legitimate aggregate source
+                // address is a const.null. Found by mirage303's
+                // 'control.data().parent = nil'.
+                if (is_const_null(b, source)) {
+                    b.mem_set(dest, b.const_int(mir::Ty::I8, 0),
+                               b.const_int(usize, std::max(1u, size_of(target))));
+                    return;
+                }
 
                 // slice -> array: copy min(len, count) elements, zero-fill the tail (an
                 // empty slice clears the array) -- codegen's emit_slice_to_array, verbatim.
@@ -3044,13 +3256,35 @@ namespace mirgen {
             //
             // Every offset here comes from sema (StructInfo::fields[].offset, ArrayInfo),
             // which is why no layout logic is needed — see mir.hpp's opening note.
+            // A bare identifier may be an ALIAS for a symbol declared in another
+            // module (a bare import). Calls have redirected through
+            // bare_import_origins since the seventeenth increment; value reads,
+            // address takes and asm operands must do the same or an imported
+            // constant reports as unlowerable — which is exactly how mirage303
+            // found this (vbYes and friends live in game/vb6/*, referenced bare
+            // from every gameplay module).
+            struct ResolvedName {
+                const std::string *module = nullptr;
+                const std::string *name = nullptr;
+            };
+            [[nodiscard]] auto resolve_bare_name(const std::string &name) const -> ResolvedName {
+                if (module_) {
+                    if (const auto origin = module_->bare_import_origins.find(name);
+                        origin != module_->bare_import_origins.end()) {
+                        return {&origin->second.module_path, &origin->second.symbol_name};
+                    }
+                }
+                return {module_path_, &name};
+            }
+
             auto emit_address(mir::Builder &b, const ast::Expr &expr) -> mir::ValueId {
                 if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
                     if (const auto it = locals_.find(ident->name); it != locals_.end()) {
                         return b.slot_addr(it->second);
                     }
                     if (module_path_) {
-                        if (const auto g = global_index_.find(key(*module_path_, ident->name));
+                        const auto resolved = resolve_bare_name(ident->name);
+                        if (const auto g = global_index_.find(key(*resolved.module, *resolved.name));
                             g != global_index_.end()) {
                             return b.global_addr(g->second);
                         }
@@ -3373,8 +3607,16 @@ namespace mirgen {
                     using V = std::decay_t<T>;
 
                     if constexpr (std::is_same_v<V, ast::LiteralIntegerExpr>) {
+                        // Sema types an integer literal as FLOAT when the context
+                        // demands one ('x + 5' with x: f32, '{0, 0}' into a
+                        // Vector2); the constant must follow or the verifier
+                        // rejects a float-typed const.int. Found by mirage303's
+                        // GUI math, which the corpus never exercised.
                         const auto ty = expr_type(expr);
                         const auto mir_ty = is_scalar(ty) ? scalar_type(ty) : mir::Ty::I64;
+                        if (mir::is_float(mir_ty)) {
+                            return b.const_float(mir_ty, static_cast<double>(v.value));
+                        }
                         return b.const_int(mir_ty, static_cast<int64_t>(v.value));
 
                     } else if constexpr (std::is_same_v<V, ast::LiteralBoolExpr>) {
@@ -3524,6 +3766,9 @@ namespace mirgen {
                             const auto base = b.slot_addr(slot);
                             b.mem_set(base, b.const_int(mir::Ty::I8, 0),
                                        b.const_int(usize_ty(), size_of(type)));
+                            if (type_has_field_defaults(type)) {
+                                emit_field_defaults(b, base, type);
+                            }
                             return base;
                         }
                         unsupported("'default' in this position", loc);
@@ -3640,13 +3885,14 @@ namespace mirgen {
                 }
 
                 if (module_path_) {
-                    if (const auto it = global_index_.find(key(*module_path_, ident.name));
+                    const auto resolved = resolve_bare_name(ident.name);
+                    if (const auto it = global_index_.find(key(*resolved.module, *resolved.name));
                         it != global_index_.end()) {
                         const auto type = expr_type(expr);
                         const auto addr = b.global_addr(it->second);
                         return is_scalar(type) ? b.load(scalar_type(type), addr) : addr;
                     }
-                    if (const auto it = function_index_.find(key(*module_path_, ident.name));
+                    if (const auto it = function_index_.find(key(*resolved.module, *resolved.name));
                         it != function_index_.end()) {
                         return b.func_addr(it->second);
                     }
@@ -3741,6 +3987,25 @@ namespace mirgen {
                 const auto arith = [&](const mir::Op int_op, const mir::Op float_op) {
                     return b.binary(is_float ? float_op : int_op, ty, lhs, rhs);
                 };
+
+                // Bitset algebra: infix '+' is set UNION and '-' set difference —
+                // integer add would corrupt the mask the moment two operands share
+                // a member ({Write} + {Write, Seek} must be OR, not ADD). The
+                // compound forms had this since increment 15; the plain infix
+                // forms did not, found by example_bitset once the differential
+                // finally covered nonzero-exit fixtures.
+                if (lhs_type.kind == sema::TypeKind::Bitset ||
+                    rhs_type.kind == sema::TypeKind::Bitset) {
+                    switch (bin.op) {
+                    case Bop::Add:
+                        return b.binary(mir::Op::Or, ty, lhs, rhs);
+                    case Bop::Sub:
+                        return b.binary(mir::Op::And, ty, lhs,
+                                         b.unary(mir::Op::Not, ty, rhs));
+                    default:
+                        break; // &, |, ^, comparisons: the bitwise mapping below is right
+                    }
+                }
 
                 switch (bin.op) {
                 case Bop::Add: return arith(mir::Op::Add, mir::Op::FAdd);
@@ -4556,13 +4821,83 @@ namespace mirgen {
             // struct and array literals at sema's own offsets, so an aggregate global
             // lands in .rodata/.data fully formed rather than as zeros -- which is what
             // 'const S: [3]i32 = {7,8,9}' silently became before.
+            // The constant analogue of emit_field_defaults: fold each declared
+            // field default into 'blob' at 'base', recursively, skipping fields a
+            // literal already supplied. False when a default does not fold — the
+            // caller degrades exactly as any other unfoldable initializer does.
+            auto constant_apply_defaults(ConstBlob &blob, const uint32_t base,
+                                          const sema::ResolvedType &type,
+                                          const std::vector<bool> *supplied) -> bool {
+                if (type.kind == sema::TypeKind::Struct) {
+                    const auto *info = sema_.struct_at(type.struct_index);
+                    if (!info) return false;
+                    for (size_t i = 0; i < info->fields.size(); ++i) {
+                        if (supplied && i < supplied->size() && (*supplied)[i]) continue;
+                        const auto &field = info->fields[i];
+                        if (field.init_expr != nullptr) {
+                            const auto mod = sema_.modules.find(info->module_path);
+                            if (mod == sema_.modules.end()) return false;
+                            const auto *saved_path = module_path_;
+                            const auto *saved_module = module_;
+                            const auto *saved_exprs = exprs_;
+                            module_path_ = &mod->first;
+                            module_ = &mod->second;
+                            exprs_ = &mod->second.exprs;
+                            auto child = constant_blob(*field.init_expr, field.type,
+                                                        info->module_path);
+                            module_path_ = saved_path;
+                            module_ = saved_module;
+                            exprs_ = saved_exprs;
+                            if (!child) return false;
+                            blob.splice(base + field.offset, *child);
+                        } else if (type_has_field_defaults(field.type)) {
+                            if (!constant_apply_defaults(blob, base + field.offset,
+                                                          field.type, nullptr)) {
+                                return false;
+                            }
+                        }
+                    }
+                    return true;
+                }
+                if (type.kind == sema::TypeKind::Array) {
+                    const auto *info = sema_.array_at(type.array_index);
+                    if (!info) return false;
+                    if (!type_has_field_defaults(info->element_type)) return true;
+                    const auto align = std::max(1u, align_of(info->element_type));
+                    const auto stride = (std::max(1u, size_of(info->element_type)) + align - 1)
+                                        / align * align;
+                    for (uint64_t i = 0; i < info->count; ++i) {
+                        if (!constant_apply_defaults(blob, base + static_cast<uint32_t>(i * stride),
+                                                      info->element_type, nullptr)) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                return true;
+            }
+
+            auto constant_default_blob(const sema::ResolvedType &type,
+                                        const std::string &) -> std::optional<ConstBlob> {
+                auto blob = blob_of(std::max(1u, size_of(type)));
+                if (!constant_apply_defaults(blob, 0, type, nullptr)) return std::nullopt;
+                return blob;
+            }
+
             auto constant_blob(const ast::Expr &expr, const sema::ResolvedType &type,
                                 const std::string &module_path) -> std::optional<ConstBlob> {
                 const auto size = std::max(1u, size_of(type));
 
-                if (std::holds_alternative<ast::DefaultExpr>(expr) ||
-                    std::holds_alternative<ast::UndefinedExpr>(expr)) {
+                if (std::holds_alternative<ast::UndefinedExpr>(expr)) {
                     return blob_of(size);
+                }
+                if (std::holds_alternative<ast::DefaultExpr>(expr)) {
+                    auto blob = blob_of(size);
+                    if (type_has_field_defaults(type) &&
+                        !constant_apply_defaults(blob, 0, type, nullptr)) {
+                        return std::nullopt;
+                    }
+                    return blob;
                 }
 
                 // A string literal is either a '[]u8' header or raw array bytes.
@@ -4582,6 +4917,101 @@ namespace mirgen {
                     return std::nullopt;
                 }
 
+                // A bitset literal folds to its storage mask, the same fold the
+                // runtime path performs.
+                if (const auto *init = std::get_if<std::unique_ptr<ast::BracedInitializerExpr>>(&expr);
+                    init && type.kind == sema::TypeKind::Bitset) {
+                    if (const auto *bitset = std::get_if<ast::BitsetExpr>(&**init)) {
+                        if (const auto *info = sema_.bitset_at(type.bitset_index)) {
+                            if (const auto *members = sema_.enum_at(info->member_enum_type.enum_index)) {
+                                uint64_t folded = 0;
+                                for (const auto &member : bitset->members) {
+                                    const auto field = std::ranges::find(members->fields, member.name,
+                                                                          &sema::EnumFieldInfo::name);
+                                    if (field != members->fields.end()) {
+                                        folded |= uint64_t{1} << (field->value + 1);
+                                    }
+                                }
+                                auto blob = blob_of(size);
+                                blob.put_int(0, folded, size);
+                                return blob;
+                            }
+                        }
+                    }
+                }
+
+                // A payload-free tagged-union variant ('.None' / 'Opt.None') as a
+                // constant: the tag over zeros. The payload-BEARING form is a sema
+                // error before this can run.
+                if (type.kind == sema::TypeKind::Union) {
+                    const auto *info = sema_.union_at(type.union_index);
+                    const auto variant_name = [&]() -> const std::string * {
+                        if (const auto *dot = std::get_if<ast::DotIdentExpr>(&expr)) return &dot->name;
+                        if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&expr)) {
+                            return &(*member)->member;
+                        }
+                        return nullptr;
+                    }();
+                    if (info && info->is_tagged && variant_name) {
+                        const auto variant = std::ranges::find(info->variants, *variant_name,
+                                                                &sema::TaggedUnionVariant::name);
+                        if (variant != info->variants.end()) {
+                            auto blob = blob_of(size);
+                            blob.put_int(0, static_cast<uint64_t>(variant->tag_value), 4);
+                            return blob;
+                        }
+                    }
+                }
+
+                // 'const S: []T = A' with A a const array global: the fat pointer is
+                // a relocation against A plus its element count.
+                if (type.kind == sema::TypeKind::Slice) {
+                    if (const auto *ident = std::get_if<ast::IdentExpr>(&expr)) {
+                        const auto resolved = resolve_bare_name(ident->name);
+                        if (const auto it = global_index_.find(key(*resolved.module, *resolved.name));
+                            it != global_index_.end()) {
+                            const auto source_type = [&]() -> sema::ResolvedType {
+                                const auto mod = sema_.modules.find(*resolved.module);
+                                if (mod == sema_.modules.end()) return {};
+                                const auto sym = mod->second.symbols.find(*resolved.name);
+                                if (sym == mod->second.symbols.end()) return {};
+                                const auto *global = std::get_if<sema::GlobalSymbol>(&sym->second);
+                                return global ? global->type : sema::ResolvedType{};
+                            }();
+                            if (source_type.kind == sema::TypeKind::Array) {
+                                if (const auto *info = sema_.array_at(source_type.array_index)) {
+                                    auto blob = blob_of(size);
+                                    blob.put_global_ptr(0, it->second);
+                                    blob.put_int(pointer_bytes(), info->count, pointer_bytes());
+                                    return blob;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 'import_bin("path")' — the file's bytes ARE the initializer.
+                // Missing from this folder until mirage303: the embedded font
+                // silently became zeros ("anything that does not fold stays
+                // zero-initialized" is right for runtime-initialized globals and
+                // exactly wrong for this), and raylib crashed on the empty TTF.
+                if (const auto *bin = std::get_if<ast::ImportBinExpr>(&expr)) {
+                    const auto resolved = ast::resolve_contained_path(module_path, bin->path);
+                    std::ifstream file(resolved, std::ios::binary);
+                    if (!file) {
+                        unsupported(std::format("import_bin: cannot open '{}'", bin->path),
+                                     bin->location);
+                        return std::nullopt;
+                    }
+                    const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)),
+                                                      std::istreambuf_iterator<char>());
+                    auto blob = blob_of(size);
+                    for (uint32_t i = 0; i < size && i < bytes.size(); ++i) {
+                        blob.bytes[i] = bytes[i];
+                    }
+                    return blob;
+                }
+
                 if (const auto *init = std::get_if<std::unique_ptr<ast::BracedInitializerExpr>>(&expr)) {
                     auto blob = blob_of(size);
                     bool ok = true;
@@ -4591,17 +5021,47 @@ namespace mirgen {
                             const auto *info = type.kind == sema::TypeKind::Struct
                                 ? sema_.struct_at(type.struct_index) : nullptr;
                             if (!info) { ok = false; return; }
+                            std::vector<bool> supplied(info->fields.size(), false);
                             for (const auto &field : v.fields) {
                                 const auto declared = std::ranges::find(info->fields, field.name,
                                                                          &sema::StructField::name);
                                 if (declared == info->fields.end()) { ok = false; continue; }
+                                supplied[static_cast<size_t>(declared - info->fields.begin())] = true;
                                 if (const auto child = constant_blob(field.expr, declared->type, module_path)) {
                                     blob.splice(declared->offset, *child);
                                 } else {
                                     ok = false;
                                 }
                             }
+                            if (ok && type_has_field_defaults(type)) {
+                                ok = constant_apply_defaults(blob, 0, type, &supplied);
+                            }
                         } else if constexpr (std::is_same_v<B, ast::ArrayExpr>) {
+                            // A positional STRUCT literal parses as an ArrayExpr;
+                            // fold fields in declaration order (mirrors the
+                            // runtime path in emit_braced_initializer).
+                            if (type.kind == sema::TypeKind::Struct) {
+                                const auto *sinfo = sema_.struct_at(type.struct_index);
+                                if (!sinfo || v.has_fill || v.values.size() > sinfo->fields.size()) {
+                                    ok = false;
+                                    return;
+                                }
+                                std::vector<bool> supplied(sinfo->fields.size(), false);
+                                for (size_t i = 0; i < v.values.size(); ++i) {
+                                    supplied[i] = true;
+                                    if (const auto child = constant_blob(v.values[i],
+                                                                          sinfo->fields[i].type,
+                                                                          module_path)) {
+                                        blob.splice(sinfo->fields[i].offset, *child);
+                                    } else {
+                                        ok = false;
+                                    }
+                                }
+                                if (ok && type_has_field_defaults(type)) {
+                                    ok = constant_apply_defaults(blob, 0, type, &supplied);
+                                }
+                                return;
+                            }
                             const auto *info = type.kind == sema::TypeKind::Array
                                 ? sema_.array_at(type.array_index) : nullptr;
                             if (!info) { ok = false; return; }
@@ -4624,7 +5084,10 @@ namespace mirgen {
                                 }
                             }
                         } else if constexpr (std::is_same_v<B, ast::EmptyExpr>) {
-                            // '{}' -- the zero fill is the whole answer.
+                            // '{}' -- zeros plus any declared field defaults.
+                            if (type_has_field_defaults(type)) {
+                                ok = constant_apply_defaults(blob, 0, type, nullptr);
+                            }
                         } else {
                             ok = false;
                         }
@@ -5818,6 +6281,32 @@ namespace mirgen {
                 return header_base;
             }
 
+            // The folded value of a module-scope scalar constant, for asm
+            // immediate operands: the global's initializer bytes are already the
+            // evaluated constant, so this reads them back rather than
+            // re-evaluating the AST. Sign-extends at the stored width.
+            [[nodiscard]] auto named_constant_immediate(const std::string &name)
+                -> std::optional<int64_t> {
+                if (!module_path_) return std::nullopt;
+                const auto resolved = resolve_bare_name(name);
+                const auto it = global_index_.find(key(*resolved.module, *resolved.name));
+                if (it == global_index_.end()) return std::nullopt;
+                const auto &global = result_.module.globals[it->second];
+                if (!global.is_constant || global.init.empty() || global.init.size() > 8 ||
+                    !global.relocations.empty()) {
+                    return std::nullopt;
+                }
+                uint64_t value = 0;
+                for (size_t i = 0; i < global.init.size(); ++i) {
+                    value |= static_cast<uint64_t>(global.init[i]) << (8 * i);
+                }
+                const auto bits = global.init.size() * 8;
+                if (bits < 64 && ((value >> (bits - 1)) & 1) != 0) {
+                    value |= ~uint64_t{0} << bits;
+                }
+                return static_cast<int64_t>(value);
+            }
+
             // 'asm { ... }' / 'asm -> reg { ... }'. Sema already resolved every operand,
             // validated the mnemonics and computed the clobber set, so lowering is a
             // transliteration into MIR's own asm carrier -- with ONE real decision: a
@@ -5854,6 +6343,17 @@ namespace mirgen {
                             } else {
                                 const auto it = locals_.find(op.name);
                                 if (it == locals_.end()) {
+                                    // Not a local: a module-scope CONSTANT folds to
+                                    // an immediate — 'mov rax, sys_write' with
+                                    // 'const sys_write: i64 = 1', the shape the
+                                    // stdlib's syscall veneers use throughout.
+                                    if (const auto imm = named_constant_immediate(op.name)) {
+                                        out.operands.push_back({
+                                            .kind = mir::AsmOperand::Kind::Immediate,
+                                            .imm = *imm,
+                                        });
+                                        return;
+                                    }
                                     unsupported(std::format("an 'asm' operand naming '{}'", op.name),
                                                  op.location);
                                     ok = false;
@@ -5947,11 +6447,14 @@ namespace mirgen {
             auto emit_method_call(mir::Builder &b, const ast::CallExpr &call, const ast::MemberExpr &member) -> mir::ValueId {
                 // lvalue_type, not expr_type: 'self' inside a method body is a LOCAL whose
                 // recorded type may be absent, and lvalue_type knows every receiver root.
+                //
+                // A TRAIT-typed receiver is legal here: dynamic dispatch was decided
+                // by sema and peeled off in emit_call (expr_trait_dispatch); a trait
+                // method call that reaches THIS path is an INHERENT method from a
+                // bare 'impl Trait { ... }' block — a direct call taking the handle
+                // as its receiver, which find_method resolves through the trait's
+                // declaring module exactly like any other type's bare impl.
                 auto receiver_type = lvalue_type(member.object);
-                if (receiver_type.kind == sema::TypeKind::Trait) {
-                    unsupported("a trait-handle method call", call.location);
-                    return mir::NO_VALUE;
-                }
 
                 // Method lookup goes through ONE stripped pointer level, mirroring the
                 // language's receiver auto-deref (codegen's resolve_callee does the same).
@@ -6130,8 +6633,38 @@ namespace mirgen {
                     if constexpr (std::is_same_v<B, ast::StructExpr>) {
                         ok = store_struct_fields(b, base, type.struct_index, v);
                     } else if constexpr (std::is_same_v<B, ast::ArrayExpr>) {
+                        // '{0, 0, 201, 309}' with a STRUCT expected type is a
+                        // POSITIONAL struct literal — it parses as an ArrayExpr,
+                        // and this arm used to fail the array lookup and bail
+                        // with ok=false and NO diagnostic, silently dropping the
+                        // whole enclosing expression. mirage303's raylib
+                        // Rectangles found both halves of that bug.
+                        if (type.kind == sema::TypeKind::Struct) {
+                            const auto *sinfo = sema_.struct_at(type.struct_index);
+                            if (!sinfo || v.has_fill || v.values.size() > sinfo->fields.size()) {
+                                unsupported("this positional struct literal", v.location);
+                                ok = false;
+                                return;
+                            }
+                            std::vector<bool> supplied(sinfo->fields.size(), false);
+                            for (size_t i = 0; i < v.values.size(); ++i) {
+                                supplied[i] = true;
+                                if (!store_element(b, base, sinfo->fields[i].offset,
+                                                    sinfo->fields[i].type, v.values[i])) {
+                                    ok = false;
+                                }
+                            }
+                            if (type_has_field_defaults(type)) {
+                                emit_field_defaults(b, base, type, &supplied);
+                            }
+                            return;
+                        }
                         const auto *info = sema_.array_at(type.array_index);
-                        if (!info) { ok = false; return; }
+                        if (!info) {
+                            unsupported("this braced initializer", v.location);
+                            ok = false;
+                            return;
+                        }
                         const auto stride = size_of(info->element_type);
                         const size_t plain = v.values.size() - (v.has_fill ? 1 : 0);
                         for (size_t i = 0; i < plain; ++i) {
@@ -6162,7 +6695,10 @@ namespace mirgen {
                             }
                         }
                     } else if constexpr (std::is_same_v<B, ast::EmptyExpr>) {
-                        // '{}' -- the zero fill above is the whole answer.
+                        // '{}' -- the zero fill plus any declared field defaults.
+                        if (type_has_field_defaults(type)) {
+                            emit_field_defaults(b, base, type);
+                        }
                     } else {
                         unsupported("this braced initializer", v.location);
                         ok = false;
@@ -6180,10 +6716,18 @@ namespace mirgen {
                 const auto *info = sema_.struct_at(struct_index);
                 if (!info) return false;
                 bool ok = true;
+                std::vector<bool> supplied(info->fields.size(), false);
                 for (const auto &field : fields.fields) {
                     const auto declared = std::ranges::find(info->fields, field.name, &sema::StructField::name);
                     if (declared == info->fields.end()) { ok = false; continue; }
+                    supplied[static_cast<size_t>(declared - info->fields.begin())] = true;
                     if (!store_element(b, base, declared->offset, declared->type, field.expr)) ok = false;
+                }
+                // Omitted fields take their declared defaults, as under codegen.
+                const sema::ResolvedType struct_type{.kind = sema::TypeKind::Struct,
+                                                      .struct_index = struct_index};
+                if (type_has_field_defaults(struct_type)) {
+                    emit_field_defaults(b, base, struct_type, &supplied);
                 }
                 return ok;
             }
@@ -6192,10 +6736,17 @@ namespace mirgen {
             // copied. Returns false if the element could not be lowered (already reported).
             auto store_element(mir::Builder &b, const mir::ValueId base, const uint32_t offset,
                                 const sema::ResolvedType &type, const ast::Expr &value) -> bool {
-                // 'default' is what the enclosing zero fill already produced; 'undefined'
-                // deliberately leaves the element unspecified. Neither needs a store.
-                if (std::holds_alternative<ast::DefaultExpr>(value) ||
-                    std::holds_alternative<ast::UndefinedExpr>(value)) {
+                // 'undefined' deliberately leaves the element unspecified;
+                // 'default' is the enclosing zero fill PLUS any declared field
+                // defaults.
+                if (std::holds_alternative<ast::UndefinedExpr>(value)) {
+                    return true;
+                }
+                if (std::holds_alternative<ast::DefaultExpr>(value)) {
+                    if (type_has_field_defaults(type)) {
+                        emit_field_defaults(b,
+                            offset == 0 ? base : b.ptr_add_const(base, offset), type);
+                    }
                     return true;
                 }
                 const auto address = b.ptr_add_const(base, offset);

@@ -4,10 +4,11 @@ You are picking up an in-progress body of work on the Mirage compiler. This docu
 complete brief: what was done, what remains, how to verify it, and the conventions and
 traps that matter.
 
-**Where it stands:** the LLVM replacement is complete through stage 5 for x86-64.
-`--backend=native` compiles, links and runs, and matches LLVM on every positive fixture
-in the corpus. What remains is a real register allocator (stage 6), the wasm backends
-(7–9), and the flip-and-delete (10).
+**Where it stands (updated 2026-08-03, end of session):** ALL TEN STAGES ARE DONE.
+`--backend=native` is the DEFAULT on x86_64-linux and wasm32 (standalone and
+emscripten); `--backend=llvm` stays selectable through the soak period, after which
+`codegen.cpp` and the LLVM dependency get deleted. What remains is the soak itself,
+the deferred corpus migration (§6.2, decision D7), and CI's first real push.
 
 **Read `TODO.md` and `docs/backend.md` before writing any code.** This file tells you *how*
 to work on the repo; those two tell you *what* is left and *why the design is the way it
@@ -124,7 +125,7 @@ complete through stage 5.
 | `--nortti` and `$rtti_enabled` | done |
 | `@no_discard` / `@export` / `@callconv` / `@cdecl` / `@import` | done |
 | `@test`, `mirage test`, `--load` forced modules, `core/testing` | done |
-| **Custom IR + native x86-64 object generation** | **stages 1–5 done; 6–10 remain** |
+| **Custom IR + native x86-64/wasm object generation** | **all ten stages done; LLVM deletion post-soak** |
 
 `--backend=native` is a complete pipeline: sema → MIR (`mirgen.cpp`) → `promote_slots` +
 `peephole` (`mir_passes.cpp`) → verify → x86-64 selection with the trivial allocator
@@ -378,7 +379,8 @@ If you touch `mirgen.cpp`, these are the shapes to re-check:
 - `docs/spec.md`, `docs/grammar.md`, `docs/backend.md` and `README.md` current. —
   `backend.md` and `README.md` were brought current with the native backend; spec and
   grammar were never invalidated by it (nothing language-visible changed).
-- `TODO.md` and this file deleted once genuinely complete. — NOT YET: stages 6–10 remain,
+- `TODO.md` and this file deleted once genuinely complete. — NOT YET: the soak period
+  and the post-soak LLVM deletion remain,
   and `TODO.md` §2.1/§2.2 (wasm-blocked attributes) and §6.2 (corpus migration, deferred
   by decision) are still open.
 

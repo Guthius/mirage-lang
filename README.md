@@ -26,11 +26,13 @@ Mirage is a compiled, statically-typed systems language that targets native code
 - [`docs/grammar.md`](docs/grammar.md) — the full grammar, with notes on the places the
   parser deliberately defers a decision to sema.
 - [`docs/backend.md`](docs/backend.md) — the design record for replacing LLVM with a
-  Mirage-specific IR and native `x86_64`/`wasm` object generation. The x86-64 path works
-  end to end (`--backend=native`, linear-scan register allocation) and matches LLVM on
-  the whole test corpus; `--backend=native --target=wasm32-unknown-unknown` emits a
-  finished standalone `.wasm` module directly, differentially tested against the x86-64
-  path under node. LLVM remains the default and the only path for wasm-emscripten.
+  Mirage-specific IR and native `x86_64`/`wasm` object generation. **The native backend
+  is the default** on the targets it owns: x86_64-linux (linear-scan register
+  allocation, matching LLVM on the whole corpus), `wasm32-unknown-unknown` (a finished
+  standalone `.wasm`, run differentially under node) and `wasm32-unknown-emscripten`
+  (a relocatable object linked by `emcc`, real libc included). `--backend=llvm` stays
+  selectable through the soak period, is forced by `--emit-ir`, and remains the
+  automatic choice for targets the native backend does not cover.
 
 ## Building
 
@@ -73,7 +75,7 @@ Options:
 --emit-ir                 Print LLVM IR to stdout instead of compiling
 --emit-mir                Print Mirage IR to stdout instead of compiling (native backend)
 --mir-opt                 With --emit-mir: run the MIR optimization passes before printing
---backend=<name>          Code generator: 'llvm' (default) or 'native' (x86-64 Linux)
+--backend=<name>          Code generator: 'native' (default on x86_64-linux/wasm32) or 'llvm'
 --regalloc=<name>         Native register allocator: 'linear' (default) or 'trivial' (triage)
 --freestanding            Compile without standard library
 --load <path>             Compile a module nothing imports (may be repeated)

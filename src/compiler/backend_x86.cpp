@@ -1373,6 +1373,26 @@ namespace backend_x86 {
                     block_labels.push_back(enc.make_label());
                 }
 
+                // '@naked': the body IS the function — no prologue, no parameter
+                // spills, no frame. Its asm ends however the author ended it; a
+                // Return op degrades to a bare 'ret'.
+                if (fn.is_naked) {
+                    uint32_t index = 0;
+                    for (size_t b = 0; b < fn.blocks.size(); ++b) {
+                        enc.bind(block_labels[b]);
+                        for (const auto &inst : fn.blocks[b].insts) {
+                            advance_to(index);
+                            if (inst.op == mir::Op::Return) {
+                                enc.ret();
+                            } else {
+                                emit_inst(inst, static_cast<mir::BlockId>(b));
+                            }
+                            ++index;
+                        }
+                    }
+                    return;
+                }
+
                 enc.push_r(Reg::RBP);
                 enc.mov_rr(Width::W64, Reg::RBP, Reg::RSP);
                 if (frame_size > 0) enc.sub_rsp(frame_size);

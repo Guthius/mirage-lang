@@ -138,7 +138,10 @@ CASES = [
         "example_attr_naked_method",
         "build",
         False,
-        ["cannot use argument of naked function"],
+        # The native backend (the default since stage 10) rejects this with a
+        # REAL diagnostic where LLVM only failed module verification with
+        # 'cannot use argument of naked function'.
+        ["'@naked' cannot apply to a method"],
         [],
     ),
     (
@@ -147,7 +150,7 @@ CASES = [
         False,
         [
             "'@naked' function contains a non-'asm' statement",
-            "cannot use argument of naked function",
+            "'@naked' cannot apply to a method",
         ],
         [],
     ),

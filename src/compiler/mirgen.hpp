@@ -27,6 +27,10 @@ namespace mirgen {
         // '--noinit': skip synthesizing the '@init'-runner '_init', mirroring the
         // driver flag codegen honors.
         bool noinit = false;
+        // Run codegen's hosted entry-point validation (validate_hosted_main's
+        // rules). Set by the driver for real native BUILDS — not for '--emit-mir'
+        // (which inspects arbitrary modules) and not under '--freestanding'.
+        bool validate_entry = false;
         // Set under 'mirage test': synthesize the test-runner entry instead of the
         // ordinary one. Empty means the normal build; otherwise it is the resolved
         // 'core/testing' module path, whose '_run_tests' the entry calls.

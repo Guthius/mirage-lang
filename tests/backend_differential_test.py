@@ -91,9 +91,12 @@ def main() -> int:
 
     # Positive run/build fixtures only: emit-ir and link-directives have no
     # backend-differential meaning, and negative fixtures never reach codegen.
+    # Every runnable POSITIVE fixture — nonzero expected exits included. The
+    # original exit==0 filter silently excluded half the runnable corpus, and
+    # the stage-10 flip found eight real divergences hiding in that half.
     candidates = sorted(
         name for name, spec in baseline.items()
-        if spec.get("exit", 1) == 0 and spec.get("action") in ("run", "build")
+        if spec.get("action") in ("run", "build") and "diag" not in spec
     )
 
     matched = 0

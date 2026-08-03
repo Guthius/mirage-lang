@@ -48,9 +48,12 @@ namespace {
         // '--mir-opt': additionally run the stage-3 passes (promote_slots) before
         // printing — the debugging view of what the later stages actually consume.
         bool mir_opt = false;
-        // '--backend=llvm|native'. Defaults to llvm until stage 10 (docs/backend.md);
-        // keeping both alive is what makes differential testing possible.
-        std::string backend = "llvm";
+        // '--backend=llvm|native'. Empty means AUTO (stage 10): native for the
+        // targets the native backend owns — x86_64-linux and wasm32 — and llvm
+        // for anything else (an aarch64 cross-compile, say). '--backend=llvm'
+        // stays available through the soak period: the differential harnesses
+        // are most valuable exactly while the new default is newest.
+        std::string backend;
         // '--regalloc=linear|trivial' (native backend). Trivial is the standing
         // triage tool (docs/backend.md stage 6): if a bug reproduces under it,
         // the bug is not in the linear-scan allocator.
@@ -96,7 +99,7 @@ namespace {
                      << "  --emit-ir            Print LLVM IR to stdout instead of compiling\n"
                      << "  --emit-mir           Print Mirage IR to stdout instead of compiling (native backend)\n"
                      << "  --mir-opt            With --emit-mir: run the stage-3 MIR passes before printing\n"
-                     << "  --backend=<name>     Code generator: 'llvm' (default) or 'native' (in development)\n"
+                     << "  --backend=<name>     Code generator: 'native' (default on x86_64-linux/wasm32) or 'llvm'\n"
                      << "  --regalloc=<name>    Native register allocator: 'linear' (default) or 'trivial' (triage)\n"
                      << "  --freestanding       Compile without standard library\n"
                      << "  --noinit             Skip generating/calling the synthesized '@init'-runner '_init'\n"
@@ -880,16 +883,29 @@ auto main(const int argc, char *argv[]) -> int {
     // link/run tail the LLVM path uses, or (stage 7) a finished standalone .wasm
     // written straight to the output — whole-program compilation leaves nothing
     // for a linker to do on that target.
-    if (options.backend == "native") {
-        const bool wasm_target = target_triple.getArch() == llvm::Triple::wasm32;
-        if (!wasm_target &&
-            (target_triple.getArch() != llvm::Triple::x86_64 || !target_triple.isOSLinux())) {
+    // Backend AUTO-selection (stage 10): the native backend is the default for
+    // the targets it owns; everything else stays on LLVM. '--emit-ir' prints
+    // LLVM IR by definition, so it forces the LLVM path regardless.
+    {
+        const bool native_capable =
+            target_triple.getArch() == llvm::Triple::wasm32 ||
+            (target_triple.getArch() == llvm::Triple::x86_64 && target_triple.isOSLinux());
+        if (options.backend.empty()) {
+            options.backend = native_capable ? "native" : "llvm";
+        }
+        if (options.emit_ir) options.backend = "llvm";
+        if (options.backend == "native" && !native_capable) {
             llvm::errs() << "error: the native backend supports x86_64-linux and wasm32 "
                          << "targets (docs/backend.md)\n";
             return 1;
         }
+    }
+
+    if (options.backend == "native") {
+        const bool wasm_target = target_triple.getArch() == llvm::Triple::wasm32;
         auto lowered = mirgen::generate(ast, sema, diag, mirgen::Options{
             .noinit = options.noinit,
+            .validate_entry = !options.freestanding,
             .testing_module_path = testing_module_path, // resolved above; empty unless 'test'
             .pointer_bits = target_triple.getArchPointerBitWidth(),
         });

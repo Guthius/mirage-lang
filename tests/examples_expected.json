@@ -242,12 +242,12 @@
   },
   "example_attr_naked_method": {
     "action": "build",
-    "diag": ":1:1: error: LLVM module verification failed",
+    "diag": "examples/example_attr_naked_method/main.mir:20:5: error: '@naked' cannot apply to a method: the implicit 'self' receiver is a function argument, which a naked function must not reference",
     "exit": 1
   },
   "example_attr_naked_method_non_asm_body": {
     "action": "build",
-    "diag": ":1:1: error: LLVM module verification failed",
+    "diag": "examples/example_attr_naked_method_non_asm_body/main.mir:19:5: error: '@naked' cannot apply to a method: the implicit 'self' receiver is a function argument, which a naked function must not reference",
     "exit": 1
   },
   "example_attr_naked_non_asm_body": {

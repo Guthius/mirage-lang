@@ -42,7 +42,7 @@ Every behavioural claim here was reproduced against `build/mirage`.
   (`@export` on module-scope globals) and `61a0811` (`@no_discard` on trait methods, binding
   every caller reaching them through a handle).
 
-## 3. The backend — **stages 1–5 done; 6–10 remain**
+## 3. The backend — **ALL TEN STAGES DONE** (LLVM deletion deferred to post-soak)
 
 `docs/backend.md` is the design record: stages, sequencing, validation strategy, decisions
 D1–D8. It is CURRENT — status, stage list and validation section all reflect reality.
@@ -698,9 +698,43 @@ structuring was the only new variable, wasm's validator turns any wrong `br`
 depth into a loud rejection, and both wasm differentials passed on the
 algorithm's first full run.
 
-Next per `docs/backend.md`: stage 10 (flip, soak, delete) — which first needs
-the mirage303-native lowering tail (imported-constant references, asm constant
-operands) closed.
+## Stage 10 — the flip: **done; `--backend=native` is the default, LLVM stays
+for the soak**
+
+The default is auto-selected: native wherever the native backend owns the
+target (x86_64-linux, wasm32 standalone and emscripten), LLVM elsewhere and
+under `--emit-ir` (which prints LLVM IR by definition). `--backend=llvm` stays
+through the soak period per the revised decision; `codegen.cpp` and the LLVM
+dependency are deleted only after it.
+
+The stage's real content was making mirage303 RUN natively, not just build —
+and the consumer project earned its place as validation #5 by surfacing SIX
+gaps the 74-fixture corpus never touched:
+
+- **Bare-imported symbol references.** Calls had redirected through
+  bare_import_origins since increment 17; value reads, address takes and asm
+  operands did not, so every `vbYes`-style imported constant refused loudly.
+  One resolve_bare_name helper now serves all of them.
+- **Asm operands naming module constants** (`mov rax, sys_write`) fold to
+  immediates read from the constant global's own initializer bytes.
+- **Inherent methods on trait types** (`impl Control { ... }` on the trait
+  itself): a dispatch-less trait method call is a DIRECT call find_method
+  already resolves; mirgen's early refusal was the only blocker.
+- **Integer literals in float contexts** (sema types `{0, 0}` as f32 fields)
+  emitted float-typed const.int — caught by the MIR verifier.
+- **Positional struct literals** (`{0, 0, 201, 309}` for a Rectangle) parse
+  as ArrayExpr; the struct arm failed the array lookup and bailed with
+  `ok = false` and NO diagnostic — the enclosing statement vanished silently,
+  the single loud-refusal contract violation found in this whole effort. Both
+  emission and the constant folder now lower them; both failure paths report.
+- **`nil` assigned to a trait-handle field** treated the null pointer as a
+  copy SOURCE (`memcpy(dst, NULL, 16)`): sema types the literal as the
+  target, so nothing at the type level distinguishes it. The aggregate-store
+  funnel now recognizes a const.null source and zero-fills, as codegen does.
+
+mirage303 under the flipped default: compiles ~2× faster than under LLVM
+(1.2s vs 2.3s) and produces byte-identical startup logs (187 lines) under
+native/linear, native/trivial and LLVM alike.
 
 Remaining:
 

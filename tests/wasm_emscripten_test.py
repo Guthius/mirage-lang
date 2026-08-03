@@ -44,6 +44,18 @@ EMSDK = Path(os.environ.get("EMSDK", "/mnt/projects/Projects/Mirage/emsdk"))
 
 # Deliberately-unspecified stdout (see backend_differential_test.py).
 EXIT_CODE_ONLY = {"example_fnptr3"}
+# Fixtures whose RESULT legitimately depends on the target: '#compile_only_if'
+# selects different platform files under a wasm target_os, and 'size_of' of
+# pointer-bearing shapes answers 4 where x86-64 answers 8. Compiled and run,
+# but not compared across targets.
+TARGET_DEPENDENT = {
+    "example_compile_only_if",
+    "example_compile_only_if_trait",
+    "example_generics_size_of",
+    "example_when_size_of",
+    "example_sibling_type_layout",
+    "example_generics_default_size_of",
+}
 # These read the host filesystem at run time; emscripten's MEMFS has no files.
 NEEDS_HOST_FS = {"test_io", "compiler"}
 
@@ -78,9 +90,12 @@ def main() -> int:
     env["PATH"] = f"{emcc.parent}:{EMSDK / 'upstream' / 'bin'}:{env['PATH']}"
 
     baseline = json.loads(BASELINE.read_text())
+    # Every runnable POSITIVE fixture — nonzero expected exits included. The
+    # original exit==0 filter silently excluded half the runnable corpus, and
+    # the stage-10 flip found eight real divergences hiding in that half.
     candidates = sorted(
         name for name, spec in baseline.items()
-        if spec.get("exit", 1) == 0 and spec.get("action") in ("run", "build")
+        if spec.get("action") in ("run", "build") and "diag" not in spec
     )
 
     matched = 0
@@ -88,6 +103,8 @@ def main() -> int:
     skipped_fs: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
         for name in candidates:
+            if name in TARGET_DEPENDENT:
+                continue
             if name in NEEDS_HOST_FS:
                 skipped_fs.append(name)
                 continue

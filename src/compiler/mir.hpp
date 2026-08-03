@@ -244,6 +244,10 @@ namespace mir {
         std::vector<ValueDef> values;
         // False for a declaration with no body (an 'ext fn', or an imported wasm function).
         bool has_body = false;
+        // '@naked': the backend emits no prologue, epilogue, parameter spills or
+        // frame — the body (inline asm by convention, warned otherwise) IS the
+        // function.
+        bool is_naked = false;
         // Wasm import binding ('@import'); empty on a definition or a native target.
         std::string import_module;
         std::string import_name;
