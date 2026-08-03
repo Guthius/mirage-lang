@@ -750,7 +750,12 @@ cast(ptr, []T, length)   // create a slice from a pointer
 Valid casts:
 - Between any scalar types (integers, floats, bool, anyptr, pointers)
 - `anyptr` ↔ any typed pointer
-- `anyptr` ↔ function pointer type
+- `anyptr` ↔ function pointer type — **native targets only**; on a wasm target
+  this cast is a compile error, because a wasm function reference is an index
+  into the module's function table rather than an address, so treating one as a
+  data pointer can never be meaningful there. This is a real semantic
+  difference between the targets, surfaced at compile time rather than left to
+  miscompile.
 - Array → slice (same element type)
 - Pointer/anyptr → slice (requires length expression)
 

@@ -4553,6 +4553,23 @@ namespace sema {
                     if (from.kind != TypeKind::Invalid && to.kind != TypeKind::Invalid && !is_cast_legal(from, to)) {
                         return error(diag, v->location, "illegal cast between these types");
                     }
+                    // On wasm a function reference is a TABLE INDEX, not an
+                    // address (docs/backend.md stage 7): treating one as a data
+                    // pointer can never work there, so the cast is a
+                    // target-conditional error rather than a silent miscompile.
+                    // A real semantic difference between targets, documented in
+                    // spec.md's cast section.
+                    if ((from.kind == TypeKind::Function && to.kind == TypeKind::Anyptr) ||
+                        (from.kind == TypeKind::Anyptr && to.kind == TypeKind::Function)) {
+                        const auto arch = program.options.opt_values.find("build/target_arch");
+                        if (arch != program.options.opt_values.end() &&
+                            arch->second.starts_with("Wasm")) {
+                            return error(diag, v->location,
+                                "cannot cast between a function pointer and 'anyptr' when "
+                                "targeting wasm: a wasm function reference is a table index, "
+                                "not an address");
+                        }
+                    }
                     if (from.kind != TypeKind::Invalid && to.kind == TypeKind::Slice && !slice_cast_elements_match(from, to, module_path, program)) {
                         return error(diag, v->location, "slice cast element type mismatch");
                     }

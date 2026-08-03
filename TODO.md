@@ -24,11 +24,13 @@ Every behavioural claim here was reproduced against `build/mirage`.
 
 ## 2. Accepted-but-inert features
 
-- **2.1** `@import` is validated and never read. **Blocked on the wasm backend** (§3,
-  stage 7), which is its only consumer. Not a defect in itself — the spec already documents
-  it as target-conditional — but nothing acts on it yet.
-- **2.2** `@export` does not produce a wasm *export section* entry. **Blocked on the same
-  stage.** On the current emscripten path `emcc`'s `-sEXPORTED_FUNCTIONS` decides this.
+- ~~**2.1** `@import` is validated and never read.~~ Live as of stage 7: the native
+  wasm backend binds every referenced `ext fn` import to its `@import("module",
+  "name")` pair, defaulting to `("env", <decl name>)` per decision D4.
+- ~~**2.2** `@export` does not produce a wasm *export section* entry.~~ Live as of
+  stage 7: every External-linkage definition lands in the export section under its
+  export name. (On the LLVM emscripten path `emcc`'s `-sEXPORTED_FUNCTIONS` still
+  decides, until stage 10.)
 - ~~**2.3** `@no_discard` fired on only three call paths.~~ Generic calls closed by
   `ec78a2c`; trait dispatch by `61a0811`. The function-pointer case is deliberate and now
   documented (spec §21): `@no_discard` is a property of the declaration, and a
@@ -587,7 +589,63 @@ Two real miscompiles found and fixed, both invisible to every pre-stage-6 suite:
 Perf sanity (hash loop, 2×10⁸ iterations): trivial 1372ms, linear 425ms, LLVM
 381ms — 3.2× over trivial, within ~12% of LLVM, identical outputs.
 
-Next per `docs/backend.md`: stages 7–9 (wasm), then stage 10 (flip, soak, delete).
+## Stage 7 — standalone wasm: **done; 64 of 74 fixtures match x86 natively, the
+other 10 refused by name**
+
+`--backend=native --target=wasm32-unknown-unknown` emits a finished `.wasm`
+straight to `-o` — whole-program compilation leaves nothing to link. The shape is
+exactly the plan's: dispatch-loop control flow (`loop { block×N { br_table } }`,
+one arm per MIR block — the Relooper stays stage 9), every MIR value a typed wasm
+local, aggregates on a `__stack_pointer` shadow stack, function pointers as
+funcref TABLE INDICES with slot 0 reserved (a null pointer traps on
+call_indirect instead of dispatching), and global-initializer relocations
+resolved at layout time into table slots and absolute addresses. `@import`
+(§2.1) and `@export`-to-export-section (§2.2) are now live; the funcptr↔anyptr
+cast is the promised target-conditional sema error (spec §cast updated) —
+`example_fnptr2` moving from "matched" to "refused by name" is that rule firing.
+
+Semantic parity with x86 was the real work. Everywhere wasm's own instruction
+semantics differ from x86-64's by accident of encoding — shift counts taken mod
+32 where the x86 backend's W64 shifts take them mod 64, `i32.div_s` trapping on
+INT32_MIN/-1 where 64-bit idiv wraps, `f64.ne` being UNORDERED-ne where the x86
+backend's is ordered, `i64.trunc_f64_s` trapping where cvttsd2si saturates —
+the narrow operation is widened to i64 or recomposed from ordered primitives so
+both backends compute identical bit patterns from the same MIR. The canonical
+zero-extended form carries over unchanged.
+
+Two findings the plan did not predict:
+
+- **C-variadic imports are reachable after all.** printf-family calls lower by
+  spilling the variadic tail to a shadow-stack buffer passed as ONE trailing
+  pointer — emscripten's own convention, chosen deliberately so the stage-8
+  relocatable objects link against real emscripten libc unchanged. This lifted
+  26 printing fixtures into the differential that a flat "no variadics" rule
+  would have excluded. Mirage-native variadics were the trap here: their
+  signatures are also marked variadic, but mirgen already collected their tail
+  into a slice at every call site, so a defined function's wasm type must come
+  from its ENTRY BLOCK PARAMETERS (the ground truth), never its signature.
+- **The first 32-bit lowering found a latent mirgen bug.** The `any` blob's
+  data word was written at `pointer_bytes()` (4 on wasm32) instead of at
+  offset 8, overwriting the u64 type id's upper half, and the temporary slot
+  was 8 bytes where the blob is 16. Invisible to every 64-bit run since stage
+  2 — `pointer_bytes()` happens to equal 8 there — and caught by the wasm
+  differential's very first reflection fixture. `ANY_DATA_OFFSET` now pins the
+  rule beside the pointer-pair aggregates whose second word genuinely IS at
+  `pointer_bytes()`.
+
+Validation: `tests/wasm_differential_test.py` compiles every positive fixture
+for both native targets and runs the wasm module under node
+(`tests/wasm_host.js` — a minimal embedder providing write/exit/sbrk, a bump
+malloc family, the printf family reading the variadic buffer, and FILE-handle
+shims; an unsatisfied import is counted as "no wasm form", never a silent
+pass). Node's own module validation runs over the whole corpus on every
+invocation, backed by `wasm_encoder_test.cpp` pinning LEB128 edge cases and
+section framing in ctest. 64 of 74 fixtures produce identical exit codes and
+stdout; the 10 refusals are the nine asm/`@naked` fixtures (x86-only by
+definition) and the funcptr↔anyptr sema error above.
+
+Next per `docs/backend.md`: stage 8 (relocatable wasm for emscripten), stage 9
+(Relooper), stage 10 (flip, soak, delete).
 
 Remaining:
 

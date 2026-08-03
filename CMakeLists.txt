@@ -50,6 +50,10 @@ add_library(mirage_core OBJECT
         src/compiler/x86_encoder.hpp
         src/compiler/x86_regalloc.cpp
         src/compiler/x86_regalloc.hpp
+        src/compiler/wasm_encoder.cpp
+        src/compiler/wasm_encoder.hpp
+        src/compiler/backend_wasm.cpp
+        src/compiler/backend_wasm.hpp
         src/compiler/mirgen.hpp
         src/compiler/module_resolver.cpp
         src/compiler/module_resolver.hpp
@@ -143,6 +147,19 @@ add_executable(x86_encoder_test
         src/compiler/x86_encoder.cpp
         src/compiler/x86_encoder.hpp
 )
+
+add_executable(wasm_encoder_test
+        tests/wasm_encoder_test.cpp
+        src/compiler/wasm_encoder.cpp
+        src/compiler/wasm_encoder.hpp
+)
+
+target_include_directories(wasm_encoder_test
+        PRIVATE src
+)
+
+add_test(NAME wasm_encoder_test COMMAND wasm_encoder_test)
+set_tests_properties(wasm_encoder_test PROPERTIES TIMEOUT 10)
 
 add_executable(x86_regalloc_test
         tests/x86_regalloc_test.cpp

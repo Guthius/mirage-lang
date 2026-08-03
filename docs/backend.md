@@ -5,19 +5,27 @@ lines, plus the object-emission and target-selection code in `src/main.cpp`). It
 replaced by a Mirage-specific IR and native object generation for `x86_64` and `wasm`, so
 that the compiler is standalone — no LLVM, no external toolchain beyond a linker.
 
-**Status (2026-08-03).** Stages 1–6 are done. `--backend=native` is a complete pipeline —
+**Status (2026-08-03).** Stages 1–7 are done. `--backend=native` is a complete pipeline —
 sema → MIR (`mirgen.cpp`) → `promote_slots` + `peephole` (`mir_passes.cpp`) → verify →
-linear-scan register allocation (`x86_regalloc.cpp`, with its machine-level interference
-verifier) → x86-64 emission (`backend_x86.cpp`) → machine code (`x86_encoder.cpp`) → a
-relocatable object (`elf_writer.cpp`) → the same linker invocation the LLVM path uses.
+then per target: x86-64 through linear-scan register allocation (`x86_regalloc.cpp`,
+with its machine-level interference verifier) → emission (`backend_x86.cpp`) → machine
+code (`x86_encoder.cpp`) → a relocatable object (`elf_writer.cpp`) → the same linker
+invocation the LLVM path uses; or (`--target=wasm32-unknown-unknown`) a finished
+standalone `.wasm` module (`backend_wasm.cpp` → `wasm_encoder.cpp`) written straight to
+the output — whole-program compilation leaves nothing for a linker to do there.
+
 **`tests/backend_differential_test.py` reports 74 of 74 positive corpus fixtures
 producing identical exit codes and stdout under both backends — with the native side run
-under BOTH register allocators** — and every construct the corpus contains lowers,
-inline `asm` included. `--regalloc=trivial` keeps the stage-4/5 discipline alive as the
-standing triage tool.
+under BOTH register allocators** — and `tests/wasm_differential_test.py` reports 64 of
+those 74 producing identical results between native x86-64 and native wasm under node,
+with the other 10 refused BY NAME (the nine inline-asm/`@naked` fixtures, which are
+x86-only by definition, and one exercising the funcptr↔anyptr cast that is now a
+target-conditional sema error on wasm). `--regalloc=trivial` keeps the stage-4/5
+discipline alive as the standing triage tool.
 
-LLVM remains the default (`--backend=llvm`) and the only path for wasm. What remains is
-stages 7–10 below: the wasm backends and the flip-and-delete.
+LLVM remains the default (`--backend=llvm`) and the only path for wasm-emscripten. What
+remains is stages 8–10 below: the relocatable wasm form, the Relooper, and the
+flip-and-delete.
 
 The per-increment history, including the fifteen silent miscompiles the differential
 harness caught, is in `TODO.md`.
@@ -162,7 +170,28 @@ verifier re-checks pairwise interference and kill-range violations after every
 allocation and aborts the compile on any finding; `tests/x86_regalloc_test.cpp` pins the
 constraint properties in ctest.
 
-**7. wasm, standalone.** Structurally easier than x86-64 in two ways and harder in one.
+**7. wasm, standalone.** — DONE (`wasm_encoder.cpp` + `backend_wasm.cpp`), exactly as
+planned below: the dispatch loop shipped first (Relooper deferred to stage 9), every MIR
+value is a typed wasm local, aggregates live on a `__stack_pointer` shadow stack, a
+function pointer is a funcref table index (slot 0 reserved so null traps), and
+global-initializer relocations resolve at layout time — function targets to table
+indices, global targets to absolute addresses — because the final `.wasm` is emitted
+directly with nothing left for a linker. `@import` now binds import module/name
+(closing TODO §2.1) and External linkage exports every `@export`ed definition (§2.2);
+the funcptr↔anyptr cast became the promised target-conditional sema error. Two
+things the plan did not predict: C-variadic imports (printf) are reachable after all —
+the tail spills to a shadow-stack buffer passed as one trailing pointer, emscripten's
+own convention, so stage 8 will link real libc unchanged — and the first 32-bit
+lowering exposed a latent mirgen bug (the `any` blob's data word was placed at
+pointer_bytes() instead of 8, overwriting the u64 id's upper half; invisible on every
+64-bit run). Semantics that differ between wasm and x86 by instruction-set accident
+(shift counts mod 32 vs 64, `i32.div_s` trapping on INT32_MIN/-1, `f.ne` being
+unordered, trapping float→int) are widened to i64 or recomposed so both backends
+compute identical bits; `tests/wasm_differential_test.py` runs the corpus under node
+(`tests/wasm_host.js` is the minimal embedder: write/exit/sbrk/malloc-family/printf-
+family/file handles) against native x86-64.
+
+The original sizing rationale, kept as the design record:
 
 *Easier:* no register allocation at all — wasm functions have unlimited typed locals, so
 each MIR value becomes a local. And opcodes are one or two bytes with LEB128 immediates.

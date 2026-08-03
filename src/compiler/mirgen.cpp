@@ -14,6 +14,13 @@
 
 namespace mirgen {
     namespace {
+        // 'any' is {id: u64, data: ptr}: the data word sits at offset 8 on EVERY
+        // target, because the id is a u64 and aligns the pointer up — unlike the
+        // pointer-pair aggregates (slices, trait handles), whose second word IS at
+        // pointer_bytes(). Keep this beside them mentally: conflating the two was
+        // a latent bug only the first 32-bit lowering could expose.
+        inline constexpr int64_t ANY_DATA_OFFSET = 8;
+
         // Mangling must agree with codegen.cpp's symbol_name: while both backends exist, a
         // program compiled either way has to produce the same symbols, and the eventual
         // differential test compares them directly.
@@ -2888,10 +2895,16 @@ namespace mirgen {
                     data = b.slot_addr(spill);
                 }
 
-                const auto slot = b.add_slot(pointer_bytes() * 2, pointer_bytes(), "any");
+                // 'any' is {id: u64, data: ptr} with the data word at offset 8 on
+                // EVERY target — the id is a u64, so the layout does not contract
+                // on wasm32 the way pointer-pair aggregates do. Building it from
+                // pointer_bytes() was a latent bug no 64-bit run could see: the
+                // first wasm32 lowering stored the data pointer over the id's
+                // upper half and copied 16 bytes out of an 8-byte slot.
+                const auto slot = b.add_slot(16, 8, "any");
                 const auto base = b.slot_addr(slot);
                 b.store(base, b.const_int(mir::Ty::I64, static_cast<int64_t>(id)));
-                b.store(b.ptr_add_const(base, pointer_bytes()), data);
+                b.store(b.ptr_add_const(base, ANY_DATA_OFFSET), data);
                 return base;
             }
 
@@ -3816,7 +3829,7 @@ namespace mirgen {
                     return coerce_arg(b, value, target, from);
                 }
                 if (scalar_type(target) == mir::Ty::Ptr && from.kind == sema::TypeKind::Any) {
-                    return b.load(mir::Ty::Ptr, b.ptr_add_const(value, pointer_bytes()));
+                    return b.load(mir::Ty::Ptr, b.ptr_add_const(value, ANY_DATA_OFFSET));
                 }
                 // float -> int reads its signedness from the TARGET (which rounding form
                 // to use); every other direction reads it from the source.

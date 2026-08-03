@@ -1,3 +1,4 @@
+#include "compiler/backend_wasm.hpp"
 #include "compiler/backend_x86.hpp"
 #include "compiler/codegen.hpp"
 #include "compiler/elf_writer.hpp"
@@ -874,14 +875,17 @@ auto main(const int argc, char *argv[]) -> int {
         return lowered.ok ? 0 : 1;
     }
 
-    // '--backend=native': the stage-4 pipeline. Lower, run the stage-3 passes,
-    // verify, generate x86-64 machine code with the trivial register allocator,
-    // write the ELF object, and hand it to the SAME link/run tail the LLVM path
-    // uses — the two backends differ only in how the object's bytes came to exist.
+    // '--backend=native': the native pipeline. Lower, run the MIR passes, verify,
+    // then either x86-64 machine code through the register allocator and the SAME
+    // link/run tail the LLVM path uses, or (stage 7) a finished standalone .wasm
+    // written straight to the output — whole-program compilation leaves nothing
+    // for a linker to do on that target.
     if (options.backend == "native") {
-        if (target_triple.getArch() != llvm::Triple::x86_64 || !target_triple.isOSLinux()) {
-            llvm::errs() << "error: the native backend supports only x86_64-linux for now "
-                         << "(wasm is stage 7, docs/backend.md)\n";
+        const bool wasm_target = target_triple.getArch() == llvm::Triple::wasm32;
+        if (!wasm_target &&
+            (target_triple.getArch() != llvm::Triple::x86_64 || !target_triple.isOSLinux())) {
+            llvm::errs() << "error: the native backend supports x86_64-linux and wasm32 "
+                         << "targets (docs/backend.md)\n";
             return 1;
         }
         auto lowered = mirgen::generate(ast, sema, diag, mirgen::Options{
@@ -904,6 +908,36 @@ auto main(const int argc, char *argv[]) -> int {
             llvm::errs() << "error: internal error: MIR passes produced malformed MIR: "
                          << error.message << "\n";
             return 1;
+        }
+
+        if (wasm_target) {
+            const auto object_start = std::chrono::steady_clock::now();
+            const auto generated = backend_wasm::generate(lowered.module,
+                                                           lowered.test_info_global,
+                                                           lowered.test_runner_function);
+            if (!generated.ok) {
+                for (const auto &error : generated.errors) {
+                    llvm::errs() << "error: native backend: " << error << "\n";
+                }
+                return 1;
+            }
+            std::error_code write_error;
+            llvm::raw_fd_ostream out(options.output, write_error);
+            if (write_error) {
+                llvm::errs() << "error: cannot write '" << options.output << "'\n";
+                return 1;
+            }
+            out.write(reinterpret_cast<const char *>(generated.bytes.data()),
+                       static_cast<size_t>(generated.bytes.size()));
+            out.close();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - object_start);
+            llvm::errs() << "  wasm:    " << elapsed.count() << "ms\n";
+            const auto total = std::chrono::duration_cast<std::chrono::duration<double>>(
+                std::chrono::steady_clock::now() - start_time);
+            llvm::errs() << std::format("Compiled '{}' -> '{}' in {:.2f}s\n",
+                                         options.module_path, options.output, total.count());
+            return 0;
         }
 
         const auto object_start = std::chrono::steady_clock::now();

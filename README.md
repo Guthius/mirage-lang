@@ -27,8 +27,10 @@ Mirage is a compiled, statically-typed systems language that targets native code
   parser deliberately defers a decision to sema.
 - [`docs/backend.md`](docs/backend.md) — the design record for replacing LLVM with a
   Mirage-specific IR and native `x86_64`/`wasm` object generation. The x86-64 path works
-  end to end (`--backend=native`) and matches LLVM on the whole test corpus; LLVM remains
-  the default and the only path for wasm.
+  end to end (`--backend=native`, linear-scan register allocation) and matches LLVM on
+  the whole test corpus; `--backend=native --target=wasm32-unknown-unknown` emits a
+  finished standalone `.wasm` module directly, differentially tested against the x86-64
+  path under node. LLVM remains the default and the only path for wasm-emscripten.
 
 ## Building
 
