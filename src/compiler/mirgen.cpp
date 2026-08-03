@@ -3002,6 +3002,22 @@ namespace mirgen {
                 if (const auto macro = macro_args_.find(ident.name); macro != macro_args_.end()) {
                     return emit_macro_arg(b, macro->second);
                 }
+                // A VALUE generic parameter ('[N: usize]') referenced in an instance body
+                // is a compile-time constant on the active substitution env.
+                if (!sema_.active_generic_env_stack.empty()) {
+                    for (const auto &binding : *sema_.active_generic_env_stack.current()) {
+                        if (!binding.is_type && binding.param_name == ident.name) {
+                            if (const auto *num = std::get_if<int64_t>(&binding.const_value)) {
+                                const auto type = binding.const_value_type.kind != sema::TypeKind::Invalid
+                                    ? binding.const_value_type : expr_type(expr);
+                                return b.const_int(is_scalar(type) ? scalar_type(type) : usize_ty(), *num);
+                            }
+                            if (const auto *str = std::get_if<std::string>(&binding.const_value)) {
+                                return emit_string_literal(b, *str);
+                            }
+                        }
+                    }
+                }
                 if (const auto it = locals_.find(ident.name); it != locals_.end()) {
                     const auto type = local_types_.at(ident.name);
                     if (!is_scalar(type)) {
@@ -3991,14 +4007,30 @@ namespace mirgen {
             // Trait-handle dispatch is deliberately not handled here -- it is an indirect
             // call through a vtable slot, a different shape entirely.
             auto emit_method_call(mir::Builder &b, const ast::CallExpr &call, const ast::MemberExpr &member) -> mir::ValueId {
-                auto receiver_type = expr_type(member.object);
+                // lvalue_type, not expr_type: 'self' inside a method body is a LOCAL whose
+                // recorded type may be absent, and lvalue_type knows every receiver root.
+                auto receiver_type = lvalue_type(member.object);
                 if (receiver_type.kind == sema::TypeKind::Trait) {
                     unsupported("a trait-handle method call", call.location);
                     return mir::NO_VALUE;
                 }
 
-                const auto *info = sema::find_method(receiver_type, member.member, sema_);
+                // Method lookup goes through ONE stripped pointer level, mirroring the
+                // language's receiver auto-deref (codegen's resolve_callee does the same).
+                auto lookup_type = receiver_type;
+                if (lookup_type.kind == sema::TypeKind::Pointer) {
+                    if (const auto *pointee = sema_.pointee_at(lookup_type.pointee_index)) {
+                        lookup_type = *pointee;
+                    }
+                }
+
+                const auto *info = sema::find_method(lookup_type, member.member, sema_);
                 if (!info || !info->is_resolved) {
+                    // 'h.f(x)' where 'f' is a struct FIELD of function type is an indirect
+                    // call through the field's value, not a method at all.
+                    if (lvalue_type(call.callee).kind == sema::TypeKind::Function) {
+                        return emit_indirect_call(b, call);
+                    }
                     unsupported(std::format("a call to method '{}'", member.member), call.location);
                     return mir::NO_VALUE;
                 }

@@ -579,6 +579,26 @@ def case_native_variadics():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_self_calls_and_field_fn_ptrs():
+    """'self.bump()' inside a method resolves through one stripped pointer level (the
+    receiver auto-deref); 'h.f(x)' where 'f' is a function-typed FIELD is an indirect
+    call through the field's value, not a method."""
+    r = emit_mir("type Counter = struct { n: i32 }\n"
+                 "impl Counter {\n"
+                 "  fn bump(mut self) -> i32 { self.n += 1  return self.n }\n"
+                 "  pub fn twice(mut self) -> i32 { return self.bump() + self.bump() }\n}\n"
+                 "type Holder = struct { f: fn(i32) -> i32 }\n"
+                 "fn negate(v: i32) -> i32 { return -v }\n"
+                 "pub fn main() -> i32 {\n"
+                 "  mut c: Counter = { .n = 0 }\n  mut h: Holder = { .f = negate }\n"
+                 "  return c.twice() + h.f(-39)\n}\n")
+    check(r.returncode == 0, f"self-calls and field fn-ptrs lower ({r.stderr.strip()[:140]})")
+    check("call.indirect" in r.stdout, "the field call goes through call.indirect")
+    check(re.search(r"Counter::bump\(%\d+: ptr\)", r.stdout) is not None,
+          "the self-call resolves to the concrete method")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_switch_and_conditions():
     r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
                  "pub fn main() -> i32 {\n"
@@ -690,6 +710,7 @@ def main() -> int:
     case_ranges_unions_defaults()
     case_macros()
     case_native_variadics()
+    case_self_calls_and_field_fn_ptrs()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()
