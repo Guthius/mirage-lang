@@ -233,8 +233,31 @@ Done:
   named generic-method calls), `type_info_of` (18), calls dropping an ignorable
   error (13), inline `asm` (16), member accesses through generic types (9).
 
-  Still entirely absent from stage 2: generics (monomorphized instances), inline
-  `asm`, global initializers, `type_info_of`/reflection tables.
+- **Stage 2, sixteenth increment** — generics. One function per instance in
+  `generic_fn_instances_needed` (an ordered set, so declaration order is
+  deterministic), mangled `symbol_name(module, instance.mangled_name)` to match
+  codegen. Call sites route through sema's `expr_generic_fn_instance` record — checked
+  before ANY shape-based resolution, since the same call node resolves to a different
+  instance per enclosing instantiation — consulting BOTH key spellings sema uses (the
+  Expr variant-slot address for value calls, the CallExpr's own address for
+  group/forwarded/`try` calls). Instance bodies are emitted with that instance's own
+  expr side tables and its substitution env pushed on `active_generic_env_stack`,
+  which is what lets `size_of(T)` and parameter-dependent local type annotations
+  (`mut buf: [N]u8`) resolve; `operand_named_type` reads the env for a bare `T`
+  exactly as codegen's `resolve_operand_type` case 2 does. `fnv1a[i32]` as a
+  function-pointer VALUE resolves to the instance's address.
+
+  **Coverage: 86 of 271; zero verifier failures.** Cleared: the whole generic
+  cluster (~55): "this call form" 28→0 in its generic portion, `try_get`/`get`/`put`/
+  `remove`/... method calls, generic member accesses, `size_of(T)`-in-instance.
+
+  Largest remaining blockers: `type_info_of` (18), calls with defaulted arguments
+  (13), calls dropping an ignorable error (13), inline `asm` (16), `default` (6),
+  `for-in` over non-array operands (6), argument spreads (4).
+
+  Still entirely absent from stage 2: inline `asm`, global initializers,
+  `type_info_of`/reflection tables, defaulted arguments, the runtime
+  unhandled-error check.
 
 Remaining:
 

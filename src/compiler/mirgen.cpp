@@ -42,10 +42,12 @@ namespace mirgen {
                 declare_functions();
                 declare_methods();
                 declare_trait_methods();
+                declare_generic_functions();
                 declare_vtables();
                 emit_function_bodies();
                 emit_method_bodies();
                 emit_trait_method_bodies();
+                emit_generic_function_bodies();
 
                 // The verifier is the analogue of llvm::verifyModule, which the LLVM path
                 // runs on every compile. Running it here means a lowering bug is reported
@@ -324,6 +326,11 @@ namespace mirgen {
             // consume one -- so the sret blob's size cannot come from expr_type there.
             [[nodiscard]] auto callee_return_types(const ast::CallExpr &call) const
                 -> std::optional<std::vector<sema::ResolvedType>> {
+                // A generic call's return list lives on its resolved INSTANCE; checked
+                // first, mirroring emit_call's routing order.
+                if (const auto instance = generic_instance_for_call(call, nullptr)) {
+                    return sema_.generic_fn_instances[*instance]->return_types;
+                }
                 const auto through_pointer = [&]() -> std::optional<std::vector<sema::ResolvedType>> {
                     const auto callee_type = lvalue_type(call.callee);
                     if (callee_type.kind != sema::TypeKind::Function) return std::nullopt;
@@ -383,6 +390,28 @@ namespace mirgen {
                     return b.load(mir::Ty::Ptr, value);
                 }
                 return value;
+            }
+
+            // The monomorphized instance a call resolved to, if any. Sema keys the record
+            // two ways -- get_expr_key's VARIANT-SLOT address for a value call, the
+            // CallExpr's own address for a group/forwarded/'try' call, which never sees the
+            // outer Expr variant -- so both are consulted (codegen reads each back where it
+            // was written, split across two sites; one funnel here instead).
+            [[nodiscard]] auto generic_instance_for_call(const ast::CallExpr &call, const ast::Expr *expr) const
+                -> std::optional<size_t> {
+                if (!exprs_) return std::nullopt;
+                const auto &table = exprs_->expr_generic_fn_instance;
+                if (expr) {
+                    if (const auto it = table.find(sema::get_expr_key(*expr));
+                        it != table.end() && it->second < sema_.generic_fn_instances.size()) {
+                        return it->second;
+                    }
+                }
+                if (const auto it = table.find(&call);
+                    it != table.end() && it->second < sema_.generic_fn_instances.size()) {
+                    return it->second;
+                }
+                return std::nullopt;
             }
 
             [[nodiscard]] auto is_error_union(const sema::ResolvedType &type) const -> bool {
@@ -500,6 +529,133 @@ namespace mirgen {
                             method_index_[key(path, k)] = static_cast<uint32_t>(result_.module.functions.size() - 1);
                         }
                     }
+                }
+            }
+
+            // Monomorphized generic instances, keyed by their index into
+            // Program::generic_fn_instances. Only the instances sema marked as needed are
+            // declared -- generic_fn_instances_needed is a std::set, so declaration order
+            // is deterministic. Mangling must match codegen's:
+            // symbol_name(module, instance.mangled_name).
+            std::unordered_map<size_t, uint32_t> generic_instance_index_;
+
+            void declare_generic_functions() {
+                for (const auto idx : sema_.generic_fn_instances_needed) {
+                    const auto &instance = *sema_.generic_fn_instances[idx];
+
+                    mir::Signature sig;
+                    if (returns_via_sret(instance.return_types)) {
+                        sig.params.push_back(mir::Ty::Ptr); // sret
+                    } else if (!instance.return_types.empty()) {
+                        sig.result = scalar_type(instance.return_types.front());
+                    }
+                    if (instance.impl_decl) {
+                        sig.params.push_back(mir::Ty::Ptr); // self
+                    }
+                    for (const auto &p : instance.param_types) {
+                        sig.params.push_back(is_scalar(p) ? scalar_type(p) : mir::Ty::Ptr);
+                    }
+
+                    mir::Function f;
+                    f.name = symbol_name(instance.module_path, instance.mangled_name);
+                    f.linkage = mir::Linkage::Internal;
+                    f.signature = result_.module.intern_signature(std::move(sig));
+                    f.has_body = true;
+                    result_.module.functions.push_back(std::move(f));
+                    generic_instance_index_[idx] = static_cast<uint32_t>(result_.module.functions.size() - 1);
+                }
+            }
+
+            void emit_generic_function_bodies() {
+                for (const auto idx : sema_.generic_fn_instances_needed) {
+                    const auto it = generic_instance_index_.find(idx);
+                    const auto &instance = *sema_.generic_fn_instances[idx];
+                    const auto mod = sema_.modules.find(instance.module_path);
+                    if (it == generic_instance_index_.end() || mod == sema_.modules.end()) continue;
+
+                    module_path_ = &mod->first;
+                    module_ = &mod->second;
+                    // The whole body was checked into THIS instance's records, not the
+                    // module's -- every monomorphization of one generic walks the same AST
+                    // nodes, so per-node tables must be per-instance.
+                    exprs_ = sema_.find_fn_instance_exprs(idx);
+                    if (!exprs_) exprs_ = &mod->second.exprs;
+
+                    // The ambient env serves the few sites (a local's own type annotation,
+                    // e.g. 'mut buf: [N]u8') that re-derive a type from an ast::Type node
+                    // via resolve_declared_type instead of reading expr_types.
+                    const auto &generic_params = instance.decl
+                        ? instance.decl->generic_params : *instance.generic_params_for_method;
+                    const auto env = sema::build_generic_binding_env(generic_params, instance.args);
+                    const sema::ActiveGenericEnvStack::PushGuard env_guard(
+                        const_cast<sema::Program &>(sema_).active_generic_env_stack, &env);
+
+                    emit_generic_instance_body(it->second, instance);
+                }
+                module_path_ = nullptr;
+                module_ = nullptr;
+                exprs_ = nullptr;
+            }
+
+            void emit_generic_instance_body(const uint32_t fn_index, const sema::GenericFunctionInstance &instance) {
+                mir::Builder b(result_.module, fn_index);
+                locals_.clear();
+                local_types_.clear();
+                slots_escaping_.clear();
+                sret_ = mir::NO_VALUE;
+                loop_stack_.clear();
+                defer_scopes_.clear();
+                next_block_is_loop_body_ = false;
+
+                const auto entry = b.create_block("entry");
+                b.set_insert_point(entry);
+                const auto &sig = result_.module.signatures[result_.module.functions[fn_index].signature];
+
+                size_t first_param = 0;
+                if (returns_via_sret(instance.return_types)) {
+                    sret_ = b.add_block_param(entry, mir::Ty::Ptr);
+                    result_.module.functions[fn_index].params.push_back(sret_);
+                    first_param = 1;
+                }
+                if (instance.impl_decl && instance.self_type) {
+                    // 'self' arrives as a pointer and is bound as one, exactly as in
+                    // emit_method_body.
+                    const auto self_value = b.add_block_param(entry, mir::Ty::Ptr);
+                    result_.module.functions[fn_index].params.push_back(self_value);
+                    const auto self_slot = b.add_slot(pointer_bytes(), pointer_bytes(), "self");
+                    b.store(b.slot_addr(self_slot), self_value);
+                    locals_["self"] = self_slot;
+                    local_types_["self"] = pointer_type_to(*instance.self_type);
+                    first_param += 1;
+                }
+
+                // FunctionDecl::Param and ImplDecl::Function::Param are distinct types;
+                // only the names are needed here.
+                std::vector<const std::string *> param_names;
+                if (instance.decl) {
+                    for (const auto &p : instance.decl->params) param_names.push_back(&p.name);
+                } else {
+                    for (const auto &p : instance.impl_decl->params) param_names.push_back(&p.name);
+                }
+                for (size_t i = 0; i < instance.param_types.size() && i + first_param < sig.params.size(); ++i) {
+                    const auto value = b.add_block_param(entry, sig.params[i + first_param]);
+                    result_.module.functions[fn_index].params.push_back(value);
+                    if (i < param_names.size()) {
+                        bind_param(b, *param_names[i], instance.param_types[i], value);
+                    }
+                }
+
+                current_returns_ = &instance.return_types;
+                emit_stmt(b, instance.decl ? instance.decl->body : instance.impl_decl->body,
+                           instance.return_types);
+                current_returns_ = nullptr;
+
+                for (const auto slot : slots_escaping_) {
+                    b.mark_slot_escaping(slot);
+                }
+                if (!b.block_is_terminated()) {
+                    if (instance.return_types.empty()) b.ret();
+                    else b.unreachable();
                 }
             }
 
@@ -2542,6 +2698,17 @@ namespace mirgen {
                         return emit_load_from_address(b, expr, loc, expr_kind_name<V>());
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IndexOrInstantiateExpr>>) {
+                        // 'fnv1a[i32]' as a VALUE names a monomorphized instance as a
+                        // function pointer; sema recorded which one.
+                        if (exprs_ && expr_type(expr).kind == sema::TypeKind::Function) {
+                            if (const auto it = exprs_->expr_generic_fn_instance.find(sema::get_expr_key(expr));
+                                it != exprs_->expr_generic_fn_instance.end()) {
+                                if (const auto fn = generic_instance_index_.find(it->second);
+                                    fn != generic_instance_index_.end()) {
+                                    return b.func_addr(fn->second);
+                                }
+                            }
+                        }
                         return emit_load_from_address(b, expr, loc, expr_kind_name<V>());
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) {
@@ -2954,8 +3121,14 @@ namespace mirgen {
                     return mir::NO_VALUE;
                 }
 
-                // Dynamic dispatch through a trait handle, decided by sema and keyed by the
-                // call node -- never re-derived from the receiver's shape here.
+                // A call sema resolved to a monomorphized generic instance -- checked FIRST,
+                // before any shape-based routing: the same call node resolves to a different
+                // instance per enclosing instantiation, so nothing here may re-derive it.
+                if (const auto instance = generic_instance_for_call(call, &expr)) {
+                    return emit_generic_call(b, call, *instance);
+                }
+                // Dynamic dispatch through a trait handle, likewise decided by sema and
+                // keyed by the call node.
                 if (exprs_) {
                     if (const auto it = exprs_->expr_trait_dispatch.find(&call);
                         it != exprs_->expr_trait_dispatch.end()) {
@@ -3253,6 +3426,72 @@ namespace mirgen {
                 // Mirage's '++'/'--' are statements in practice; yielding the NEW value is
                 // the conservative choice and matches what an assignment expression returns.
                 return updated;
+            }
+
+            // A call to a monomorphized generic instance -- a direct call to the function
+            // declare_generic_functions made for it; only the receiver (for a generic
+            // method) needs the same address-taking a concrete method call does.
+            auto emit_generic_call(mir::Builder &b, const ast::CallExpr &call, const size_t instance_idx) -> mir::ValueId {
+                const auto it = generic_instance_index_.find(instance_idx);
+                if (it == generic_instance_index_.end() ||
+                    instance_idx >= sema_.generic_fn_instances.size()) {
+                    unsupported("a call to an undeclared generic instance", call.location);
+                    return mir::NO_VALUE;
+                }
+                if (exprs_ && exprs_->call_dropped_optional_error.contains(&call)) {
+                    unsupported("a call dropping an ignorable error", call.location);
+                    return mir::NO_VALUE;
+                }
+                const auto &instance = *sema_.generic_fn_instances[instance_idx];
+                const auto &sig = result_.module.signatures[result_.module.functions[it->second].signature];
+
+                std::vector<mir::ValueId> args;
+                mir::ValueId sret_slot = mir::NO_VALUE;
+                if (returns_via_sret(instance.return_types)) {
+                    const auto layout = multi_return_layout(instance.return_types);
+                    const auto slot = b.add_slot(layout.size, layout.align, "ret");
+                    sret_slot = b.slot_addr(slot);
+                    args.push_back(sret_slot);
+                }
+
+                if (instance.impl_decl) {
+                    const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee);
+                    if (!member) {
+                        unsupported("a generic method call of this form", call.location);
+                        return mir::NO_VALUE;
+                    }
+                    const auto obj_type = expr_type((*member)->object);
+                    mir::ValueId self;
+                    if (obj_type.kind == sema::TypeKind::Pointer) {
+                        self = emit_expr(b, (*member)->object);
+                    } else {
+                        mark_root_slot_escaping((*member)->object);
+                        self = emit_address(b, (*member)->object);
+                    }
+                    if (self == mir::NO_VALUE) {
+                        unsupported("a generic method call on this receiver", call.location);
+                        return mir::NO_VALUE;
+                    }
+                    args.push_back(self);
+                }
+
+                for (size_t i = 0; i < call.args.size(); ++i) {
+                    auto value = emit_expr(b, call.args[i]);
+                    if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                    if (i < instance.param_types.size()) {
+                        value = coerce_arg(b, value, instance.param_types[i], expr_type(call.args[i]));
+                    }
+                    const auto slot = args.size();
+                    args.push_back(slot < sig.params.size()
+                        ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
+                        : value);
+                }
+                if (!sig.is_variadic && args.size() != sig.params.size()) {
+                    unsupported("a call with defaulted arguments", call.location);
+                    return mir::NO_VALUE;
+                }
+                const auto result = b.call(it->second, sig.result, args);
+                return sret_slot != mir::NO_VALUE ? sret_slot : result;
             }
 
             // A '.method()' call through a dyn-handle receiver: an indirect call through
@@ -3668,6 +3907,17 @@ namespace mirgen {
                             if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second);
                                 ts && ts->resolved) {
                                 return *ts->resolved;
+                            }
+                        }
+                    }
+                    // 'size_of(T)' inside a generic instantiation: 'T' is never a module
+                    // symbol by now and never gets its own expr_types entry -- it lives on
+                    // the active substitution env, exactly as sema resolved it (codegen's
+                    // resolve_operand_type, case 2).
+                    if (!sema_.active_generic_env_stack.empty()) {
+                        for (const auto &binding : *sema_.active_generic_env_stack.current()) {
+                            if (binding.is_type && binding.param_name == ident->name) {
+                                return binding.type_value;
                             }
                         }
                     }

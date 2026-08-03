@@ -507,6 +507,29 @@ def case_bitsets_and_slice_casts():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_generic_instances():
+    """A generic call resolves to the monomorphized instance sema already picked
+    (expr_generic_fn_instance) -- never re-derived here -- and each instance's body is
+    emitted with that instance's own expr tables and substitution env active, which is
+    what makes 'size_of(T)' inside the body fold to the concrete type's size."""
+    r = emit_mir("fn scaled[T: type](v: T) -> T {\n"
+                 "  return v * cast(size_of(T), T)\n}\n"
+                 "pub type Box[T: type] = struct { value: T }\n"
+                 "impl Box[T: type] {\n"
+                 "  pub fn get(self) -> T { return self.value }\n}\n"
+                 "pub fn main() -> i32 {\n"
+                 "  mut b: Box[i64] = { .value = 5 }\n"
+                 "  return cast(scaled[i64](4) + b.get(), i32)\n}\n")
+    check(r.returncode == 0, f"generic instances lower ({r.stderr.strip()[:140]})")
+    check(re.search(r"fn @\S*scaled__i64\(", r.stdout) is not None,
+          "a free-function instance is emitted under its mangled name")
+    check(re.search(r"fn @\S*Box__i64::get\(%\d+: ptr\)", r.stdout) is not None,
+          "a generic-type method instance takes self as a leading pointer")
+    check("const.int 8" in r.stdout,
+          "'size_of(T)' inside the instance folds through the substitution env")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_switch_and_conditions():
     r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
                  "pub fn main() -> i32 {\n"
@@ -614,6 +637,7 @@ def main() -> int:
     case_compound_assignment()
     case_defer_ternary_sizeof()
     case_bitsets_and_slice_casts()
+    case_generic_instances()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()
