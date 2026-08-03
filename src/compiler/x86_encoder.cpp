@@ -371,4 +371,89 @@ namespace x86 {
     void Encoder::sub_rsp(const int32_t bytes) { alu_ri(Alu::Sub, Width::W64, Reg::RSP, bytes); }
     void Encoder::add_rsp(const int32_t bytes) { alu_ri(Alu::Add, Width::W64, Reg::RSP, bytes); }
     void Encoder::ud2() { byte(0x0F); byte(0x0B); }
+
+    // --- inline-asm support -----------------------------------------------------
+
+    void Encoder::nop() { byte(0x90); }
+    void Encoder::syscall() { byte(0x0F); byte(0x05); }
+    void Encoder::cpuid() { byte(0x0F); byte(0xA2); }
+
+    void Encoder::alu_rm(const Alu op, const Width w, const Reg dst, const Reg base, const int32_t disp) {
+        const auto d = static_cast<uint8_t>(dst);
+        if (w == Width::W16) byte(0x66);
+        rex(w == Width::W64, d, static_cast<uint8_t>(base), w == Width::W8 && needs_byte_rex(d));
+        // The 0x03-family (reg <- reg op mem) is the r/m-as-source direction.
+        byte(static_cast<uint8_t>(static_cast<uint8_t>(op) * 8 | (w == Width::W8 ? 0x02 : 0x03)));
+        modrm_mem(d, base, disp);
+    }
+
+    void Encoder::alu_mr(const Alu op, const Width w, const Reg base, const int32_t disp, const Reg src) {
+        const auto s = static_cast<uint8_t>(src);
+        if (w == Width::W16) byte(0x66);
+        rex(w == Width::W64, s, static_cast<uint8_t>(base), w == Width::W8 && needs_byte_rex(s));
+        byte(static_cast<uint8_t>(static_cast<uint8_t>(op) * 8 | (w == Width::W8 ? 0x00 : 0x01)));
+        modrm_mem(s, base, disp);
+    }
+
+    void Encoder::alu_mi(const Alu op, const Width w, const Reg base, const int32_t disp, const int32_t imm) {
+        if (w == Width::W16) byte(0x66);
+        rex(w == Width::W64, 0, static_cast<uint8_t>(base));
+        byte(w == Width::W8 ? 0x80 : 0x81);
+        modrm_mem(static_cast<uint8_t>(op), base, disp);
+        if (w == Width::W8) byte(static_cast<uint8_t>(imm));
+        else if (w == Width::W16) { byte(static_cast<uint8_t>(imm)); byte(static_cast<uint8_t>(imm >> 8)); }
+        else imm32(imm);
+    }
+
+    void Encoder::mov_mi(const Width w, const Reg base, const int32_t disp, const int32_t imm) {
+        if (w == Width::W16) byte(0x66);
+        rex(w == Width::W64, 0, static_cast<uint8_t>(base));
+        byte(w == Width::W8 ? 0xC6 : 0xC7);
+        modrm_mem(0, base, disp);
+        if (w == Width::W8) byte(static_cast<uint8_t>(imm));
+        else if (w == Width::W16) { byte(static_cast<uint8_t>(imm)); byte(static_cast<uint8_t>(imm >> 8)); }
+        else imm32(imm);
+    }
+
+    void Encoder::movzx_m(const Width from, const Reg dst, const Reg base, const int32_t disp) {
+        const auto d = static_cast<uint8_t>(dst);
+        if (from == Width::W32 || from == Width::W64) {
+            // No movzx from 32: a plain 32-bit load already zero-extends.
+            rex(false, d, static_cast<uint8_t>(base));
+            byte(0x8B);
+            modrm_mem(d, base, disp);
+            return;
+        }
+        rex(true, d, static_cast<uint8_t>(base));
+        byte(0x0F);
+        byte(from == Width::W8 ? 0xB6 : 0xB7);
+        modrm_mem(d, base, disp);
+    }
+
+    void Encoder::unary_m(const uint8_t slot, const Width w, const Reg base, const int32_t disp) {
+        if (w == Width::W16) byte(0x66);
+        rex(w == Width::W64, 0, static_cast<uint8_t>(base));
+        // inc/dec (slots 0/1) live on 0xFE/0xFF; not/neg (2/3) on 0xF6/0xF7.
+        byte(slot <= 1 ? (w == Width::W8 ? 0xFE : 0xFF) : (w == Width::W8 ? 0xF6 : 0xF7));
+        modrm_mem(slot <= 1 ? slot : static_cast<uint8_t>(slot), base, disp);
+    }
+
+    void Encoder::unary_r(const uint8_t slot, const Width w, const Reg reg) {
+        const auto r = static_cast<uint8_t>(reg);
+        if (w == Width::W16) byte(0x66);
+        rex(w == Width::W64, 0, r);
+        byte(slot <= 1 ? (w == Width::W8 ? 0xFE : 0xFF) : (w == Width::W8 ? 0xF6 : 0xF7));
+        modrm_reg(slot, r);
+    }
+
+    void Encoder::push_m(const Reg base, const int32_t disp) {
+        rex(false, 0, static_cast<uint8_t>(base));
+        byte(0xFF);
+        modrm_mem(6, base, disp);
+    }
+    void Encoder::pop_m(const Reg base, const int32_t disp) {
+        rex(false, 0, static_cast<uint8_t>(base));
+        byte(0x8F);
+        modrm_mem(0, base, disp);
+    }
 }

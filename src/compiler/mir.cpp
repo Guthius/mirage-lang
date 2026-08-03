@@ -105,6 +105,7 @@ namespace mir {
         case Op::IntToPtr:     return "inttoptr";
         case Op::Bitcast:      return "bitcast";
         case Op::Select:       return "select";
+        case Op::Asm:          return "asm";
         case Op::Call:         return "call";
         case Op::CallIndirect: return "call.indirect";
         case Op::Jump:         return "jump";
@@ -300,6 +301,11 @@ namespace mir {
 
     auto Builder::select(const ValueId condition, const ValueId if_true, const ValueId if_false, const Ty type) -> ValueId {
         return emit(Inst{.op = Op::Select, .type = type, .a = condition, .b = if_true, .c = if_false});
+    }
+
+    auto Builder::asm_block(const uint32_t block, const Ty result_type,
+                             const std::vector<ValueId> &operands) -> ValueId {
+        return emit(Inst{.op = Op::Asm, .type = result_type, .a = block, .args = operands});
     }
 
     auto Builder::call(const uint32_t callee, const Ty result_type, const std::vector<ValueId> &args) -> ValueId {
@@ -505,6 +511,30 @@ namespace mir {
                     check_operand(fn, inst.b, site);
                     if (inst.type != Ty::Ptr) fail(std::format("{}: result must be 'ptr'", site));
                     break;
+
+                case Op::Asm: {
+                    if (inst.a >= module.asm_blocks.size()) {
+                        fail(std::format("{}: asm block {} does not exist", site, inst.a));
+                        break;
+                    }
+                    // Every operand is the ADDRESS of a variable's storage; an asm
+                    // block never takes a value directly, because with no register
+                    // allocator a variable operand IS its memory location.
+                    for (const auto arg : inst.args) {
+                        check_operand_type(fn, arg, Ty::Ptr, site);
+                    }
+                    const auto &block = module.asm_blocks[inst.a];
+                    for (const auto &instruction : block.instructions) {
+                        for (const auto &operand : instruction.operands) {
+                            if (operand.kind == AsmOperand::Kind::Variable &&
+                                operand.arg_index >= inst.args.size()) {
+                                fail(std::format("{}: asm operand references argument {} of {}",
+                                                  site, operand.arg_index, inst.args.size()));
+                            }
+                        }
+                    }
+                    break;
+                }
 
                 case Op::Select:
                     check_operand_type(fn, inst.a, Ty::I1, site);
@@ -714,6 +744,32 @@ namespace mir {
                     out += value_ref(fn, inst.args[i]);
                 }
                 out += ")";
+                break;
+            }
+            case Op::Asm: {
+                // The instructions themselves, inline: an asm block's whole content is
+                // its text, and printing only a block index would make '--emit-mir'
+                // useless for exactly the construct hardest to get right.
+                out += module.asm_blocks[inst.a].result_register.empty()
+                    ? std::string(" {")
+                    : std::format(" -> {} {{", module.asm_blocks[inst.a].result_register);
+                for (const auto &instruction : module.asm_blocks[inst.a].instructions) {
+                    out += "\n      " + instruction.mnemonic;
+                    for (size_t i = 0; i < instruction.operands.size(); ++i) {
+                        const auto &operand = instruction.operands[i];
+                        out += i ? ", " : " ";
+                        switch (operand.kind) {
+                        case AsmOperand::Kind::Register:  out += operand.reg; break;
+                        case AsmOperand::Kind::Immediate: out += std::to_string(operand.imm); break;
+                        case AsmOperand::Kind::Variable:
+                            out += operand.arg_index < inst.args.size()
+                                ? std::format("[{}]", value_ref(fn, inst.args[operand.arg_index]))
+                                : std::string("[<bad>]");
+                            break;
+                        }
+                    }
+                }
+                out += "\n    }";
                 break;
             }
             case Op::CallIndirect: {

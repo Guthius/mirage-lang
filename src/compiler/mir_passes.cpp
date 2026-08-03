@@ -181,6 +181,10 @@ namespace mir {
                 visit(inst.c);
                 return;
             case Op::Call:
+            case Op::Asm:
+                // Asm's 'a' is a block index, never a value -- visiting it would hand
+                // the passes a bogus ValueId (and, worse, let promote_slots believe an
+                // asm-referenced slot was unused).
                 for (auto &arg : inst.args) visit(arg);
                 return;
             case Op::CallIndirect:

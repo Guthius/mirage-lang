@@ -102,14 +102,13 @@ def case_unsigned_and_float_operators():
 
 def case_unsupported_is_reported_not_skipped():
     """The property that matters while coverage is partial."""
-    # Inline 'asm' is the probe BECAUSE it is still unlowered (it needs the stage-5
-    # encoder) -- when that changes, point this at whatever is unlowered then rather than
-    # deleting it. The property under test is that mirgen refuses loudly, not that any
-    # particular construct is missing.
+    # 'stackalloc' is the probe BECAUSE it is still unlowered -- when that changes,
+    # point this at whatever is unlowered then rather than deleting it. The property
+    # under test is that mirgen refuses loudly, not that any particular construct is
+    # missing. (Previous probes: 'defer', then inline 'asm'; both now lower.)
     r = emit_mir("pub fn main() -> i32 {\n"
-                 "  mut x: i64 = 41\n"
-                 "  asm {\n    add x, 1\n  }\n"
-                 "  return cast(x, i32) - 42\n}\n")
+                 "  const p := stackalloc(16)\n"
+                 "  return cast(p == nil, i32)\n}\n")
     check(r.returncode != 0, "a construct mirgen cannot lower fails the build")
     check("native backend cannot lower" in r.stderr,
           "and says so, naming the native backend")

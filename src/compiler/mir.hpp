@@ -102,6 +102,12 @@ namespace mir {
 
         Select,        // a = condition (I1), b = if-true, c = if-false
 
+        // Inline assembly. 'a' indexes Module::asm_blocks; Inst::args carries one
+        // POINTER value per variable operand (the variable's storage), which the
+        // block's operands reference by index. Defines a value only for the
+        // expression form ('asm -> reg'), whose result is that register at exit.
+        Asm,
+
         // --- calls -----------------------------------------------------------------
         // 'a' indexes Module::functions; arguments are in Inst::args. Defines the return
         // value, or nothing when the callee returns Void.
@@ -239,12 +245,43 @@ namespace mir {
         std::string section;
     };
 
+    // One resolved inline-asm operand. A register or an immediate is literal; a
+    // variable refers to Inst::args[arg_index], which holds a pointer to that
+    // variable's storage — with no register allocator involved, a backend renders it
+    // as an ordinary memory operand.
+    struct AsmOperand {
+        enum class Kind : uint8_t { Register, Immediate, Variable };
+        Kind kind = Kind::Register;
+        std::string reg;           // Register: normalized name, e.g. "eax"
+        uint32_t width_bits = 64;  // Register/Variable: operand width
+        int64_t imm = 0;           // Immediate
+        uint32_t arg_index = 0;    // Variable: index into Inst::args
+    };
+
+    struct AsmInstruction {
+        std::string mnemonic;      // normalized lowercase; sema validated it
+        std::vector<AsmOperand> operands;
+        uint32_t line = 0;
+        uint32_t column = 0;
+    };
+
+    // A whole 'asm { ... }' / 'asm -> reg { ... }' block, with sema's clobber
+    // analysis carried through: a backend that allocates registers needs it, and the
+    // trivial one still needs 'clobbers_memory' to know it cannot cache anything.
+    struct AsmBlock {
+        std::vector<AsmInstruction> instructions;
+        std::vector<std::string> clobbered_families; // 64-bit roots, e.g. "rax"
+        bool clobbers_memory = false;
+        std::string result_register;                  // empty for the statement form
+    };
+
     struct Module {
         std::string name;
         uint32_t pointer_bits = 64;
         std::vector<Function> functions;
         std::vector<Global> globals;
         std::vector<Signature> signatures;
+        std::vector<AsmBlock> asm_blocks;
 
         // Returns an existing index for an identical signature, or appends. Deduplication is
         // required for wasm (a type index must be unique per shape) and free elsewhere.
@@ -304,6 +341,12 @@ namespace mir {
         auto call(uint32_t callee, Ty result_type, const std::vector<ValueId> &args) -> ValueId;
         auto call_indirect(ValueId callee, uint32_t signature, Ty result_type,
                             const std::vector<ValueId> &args) -> ValueId;
+
+        // --- inline asm ---
+        // 'block' indexes Module::asm_blocks; 'operands' are the variable operands'
+        // storage POINTERS, referenced by AsmOperand::arg_index. Ty::Void for the
+        // statement form.
+        auto asm_block(uint32_t block, Ty result_type, const std::vector<ValueId> &operands) -> ValueId;
 
         // --- terminators ---
         void jump(BlockId target, const std::vector<ValueId> &args = {});

@@ -1268,6 +1268,17 @@ namespace mirgen {
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SwitchStmt>>) {
                         emit_switch(b, *v, returns);
 
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmStmt>>) {
+                        if (!exprs_) {
+                            unsupported("an 'asm' block", v->location);
+                        } else if (const auto it = exprs_->asm_stmt_info.find(v.get());
+                                    it != exprs_->asm_stmt_info.end()) {
+                            (void) emit_asm(b, v->instructions, it->second, {}, mir::Ty::Void,
+                                             v->location);
+                        } else {
+                            unsupported("an 'asm' block", v->location);
+                        }
+
                     } else if constexpr (std::is_same_v<V, ast::ReturnOkStmt>) {
                         emit_return_ok(b, v, returns);
 
@@ -1285,7 +1296,6 @@ namespace mirgen {
                 if constexpr (std::is_same_v<V, std::unique_ptr<ast::ForInStmt>>) return "a 'for-in' loop";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SwitchStmt>>) return "a 'switch' statement";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::WhenStmt>>) return "a 'when' statement";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmStmt>>) return "an 'asm' block";
                 else if constexpr (std::is_same_v<V, ast::BreakStmt>) return "'break'";
                 else if constexpr (std::is_same_v<V, ast::ContinueStmt>) return "'continue'";
                 else if constexpr (std::is_same_v<V, ast::LinkDecl>) return "'#link'";
@@ -2821,7 +2831,6 @@ namespace mirgen {
                 else if constexpr (std::is_same_v<V, ast::UndefinedExpr>) return "'undefined'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) return "'++' / '--'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StackAllocExpr>>) return "'stackalloc'";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmExpr>>) return "an 'asm' expression";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) return "'$option'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) return "'$env'";
                 else if constexpr (std::is_same_v<V, ast::RttiEnabledExpr>) return "'$rtti_enabled'";
@@ -3152,6 +3161,20 @@ namespace mirgen {
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) {
                         return emit_match(b, *v, expr);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmExpr>>) {
+                        const auto type = expr_type(expr);
+                        if (!exprs_) {
+                            unsupported("an 'asm' expression", v->location);
+                            return mir::NO_VALUE;
+                        }
+                        const auto it = exprs_->asm_expr_info.find(v.get());
+                        if (it == exprs_->asm_expr_info.end() || !is_scalar(type)) {
+                            unsupported("an 'asm' expression", v->location);
+                            return mir::NO_VALUE;
+                        }
+                        return emit_asm(b, v->instructions, it->second, v->result_register.name,
+                                         scalar_type(type), v->location);
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TryExpr>>) {
                         return emit_try(b, *v, loc);
@@ -5068,6 +5091,69 @@ namespace mirgen {
                 b.store(b.ptr_add_const(header_base, pointer_bytes()),
                          b.const_int(usize, static_cast<int64_t>(n)));
                 return header_base;
+            }
+
+            // 'asm { ... }' / 'asm -> reg { ... }'. Sema already resolved every operand,
+            // validated the mnemonics and computed the clobber set, so lowering is a
+            // transliteration into MIR's own asm carrier -- with ONE real decision: a
+            // variable operand becomes a POINTER to the variable's storage. That works
+            // for both directions ('var' reads it, '&var' writes it, and the mnemonic
+            // decides which), because without a register allocator a variable operand is
+            // simply its memory location. Every referenced local is therefore pinned:
+            // promote_slots must not lift a variable the asm block addresses.
+            auto emit_asm(mir::Builder &b, const std::vector<ast::AsmInstruction> &instructions,
+                           const sema::AsmStmtInfo &info, const std::string &result_register,
+                           const mir::Ty result_type, const SourceLocation &loc) -> mir::ValueId {
+                mir::AsmBlock block;
+                block.result_register = result_register;
+                block.clobbers_memory = info.clobbers_memory;
+                block.clobbered_families.assign(info.clobbered_families.begin(),
+                                                 info.clobbered_families.end());
+
+                std::vector<mir::ValueId> operand_values;
+                for (const auto &instruction : instructions) {
+                    mir::AsmInstruction out;
+                    out.mnemonic = instruction.mnemonic;
+                    out.line = instruction.location.line;
+                    out.column = instruction.location.column;
+                    bool ok = true;
+                    for (const auto &operand : instruction.operands) {
+                        std::visit([&]<typename T>(const T &op) {
+                            using OpT = std::decay_t<T>;
+                            if constexpr (std::is_same_v<OpT, ast::AsmRegisterOperand>) {
+                                out.operands.push_back({.kind = mir::AsmOperand::Kind::Register,
+                                                         .reg = op.name, .width_bits = op.width_bits});
+                            } else if constexpr (std::is_same_v<OpT, ast::AsmImmediateOperand>) {
+                                out.operands.push_back({.kind = mir::AsmOperand::Kind::Immediate,
+                                                         .imm = op.value});
+                            } else {
+                                const auto it = locals_.find(op.name);
+                                if (it == locals_.end()) {
+                                    unsupported(std::format("an 'asm' operand naming '{}'", op.name),
+                                                 op.location);
+                                    ok = false;
+                                    return;
+                                }
+                                const auto type = local_types_.count(op.name)
+                                    ? local_types_.at(op.name) : sema::ResolvedType{};
+                                slots_escaping_.insert(it->second);
+                                operand_values.push_back(b.slot_addr(it->second));
+                                out.operands.push_back({
+                                    .kind = mir::AsmOperand::Kind::Variable,
+                                    .width_bits = std::max(8u, size_of(type) * 8),
+                                    .arg_index = static_cast<uint32_t>(operand_values.size() - 1),
+                                });
+                            }
+                        }, operand);
+                    }
+                    if (!ok) return mir::NO_VALUE;
+                    block.instructions.push_back(std::move(out));
+                }
+
+                result_.module.asm_blocks.push_back(std::move(block));
+                const auto index = static_cast<uint32_t>(result_.module.asm_blocks.size() - 1);
+                b.set_location(loc.line, loc.column);
+                return b.asm_block(index, result_type, operand_values);
             }
 
             // A macro call: bind each argument with the CALLER's context captured, then

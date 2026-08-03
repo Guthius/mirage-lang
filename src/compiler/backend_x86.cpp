@@ -22,6 +22,8 @@
 
 #include <algorithm>
 #include <format>
+#include <optional>
+#include <string>
 #include <unordered_map>
 
 namespace backend_x86 {
@@ -494,6 +496,7 @@ namespace backend_x86 {
 
                 case Op::Call: emit_call(inst, false); return;
                 case Op::CallIndirect: emit_call(inst, true); return;
+                case Op::Asm: emit_asm(inst); return;
 
                 case Op::Jump: {
                     pass_block_args(inst.a, inst.args);
@@ -547,6 +550,212 @@ namespace backend_x86 {
 
             uint32_t fmod_symbol = 0;
             uint32_t fmodf_symbol = 0;
+
+            // ---- inline asm ------------------------------------------------------
+            // Every operand is already resolved (sema) and every variable operand is a
+            // pointer to a FRAME SLOT (mirgen pins them), so an asm instruction encodes
+            // directly against [rbp - offset] with no register allocation and no
+            // constraint model at all — the simplification the plan predicted from
+            // owning the allocator.
+            struct AsmArg {
+                bool is_memory = false;
+                int32_t disp = 0;   // memory: rbp-relative
+                Reg reg = Reg::RAX; // register operand
+                int64_t imm = 0;
+                bool is_imm = false;
+                Width width = Width::W64;
+            };
+
+            static auto reg_by_name(const std::string &name) -> std::optional<Reg> {
+                static const std::unordered_map<std::string, Reg> table = {
+                    {"rax", Reg::RAX}, {"eax", Reg::RAX}, {"ax", Reg::RAX}, {"al", Reg::RAX},
+                    {"rcx", Reg::RCX}, {"ecx", Reg::RCX}, {"cx", Reg::RCX}, {"cl", Reg::RCX},
+                    {"rdx", Reg::RDX}, {"edx", Reg::RDX}, {"dx", Reg::RDX}, {"dl", Reg::RDX},
+                    {"rbx", Reg::RBX}, {"ebx", Reg::RBX}, {"bx", Reg::RBX}, {"bl", Reg::RBX},
+                    {"rsp", Reg::RSP}, {"esp", Reg::RSP}, {"sp", Reg::RSP}, {"spl", Reg::RSP},
+                    {"rbp", Reg::RBP}, {"ebp", Reg::RBP}, {"bp", Reg::RBP}, {"bpl", Reg::RBP},
+                    {"rsi", Reg::RSI}, {"esi", Reg::RSI}, {"si", Reg::RSI}, {"sil", Reg::RSI},
+                    {"rdi", Reg::RDI}, {"edi", Reg::RDI}, {"di", Reg::RDI}, {"dil", Reg::RDI},
+                    {"r8", Reg::R8},   {"r8d", Reg::R8},  {"r8w", Reg::R8},  {"r8b", Reg::R8},
+                    {"r9", Reg::R9},   {"r9d", Reg::R9},  {"r9w", Reg::R9},  {"r9b", Reg::R9},
+                    {"r10", Reg::R10}, {"r10d", Reg::R10}, {"r10w", Reg::R10}, {"r10b", Reg::R10},
+                    {"r11", Reg::R11}, {"r11d", Reg::R11}, {"r11w", Reg::R11}, {"r11b", Reg::R11},
+                    {"r12", Reg::R12}, {"r12d", Reg::R12}, {"r12w", Reg::R12}, {"r12b", Reg::R12},
+                    {"r13", Reg::R13}, {"r13d", Reg::R13}, {"r13w", Reg::R13}, {"r13b", Reg::R13},
+                    {"r14", Reg::R14}, {"r14d", Reg::R14}, {"r14w", Reg::R14}, {"r14b", Reg::R14},
+                    {"r15", Reg::R15}, {"r15d", Reg::R15}, {"r15w", Reg::R15}, {"r15b", Reg::R15},
+                };
+                const auto it = table.find(name);
+                return it == table.end() ? std::optional<Reg>{} : it->second;
+            }
+
+            static auto width_from_bits(const uint32_t bits) -> Width {
+                switch (bits) {
+                case 8:  return Width::W8;
+                case 16: return Width::W16;
+                case 32: return Width::W32;
+                default: return Width::W64;
+                }
+            }
+
+            // The rbp offset a variable operand's pointer refers to. Only a slot address
+            // qualifies -- which is all mirgen ever produces for an asm operand.
+            auto slot_disp_of(const mir::ValueId value) const -> std::optional<int32_t> {
+                const auto &def = fn.values[value];
+                if (def.is_param || def.block >= fn.blocks.size()) return std::nullopt;
+                const auto &block = fn.blocks[def.block];
+                for (const auto &candidate : block.insts) {
+                    if (candidate.result == value) {
+                        if (candidate.op != mir::Op::SlotAddr) return std::nullopt;
+                        return slot_offset[candidate.a];
+                    }
+                }
+                return std::nullopt;
+            }
+
+            void emit_asm(const mir::Inst &inst) {
+                const auto &block = module.asm_blocks[inst.a];
+                for (const auto &instruction : block.instructions) {
+                    std::vector<AsmArg> args;
+                    bool ok = true;
+                    for (const auto &operand : instruction.operands) {
+                        AsmArg arg;
+                        switch (operand.kind) {
+                        case mir::AsmOperand::Kind::Register: {
+                            const auto reg = reg_by_name(operand.reg);
+                            if (!reg) {
+                                error(std::format("inline asm: unsupported register '{}'", operand.reg));
+                                ok = false;
+                                break;
+                            }
+                            arg.reg = *reg;
+                            arg.width = width_from_bits(operand.width_bits);
+                            break;
+                        }
+                        case mir::AsmOperand::Kind::Immediate:
+                            arg.is_imm = true;
+                            arg.imm = operand.imm;
+                            break;
+                        case mir::AsmOperand::Kind::Variable: {
+                            const auto disp = operand.arg_index < inst.args.size()
+                                ? slot_disp_of(inst.args[operand.arg_index]) : std::nullopt;
+                            if (!disp) {
+                                error("inline asm: a variable operand did not resolve to a frame slot");
+                                ok = false;
+                                break;
+                            }
+                            arg.is_memory = true;
+                            arg.disp = *disp;
+                            arg.width = width_from_bits(operand.width_bits);
+                            break;
+                        }
+                        }
+                        args.push_back(arg);
+                    }
+                    if (!ok) return;
+                    emit_asm_instruction(instruction, args);
+                }
+
+                // 'asm -> reg': that register's value AT BLOCK EXIT is the expression's
+                // result. Stored immediately, with nothing emitted in between that could
+                // disturb it.
+                if (inst.result == mir::NO_VALUE) return;
+                const auto reg = reg_by_name(block.result_register);
+                if (!reg) {
+                    error(std::format("inline asm: unsupported result register '{}'",
+                                       block.result_register));
+                    return;
+                }
+                store_result(inst.result, *reg);
+            }
+
+            // The operand width an instruction runs at: a register operand names it
+            // explicitly ('eax' is 32), otherwise the variable's own width decides.
+            static auto asm_width(const std::vector<AsmArg> &args) -> Width {
+                for (const auto &arg : args) {
+                    if (!arg.is_memory && !arg.is_imm) return arg.width;
+                }
+                for (const auto &arg : args) {
+                    if (arg.is_memory) return arg.width;
+                }
+                return Width::W64;
+            }
+
+            void emit_asm_instruction(const mir::AsmInstruction &instruction,
+                                       const std::vector<AsmArg> &args) {
+                const auto &m = instruction.mnemonic;
+                const auto w = asm_width(args);
+                const auto two = args.size() == 2;
+
+                static const std::unordered_map<std::string, Alu> alu_ops = {
+                    {"add", Alu::Add}, {"sub", Alu::Sub}, {"and", Alu::And},
+                    {"or", Alu::Or}, {"xor", Alu::Xor}, {"cmp", Alu::Cmp},
+                };
+                // not/neg/inc/dec share the /digit unary encodings.
+                static const std::unordered_map<std::string, uint8_t> unary_slots = {
+                    {"inc", 0}, {"dec", 1}, {"not", 2}, {"neg", 3},
+                };
+
+                if (m == "nop") { enc.nop(); return; }
+                if (m == "syscall") { enc.syscall(); return; }
+                if (m == "cpuid") { enc.cpuid(); return; }
+                if (m == "ret") { enc.ret(); return; }
+
+                if (m == "mov" && two) {
+                    const auto &dst = args[0];
+                    const auto &src = args[1];
+                    if (!dst.is_memory && src.is_imm) { enc.mov_ri(dst.reg, src.imm); return; }
+                    if (!dst.is_memory && !src.is_memory && !src.is_imm) { enc.mov_rr(w, dst.reg, src.reg); return; }
+                    if (!dst.is_memory && src.is_memory) { enc.load(w, dst.reg, Reg::RBP, src.disp); return; }
+                    if (dst.is_memory && !src.is_memory && !src.is_imm) { enc.store(w, Reg::RBP, dst.disp, src.reg); return; }
+                    if (dst.is_memory && src.is_imm) {
+                        enc.mov_mi(w, Reg::RBP, dst.disp, static_cast<int32_t>(src.imm));
+                        return;
+                    }
+                }
+                if (m == "movzx" && two && !args[0].is_memory) {
+                    if (args[1].is_memory) { enc.movzx_m(args[1].width, args[0].reg, Reg::RBP, args[1].disp); return; }
+                    if (!args[1].is_imm) { enc.movzx(args[1].width, args[0].reg, args[1].reg); return; }
+                }
+                if (m == "lea" && two && !args[0].is_memory && args[1].is_memory) {
+                    enc.lea(args[0].reg, Reg::RBP, args[1].disp);
+                    return;
+                }
+                if (const auto alu = alu_ops.find(m); alu != alu_ops.end() && two) {
+                    const auto &dst = args[0];
+                    const auto &src = args[1];
+                    if (!dst.is_memory && src.is_imm) { enc.alu_ri(alu->second, w, dst.reg, static_cast<int32_t>(src.imm)); return; }
+                    if (!dst.is_memory && !src.is_memory) { enc.alu_rr(alu->second, w, dst.reg, src.reg); return; }
+                    if (!dst.is_memory && src.is_memory) { enc.alu_rm(alu->second, w, dst.reg, Reg::RBP, src.disp); return; }
+                    if (dst.is_memory && src.is_imm) { enc.alu_mi(alu->second, w, Reg::RBP, dst.disp, static_cast<int32_t>(src.imm)); return; }
+                    if (dst.is_memory && !src.is_memory) { enc.alu_mr(alu->second, w, Reg::RBP, dst.disp, src.reg); return; }
+                }
+                if (m == "test" && two && !args[0].is_memory && !args[1].is_memory && !args[1].is_imm) {
+                    enc.test_rr(w, args[0].reg, args[1].reg);
+                    return;
+                }
+                if (const auto unary = unary_slots.find(m);
+                    unary != unary_slots.end() && args.size() == 1) {
+                    if (args[0].is_memory) enc.unary_m(unary->second, w, Reg::RBP, args[0].disp);
+                    else enc.unary_r(unary->second, w, args[0].reg);
+                    return;
+                }
+                if (m == "push" && args.size() == 1) {
+                    if (args[0].is_memory) enc.push_m(Reg::RBP, args[0].disp);
+                    else enc.push_r(args[0].reg);
+                    return;
+                }
+                if (m == "pop" && args.size() == 1) {
+                    if (args[0].is_memory) enc.pop_m(Reg::RBP, args[0].disp);
+                    else enc.pop_r(args[0].reg);
+                    return;
+                }
+
+                // Loud refusal, naming the instruction: an asm block the encoder cannot
+                // render must never be silently dropped from the output.
+                error(std::format("inline asm: cannot encode '{}' with {} operand(s) in this form "
+                                   "(line {})", m, args.size(), instruction.line));
+            }
 
             void load_signed(const mir::ValueId value, const Reg reg) {
                 const auto width = width_of(fn.values[value].type);

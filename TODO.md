@@ -453,9 +453,36 @@ position, shifting every byte-copy loop; `cast(any, *T)` yielded the blob addres
 instead of the data word; and int↔float casts fell through to `Bitcast`, printing
 3.14159 as 4614256650576692846.
 
-Remaining in stage 4: `@section` placement, `@naked`, and inline `asm` (stage 5's
-encoder work). Then stage 6's linear-scan allocator, differential-tested against
-this trivial one, which stays permanently as the triage tool.
+## Stage 5 — inline `asm`: **the whole corpus now matches, 74 of 74**
+
+The plan predicted this would be *simpler* without LLVM, and it was. With no
+register allocator there is no constraint model: every variable operand is simply
+its frame slot, so `mov &fd, eax` encodes directly as `mov [rbp-off], eax`. Sema had
+already done the hard part (mnemonic validation, operand directions, the clobber
+set), so MIR carries a resolved `AsmBlock` — instructions with register/immediate/
+variable operands, where a variable operand indexes the instruction's argument list
+and each argument is a pointer to that variable's storage. mirgen pins those slots
+against `promote_slots`; the backend resolves each back to its `rbp` offset and
+encodes. The `asm -> reg` expression form stores that register at block exit.
+
+The encoder grew the forms hand-written asm needs but ISel never emits: memory
+operands across the ALU/mov family, `movzx` from memory, the unary `/digit` group,
+`push`/`pop` on memory, and `nop`/`syscall`/`cpuid`. An instruction it cannot render
+is a NAMED error, never a silent drop.
+
+Found by this work: `for_each_value_operand` reached `Op::Asm` through its default
+case, which would have handed the MIR passes an asm BLOCK INDEX as a value id — and
+worse, let `promote_slots` believe an asm-referenced slot was unused.
+
+**Differential result: 74 of 74 positive fixtures — the entire corpus — produce
+identical exit codes and stdout under `--backend=llvm` and `--backend=native`.**
+`mirgen_test`'s refuse-loudly probe moved from `asm` to `stackalloc`, which is now
+one of only three constructs left unlowered (with `hook` macros in one fixture and
+forwarded multi-returns needing slot coercions).
+
+Next per `docs/backend.md`: stage 6's linear-scan allocator plus a machine-level
+verifier, differential-tested against this trivial allocator — which stays
+permanently as `--regalloc=trivial`, the standing triage tool.
 
 Remaining:
 

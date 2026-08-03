@@ -132,6 +132,23 @@ namespace x86 {
         void add_rsp(int32_t bytes);
         void ud2();
 
+        // --- inline-asm support -------------------------------------------------
+        // Forms the ISel itself never needs, but that hand-written 'asm' blocks do:
+        // memory operands on the ALU/mov family, and the few zero-operand
+        // instructions the Tier-1 table admits.
+        void nop();
+        void syscall();
+        void cpuid();
+        void alu_rm(Alu op, Width w, Reg dst, Reg base, int32_t disp);   // op reg, [base+disp]
+        void alu_mr(Alu op, Width w, Reg base, int32_t disp, Reg src);   // op [base+disp], reg
+        void alu_mi(Alu op, Width w, Reg base, int32_t disp, int32_t imm);
+        void mov_mi(Width w, Reg base, int32_t disp, int32_t imm);
+        void movzx_m(Width from, Reg dst, Reg base, int32_t disp);
+        void unary_m(uint8_t slot, Width w, Reg base, int32_t disp);     // not/neg/inc/dec
+        void unary_r(uint8_t slot, Width w, Reg reg);
+        void push_m(Reg base, int32_t disp);
+        void pop_m(Reg base, int32_t disp);
+
       private:
         struct PendingJump {
             uint32_t patch_offset = 0; // where the rel32 field sits
