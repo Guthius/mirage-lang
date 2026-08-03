@@ -643,6 +643,40 @@ def case_reflection():
               f"reflection without runtime/type_info fails in sema, not mirgen ({r.stderr.strip()[:120]})")
 
 
+def case_global_initializers():
+    """A global's initializer becomes its BYTES -- scalars through sema's own folder,
+    aggregates recursively at sema's offsets, strings as a relocation plus length.
+    Zero-initializing instead is silent and catastrophic: 'const alignment := 8'
+    became 0, and every allocation divided by zero."""
+    r = emit_mir("const alignment: usize = 8\n"
+                 "const table: [3]i32 = {7, 8, 9}\n"
+                 "pub type P = struct { x: i32  y: i32 }\n"
+                 "const origin: P = {.x = 3, .y = 4}\n"
+                 "pub fn main() -> i32 {\n"
+                 "  return cast(alignment, i32) + table[0] + origin.x - 18\n}\n")
+    check(r.returncode == 0, f"global initializers lower ({r.stderr.strip()[:140]})")
+    check("zeroinit" not in r.stdout.split("fn ")[0],
+          "no initialized global is left zero-filled")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
+def case_inline_asm():
+    """Inline asm carries sema's resolved instructions into MIR, with each variable
+    operand becoming a POINTER to that variable's storage -- with no register
+    allocator, a variable operand simply IS its memory location."""
+    r = emit_mir("pub fn widen(byte_value: u8) -> i32 {\n"
+                 "  mut wide: i32 = undefined\n"
+                 "  asm {\n    movzx eax, byte_value\n    mov &wide, eax\n  }\n"
+                 "  return wide\n}\n"
+                 "pub fn main() -> i32 { return widen(200) - 200 }\n")
+    check(r.returncode == 0, f"inline asm lowers ({r.stderr.strip()[:140]})")
+    check("asm {" in r.stdout, "the block is carried into MIR")
+    check("movzx eax" in r.stdout, "with its instructions readable in '--emit-mir'")
+    check(", escapes ; wide" in r.stdout,
+          "an asm-referenced local is pinned against promote_slots")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_switch_and_conditions():
     r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
                  "pub fn main() -> i32 {\n"
@@ -779,6 +813,8 @@ def main() -> int:
     case_self_calls_and_field_fn_ptrs()
     case_dropped_optional_error()
     case_reflection()
+    case_global_initializers()
+    case_inline_asm()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()

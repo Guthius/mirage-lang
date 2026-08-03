@@ -1,6 +1,7 @@
 #include "mirgen.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <functional>
@@ -256,57 +257,28 @@ namespace mirgen {
                         g.size = size_of(global->type);
                         g.align = std::max(1u, align_of(global->type));
                         g.is_constant = !global->is_mut;
-                        // A foldable scalar initializer becomes the global's bytes -- with
-                        // sema's OWN folder, so nothing here can disagree with what a
-                        // 'when' condition already computed from the same expression.
-                        // (Zero-initializing 'const alignment := 8' instead broke every
-                        // native allocation with a division by zero.) String initializers
-                        // become a (reloc, len) slice header; anything else that is not
-                        // 'default'/absent keeps zeroinit, exactly as before.
-                        if (global->decl && global->decl->init && is_scalar(global->type) &&
-                            !std::holds_alternative<ast::DefaultExpr>(*global->decl->init) &&
-                            !std::holds_alternative<ast::UndefinedExpr>(*global->decl->init)) {
-                            std::optional<int64_t> value;
-                            // 'const id: type = type_of(T)' -- an interned type id, which
-                            // is a compile-time constant sema's value folder does not
-                            // model (it has no 'type' case), so it is read directly.
-                            if (const auto *type_of = std::get_if<std::unique_ptr<ast::TypeOfExpr>>(
-                                    &*global->decl->init)) {
-                                const auto saved_module = module_;
-                                const auto saved_exprs = exprs_;
-                                module_ = mod_ptr;
-                                exprs_ = &mod_ptr->exprs;
-                                if (const auto operand = operand_named_type((*type_of)->operand)) {
-                                    if (const auto it = sema_.type_ids.find(*operand);
-                                        it != sema_.type_ids.end()) {
-                                        value = static_cast<int64_t>(it->second);
-                                    }
-                                }
-                                module_ = saved_module;
-                                exprs_ = saved_exprs;
-                            } else if (const auto folded = sema::evaluate_const_value(
-                                           *global->decl->init, path,
-                                           const_cast<sema::Program &>(sema_), diag_)) {
-                                if (const auto *num = std::get_if<int64_t>(&*folded)) value = *num;
-                            }
-                            if (value) {
-                                g.init.assign(g.size, 0);
-                                for (uint32_t byte = 0; byte < g.size && byte < 8; ++byte) {
-                                    g.init[byte] = static_cast<uint8_t>(*value >> (8 * byte));
-                                }
-                            }
-                        } else if (global->decl && global->decl->init &&
-                                    global->type.kind == sema::TypeKind::Slice) {
-                            if (const auto *text = std::get_if<ast::LiteralStringExpr>(&*global->decl->init)) {
-                                g.init.assign(g.size, 0);
-                                const auto data = intern_string(text->value);
-                                g.relocations.push_back({.kind = mir::Relocation::Kind::GlobalAddr,
-                                                          .offset = 0, .target = data});
-                                const auto length = static_cast<uint64_t>(text->value.size());
-                                for (uint32_t byte = 0; byte < pointer_bytes(); ++byte) {
-                                    g.init[pointer_bytes() + byte] =
-                                        static_cast<uint8_t>(length >> (8 * byte));
-                                }
+                        // A foldable initializer becomes the global's bytes, through
+                        // sema's OWN folder for scalars -- so nothing here can disagree
+                        // with what a 'when' condition computed from the same expression.
+                        // Anything that does not fold stays zero-initialized, which is
+                        // what 'default' means anyway.
+                        if (global->decl && global->decl->init) {
+                            // The initializer's own module must be current: a
+                            // 'type_of(T)' operand resolves T through the symbol table,
+                            // and folding reads that module's records.
+                            const auto *saved_path = module_path_;
+                            const auto *saved_module = module_;
+                            const auto *saved_exprs = exprs_;
+                            module_path_ = &path;
+                            module_ = mod_ptr;
+                            exprs_ = &mod_ptr->exprs;
+                            auto blob = constant_blob(*global->decl->init, global->type, path);
+                            module_path_ = saved_path;
+                            module_ = saved_module;
+                            exprs_ = saved_exprs;
+                            if (blob) {
+                                g.init = std::move(blob->bytes);
+                                g.relocations = std::move(blob->relocs);
                             }
                         }
                         result_.module.globals.push_back(std::move(g));
@@ -1545,8 +1517,8 @@ namespace mirgen {
                             return;
                         }
                         const auto callee_returns = callee_return_types(**call);
-                        if (!callee_returns || *callee_returns != returns) {
-                            unsupported("a forwarded multi-return with slot coercions", (*call)->location);
+                        if (!callee_returns || callee_returns->size() < returns.size()) {
+                            unsupported("a multi-return 'return'", stmt.location);
                             b.unreachable();
                             return;
                         }
@@ -1555,7 +1527,33 @@ namespace mirgen {
                             b.unreachable();
                             return;
                         }
-                        b.mem_copy(sret_, blob, b.const_int(usize_ty(), layout.size));
+                        if (*callee_returns == returns) {
+                            b.mem_copy(sret_, blob, b.const_int(usize_ty(), layout.size));
+                        } else {
+                            // The callee's slots do not match ours exactly: sema accepted
+                            // this through assignable_in_module, which permits
+                            // representation changes (array->slice, a dropped trailing
+                            // '?error'). Rebuild slot by slot rather than copying the
+                            // blob -- the layouts genuinely differ.
+                            const auto source = multi_return_layout(*callee_returns);
+                            for (size_t i = 0; i < returns.size(); ++i) {
+                                const auto from = source.offsets[i] == 0
+                                    ? blob : b.ptr_add_const(blob, source.offsets[i]);
+                                const auto dest = layout.offsets[i] == 0
+                                    ? sret_ : b.ptr_add_const(sret_, layout.offsets[i]);
+                                // An aggregate slot's "value" is its address, exactly as
+                                // everywhere else -- so a slot that is aggregate on ONE
+                                // side (array -> pointer, say) still reads correctly.
+                                const auto value = is_scalar((*callee_returns)[i])
+                                    ? b.load(scalar_type((*callee_returns)[i]), from) : from;
+                                if (is_scalar(returns[i])) {
+                                    b.store(dest, coerce(b, coerce_arg(b, value, returns[i], (*callee_returns)[i]),
+                                                          returns[i], (*callee_returns)[i]));
+                                } else {
+                                    store_aggregate_value(b, dest, returns[i], value, (*callee_returns)[i]);
+                                }
+                            }
+                        }
                         emit_defers_for_return(b, returns);
                         b.ret();
                         return;
@@ -3614,6 +3612,10 @@ namespace mirgen {
                     if (locals_.contains(ident->name)) {
                         return emit_indirect_call(b, call);
                     }
+                    // So is a module-scope GLOBAL holding one ('mut hook: fn() = nil').
+                    if (lvalue_type(call.callee).kind == sema::TypeKind::Function) {
+                        return emit_indirect_call(b, call);
+                    }
                     callee_name = ident->name;
                     // A bare import is an alias: the function itself was declared (once)
                     // under its ORIGIN module, so the call redirects there.
@@ -3627,6 +3629,10 @@ namespace mirgen {
                     it = function_index_.find(key(*callee_module, callee_name));
                 } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
                     if (const auto *target = namespace_target((*member)->object)) {
+                        // 'mod.hook()' where 'hook' is a fn-pointer global, same rule.
+                        if (lvalue_type(call.callee).kind == sema::TypeKind::Function) {
+                            return emit_indirect_call(b, call);
+                        }
                         callee_name = (*member)->member;
                         callee_module = target;
                         it = function_index_.find(key(*target, callee_name));
@@ -4038,6 +4044,124 @@ namespace mirgen {
                 slice.put_global_ptr(0, intern_string(text));
                 slice.put_int(pointer_bytes(), text.size(), pointer_bytes());
                 return slice;
+            }
+
+            // A global's initializer as constant bytes, or nullopt when it is not a
+            // compile-time constant this builder models (the global then stays
+            // zero-initialized, which is what 'default' means anyway). Recurses through
+            // struct and array literals at sema's own offsets, so an aggregate global
+            // lands in .rodata/.data fully formed rather than as zeros -- which is what
+            // 'const S: [3]i32 = {7,8,9}' silently became before.
+            auto constant_blob(const ast::Expr &expr, const sema::ResolvedType &type,
+                                const std::string &module_path) -> std::optional<ConstBlob> {
+                const auto size = std::max(1u, size_of(type));
+
+                if (std::holds_alternative<ast::DefaultExpr>(expr) ||
+                    std::holds_alternative<ast::UndefinedExpr>(expr)) {
+                    return blob_of(size);
+                }
+
+                // A string literal is either a '[]u8' header or raw array bytes.
+                if (const auto *text = std::get_if<ast::LiteralStringExpr>(&expr)) {
+                    auto blob = blob_of(size);
+                    if (type.kind == sema::TypeKind::Slice) {
+                        blob.put_global_ptr(0, intern_string(text->value));
+                        blob.put_int(pointer_bytes(), text->value.size(), pointer_bytes());
+                        return blob;
+                    }
+                    if (type.kind == sema::TypeKind::Array) {
+                        for (uint32_t i = 0; i < size && i < text->value.size(); ++i) {
+                            blob.bytes[i] = static_cast<uint8_t>(text->value[i]);
+                        }
+                        return blob;
+                    }
+                    return std::nullopt;
+                }
+
+                if (const auto *init = std::get_if<std::unique_ptr<ast::BracedInitializerExpr>>(&expr)) {
+                    auto blob = blob_of(size);
+                    bool ok = true;
+                    std::visit([&]<typename BV>(const BV &v) {
+                        using B = std::decay_t<BV>;
+                        if constexpr (std::is_same_v<B, ast::StructExpr>) {
+                            const auto *info = type.kind == sema::TypeKind::Struct
+                                ? sema_.struct_at(type.struct_index) : nullptr;
+                            if (!info) { ok = false; return; }
+                            for (const auto &field : v.fields) {
+                                const auto declared = std::ranges::find(info->fields, field.name,
+                                                                         &sema::StructField::name);
+                                if (declared == info->fields.end()) { ok = false; continue; }
+                                if (const auto child = constant_blob(field.expr, declared->type, module_path)) {
+                                    blob.splice(declared->offset, *child);
+                                } else {
+                                    ok = false;
+                                }
+                            }
+                        } else if constexpr (std::is_same_v<B, ast::ArrayExpr>) {
+                            const auto *info = type.kind == sema::TypeKind::Array
+                                ? sema_.array_at(type.array_index) : nullptr;
+                            if (!info) { ok = false; return; }
+                            const auto stride = std::max(1u, size_of(info->element_type));
+                            const size_t plain = v.values.size() - (v.has_fill ? 1 : 0);
+                            for (size_t i = 0; i < plain; ++i) {
+                                if (const auto child = constant_blob(v.values[i], info->element_type, module_path)) {
+                                    blob.splice(static_cast<uint32_t>(i) * stride, *child);
+                                } else {
+                                    ok = false;
+                                }
+                            }
+                            if (v.has_fill && !v.values.empty()) {
+                                if (const auto child = constant_blob(v.values.back(), info->element_type, module_path)) {
+                                    for (size_t i = plain; i < info->count; ++i) {
+                                        blob.splice(static_cast<uint32_t>(i) * stride, *child);
+                                    }
+                                } else {
+                                    ok = false;
+                                }
+                            }
+                        } else if constexpr (std::is_same_v<B, ast::EmptyExpr>) {
+                            // '{}' -- the zero fill is the whole answer.
+                        } else {
+                            ok = false;
+                        }
+                    }, **init);
+                    if (!ok) return std::nullopt;
+                    return blob;
+                }
+
+                // Everything else must fold to a scalar. 'type_of(T)' is a compile-time
+                // type id sema's value folder has no case for, so it is read directly.
+                if (!is_scalar(type)) return std::nullopt;
+                std::optional<int64_t> value;
+                if (const auto *type_of = std::get_if<std::unique_ptr<ast::TypeOfExpr>>(&expr)) {
+                    if (const auto operand = operand_named_type((*type_of)->operand)) {
+                        if (const auto it = sema_.type_ids.find(*operand); it != sema_.type_ids.end()) {
+                            value = static_cast<int64_t>(it->second);
+                        }
+                    }
+                } else if (const auto *number = std::get_if<ast::LiteralFloatExpr>(&expr)) {
+                    // Float bytes are the IEEE pattern, at the declared width.
+                    auto blob = blob_of(size);
+                    if (scalar_type(type) == mir::Ty::F32) {
+                        const auto single = static_cast<float>(number->value);
+                        uint32_t bits = 0;
+                        std::memcpy(&bits, &single, sizeof bits);
+                        blob.put_int(0, bits, 4);
+                    } else {
+                        uint64_t bits = 0;
+                        const double wide = number->value;
+                        std::memcpy(&bits, &wide, sizeof bits);
+                        blob.put_int(0, bits, 8);
+                    }
+                    return blob;
+                } else if (const auto folded = sema::evaluate_const_value(
+                               expr, module_path, const_cast<sema::Program &>(sema_), diag_)) {
+                    if (const auto *num = std::get_if<int64_t>(&*folded)) value = *num;
+                }
+                if (!value) return std::nullopt;
+                auto blob = blob_of(size);
+                blob.put_int(0, static_cast<uint64_t>(*value), std::min(size, 8u));
+                return blob;
             }
 
             struct TypeInfoFieldAssignment {
@@ -4751,6 +4875,12 @@ namespace mirgen {
                     // Statement position; the value is never consumed, but NO_VALUE means
                     // "failed and reported".
                     return b.const_int(mir::Ty::I8, 0);
+                }
+                if (dropped.slot_index > 1) {
+                    // Two or more surviving values: the caller destructures the blob
+                    // itself (a group declaration, or a forwarded multi-return), so the
+                    // blob is what it wants -- codegen's rule exactly.
+                    return result;
                 }
                 const auto &value_type = returns->front();
                 return is_scalar(value_type) ? b.load(scalar_type(value_type), result) : result;

@@ -480,6 +480,24 @@ identical exit codes and stdout under `--backend=llvm` and `--backend=native`.**
 one of only three constructs left unlowered (with `hook` macros in one fixture and
 forwarded multi-returns needing slot coercions).
 
+Closing the last three unlowered constructs found two more silent miscompiles, both
+of the same shape as the earlier ones — something that *looked* lowered but wasn't:
+
+- **Aggregate global initializers were dropped entirely.** `const S: [3]i32 = {7,8,9}`
+  became zeros, so a fixture reading `S[0]` printed 0 and still "passed" everything
+  except the differential run. Globals now fold through one recursive
+  `constant_blob` (scalars via sema's own evaluator, structs and arrays spliced at
+  sema's offsets, strings as a relocation plus length, `type_of(T)` as its interned
+  id), which also replaced the ad-hoc scalar/string special cases.
+- **A forwarded multi-return with a dropped `?error` slot** returned the first value
+  instead of the blob; the drop wrapper now yields the blob whenever two or more
+  values survive, as codegen does, and forwarding rebuilds slot by slot when the
+  layouts genuinely differ (`[]i32` → `*i32`).
+
+Plus function-pointer GLOBALS as callees (`hook()`, `mod.hook()`), which had no
+route at all. `stackalloc` is the one construct left unlowered — the refuse-loudly
+probe now points at it.
+
 Next per `docs/backend.md`: stage 6's linear-scan allocator plus a machine-level
 verifier, differential-tested against this trivial allocator — which stays
 permanently as `--regalloc=trivial`, the standing triage tool.
