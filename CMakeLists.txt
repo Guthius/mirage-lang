@@ -1,4 +1,8 @@
-cmake_minimum_required(VERSION 4.2)
+# Floor 3.28 (OBJECT libraries, ninja dyndep scanning, everything this file
+# actually uses); the range lets a newer local CMake keep its own policies.
+# 4.2 was only ever the dev machine's installed version, and it locked CI's
+# 3.31 runner out of the build.
+cmake_minimum_required(VERSION 3.28...4.2)
 project(Mirage LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
