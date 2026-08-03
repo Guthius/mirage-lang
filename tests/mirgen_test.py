@@ -565,6 +565,20 @@ def case_macros():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_native_variadics():
+    """A Mirage-native variadic receives its tail as ONE slice, collected at the call
+    site; 'xs...' forwards an existing slice verbatim. Only a C 'ext fn' variadic
+    passes raw trailing arguments."""
+    r = emit_mir("fn total(base: i32, xs: ...i32) -> i32 {\n"
+                 "  mut sum: i32 = base\n  for x in xs { sum += x }\n  return sum\n}\n"
+                 "pub fn main() -> i32 {\n"
+                 "  return total(1, 2, 3, 4) - 10\n}\n")
+    check(r.returncode == 0, f"native variadics lower ({r.stderr.strip()[:140]})")
+    check("variadic.tmp" in r.stdout, "the tail is collected into a backing array")
+    check("const.int 3" in r.stdout, "with the count in the slice header")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_switch_and_conditions():
     r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
                  "pub fn main() -> i32 {\n"
@@ -675,6 +689,7 @@ def main() -> int:
     case_generic_instances()
     case_ranges_unions_defaults()
     case_macros()
+    case_native_variadics()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()

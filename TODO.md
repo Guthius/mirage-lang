@@ -291,6 +291,15 @@ Done:
   singletons (`stackalloc`, `$option` as a value, a forwarded multi-return with slot
   coercions, an array `...` fill).
 
+- **Stage 2, nineteenth increment** — Mirage-native variadics: the tail collects into
+  a fresh backing array with a `(data, len)` header, `xs...` forwards an existing
+  slice verbatim, an empty tail is a zero slice. Found as a SILENT hazard, not a
+  diagnostic: `emit_call` passed trailing arguments raw (correct only for C `ext fn`
+  variadics), so a Mirage variadic callee would have read a slice header out of
+  whatever scalar landed in that position.
+
+  **Coverage: 112 of 271; zero verifier failures.**
+
 Remaining:
 
 - **Stage 2, rest** — aggregates (structs, arrays, slices, trait handles, `any`, error

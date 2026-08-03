@@ -3394,6 +3394,33 @@ namespace mirgen {
                     args.push_back(sret_slot);
                 }
 
+                // A MIRAGE-native variadic ('fn f(xs: ...T)') receives its tail as ONE
+                // slice, collected here; only a C 'ext fn' variadic passes raw trailing
+                // arguments. Getting this wrong is silent: the callee reads a slice header
+                // out of whatever scalar landed in that position.
+                const auto *fn_sym = symbol_function(*callee_module, callee_name);
+                if (sig.is_variadic && fn_sym && !fn_sym->params.empty()) {
+                    const size_t fixed = fn_sym->params.size() - 1;
+                    if (call.args.size() < fixed) {
+                        unsupported("a variadic call with missing fixed arguments", call.location);
+                        return mir::NO_VALUE;
+                    }
+                    for (size_t i = 0; i < fixed; ++i) {
+                        auto value = emit_expr(b, call.args[i]);
+                        if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                        value = coerce_arg(b, value, fn_sym->params[i], expr_type(call.args[i]));
+                        const auto slot = args.size();
+                        args.push_back(slot < sig.params.size()
+                            ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
+                            : value);
+                    }
+                    const auto tail = emit_variadic_tail(b, call, fixed, fn_sym->params.back());
+                    if (tail == mir::NO_VALUE) return mir::NO_VALUE;
+                    args.push_back(tail);
+                    const auto result = b.call(it->second, sig.result, args);
+                    return via_sret ? sret_slot : result;
+                }
+
                 const auto *callee_params = symbol_param_types(*callee_module, callee_name);
                 for (size_t i = 0; i < call.args.size(); ++i) {
                     auto value = emit_expr(b, call.args[i]);
@@ -3818,6 +3845,48 @@ namespace mirgen {
                 }
                 const auto result = b.call_indirect(callee, signature, sig.result, args);
                 return sret_slot != mir::NO_VALUE ? sret_slot : result;
+            }
+
+            // The variadic tail of a Mirage-native call, as one slice: an 'xs...' spread
+            // forwards an existing slice verbatim; otherwise the trailing arguments are
+            // stored into a fresh array slot and a (data, len) header is built over it
+            // (codegen's emit_variadic_tail_slice). An empty tail is a zero slice.
+            auto emit_variadic_tail(mir::Builder &b, const ast::CallExpr &call, const size_t fixed,
+                                     const sema::ResolvedType &slice_type) -> mir::ValueId {
+                const auto usize = usize_ty();
+                if (call.args.size() == fixed + 1) {
+                    if (const auto *spread = std::get_if<std::unique_ptr<ast::SpreadExpr>>(&call.args[fixed])) {
+                        return emit_expr(b, (*spread)->operand);
+                    }
+                }
+                const auto *info = slice_type.kind == sema::TypeKind::Slice
+                    ? sema_.slice_at(slice_type.slice_index) : nullptr;
+                if (!info) {
+                    unsupported("a variadic call of this shape", call.location);
+                    return mir::NO_VALUE;
+                }
+                const size_t n = call.args.size() - fixed;
+                const auto header = b.add_slot(pointer_bytes() * 2, pointer_bytes(), "variadic");
+                const auto header_base = b.slot_addr(header);
+                if (n == 0) {
+                    b.store(header_base, b.const_null());
+                    b.store(b.ptr_add_const(header_base, pointer_bytes()), b.const_int(usize, 0));
+                    return header_base;
+                }
+                const auto stride = std::max(1u, size_of(info->element_type));
+                const auto backing = b.add_slot(static_cast<uint32_t>(stride * n),
+                                                 std::max(1u, align_of(info->element_type)), "variadic.tmp");
+                const auto base = b.slot_addr(backing);
+                for (size_t i = 0; i < n; ++i) {
+                    if (!store_element(b, base, static_cast<uint32_t>(i * stride),
+                                        info->element_type, call.args[fixed + i])) {
+                        return mir::NO_VALUE;
+                    }
+                }
+                b.store(header_base, base);
+                b.store(b.ptr_add_const(header_base, pointer_bytes()),
+                         b.const_int(usize, static_cast<int64_t>(n)));
+                return header_base;
             }
 
             // A macro call: bind each argument with the CALLER's context captured, then
