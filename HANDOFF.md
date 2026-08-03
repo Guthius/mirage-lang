@@ -4,9 +4,17 @@ You are picking up an in-progress body of work on the Mirage compiler. This docu
 complete brief: what was done, what remains, how to verify it, and the conventions and
 traps that matter.
 
+**Where it stands:** the LLVM replacement is complete through stage 5 for x86-64.
+`--backend=native` compiles, links and runs, and matches LLVM on every positive fixture
+in the corpus. What remains is a real register allocator (stage 6), the wasm backends
+(7–9), and the flip-and-delete (10).
+
 **Read `TODO.md` and `docs/backend.md` before writing any code.** This file tells you *how*
 to work on the repo; those two tell you *what* is left and *why the design is the way it
-is*. Neither is optional.
+is*. Neither is optional. `docs/backend.md`'s stage ordering in particular exists for
+reasons that are easy to override without it — and every one of its predictions that has
+been tested so far turned out to be right, including that inline `asm` would get SIMPLER
+once we owned the register allocator.
 
 ---
 
@@ -33,7 +41,11 @@ just test             # ctest (6 targets) + every tests/*_test.py
 ```
 
 `just test` defaults `MIRAGE_STD` to `../Mirage`; override it if your stdlib is elsewhere.
-It runs every suite even after one fails and lists them all at the end.
+It runs every suite even after one fails and lists them all at the end. The backend's own
+nets are `backend_differential_test.py` (both backends over the corpus),
+`mir_suite_test.py` (the assertion suite, both backends) and
+`x86_encoder_differential_test.py` (our encoder vs GNU `as`); the last skips cleanly if
+binutils is absent.
 
 **Check `cmake --build`'s EXIT STATUS, not its output.** This cost real time once: a
 root-owned `build/.ninja_log` made ninja bail with `Error writing to build log`, which does
@@ -51,113 +63,117 @@ to build your own understanding of the code you are about to extend.
    ```sh
    just test
    ```
-   Expect ctest (6) plus 26 Python suites, all passing.
+   Expect ctest (7 targets) plus every `tests/*_test.py`, all passing. Two of those are
+   the backend's own safety nets and take the longest: `backend_differential_test.py`
+   and `mir_suite_test.py`.
 
-2. **The real-world consumer still builds.**
+2. **The two backends agree on the whole corpus.**
+   ```sh
+   python3 tests/backend_differential_test.py
+   ```
+   Expect **74 of 74 positive fixtures matched, 0 mismatched, 0 refused**. This is the
+   single most important number in the project: it says the native backend compiles and
+   runs every program the LLVM one does, with identical results.
+
+3. **The assertion suite passes natively.**
+   ```sh
+   python3 tests/mir_suite_test.py
+   ```
+   Expect all 4 modules (35 tests) green under BOTH backends. A native miscompile shows
+   up here as a named failing test, which the differential run cannot give you.
+
+4. **The real-world consumer still builds.**
    ```sh
    cd /mnt/projects/Projects/mirage303
    mirage build game -l raylib --std=/mnt/projects/Projects/Mirage/Mirage -o /tmp/Client
    ```
-   ~2.3s, 90 files. This is the only thing exercising `ext fn` struct ABI, function
+   ~2.3s, 90 files, LLVM backend. The only thing exercising `ext fn` struct ABI, function
    pointers, traits and `#link` together.
 
-3. **Backend coverage is where `TODO.md` claims.**
-   ```sh
-   ok=0; for d in examples/*/; do
-     ./build/mirage build "$d" --emit-mir >/dev/null 2>&1 && ok=$((ok+1)); done
-   echo "$ok / $(ls -d examples/*/ | wc -l)"
-   ```
-   Should print **32 / 271**. If it differs, find out why before proceeding.
-
-4. **Read the coverage report** — this is your work queue for the rest of stage 2:
+5. **Nothing is unlowered.**
    ```sh
    for d in examples/*/; do ./build/mirage build "$d" --emit-mir 2>&1 >/dev/null; done \
-     | grep -oE 'cannot lower .* yet' | sed 's/cannot lower //; s/ yet//' \
-     | sort | uniq -c | sort -rn
+     | grep -c 'cannot lower'
    ```
+   Should print **0**. If it does not, a construct regressed — `mirgen`'s coverage report
+   is the instrument this project is steered by.
 
-5. **Review the 22 commits on the branch** (`git log --oneline 2ece065..HEAD`). Each commit
-   message explains *why*, not just what. Several document bugs that were found and fixed;
-   those explanations are the best available description of the traps in this codebase.
+6. **Read the commit log** (`git log --oneline 2ece065..HEAD`). Each message explains
+   *why*, not just what, and several document bugs found along the way — those
+   explanations are the best available description of the traps in this codebase.
 
-6. **Spot-check the claims.** The commit messages assert specific things — that `@export` on
-   a generic type's method is rejected, that `cast(u8(200), i64)` zero-extends, that `when`
-   emits only the live branch. Verify a few directly. If any claim is false, that is a bug
-   to fix and the first thing to report.
+7. **Spot-check a claim.** The messages assert specific things: that `postfix ++` returns
+   the old value, that `cast(3.14, u64)` converts rather than reinterprets, that an
+   asm-referenced local is pinned against `promote_slots`. Verify a few directly with
+   `--emit-mir --mir-opt`. If any claim is false, that is a bug and the first thing to
+   report.
 
 Report anything that fails validation *before* doing new work.
 
----
-
 ## 2. What was already done
 
-Five original work items, of which four are complete and one (the backend) is partial.
+Five original work items; four landed early, and the fifth — the backend — is now
+complete through stage 5.
 
 | Item | Status |
 |---|---|
-| Five-root module resolution; `MIRAGE_PATH` retired | ✅ done |
-| `--nortti` and `$rtti_enabled` | ✅ done |
-| `@no_discard` / `@export` / `@callconv` / `@cdecl` / `@import` | ✅ done |
-| `@test`, `mirage test`, `--load` forced modules, `core/testing` | ✅ done |
-| **Custom IR + native x86-64/wasm object generation** | ⚠️ **stage 2 of 10, partial** |
+| Five-root module resolution; `MIRAGE_PATH` retired | done |
+| `--nortti` and `$rtti_enabled` | done |
+| `@no_discard` / `@export` / `@callconv` / `@cdecl` / `@import` | done |
+| `@test`, `mirage test`, `--load` forced modules, `core/testing` | done |
+| **Custom IR + native x86-64 object generation** | **stages 1–5 done; 6–10 remain** |
 
-Plus a follow-up review pass (`TODO.md`) whose sections 1, 4, 5, 6.1 and 7 are fully
-resolved, and two features added from it (`@export` on globals, `@no_discard` on trait
-methods).
+`--backend=native` is a complete pipeline: sema → MIR (`mirgen.cpp`) → `promote_slots` +
+`peephole` (`mir_passes.cpp`) → verify → x86-64 selection with the trivial allocator
+(`backend_x86.cpp`) → machine code (`x86_encoder.cpp`) → a relocatable object
+(`elf_writer.cpp`) → the same linker invocation the LLVM path uses. It matches LLVM on
+all 74 positive corpus fixtures and runs the whole assertion suite. LLVM remains the
+default and the only wasm path.
 
-Also done: the Zed editor extension was **deleted** (unused). Do not re-add it. The
+`TODO.md` has the per-increment log, including the ~17 silent miscompiles the
+differential harness caught. Read `docs/backend.md` first regardless: it is the design
+record, and its stage ordering exists for reasons that are easy to override without it.
+
+Also done early: the Zed editor extension was **deleted** (unused). Do not re-add it. The
 VS Code grammar stays and is drift-checked against the parser by
 `tests/editor_grammar_test.py`.
 
----
-
 ## 3. What remains
 
-### 3.1 Backend — the large item
+### 3.1 Backend — stages 6 to 10
 
-`docs/backend.md` is the authoritative design record. It explains stages 2–10, the
-sequencing and **why the ordering matters**. Do not deviate from that ordering without a
+`docs/backend.md` is the authoritative design record and is CURRENT (status, stage list
+and validation section all reflect reality). Do not deviate from its ordering without a
 reason you can state.
 
-**Stage 2 (in progress) — finish lowering sema to MIR in `src/compiler/mirgen.cpp`.**
+**Stage 6 — linear-scan register allocation + a machine-level verifier.** The next step,
+and the one most likely to harbour a subtle miscompile: code that runs and is wrong.
 
-Already lowered: scalar functions, `ext fn`, globals, locals as slots, arithmetic with
-correct signedness, comparisons, conversions, casts, assignment, lvalues (struct fields,
-indexing, pointer auto-deref, address-of), aggregates as memory (memset/memcpy), string
-literals, `len`, direct + cross-module + method + indirect calls, braced initializers,
-`if`/`while`/`for-in`/`switch`/`when`, `break`/`continue`, slice expressions, sret returns,
-`return_ok`/`return_err`, enum variants, `type_of`, character literals.
+Today `backend_x86.cpp` emits straight from MIR to bytes with the TRIVIAL allocator —
+every value in a frame slot, every instruction loading operands into fixed scratch
+registers. Linear scan needs a machine-IR layer in between (virtual registers, then
+assignment), which is a real refactor of that file rather than an addition to it.
 
-Remaining, ranked by the coverage report (recheck — this list is from the last measurement):
+Two things make that safe to attempt: the differential harness will tell you within one
+run whether you broke anything, and the trivial allocator must SURVIVE as
+`--regalloc=trivial`. That flag is not a legacy option — it is the standing triage tool
+("if it also misbehaves under trivial, the bug is not in the allocator"), and the plan's
+requirements are concrete: 14 allocatable GPRs (`rsp`/`rbp` reserved) and 16 XMMs as
+separate classes, the caller/callee-saved split, fixed-register constraints (`div`/`idiv`
+clobber `rdx:rax`, variable shifts need `cl`, the System V argument and return
+registers), and spilling with interval splitting around calls.
 
-1. **Multi-return** (~99 occurrences across three spellings: `-> (T, error(E))` returns,
-   `return_ok` with value slots, and group declarations `const a, b := f()`). One lowering
-   covers all three. Highest value by a wide margin. The sret machinery already exists —
-   `returns_via_sret()` and the sret parameter binding — so this is mostly writing the
-   multiple values into the sret slot at their offsets and destructuring at the call site.
-2. **Tagged-union `switch`/`match`** (~80). Switch on the u32 tag at offset 0; payload
-   captures read from `UnionInfo::payload_offset`.
-3. **`try`** (~31). Error propagation as control flow: check the tag, and on failure copy
-   the error into the caller's own error slot and return early.
-4. **Trait-handle method calls** (~26). Indirect call through a vtable slot. Needs vtable
-   globals, which need global initializers with relocations (`mir::Relocation` exists).
-5. Then: `defer` (scope tracking, emitted at every exit path — including `return`, `break`,
-   `continue`), generic instantiations, inline `asm`, global initializers, `match`
-   expressions.
+**Stages 7–9 — wasm.** Dispatch loop before Relooper, standalone `.wasm` before the
+relocatable form emscripten needs. Both orderings are load-bearing: a CFG-structuring bug
+and a codegen bug look identical from outside, and you want one new variable at a time.
+Two known sema-side prerequisites: `@import` (`TODO.md` §2.1) and `@export`'s wasm export
+section (§2.2) are both validated-but-inert today, waiting on this stage; and
+function-pointer ↔ `anyptr` casts must become a target-conditional error, because a wasm
+funcref is a table index, not an address.
 
-**Stages 3–10** — see `docs/backend.md`. Summary: `promote_slots` + peephole; x86-64
-(legalize → ISel → **trivial** regalloc → frame → encoder → ELF); inline asm through that
-encoder; linear-scan regalloc + machine verifier; wasm standalone; wasm relocatable
-(emscripten); flip `--backend=native`, soak, then delete `codegen.cpp` and LLVM.
-
-Two orderings in that document are load-bearing and easy to get wrong:
-- **Build trivial register allocation before linear scan.** It validates ISel, the frame
-  layout, the encoder and the ELF writer end to end before the allocator exists, and it
-  stays permanently as the triage tool ("if it also misbehaves under `--regalloc=trivial`,
-  the bug is not in the allocator").
-- **Build the wasm dispatch loop before Relooper**, and the standalone `.wasm` writer
-  before the relocatable one. A CFG-structuring bug and a codegen bug look identical from
-  outside; you want one new variable at a time.
+**Stage 10 — flip `--backend=native` to the default, soak, then delete `codegen.cpp` and
+LLVM.** Note the revised decision: the deletion happens AFTER a soak period, because the
+differential test is most valuable exactly when the new backend is newest.
 
 ### 3.2 Corpus migration (`TODO.md` §6.2)
 
@@ -296,15 +312,60 @@ Each of these was a real bug found during the work. They are the shapes to watch
 
 ---
 
+### 7b. Traps the native backend found
+
+These are different in kind from the list above: every one was a lowering that was
+type-correct, passed `mir::verify`, and produced WRONG CODE. None was visible to any
+suite until `--backend=native` actually executed the result — which is the entire
+argument for having written the differential harness before the backend.
+
+If you touch `mirgen.cpp`, these are the shapes to re-check:
+
+1. **Size an sret slot from the CALLEE's sema return list, never `expr_type`.** A
+   multi-return call expression has no recorded type at all.
+2. **Sema's per-call side tables are keyed TWO ways** — by the `Expr` variant-slot
+   address for a value call, by the `CallExpr` address for group/forwarded/`try` calls.
+   Consult both, and route group declarations AROUND the value-position dropped-error
+   wrapper or it destructures the blob before the names can.
+3. **Aggregates bind BY VALUE**: parameters, `for-in` bindings and `any` casts must copy
+   bytes, never store the source address, because every reader treats an aggregate
+   local's slot as holding the aggregate.
+4. **An indirect callee needs `emit_address` + load**, not `emit_expr`: sema records no
+   type for a call's callee, so a member-expression callee falls into the aggregate path
+   and yields the field's address.
+5. **`!x` must route through `emit_condition`** — the one place that knows every
+   truthiness shape, including an error value's Ok/Failed tag.
+6. **Postfix `++`/`--` returns the OLD value.** `mem.mir`'s `d++.* = s++.*` depends on it.
+7. **int ↔ float casts are conversions, not `Bitcast`**, and float→int reads the TARGET's
+   signedness to pick the rounding form.
+8. **Global initializers must actually be emitted** — scalar and aggregate alike. Zeroing
+   them instead is silent: `const alignment := 8` became 0 and every allocation divided
+   by zero.
+9. **Trait-impl methods live only in `trait_impls_by_type`**, never `ProgramModule::methods`,
+   and their defaulted arguments live on the TRAIT's method declaration.
+10. **`Op::Asm`'s `a` is a block index, not a value.** A pass that treats it as one hands
+    itself a bogus `ValueId` and lets `promote_slots` believe an asm-referenced slot is
+    unused.
+11. **Test mode needs its own synthesized entry.** Without it, `mirage test` links a
+    module with no `main` and no `_start` and jumps into `argc`.
+
+---
+
 ## 8. Definition of done
 
 - Every item in `TODO.md` resolved or explicitly re-scoped with a stated reason.
-- `just test` green; `mirage303` builds and runs.
-- Backend: the corpus compiles and runs correctly under `--backend=native`, differential-
-  tested against `--backend=llvm` (build every fixture both ways, compare exit code and
-  stdout — write that harness *before* the x86-64 backend, it is the primary safety net).
-- `docs/spec.md`, `docs/grammar.md`, `docs/backend.md` and `README.md` current.
-- `TODO.md` and this file deleted once genuinely complete.
+- `just test` green; `mirage303` builds and runs. — HOLDS TODAY.
+- Backend: the corpus compiles and runs correctly under `--backend=native`,
+  differential-tested against `--backend=llvm`. — HOLDS TODAY for x86-64: 74/74 fixtures
+  match and the assertion suite passes both ways. The harness was written before the
+  backend, as this line demanded, and that is why every miscompile in §7b was found
+  within minutes of being written rather than months later.
+- `docs/spec.md`, `docs/grammar.md`, `docs/backend.md` and `README.md` current. —
+  `backend.md` and `README.md` were brought current with the native backend; spec and
+  grammar were never invalidated by it (nothing language-visible changed).
+- `TODO.md` and this file deleted once genuinely complete. — NOT YET: stages 6–10 remain,
+  and `TODO.md` §2.1/§2.2 (wasm-blocked attributes) and §6.2 (corpus migration, deferred
+  by decision) are still open.
 
 **If you cannot finish, say so plainly and leave `TODO.md` accurate.** An honest inventory
 with measured scope is worth more than an optimistic one — the previous sessions ended that

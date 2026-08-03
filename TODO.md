@@ -40,10 +40,17 @@ Every behavioural claim here was reproduced against `build/mirage`.
   (`@export` on module-scope globals) and `61a0811` (`@no_discard` on trait methods, binding
   every caller reaching them through a handle).
 
-## 3. The backend — **in progress, the large remaining item**
+## 3. The backend — **stages 1–5 done; 6–10 remain**
 
 `docs/backend.md` is the design record: stages, sequencing, validation strategy, decisions
-D1–D8.
+D1–D8. It is CURRENT — status, stage list and validation section all reflect reality.
+
+**Where this stands as of 2026-08-03.** `--backend=native` is a complete x86-64 pipeline
+and matches LLVM on **74 of 74 positive corpus fixtures** (exit code and stdout), with
+all 35 assertion-carrying tests in `tests/mir/` passing under both backends. Every
+construct the corpus contains lowers. The increments below are the log of how that
+happened, newest last; the honest remaining work is stage 6 (linear-scan regalloc plus a
+machine verifier), stages 7–9 (wasm), and stage 10 (flip, soak, delete LLVM).
 
 Done:
 
