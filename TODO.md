@@ -397,6 +397,24 @@ Done:
   (`examples_smoke_test.py --backend=...`) BEFORE stage 4, then x86-64
   (legalize → ISel → trivial regalloc → frame → encoder → ELF).
 
+- **The differential harness, written before stage 4 as the plan requires.**
+  `--backend=llvm|native` is a real driver flag: native runs the full pipeline as it
+  exists (mirgen → promote_slots → peephole → verify) and then refuses with a fixed
+  stage-4 message the harness keys its skip-detection on.
+  `tests/backend_differential_test.py` compiles (and runs, where runnable) every
+  positive fixture under both backends and compares exit code and stdout, with four
+  outcomes: match (the only passing state once stage 4 lands), MISMATCH (always a
+  failure), awaiting-stage-4 (counted, shrinks as object generation lands), and
+  named-refusal (mirgen's loud `cannot lower X yet` — today exactly the 9 asm/naked
+  fixtures, listed by name so growth is visible as a regression). Current audit:
+  74 positive fixtures = 65 awaiting stage 4 + 9 named asm refusals + 0 anything
+  else — stage 2's completeness claim, machine-checked on every `just test` run.
+  `examples_smoke_test.py` also grew the `--backend` pass-through the plan names.
+
+  Next: stage 4 — x86-64 legalize → ISel → TRIVIAL regalloc → frame → encoder →
+  ELF, in that order; `examples/start` runs first, then this harness's
+  awaiting-stage-4 count starts falling.
+
 Remaining:
 
 - **Stage 2, rest** — aggregates (structs, arrays, slices, trait handles, `any`, error

@@ -45,6 +45,9 @@ namespace {
         // '--mir-opt': additionally run the stage-3 passes (promote_slots) before
         // printing — the debugging view of what the later stages actually consume.
         bool mir_opt = false;
+        // '--backend=llvm|native'. Defaults to llvm until stage 10 (docs/backend.md);
+        // keeping both alive is what makes differential testing possible.
+        std::string backend = "llvm";
         // debugging surface until it can produce objects (docs/backend.md, stage 2).
         bool emit_mir = false;
         bool freestanding = false;
@@ -85,6 +88,8 @@ namespace {
                      << "  --target=<triple>    Cross-compile for <triple> (default: the host triple)\n"
                      << "  --emit-ir            Print LLVM IR to stdout instead of compiling\n"
                      << "  --emit-mir           Print Mirage IR to stdout instead of compiling (native backend)\n"
+                     << "  --mir-opt            With --emit-mir: run the stage-3 MIR passes before printing\n"
+                     << "  --backend=<name>     Code generator: 'llvm' (default) or 'native' (in development)\n"
                      << "  --freestanding       Compile without standard library\n"
                      << "  --noinit             Skip generating/calling the synthesized '@init'-runner '_init'\n"
                      << "  --nortti             Disable runtime type information ('type_info_of'); sets '$rtti_enabled' to false\n"
@@ -115,6 +120,13 @@ namespace {
                 options.emit_mir = true;
             } else if (arg == "--mir-opt") {
                 options.mir_opt = true;
+            } else if (arg.starts_with("--backend=")) {
+                options.backend = arg.substr(std::string("--backend=").size());
+                if (options.backend != "llvm" && options.backend != "native") {
+                    llvm::errs() << "error: unknown backend '" << options.backend
+                                 << "' (expected 'llvm' or 'native')\n";
+                    return std::nullopt;
+                }
             } else if (arg == "--freestanding") {
                 options.freestanding = true;
             } else if (arg == "--noinit") {
@@ -754,6 +766,37 @@ auto main(const int argc, char *argv[]) -> int {
             }
         }
         return lowered.ok ? 0 : 1;
+    }
+
+    // '--backend=native': run the full native pipeline as far as it exists — lowering
+    // plus the stage-3 passes, verified — then say plainly that object generation is
+    // stage 4. The flag exists NOW so the differential harness could be written first
+    // (docs/backend.md's validation plan); its skip-detection keys on this exact
+    // message, and stage 4 replaces this block with the ISel/encoder pipeline.
+    if (options.backend == "native") {
+        auto lowered = mirgen::generate(ast, sema, diag, mirgen::Options{
+            .pointer_bits = target_triple.getArchPointerBitWidth(),
+        });
+        if (!lowered.ok) {
+            if (!lowered.unsupported.empty()) {
+                llvm::errs() << "\nnot yet lowered by the native backend:\n";
+                for (const auto &what : lowered.unsupported) {
+                    llvm::errs() << "  - " << what << "\n";
+                }
+            }
+            return 1;
+        }
+        mir::promote_slots(lowered.module);
+        mir::peephole(lowered.module);
+        for (const auto &error : mir::verify(lowered.module)) {
+            llvm::errs() << "error: internal error: MIR passes produced malformed MIR: "
+                         << error.message << "\n";
+            return 1;
+        }
+        llvm::errs() << "error: the native backend cannot produce objects yet "
+                     << "(stage 4, docs/backend.md); use --emit-mir to inspect its MIR "
+                     << "or --backend=llvm to compile\n";
+        return 1;
     }
 
     const auto codegen_start = std::chrono::steady_clock::now();

@@ -17,6 +17,9 @@ Flags:
     --strict            treat a changed diagnostic message as a failure, not a warning
     --update-baseline   re-derive tests/examples_expected.json from current behavior
     --only NAME         restrict the run to a single example directory (repeatable)
+    --backend NAME      pass '--backend=NAME' to every compiler invocation (the
+                        differential plan in docs/backend.md; the baseline itself is
+                        always recorded against the default backend)
 
 Re-blessing the baseline is never a standalone commit: run --update-baseline as part
 of the fix that changed the behavior, and review the resulting JSON hunk like any
@@ -36,6 +39,10 @@ EXAMPLES = REPO_ROOT / "examples"
 BASELINE = Path(__file__).resolve().parent / "examples_expected.json"
 
 DEFAULT_TIMEOUT = 60
+
+# Extra arguments appended to every compiler invocation ('--backend=...'); set once
+# from the command line in main().
+BACKEND_ARGS: list[str] = []
 
 failures = 0
 warnings = 0
@@ -124,6 +131,7 @@ def run_action(directory: Path, action: str, extra_args: list[str], timeout: int
         else:
             raise ValueError(f"unknown action {action!r}")
         argv.extend(extra_args)
+        argv.extend(BACKEND_ARGS)
         try:
             result = subprocess.run(
                 argv,
@@ -216,7 +224,11 @@ def main() -> int:
     parser.add_argument("--strict", action="store_true", help="diagnostic drift fails")
     parser.add_argument("--update-baseline", action="store_true")
     parser.add_argument("--only", action="append", default=[], metavar="NAME")
+    parser.add_argument("--backend", default=None, metavar="NAME",
+                        help="pass --backend=NAME to every compiler invocation")
     args = parser.parse_args()
+    if args.backend:
+        BACKEND_ARGS.append(f"--backend={args.backend}")
 
     if not MIRAGE_BINARY.exists():
         print(f"error: {MIRAGE_BINARY} not found — run 'just build' first", file=sys.stderr)
