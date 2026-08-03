@@ -300,6 +300,27 @@ Done:
 
   **Coverage: 112 of 271; zero verifier failures.**
 
+- **Stage 2, twentieth increment (several commits)** — the long tail: array `...`
+  fills (evaluated once, repeated), switch/match patterns folded through sema's own
+  `evaluate_integer_constant`, `$option`/`$env` values, method calls through pointer
+  receivers (`self.bump()` — lookup strips one pointer level via `lvalue_type`),
+  struct-field function-pointer calls rerouting to the indirect path, VALUE generic
+  parameters (`[N: usize]`) read off the substitution env, and the runtime
+  unhandled-error check: a per-union noreturn panic helper (named
+  `__mirage_panic_unhandled_error.<index>` for symbol parity with codegen) that
+  dispatches the member name at compile time, writes
+  `panic: unhandled Type.Variant at file:line:col` to stderr through lazily-declared
+  libc `write`, and exits 101. Value-position drops destructure the surviving slot;
+  group declarations check the trailing slot themselves and bind the rest — the same
+  route split codegen uses.
+
+  **Coverage: 125 of 271; zero verifier failures.**
+
+  Remaining: `type_info_of` and the reflection tables (18), inline `asm` (stage 5 by
+  design, 18), `stackalloc`, a forwarded multi-return with slot coercions (2), and a
+  few singletons. The freestanding panic path (syscall, no libc) is deferred with
+  inline `asm`, which it needs.
+
 Remaining:
 
 - **Stage 2, rest** — aggregates (structs, arrays, slices, trait handles, `any`, error

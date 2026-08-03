@@ -1,6 +1,7 @@
 #include "mirgen.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <format>
 #include <functional>
 #include <map>
@@ -1316,21 +1317,31 @@ namespace mirgen {
                     unsupported("a group declaration of this form", decl.location);
                     return;
                 }
-                if (exprs_ && exprs_->call_dropped_optional_error.contains(call->get())) {
-                    unsupported("a call dropping an ignorable error", decl.location);
-                    return;
+                const sema::DroppedOptionalError *dropped = nullptr;
+                if (exprs_) {
+                    if (const auto it = exprs_->call_dropped_optional_error.find(call->get());
+                        it != exprs_->call_dropped_optional_error.end()) {
+                        dropped = &it->second;
+                    }
                 }
                 const auto callee_returns = callee_return_types(**call);
-                const size_t bound = tr ? decl.names.size() + 1 : decl.names.size();
+                const size_t bound = (tr || dropped) ? decl.names.size() + 1 : decl.names.size();
                 if (!callee_returns || callee_returns->size() != bound) {
                     unsupported("a group declaration", decl.location);
                     return;
                 }
 
-                const auto blob = emit_expr(b, tr ? tr->call : decl.init);
+                // emit_call directly, NOT emit_expr: the value-position dropped-error
+                // wrapper would otherwise destructure the blob before the names could.
+                const auto blob = emit_call(b, **call, tr ? tr->call : decl.init);
                 if (blob == mir::NO_VALUE) return;
 
                 const auto layout = multi_return_layout(*callee_returns);
+                if (dropped) {
+                    const auto err_addr = layout.offsets.back() == 0
+                        ? blob : b.ptr_add_const(blob, layout.offsets.back());
+                    emit_unhandled_error_check(b, err_addr, dropped->error_type, decl.location);
+                }
                 if (tr) {
                     if (!is_error_union(callee_returns->back())) {
                         unsupported("'try' on this callee", decl.location);
@@ -2846,7 +2857,10 @@ namespace mirgen {
                         return emit_assign(b, *v);
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CallExpr>>) {
-                        return emit_call(b, *v, expr);
+                        // Value position only: a group declaration extracts its own slots
+                        // and calls emit_call directly, exactly as codegen's split between
+                        // apply_dropped_optional_error and the group path.
+                        return apply_dropped_error(b, *v, emit_call(b, *v, expr));
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MemberExpr>>) {
                         // 'Dir.South' names an enum variant through its TYPE, which is a
@@ -3423,12 +3437,6 @@ namespace mirgen {
                     return mir::NO_VALUE;
                 }
 
-                // A dropped trailing '?error(...)' slot needs the runtime unhandled-error
-                // check; without it the blob would silently stand in for the surviving value.
-                if (exprs_ && exprs_->call_dropped_optional_error.contains(&call)) {
-                    unsupported("a call dropping an ignorable error", call.location);
-                    return mir::NO_VALUE;
-                }
 
                 const auto &sig = result_.module.signatures[result_.module.functions[it->second].signature];
 
@@ -3645,26 +3653,261 @@ namespace mirgen {
             //
             // Interned by content, matching codegen: the same literal appearing twice must
             // not produce two globals.
-            auto emit_string_literal(mir::Builder &b, const std::string &text) -> mir::ValueId {
-                uint32_t data_index = 0;
-                if (const auto it = string_globals_.find(text); it != string_globals_.end()) {
-                    data_index = it->second;
-                } else {
-                    mir::Global g;
-                    g.name = std::format(".str.{}", string_globals_.size());
-                    g.linkage = mir::Linkage::Internal;
-                    g.is_constant = true;
-                    g.init.assign(text.begin(), text.end());
-                    // NUL-terminated so the same global can back a '*u8' passed to C, which
-                    // is what codegen does and what every 'ext fn' string argument expects.
-                    g.init.push_back(0);
-                    g.size = static_cast<uint32_t>(g.init.size());
-                    g.align = 1;
-                    result_.module.globals.push_back(std::move(g));
-                    data_index = static_cast<uint32_t>(result_.module.globals.size() - 1);
-                    string_globals_[text] = data_index;
+            // ---- the unhandled-error runtime ---------------------------------------
+
+            // Lazily-declared libc entry points for the panic path. Deduplicated against
+            // any 'ext fn' of the same name the program already declared, per the
+            // process-global ext-fn rule in declare_functions.
+            uint32_t libc_write_ = UINT32_MAX;
+            uint32_t libc_exit_ = UINT32_MAX;
+            std::unordered_map<int, uint32_t> panic_helpers_;
+
+            auto runtime_ext_fn(const std::string &name, mir::Signature sig, uint32_t &cache) -> uint32_t {
+                if (cache != UINT32_MAX) return cache;
+                if (const auto seen = std::ranges::find(result_.module.functions, name, &mir::Function::name);
+                    seen != result_.module.functions.end()) {
+                    cache = static_cast<uint32_t>(std::distance(result_.module.functions.begin(), seen));
+                    return cache;
+                }
+                mir::Function f;
+                f.name = name;
+                f.linkage = mir::Linkage::External;
+                f.conv = mir::CallConv::C;
+                f.signature = result_.module.intern_signature(std::move(sig));
+                f.has_body = false;
+                result_.module.functions.push_back(std::move(f));
+                cache = static_cast<uint32_t>(result_.module.functions.size() - 1);
+                return cache;
+            }
+
+            auto libc_write_fn() -> uint32_t {
+                mir::Signature sig;
+                sig.params = {mir::Ty::I32, mir::Ty::Ptr, usize_ty()};
+                sig.result = usize_ty();
+                return runtime_ext_fn("write", std::move(sig), libc_write_);
+            }
+            auto libc_exit_fn() -> uint32_t {
+                mir::Signature sig;
+                sig.params = {mir::Ty::I32};
+                return runtime_ext_fn("exit", std::move(sig), libc_exit_);
+            }
+
+            // Writes one member's qualified name ('Type.Variant') into the name slots and
+            // jumps to 'done': a compile-time switch over the member's own discriminants,
+            // or the bare type name when it has none (codegen's
+            // emit_error_member_name_dispatch).
+            void emit_member_name_dispatch(mir::Builder &pb, const sema::ResolvedType &member_type,
+                                            const mir::ValueId member_ptr, const mir::ValueId name_ptr_slot,
+                                            const mir::ValueId name_len_slot, const mir::BlockId done) {
+                const auto usize = usize_ty();
+                const auto type_name = sema::find_type_module_and_name(member_type, sema_).second;
+
+                const auto store_name = [&](const std::string &text) {
+                    pb.store(name_ptr_slot, pb.global_addr(intern_string(text)));
+                    pb.store(name_len_slot, pb.const_int(usize, static_cast<int64_t>(text.size())));
+                    pb.jump(done);
+                };
+
+                std::vector<std::pair<int64_t, std::string>> cases;
+                if (member_type.kind == sema::TypeKind::Enum) {
+                    if (const auto *info = sema_.enum_at(member_type.enum_index)) {
+                        for (const auto &field : info->fields) cases.emplace_back(field.value, field.name);
+                    }
+                } else if (member_type.kind == sema::TypeKind::Union) {
+                    if (const auto *info = sema_.union_at(member_type.union_index)) {
+                        for (const auto &variant : info->variants) cases.emplace_back(variant.tag_value, variant.name);
+                    }
+                }
+                if (cases.empty()) {
+                    store_name(type_name.empty() ? "<error>" : type_name);
+                    return;
                 }
 
+                const auto tag = pb.load(mir::Ty::I32, member_ptr);
+                const auto unknown = pb.create_block("panic.variant.unknown");
+                std::vector<std::pair<int64_t, mir::BlockId>> switch_cases;
+                std::vector<std::pair<mir::BlockId, std::string>> arms;
+                for (const auto &[value, name] : cases) {
+                    const auto block = pb.create_block("panic.variant." + name);
+                    switch_cases.emplace_back(value, block);
+                    arms.emplace_back(block, std::format("{}.{}", type_name, name));
+                }
+                pb.switch_on(tag, unknown, switch_cases);
+                for (const auto &[block, text] : arms) {
+                    pb.set_insert_point(block);
+                    store_name(text);
+                }
+                pb.set_insert_point(unknown);
+                store_name(std::format("{}.<unknown>", type_name));
+            }
+
+            // The noreturn routine every dropped '?error(...)' at one union type panics
+            // through:  panic: unhandled Type.Variant at main.mir:3:23
+            // Only the middle varies at runtime, so it is a name dispatch feeding three
+            // write(2, ...) calls and exit(101). The error arrives BY POINTER. Named
+            // identically to codegen's helper for symbol parity.
+            auto panic_helper(const int union_index) -> uint32_t {
+                if (const auto it = panic_helpers_.find(union_index); it != panic_helpers_.end()) {
+                    return it->second;
+                }
+                const auto *wrapper = sema_.union_at(union_index);
+                const auto usize = usize_ty();
+
+                mir::Signature sig;
+                sig.params = {mir::Ty::Ptr, mir::Ty::Ptr, usize};
+                mir::Function f;
+                f.name = std::format("__mirage_panic_unhandled_error.{}", union_index);
+                f.linkage = mir::Linkage::Internal;
+                f.signature = result_.module.intern_signature(std::move(sig));
+                f.has_body = true;
+                result_.module.functions.push_back(std::move(f));
+                const auto fn_index = static_cast<uint32_t>(result_.module.functions.size() - 1);
+                panic_helpers_[union_index] = fn_index;
+                if (!wrapper) return fn_index;
+
+                mir::Builder pb(result_.module, fn_index);
+                const auto entry = pb.create_block("entry");
+                pb.set_insert_point(entry);
+                const auto err_ptr = pb.add_block_param(entry, mir::Ty::Ptr);
+                const auto site_ptr = pb.add_block_param(entry, mir::Ty::Ptr);
+                const auto site_len = pb.add_block_param(entry, usize);
+                result_.module.functions[fn_index].params = {err_ptr, site_ptr, site_len};
+
+                const auto name_ptr = pb.slot_addr(pb.add_slot(pointer_bytes(), pointer_bytes(), "name.ptr"));
+                const auto name_len = pb.slot_addr(pb.add_slot(pointer_bytes(), pointer_bytes(), "name.len"));
+                const auto write_block = pb.create_block("panic.write");
+
+                const auto payload_ptr = wrapper->payload_offset == 0
+                    ? err_ptr : pb.ptr_add_const(err_ptr, wrapper->payload_offset);
+                if (wrapper->error_member_types.size() == 1) {
+                    emit_member_name_dispatch(pb, wrapper->error_member_types.front(), payload_ptr,
+                                               name_ptr, name_len, write_block);
+                } else if (wrapper->variants.size() > 1 &&
+                            wrapper->variants[1].payload_type.kind == sema::TypeKind::Union) {
+                    const auto *inner = sema_.union_at(wrapper->variants[1].payload_type.union_index);
+                    const auto inner_tag = pb.load(mir::Ty::I32, payload_ptr);
+                    const auto unknown = pb.create_block("panic.member.unknown");
+                    std::vector<std::pair<int64_t, mir::BlockId>> cases;
+                    std::vector<std::pair<mir::BlockId, const sema::TaggedUnionVariant *>> arms;
+                    if (inner) {
+                        for (const auto &variant : inner->variants) {
+                            const auto block = pb.create_block("panic.member." + variant.name);
+                            cases.emplace_back(variant.tag_value, block);
+                            arms.emplace_back(block, &variant);
+                        }
+                    }
+                    pb.switch_on(inner_tag, unknown, cases);
+                    for (const auto &[block, variant] : arms) {
+                        pb.set_insert_point(block);
+                        const auto member_ptr = inner->payload_offset == 0
+                            ? payload_ptr : pb.ptr_add_const(payload_ptr, inner->payload_offset);
+                        emit_member_name_dispatch(pb, variant->payload_type, member_ptr,
+                                                   name_ptr, name_len, write_block);
+                    }
+                    pb.set_insert_point(unknown);
+                    const std::string unknown_text = "<unknown error>";
+                    pb.store(name_ptr, pb.global_addr(intern_string(unknown_text)));
+                    pb.store(name_len, pb.const_int(usize, static_cast<int64_t>(unknown_text.size())));
+                    pb.jump(write_block);
+                } else {
+                    pb.jump(write_block);
+                }
+
+                pb.set_insert_point(write_block);
+                const auto write_fn = libc_write_fn();
+                const auto &write_sig = result_.module.signatures[result_.module.functions[write_fn].signature];
+                const auto stderr_fd = pb.const_int(mir::Ty::I32, 2);
+                const std::string prefix = "panic: unhandled ";
+                pb.call(write_fn, write_sig.result,
+                         {stderr_fd, pb.global_addr(intern_string(prefix)),
+                          pb.const_int(usize, static_cast<int64_t>(prefix.size()))});
+                pb.call(write_fn, write_sig.result,
+                         {stderr_fd, pb.load(mir::Ty::Ptr, name_ptr), pb.load(usize, name_len)});
+                pb.call(write_fn, write_sig.result, {stderr_fd, site_ptr, site_len});
+                pb.call(libc_exit_fn(), mir::Ty::Void, {pb.const_int(mir::Ty::I32, 101)});
+                pb.unreachable();
+                return fn_index;
+            }
+
+            // Post-processes a call whose trailing '?error(...)' slot the caller left
+            // unbound (codegen's apply_dropped_optional_error): check-and-panic on Failed,
+            // then yield what survives the drop -- nothing when the error was the only
+            // return (statement position), the first slot otherwise. Group declarations
+            // never route through here; they extract their own slots.
+            auto apply_dropped_error(mir::Builder &b, const ast::CallExpr &call, const mir::ValueId result) -> mir::ValueId {
+                if (result == mir::NO_VALUE || !exprs_) return result;
+                const auto it = exprs_->call_dropped_optional_error.find(&call);
+                if (it == exprs_->call_dropped_optional_error.end()) return result;
+                const auto &dropped = it->second;
+
+                // A call with a trailing error always travels via sret, so 'result' is the
+                // blob's address.
+                const auto returns = callee_return_types(call);
+                if (!returns || dropped.slot_index >= returns->size()) {
+                    unsupported("a call dropping an ignorable error", call.location);
+                    return mir::NO_VALUE;
+                }
+                const auto layout = multi_return_layout(*returns);
+                const auto err_addr = layout.offsets[dropped.slot_index] == 0
+                    ? result : b.ptr_add_const(result, layout.offsets[dropped.slot_index]);
+                emit_unhandled_error_check(b, err_addr, dropped.error_type, call.location);
+
+                if (dropped.slot_index == 0) {
+                    // Statement position; the value is never consumed, but NO_VALUE means
+                    // "failed and reported".
+                    return b.const_int(mir::Ty::I8, 0);
+                }
+                const auto &value_type = returns->front();
+                return is_scalar(value_type) ? b.load(scalar_type(value_type), result) : result;
+            }
+
+            // The check the caller didn't write: on Failed, panic naming the error variant
+            // and the call's source location; otherwise carry on with the insert point in
+            // the ok block (codegen's emit_unhandled_error_check).
+            void emit_unhandled_error_check(mir::Builder &b, const mir::ValueId err_addr,
+                                             const sema::ResolvedType &err_type, const SourceLocation &loc) {
+                if (err_type.kind != sema::TypeKind::Union) return;
+                const auto panic = b.create_block("err.panic");
+                const auto ok = b.create_block("err.ok");
+                const auto tag = b.load(mir::Ty::I32, err_addr);
+                b.branch(b.compare(mir::Op::ICmpNe, tag, b.const_int(mir::Ty::I32, 0)), panic, ok);
+
+                b.set_insert_point(panic);
+                // The basename, not the absolute path: this string is baked into the binary
+                // for a human at the moment of the crash (codegen does the same).
+                const auto site = std::format(" at {}:{}:{}\n",
+                    std::filesystem::path(std::string(loc.filename)).filename().string(),
+                    loc.line, loc.column);
+                b.call(panic_helper(err_type.union_index), mir::Ty::Void,
+                        {err_addr, b.global_addr(intern_string(site)),
+                         b.const_int(usize_ty(), static_cast<int64_t>(site.size()))});
+                b.unreachable();
+
+                b.set_insert_point(ok);
+            }
+
+            auto intern_string(const std::string &text) -> uint32_t {
+                if (const auto it = string_globals_.find(text); it != string_globals_.end()) {
+                    return it->second;
+                }
+                mir::Global g;
+                g.name = std::format(".str.{}", string_globals_.size());
+                g.linkage = mir::Linkage::Internal;
+                g.is_constant = true;
+                g.init.assign(text.begin(), text.end());
+                // NUL-terminated so the same global can back a '*u8' passed to C, which
+                // is what codegen does and what every 'ext fn' string argument expects.
+                g.init.push_back(0);
+                g.size = static_cast<uint32_t>(g.init.size());
+                g.align = 1;
+                result_.module.globals.push_back(std::move(g));
+                const auto index = static_cast<uint32_t>(result_.module.globals.size() - 1);
+                string_globals_[text] = index;
+                return index;
+            }
+
+            auto emit_string_literal(mir::Builder &b, const std::string &text) -> mir::ValueId {
+                const auto data_index = intern_string(text);
                 const auto usize = usize_ty();
                 const auto slot = b.add_slot(pointer_bytes() * 2, pointer_bytes(), "str");
                 const auto base = b.slot_addr(slot);
@@ -3737,10 +3980,6 @@ namespace mirgen {
                 if (it == generic_instance_index_.end() ||
                     instance_idx >= sema_.generic_fn_instances.size()) {
                     unsupported("a call to an undeclared generic instance", call.location);
-                    return mir::NO_VALUE;
-                }
-                if (exprs_ && exprs_->call_dropped_optional_error.contains(&call)) {
-                    unsupported("a call dropping an ignorable error", call.location);
                     return mir::NO_VALUE;
                 }
                 const auto &instance = *sema_.generic_fn_instances[instance_idx];
@@ -3841,10 +4080,6 @@ namespace mirgen {
                 if (!trait_info || !member || dispatch.method_order_index < 0 ||
                     static_cast<size_t>(dispatch.method_order_index) >= trait_info->methods.size()) {
                     unsupported("a trait-handle method call", call.location);
-                    return mir::NO_VALUE;
-                }
-                if (exprs_ && exprs_->call_dropped_optional_error.contains(&call)) {
-                    unsupported("a call dropping an ignorable error", call.location);
                     return mir::NO_VALUE;
                 }
                 const auto &trait_method = trait_info->methods[dispatch.method_order_index];
@@ -4054,10 +4289,6 @@ namespace mirgen {
                     return mir::NO_VALUE;
                 }
 
-                if (exprs_ && exprs_->call_dropped_optional_error.contains(&call)) {
-                    unsupported("a call dropping an ignorable error", call.location);
-                    return mir::NO_VALUE;
-                }
 
                 const auto &sig = result_.module.signatures[result_.module.functions[it->second].signature];
 
@@ -4556,10 +4787,6 @@ namespace mirgen {
                 const auto *info = sema_.fn_signature_at(callee_type.fn_index);
                 if (!info) {
                     unsupported("a call through a function pointer", call.location);
-                    return mir::NO_VALUE;
-                }
-                if (exprs_ && exprs_->call_dropped_optional_error.contains(&call)) {
-                    unsupported("a call dropping an ignorable error", call.location);
                     return mir::NO_VALUE;
                 }
 

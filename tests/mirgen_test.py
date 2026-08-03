@@ -599,6 +599,24 @@ def case_self_calls_and_field_fn_ptrs():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_dropped_optional_error():
+    """A call whose trailing '?error(...)' the caller drops gets the check it didn't
+    write: branch on the tag, and on Failed call a per-union noreturn panic helper
+    that names the variant and the call site, then exits 101."""
+    r = emit_mir("pub type E = enum(i32) { Bad = 1  Worse = 2 }\n"
+                 "fn risky(fail: bool) -> (i32, ?error(E)) {\n"
+                 "  if fail { return_err .Worse }\n  return_ok 21\n}\n"
+                 "pub fn main() -> i32 {\n"
+                 "  const v := risky(false)\n  return v * 2\n}\n")
+    check(r.returncode == 0, f"a dropped ?error lowers ({r.stderr.strip()[:140]})")
+    check("err.panic" in r.stdout and "err.ok" in r.stdout, "the drop is checked at the call site")
+    check("__mirage_panic_unhandled_error." in r.stdout,
+          "through the per-union panic helper, named like codegen's")
+    check("panic.variant.Worse" in r.stdout, "which dispatches to the variant's name")
+    check("call @exit" in r.stdout and "const.int 101" in r.stdout, "and exits 101")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_switch_and_conditions():
     r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
                  "pub fn main() -> i32 {\n"
@@ -711,6 +729,7 @@ def main() -> int:
     case_macros()
     case_native_variadics()
     case_self_calls_and_field_fn_ptrs()
+    case_dropped_optional_error()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()
