@@ -26,8 +26,9 @@ Mirage is a compiled, statically-typed systems language that targets native code
 - [`docs/grammar.md`](docs/grammar.md) — the full grammar, with notes on the places the
   parser deliberately defers a decision to sema.
 - [`docs/backend.md`](docs/backend.md) — the design record for replacing LLVM with a
-  Mirage-specific IR and native `x86_64`/`wasm` object generation. The IR foundation exists
-  (`src/compiler/mir.{hpp,cpp}`); LLVM is still the only code path.
+  Mirage-specific IR and native `x86_64`/`wasm` object generation. The x86-64 path works
+  end to end (`--backend=native`) and matches LLVM on the whole test corpus; LLVM remains
+  the default and the only path for wasm.
 
 ## Building
 
@@ -69,6 +70,8 @@ Options:
 --target=<triple>         Cross-compile for <triple> (default: the host triple)
 --emit-ir                 Print LLVM IR to stdout instead of compiling
 --emit-mir                Print Mirage IR to stdout instead of compiling (native backend)
+--mir-opt                 With --emit-mir: run the MIR optimization passes before printing
+--backend=<name>          Code generator: 'llvm' (default) or 'native' (x86-64 Linux)
 --freestanding            Compile without standard library
 --load <path>             Compile a module nothing imports (may be repeated)
 --noinit                  Skip generating/calling the synthesized '@init'-runner '_init'

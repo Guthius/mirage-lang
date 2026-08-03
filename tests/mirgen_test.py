@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """'--emit-mir': lowering sema to Mirage IR (docs/backend.md, stage 2).
 
-mirgen is being grown construct by construct rather than landed whole, so this suite has
-two jobs:
+mirgen was grown construct by construct, and this suite grew with it. Every construct
+the corpus contains now lowers, so the emphasis has shifted: these cases pin that what
+is lowered is lowered CORRECTLY, by reading the emitted MIR — the offsets, the
+signedness, the block-parameter merges, the sret shapes. Several of them exist because
+the construct they cover was once silently wrong.
 
-  - pin that what IS lowered is lowered correctly, by reading the emitted MIR;
-  - pin that what is NOT yet lowered reports a diagnostic naming the construct rather than
-    silently emitting wrong code or crashing.
-
-The second is the one that matters while coverage is partial: a backend that quietly skips
-what it does not understand is far worse than one that says so.
+The refusal machinery is still pinned (case_nothing_is_silently_skipped), because the
+property it protects has not changed: mirgen must never emit a module it could not
+fully lower. Reading MIR is also what the differential harness cannot do — it compares
+behavior, while these compare structure, and a wrong-but-consistent lowering would pass
+the former and fail here.
 
 Not wired into ctest (it needs a built compiler). Run manually:
 
@@ -100,23 +102,45 @@ def case_unsigned_and_float_operators():
     check("fadd" in r.stdout or r.returncode != 0, "float addition lowers to fadd")
 
 
-def case_unsupported_is_reported_not_skipped():
-    """The property that matters while coverage is partial."""
-    # 'stackalloc' is the probe BECAUSE it is still unlowered -- when that changes,
-    # point this at whatever is unlowered then rather than deleting it. The property
-    # under test is that mirgen refuses loudly, not that any particular construct is
-    # missing. (Previous probes: 'defer', then inline 'asm'; both now lower.)
-    r = emit_mir("pub fn main() -> i32 {\n"
+def case_nothing_is_silently_skipped():
+    """The refusal machinery, now that there is nothing left to refuse.
+
+    Every construct the corpus contains lowers, so this can no longer be a probe
+    pointed at a missing feature (it was 'defer', then inline 'asm', then
+    'stackalloc' — all three lower now). What still matters, and what this pins, is
+    the PROPERTY those probes were really testing: mirgen never emits a module it
+    could not fully lower. It either produces MIR that verifies, or it fails the
+    build naming the construct — never silence, never a crash.
+
+    Concretely: a program using every shape that was hardest to lower must come out
+    clean, with no coverage summary at all.
+    """
+    r = emit_mir("pub type E = enum(i32) { Bad = 1 }\n"
+                 "pub type Shape = union(enum) { Empty  Circle: struct { r: i32 } }\n"
+                 "pub type Drawable = trait { fn area(self) -> i32 }\n"
+                 "type Box = struct { v: i32 }\n"
+                 "impl Drawable for Box { fn area(self) -> i32 { return self.v } }\n"
+                 "fn split(n: i32) -> (i32, i32, error(E)) {\n"
+                 "  if n == 0 { return_err .Bad }\n  return_ok n / 2, n % 2\n}\n"
+                 "fn hold[T: type](v: T) -> T { return v }\n"
+                 "pub fn main() -> i32 {\n"
+                 "  defer { }\n"
+                 "  const a, b, err := split(7)\n"
+                 "  if err { return 1 }\n"
+                 "  mut s: Shape = .Circle{.r = 2}\n"
+                 "  const n := match s { .Circle(c): c.r, _: 0 }\n"
+                 "  mut box: Box = { .v = 4 }\n"
+                 "  const d: Drawable = &box\n"
                  "  const p := stackalloc(16)\n"
-                 "  return cast(p == nil, i32)\n}\n")
-    check(r.returncode != 0, "a construct mirgen cannot lower fails the build")
-    check("native backend cannot lower" in r.stderr,
-          "and says so, naming the native backend")
-    check("not yet lowered by the native backend:" in r.stderr,
-          "and prints a coverage summary listing the constructs")
-    # Never a crash, and never silently-wrong output.
+                 "  mut x: i64 = 0\n"
+                 "  asm { mov &x, rsp }\n"
+                 "  return a + b + n + d.area() + hold(0) + cast(p == nil, i32) + cast(x == 0, i32) - 11\n}\n")
+    check(r.returncode == 0, f"a program of hard constructs lowers cleanly ({r.stderr.strip()[:200]})")
+    check("not yet lowered by the native backend:" not in r.stderr,
+          "with no coverage summary -- nothing was skipped")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
     check("terminate" not in r.stderr and "Aborted" not in r.stderr,
-          "an unsupported construct does not abort the compiler")
+          "and the compiler does not abort")
 
 
 def case_lvalues():
@@ -819,7 +843,7 @@ def main() -> int:
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()
     case_loops()
-    case_unsupported_is_reported_not_skipped()
+    case_nothing_is_silently_skipped()
     case_mir_opt_promotes_slots()
     case_mir_goes_to_stdout()
 

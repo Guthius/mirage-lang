@@ -495,8 +495,21 @@ of the same shape as the earlier ones — something that *looked* lowered but wa
   layouts genuinely differ (`[]i32` → `*i32`).
 
 Plus function-pointer GLOBALS as callees (`hook()`, `mod.hook()`), which had no
-route at all. `stackalloc` is the one construct left unlowered — the refuse-loudly
-probe now points at it.
+route at all.
+
+**`stackalloc` closed the list: mirgen now lowers every construct the corpus
+contains.** It is a dynamic frame extension (`Op::StackAlloc`), not a slot — the size
+is a runtime value — so the backend rounds it up, subtracts from `rsp`, and returns
+the new top; the epilogue's `mov rsp, rbp` frees it. With nothing left to refuse,
+`mirgen_test`'s probe changed shape rather than target: it now compiles a program
+using every construct that was once hardest (defer, multi-return, tagged unions,
+traits, generics, `stackalloc`, `asm`) and asserts the coverage summary is EMPTY —
+the same property the probe always tested, stated from the other side.
+
+Docs brought current per the definition of done: `docs/backend.md`'s status and
+stage list (2–5 marked done, with how each actually landed and which predictions
+held), the validation section (the differential harness's four-way report and what
+it caught), and `README.md`'s backend paragraph and flag list.
 
 Next per `docs/backend.md`: stage 6's linear-scan allocator plus a machine-level
 verifier, differential-tested against this trivial allocator — which stays

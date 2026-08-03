@@ -5,9 +5,19 @@ lines, plus the object-emission and target-selection code in `src/main.cpp`). It
 replaced by a Mirage-specific IR and native object generation for `x86_64` and `wasm`, so
 that the compiler is standalone — no LLVM, no external toolchain beyond a linker.
 
-**Status.** The IR foundation exists and is tested (`src/compiler/mir.{hpp,cpp}`,
-`tests/mir_test.cpp`, wired into ctest). Nothing consumes it yet: LLVM is still the only
-code path. The stages below are what remain.
+**Status (2026-08-03).** Stages 1–5 are done. `--backend=native` is a complete pipeline —
+sema → MIR (`mirgen.cpp`) → `promote_slots` + `peephole` (`mir_passes.cpp`) → verify →
+x86-64 selection with the trivial allocator (`backend_x86.cpp`) → machine code
+(`x86_encoder.cpp`) → a relocatable object (`elf_writer.cpp`) → the same linker
+invocation the LLVM path uses. **`tests/backend_differential_test.py` reports 74 of 74
+positive corpus fixtures producing identical exit codes and stdout under both
+backends**, and every construct the corpus contains lowers — inline `asm` included.
+
+LLVM remains the default (`--backend=llvm`) and the only path for wasm. What remains is
+stages 6–10 below: a real register allocator, the wasm backends, and the flip-and-delete.
+
+The per-increment history, including the fifteen silent miscompiles the differential
+harness caught, is in `TODO.md`.
 
 This document is the design record for that work. It exists because the reasoning behind
 the IR's shape is not recoverable from the code, and because the remaining stages have a
@@ -60,12 +70,17 @@ porting obligation), and no IR optimization passes are ever run.
 
 ---
 
-## Remaining stages
+## Stages
 
 Each is independently verifiable. Do not start the next until the current one is green.
+Stages 2–5 are DONE; their entries below are kept as the design record (the reasoning is
+what future changes must not contradict), annotated with how they actually landed.
 
-**2. Port `codegen.cpp` → `mirgen.cpp`** against `mir::Builder`. Validate by *reading* MIR
-for the corpus; no object is produced yet. This is the mechanical-but-large step.
+**2. Port `codegen.cpp` → `mirgen.cpp`** against `mir::Builder` — DONE. Validated by
+*reading* MIR for the corpus, then (from stage 4 on) by running it. The
+mechanical-but-large step, and the one that produced the most latent bugs: a lowering can
+be type-correct, pass the verifier, and still be wrong, which is why the differential
+harness exists.
 
 The one part that is not mechanical is aggregates. `codegen.cpp` uses
 `insertvalue`/`extractvalue` on first-class aggregates in ~67 places (struct literals,
@@ -76,21 +91,32 @@ builder and has not yet been read, otherwise copies first. The in-place fast pat
 the whole `null → insert → insert → insert` construction pattern that produces nearly all
 of those sites; the copy path is slower but always correct.
 
-**3. `promote_slots` + peephole.** `promote_slots` is a mem2reg-lite: a slot whose address
+**3. `promote_slots` + peephole** — DONE (`mir_passes.cpp`; `--mir-opt` runs both).
+`promote_slots` is a mem2reg-lite: a slot whose address
 never escapes, accessed only by full-width loads/stores of one scalar type, becomes a
 value. Because the front end puts *every* local in a slot, this is what recovers most of
 what LLVM's -O0 pipeline was giving for free. Target-independent, benefits both backends.
 `Slot::address_escapes` already exists for it.
 
-**4. x86-64: legalize → ISel → *trivial* regalloc → frame layout → encoder → ELF.** First
-goal: `examples/start` runs. Then the whole corpus under differential test.
+**4. x86-64: legalize → ISel → *trivial* regalloc → frame layout → encoder → ELF.** — DONE.
+Built bottom-up: encoder first (byte-checked against GNU `as`), then the ELF writer, then
+selection. The trivial allocator's discipline is one paragraph — every MIR value owns an
+8-byte frame slot; every instruction loads its operands into fixed scratch registers and
+spills its result — and block parameters get a staging slot plus a canonical slot, which
+makes the swap/rotation hazard impossible by construction rather than by analysis.
 
 Build **trivial** register allocation first — spill every value to a frame slot, reload
 around every use. It is slow and enormous but almost impossible to get wrong, and it lets
 ISel, frame layout, the encoder and the ELF writer all be validated end-to-end before a
 single line of linear scan exists.
 
-**5. Inline asm through that encoder.** Without LLVM there is no integrated assembler.
+**5. Inline asm through that encoder.** — DONE, and the prediction below held exactly:
+owning the allocator removed the constraint model entirely. A variable operand is simply
+its frame slot, so `mov &fd, eax` encodes as `mov [rbp-off], eax` with no marshalling.
+MIR carries a resolved `AsmBlock`; the encoder gained the memory-operand forms
+hand-written asm needs and refuses anything else BY NAME.
+
+Without LLVM there is no integrated assembler.
 Fortunately the accepted language is already tiny and enumerated: the 30 Tier-1 mnemonics
 (`sema_check.cpp`'s `asm_tier1_directions`), the 64 GPRs in `asm_registers.hpp`, and
 register/immediate/variable/simple-memory operands — SSE, x87, segment and control
@@ -193,14 +219,25 @@ recording.
 
 This is what determines whether the effort succeeds.
 
-1. **Differential compilation.** Build every fixture under `--backend=llvm` and
-   `--backend=native`; compare exit code and stdout. `examples_smoke_test.py` already walks
-   the corpus and can take a `--backend` argument. Write this harness *before* the backend.
+1. **Differential compilation** — DONE, and it paid for itself immediately.
+   `tests/backend_differential_test.py` builds (and runs) every positive fixture under
+   both backends and compares exit code and stdout; `examples_smoke_test.py` also takes
+   `--backend`. Written BEFORE the backend, exactly as this list demanded, which is why
+   the very first native run had a harness waiting for it. It has since caught fifteen
+   silent miscompiles — every one type-correct, verifier-clean, and invisible to all 27
+   other suites, because nothing else ever EXECUTED the lowered code.
+
+   Its report is deliberately four-way: match, mismatch, awaiting-stage-4, and
+   refused-by-name. The last two are tolerated but COUNTED and listed, so the suite is
+   green while incomplete yet any regression in coverage reads as one.
 2. **`mirage test`** on both backends. `tests/mir/` is a real assertion-carrying suite
    rather than an exit-code comparison, which is exactly what a backend swap needs.
 3. **Encoder differential**: assemble every instruction-table entry with both this encoder
    and `as`, byte-compare. This catches the class of bug that produces working-but-wrong
-   code, and pays for itself within a day.
+   code, and pays for itself within a day. PARTLY DONE: `tests/x86_encoder_test.cpp` pins
+   every emitter's bytes, cross-checked against `as` output by hand at authoring time.
+   Automating the comparison (shelling out to `as` from the test) is still worth doing
+   before the instruction table grows much further.
 4. **Machine-level verifier** after register allocation, checking interference.
 5. **`mirage303`** (90 files, ~2s, links raylib) as the integration smoke test. It
    exercises `ext fn` struct ABI, function pointers, traits and `#link` together, which no

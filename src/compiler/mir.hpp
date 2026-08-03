@@ -59,6 +59,11 @@ namespace mir {
         GlobalAddr,
         // Address of a Function::slots entry. 'a' is the slot index.
         SlotAddr,
+        // 'stackalloc(n)': 'a' = byte count (target word width), result = the address.
+        // A DYNAMIC frame extension, unlike SlotAddr's fixed slots — which is why it is
+        // its own op rather than a slot: the size is a runtime value, and the storage
+        // lives until the enclosing function returns.
+        StackAlloc,
         // Address of a Module::functions entry, as a code pointer. 'a' is the function index.
         FuncAddr,
 
@@ -347,6 +352,8 @@ namespace mir {
         // storage POINTERS, referenced by AsmOperand::arg_index. Ty::Void for the
         // statement form.
         auto asm_block(uint32_t block, Ty result_type, const std::vector<ValueId> &operands) -> ValueId;
+        // 'stackalloc(n)' — a dynamic frame extension; the result is its address.
+        auto stack_alloc(ValueId bytes) -> ValueId;
 
         // --- terminators ---
         void jump(BlockId target, const std::vector<ValueId> &args = {});

@@ -48,6 +48,7 @@ namespace mir {
         case Op::ConstNull:    return "const.null";
         case Op::GlobalAddr:   return "global.addr";
         case Op::SlotAddr:     return "slot.addr";
+        case Op::StackAlloc:   return "stackalloc";
         case Op::FuncAddr:     return "func.addr";
         case Op::Load:         return "load";
         case Op::Store:        return "store";
@@ -303,6 +304,10 @@ namespace mir {
         return emit(Inst{.op = Op::Select, .type = type, .a = condition, .b = if_true, .c = if_false});
     }
 
+    auto Builder::stack_alloc(const ValueId bytes) -> ValueId {
+        return emit(Inst{.op = Op::StackAlloc, .type = Ty::Ptr, .a = bytes});
+    }
+
     auto Builder::asm_block(const uint32_t block, const Ty result_type,
                              const std::vector<ValueId> &operands) -> ValueId {
         return emit(Inst{.op = Op::Asm, .type = result_type, .a = block, .args = operands});
@@ -509,6 +514,11 @@ namespace mir {
                 case Op::PtrAdd:
                     check_operand_type(fn, inst.a, Ty::Ptr, site);
                     check_operand(fn, inst.b, site);
+                    if (inst.type != Ty::Ptr) fail(std::format("{}: result must be 'ptr'", site));
+                    break;
+
+                case Op::StackAlloc:
+                    check_operand(fn, inst.a, site);
                     if (inst.type != Ty::Ptr) fail(std::format("{}: result must be 'ptr'", site));
                     break;
 
@@ -734,6 +744,9 @@ namespace mir {
                 break;
             case Op::PtrAddConst:
                 out += std::format(" {}, {}", value_ref(fn, inst.a), inst.imm);
+                break;
+            case Op::StackAlloc:
+                out += std::format(" {}", value_ref(fn, inst.a));
                 break;
             case Op::Call: {
                 out += inst.a < module.functions.size()

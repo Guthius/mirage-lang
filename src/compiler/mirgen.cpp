@@ -2828,7 +2828,6 @@ namespace mirgen {
                 else if constexpr (std::is_same_v<V, ast::DefaultExpr>) return "'default'";
                 else if constexpr (std::is_same_v<V, ast::UndefinedExpr>) return "'undefined'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) return "'++' / '--'";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StackAllocExpr>>) return "'stackalloc'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) return "'$option'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) return "'$env'";
                 else if constexpr (std::is_same_v<V, ast::RttiEnabledExpr>) return "'$rtti_enabled'";
@@ -3159,6 +3158,15 @@ namespace mirgen {
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::MatchExpr>>) {
                         return emit_match(b, *v, expr);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::StackAllocExpr>>) {
+                        // 'stackalloc(n)' extends the frame by n bytes and yields the
+                        // address; the storage lives until the function returns, so
+                        // there is nothing to free and no slot to name.
+                        const auto size = emit_expr(b, v->size);
+                        if (size == mir::NO_VALUE) return mir::NO_VALUE;
+                        return b.stack_alloc(coerce_to(b, size, usize_ty(),
+                                                        signed_type(expr_type(v->size))));
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::AsmExpr>>) {
                         const auto type = expr_type(expr);

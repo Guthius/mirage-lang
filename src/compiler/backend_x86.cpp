@@ -309,6 +309,22 @@ namespace backend_x86 {
                 case Op::MemCopy: emit_mem_op(inst, false); return;
                 case Op::MemSet: emit_mem_op(inst, true); return;
 
+                case Op::StackAlloc: {
+                    // Extend the frame by a 16-aligned amount and hand back the new top.
+                    // RSP is free to move here: the epilogue restores it from RBP, and
+                    // every call's own stack-argument reservation is balanced, so a
+                    // dynamic allocation simply survives until the function returns.
+                    load_value(inst.a, Reg::RAX);
+                    enc.alu_ri(Alu::Add, Width::W64, Reg::RAX, 15);
+                    enc.alu_ri(Alu::And, Width::W64, Reg::RAX, -16);
+                    enc.alu_rr(Alu::Sub, Width::W64, Reg::RSP, Reg::RAX);
+                    // Keep RSP itself 16-aligned for the next call.
+                    enc.alu_ri(Alu::And, Width::W64, Reg::RSP, -16);
+                    enc.mov_rr(Width::W64, Reg::RAX, Reg::RSP);
+                    store_result(inst.result, Reg::RAX);
+                    return;
+                }
+
                 case Op::PtrAddConst: {
                     load_value(inst.a, Reg::RAX);
                     enc.lea(Reg::RAX, Reg::RAX, static_cast<int32_t>(inst.imm));

@@ -167,6 +167,7 @@ namespace mir {
                 return;
             case Op::Load:
             case Op::PtrAddConst:
+            case Op::StackAlloc:
                 visit(inst.a);
                 return;
             case Op::Store:
