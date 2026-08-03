@@ -1,4 +1,6 @@
+#include "compiler/backend_x86.hpp"
 #include "compiler/codegen.hpp"
+#include "compiler/elf_writer.hpp"
 #include "compiler/mirgen.hpp"
 #include "compiler/module_resolver.hpp"
 #include "compiler/sema.hpp"
@@ -571,6 +573,97 @@ namespace {
     }
 }
 
+// Links 'object_path' into the requested output and, for 'run'/'test', executes
+// it -- shared verbatim by the LLVM and native backends, which differ only in how
+// the object file's bytes came to exist.
+auto link_and_finish(const std::filesystem::path &object_path, const Options &options,
+                      const llvm::Triple &target_triple,
+                      const std::vector<sema::LinkDirective> &link_directives,
+                      const std::chrono::steady_clock::time_point start_time,
+                      const std::chrono::steady_clock::duration object_elapsed) -> int {
+    const auto to_ms = [](auto elapsed) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+    };
+    // 'test' builds to a temp path and executes it, exactly as 'run' does — the compiled
+    // output is the test binary, and there is nothing to leave behind.
+    const bool executes_output = options.action == Action::Run || options.action == Action::Test;
+    const auto exe_path = executes_output
+        ? make_temp_file("")
+        : std::filesystem::path(options.output);
+    if (exe_path.empty()) {
+        std::error_code exe_temp_error;
+        std::filesystem::remove(object_path, exe_temp_error);
+        return 1;
+    }
+
+    const auto link_start = std::chrono::steady_clock::now();
+    if (!link_executable(object_path, exe_path, options, target_triple, link_directives)) {
+        // link_executable already printed a detailed diagnostic; no second banner. For
+        // 'run', the executable path is an mkstemp placeholder that would otherwise be
+        // orphaned in $TMPDIR on every failed link.
+        std::error_code remove_error;
+        std::filesystem::remove(object_path, remove_error);
+        if (executes_output) {
+            std::filesystem::remove(exe_path, remove_error);
+        }
+        return 1;
+    }
+    const auto link_elapsed = std::chrono::steady_clock::now() - link_start;
+
+    std::error_code remove_error;
+    std::filesystem::remove(object_path, remove_error);
+
+    llvm::errs() << std::format(
+        "  object:  {}ms\n"
+        "  link:    {}ms\n",
+        to_ms(object_elapsed), to_ms(link_elapsed));
+
+    const auto elapsed = std::chrono::steady_clock::now() - start_time;
+    const auto secs = std::chrono::duration<double>(elapsed).count();
+    if (executes_output) {
+        llvm::errs() << std::format("Compiled '{}' in {:.2f}s\n", options.module_path, secs);
+    } else {
+        llvm::errs() << std::format("Compiled '{}' -> '{}' in {:.2f}s\n", options.module_path, options.output, secs);
+    }
+    // Flush before fork() so nothing still buffered here is inherited by the child and
+    // written out a second time from the child's copy of the buffer.
+    llvm::outs().flush();
+    llvm::errs().flush();
+
+    if (executes_output) {
+        const pid_t pid = fork();
+        if (pid < 0) {
+            llvm::errs() << "mirage: fork failed\n";
+            std::filesystem::remove(exe_path, remove_error);
+            return 1;
+        }
+        if (pid == 0) {
+            const char *args[] = {exe_path.c_str(), nullptr};
+            execv(exe_path.c_str(), const_cast<char *const *>(args));
+            _exit(127);
+        }
+        int status = 0;
+        waitpid(pid, &status, 0);
+        std::filesystem::remove(exe_path, remove_error);
+        if (WIFEXITED(status)) {
+            const int code = WEXITSTATUS(status);
+            llvm::errs() << std::format("process exited with code {}\n", code);
+            return code;
+        }
+        if (WIFSIGNALED(status)) {
+            // Previously this fell through to a bare 'return 1', so a compiled program that
+            // segfaulted looked like an ordinary non-zero exit -- which is exactly how
+            // CODEGEN-1's stack-exhaustion crash stayed invisible through 'mirage run'.
+            const int sig = WTERMSIG(status);
+            llvm::errs() << std::format("process was killed by signal {} ({})\n", sig, strsignal(sig));
+            return 128 + sig;
+        }
+        return 1;
+    }
+
+    return 0;
+}
+
 auto main(const int argc, char *argv[]) -> int {
     // Parse first, then validate. The old 'argc < 3' gate ran BEFORE parse_options, so
     // 'mirage --help' (argc == 2) never reached the --help branch that exits 0: it printed
@@ -743,6 +836,7 @@ auto main(const int argc, char *argv[]) -> int {
     // how stage 2 is validated (docs/backend.md).
     if (options.emit_mir) {
         auto lowered = mirgen::generate(ast, sema, diag, mirgen::Options{
+            .noinit = options.noinit,
             .pointer_bits = target_triple.getArchPointerBitWidth(),
         });
         if (options.mir_opt && lowered.ok) {
@@ -768,13 +862,18 @@ auto main(const int argc, char *argv[]) -> int {
         return lowered.ok ? 0 : 1;
     }
 
-    // '--backend=native': run the full native pipeline as far as it exists — lowering
-    // plus the stage-3 passes, verified — then say plainly that object generation is
-    // stage 4. The flag exists NOW so the differential harness could be written first
-    // (docs/backend.md's validation plan); its skip-detection keys on this exact
-    // message, and stage 4 replaces this block with the ISel/encoder pipeline.
+    // '--backend=native': the stage-4 pipeline. Lower, run the stage-3 passes,
+    // verify, generate x86-64 machine code with the trivial register allocator,
+    // write the ELF object, and hand it to the SAME link/run tail the LLVM path
+    // uses — the two backends differ only in how the object's bytes came to exist.
     if (options.backend == "native") {
+        if (target_triple.getArch() != llvm::Triple::x86_64 || !target_triple.isOSLinux()) {
+            llvm::errs() << "error: the native backend supports only x86_64-linux for now "
+                         << "(wasm is stage 7, docs/backend.md)\n";
+            return 1;
+        }
         auto lowered = mirgen::generate(ast, sema, diag, mirgen::Options{
+            .noinit = options.noinit,
             .pointer_bits = target_triple.getArchPointerBitWidth(),
         });
         if (!lowered.ok) {
@@ -793,10 +892,33 @@ auto main(const int argc, char *argv[]) -> int {
                          << error.message << "\n";
             return 1;
         }
-        llvm::errs() << "error: the native backend cannot produce objects yet "
-                     << "(stage 4, docs/backend.md); use --emit-mir to inspect its MIR "
-                     << "or --backend=llvm to compile\n";
-        return 1;
+
+        const auto object_start = std::chrono::steady_clock::now();
+        const auto generated = backend_x86::generate(lowered.module);
+        if (!generated.ok) {
+            for (const auto &error : generated.errors) {
+                llvm::errs() << "error: native backend: " << error << "\n";
+            }
+            return 1;
+        }
+        const auto bytes = elf::write(generated.object);
+        const auto object_path = make_temp_file(".o");
+        if (object_path.empty()) {
+            return 1;
+        }
+        {
+            std::error_code write_error;
+            llvm::raw_fd_ostream out(object_path.string(), write_error);
+            if (write_error) {
+                llvm::errs() << "error: cannot write '" << object_path.string() << "'\n";
+                return 1;
+            }
+            out.write(reinterpret_cast<const char *>(bytes.data()),
+                       static_cast<size_t>(bytes.size()));
+        }
+        const auto object_elapsed = std::chrono::steady_clock::now() - object_start;
+        return link_and_finish(object_path, options, target_triple, sema.link_directives,
+                                start_time, object_elapsed);
     }
 
     const auto codegen_start = std::chrono::steady_clock::now();
@@ -854,82 +976,6 @@ auto main(const int argc, char *argv[]) -> int {
     }
     const auto object_elapsed = std::chrono::steady_clock::now() - object_start;
 
-    // 'test' builds to a temp path and executes it, exactly as 'run' does — the compiled
-    // output is the test binary, and there is nothing to leave behind.
-    const bool executes_output = options.action == Action::Run || options.action == Action::Test;
-    const auto exe_path = executes_output
-        ? make_temp_file("")
-        : std::filesystem::path(options.output);
-    if (exe_path.empty()) {
-        std::error_code exe_temp_error;
-        std::filesystem::remove(object_path, exe_temp_error);
-        return 1;
-    }
-
-    const auto link_start = std::chrono::steady_clock::now();
-    if (!link_executable(object_path, exe_path, options, target_triple, sema.link_directives)) {
-        // link_executable already printed a detailed diagnostic; no second banner. For
-        // 'run', the executable path is an mkstemp placeholder that would otherwise be
-        // orphaned in $TMPDIR on every failed link.
-        std::error_code remove_error;
-        std::filesystem::remove(object_path, remove_error);
-        if (executes_output) {
-            std::filesystem::remove(exe_path, remove_error);
-        }
-        return 1;
-    }
-    const auto link_elapsed = std::chrono::steady_clock::now() - link_start;
-
-    std::error_code remove_error;
-    std::filesystem::remove(object_path, remove_error);
-
-    llvm::errs() << std::format(
-        "  object:  {}ms\n"
-        "  link:    {}ms\n",
-        to_ms(object_elapsed), to_ms(link_elapsed));
-
-    const auto elapsed = std::chrono::steady_clock::now() - start_time;
-    const auto secs = std::chrono::duration<double>(elapsed).count();
-    if (executes_output) {
-        llvm::errs() << std::format("Compiled '{}' in {:.2f}s\n", options.module_path, secs);
-    } else {
-        llvm::errs() << std::format("Compiled '{}' -> '{}' in {:.2f}s\n", options.module_path, options.output, secs);
-    }
-    // Flush before fork() so nothing still buffered here is inherited by the child and
-    // written out a second time from the child's copy of the buffer.
-    llvm::outs().flush();
-    llvm::errs().flush();
-
-    if (executes_output) {
-        const pid_t pid = fork();
-        if (pid < 0) {
-            llvm::errs() << "mirage: fork failed\n";
-            std::filesystem::remove(exe_path, remove_error);
-            return 1;
-        }
-        if (pid == 0) {
-            const char *args[] = {exe_path.c_str(), nullptr};
-            execv(exe_path.c_str(), const_cast<char *const *>(args));
-            _exit(127);
-        }
-        int status = 0;
-        waitpid(pid, &status, 0);
-        std::filesystem::remove(exe_path, remove_error);
-        if (WIFEXITED(status)) {
-            const int code = WEXITSTATUS(status);
-            llvm::errs() << std::format("process exited with code {}\n", code);
-            return code;
-        }
-        if (WIFSIGNALED(status)) {
-            // Previously this fell through to a bare 'return 1', so a compiled program that
-            // segfaulted looked like an ordinary non-zero exit -- which is exactly how
-            // CODEGEN-1's stack-exhaustion crash stayed invisible through 'mirage run'.
-            const int sig = WTERMSIG(status);
-            llvm::errs() << std::format("process was killed by signal {} ({})\n", sig, strsignal(sig));
-            return 128 + sig;
-        }
-        return 1;
-    }
-
-    return 0;
+    return link_and_finish(object_path, options, target_triple, sema.link_directives,
+                            start_time, object_elapsed);
 }

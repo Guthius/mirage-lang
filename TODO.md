@@ -415,6 +415,48 @@ Done:
   ELF, in that order; `examples/start` runs first, then this harness's
   awaiting-stage-4 count starts falling.
 
+## Stage 4 — x86-64: **the native backend produces working executables**
+
+Built bottom-up in one pass: encoder, ELF writer, trivial-regalloc ISel, entry glue,
+driver wiring.
+
+- **`src/compiler/x86_encoder.{hpp,cpp}`** — byte-exact instruction encoding for
+  exactly what the ISel emits, no more. Expected bytes cross-checked against GNU `as`
+  (validation #3); label-fixup rel32 jumps; `Call32`/`Rip32` relocations against
+  caller-owned symbol indices. 44 ctest assertions.
+- **`src/compiler/elf_writer.{hpp,cpp}`** — ELF64 relocatable objects: fixed section
+  order, locals-before-globals symbol ordering with `sh_info` set correctly, `.rela`
+  sections per target section.
+- **`src/compiler/backend_x86.{hpp,cpp}`** — the TRIVIAL allocator, as the plan
+  demands before linear scan: every MIR value owns an 8-byte frame slot, every
+  instruction loads operands into fixed scratch registers and spills its result.
+  Block parameters get a staging slot plus a canonical slot, making the
+  swap/rotation hazard impossible by construction rather than by analysis. System V
+  calls (6 int + 8 SSE registers, stack tail, `AL` = vector count). Entry glue
+  matching codegen's `_start` for all three `main` shapes.
+- **`--backend=native` is now a real pipeline**: mirgen → promote_slots → peephole →
+  verify → ISel → ELF → the SAME link/run tail the LLVM path uses.
+
+**Differential result: 65 of 65 non-asm positive fixtures produce identical exit
+codes and stdout under both backends.** (One, `example_fnptr3`, is compared on exit
+code only — its own comment documents that it prints an unspecified value on the
+failed path; LLVM leaves stack garbage there, native leaves a deterministic zero.)
+
+The harness found seven real bugs on its first runs, every one of them a silent
+miscompile that no existing test could see, since nothing had executed MIR before:
+an indirect call through a struct FIELD called the field's address; a by-value
+aggregate `for-in` binding stored the element's address instead of copying it;
+`!err` took an error aggregate's address down the pointer path and was always false;
+scalar global initializers were dropped (`const alignment := 8` became 0, so every
+native allocation divided by zero); `++`/`--` returned the new value in postfix
+position, shifting every byte-copy loop; `cast(any, *T)` yielded the blob address
+instead of the data word; and int↔float casts fell through to `Bitcast`, printing
+3.14159 as 4614256650576692846.
+
+Remaining in stage 4: `@section` placement, `@naked`, and inline `asm` (stage 5's
+encoder work). Then stage 6's linear-scan allocator, differential-tested against
+this trivial one, which stays permanently as the triage tool.
+
 Remaining:
 
 - **Stage 2, rest** — aggregates (structs, arrays, slices, trait handles, `any`, error

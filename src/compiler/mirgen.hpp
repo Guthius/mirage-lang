@@ -24,6 +24,9 @@
 
 namespace mirgen {
     struct Options {
+        // '--noinit': skip synthesizing the '@init'-runner '_init', mirroring the
+        // driver flag codegen honors.
+        bool noinit = false;
         // Byte width of a pointer on the target, mirroring sema::Options::pointer_size.
         // Everything else about the target is a backend concern; MIR is target-independent
         // apart from this one number, which decides Ty::Ptr's width and therefore every

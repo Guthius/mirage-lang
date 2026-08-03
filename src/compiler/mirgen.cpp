@@ -51,6 +51,7 @@ namespace mirgen {
                 emit_method_bodies();
                 emit_trait_method_bodies();
                 emit_generic_function_bodies();
+                emit_init_runner();
 
                 // The verifier is the analogue of llvm::verifyModule, which the LLVM path
                 // runs on every compile. Running it here means a lowering bug is reported
@@ -255,8 +256,59 @@ namespace mirgen {
                         g.size = size_of(global->type);
                         g.align = std::max(1u, align_of(global->type));
                         g.is_constant = !global->is_mut;
-                        // Initializers are lowered in a later increment; a zero-initialized
-                        // global is correct for everything sema accepted as 'default'.
+                        // A foldable scalar initializer becomes the global's bytes -- with
+                        // sema's OWN folder, so nothing here can disagree with what a
+                        // 'when' condition already computed from the same expression.
+                        // (Zero-initializing 'const alignment := 8' instead broke every
+                        // native allocation with a division by zero.) String initializers
+                        // become a (reloc, len) slice header; anything else that is not
+                        // 'default'/absent keeps zeroinit, exactly as before.
+                        if (global->decl && global->decl->init && is_scalar(global->type) &&
+                            !std::holds_alternative<ast::DefaultExpr>(*global->decl->init) &&
+                            !std::holds_alternative<ast::UndefinedExpr>(*global->decl->init)) {
+                            std::optional<int64_t> value;
+                            // 'const id: type = type_of(T)' -- an interned type id, which
+                            // is a compile-time constant sema's value folder does not
+                            // model (it has no 'type' case), so it is read directly.
+                            if (const auto *type_of = std::get_if<std::unique_ptr<ast::TypeOfExpr>>(
+                                    &*global->decl->init)) {
+                                const auto saved_module = module_;
+                                const auto saved_exprs = exprs_;
+                                module_ = mod_ptr;
+                                exprs_ = &mod_ptr->exprs;
+                                if (const auto operand = operand_named_type((*type_of)->operand)) {
+                                    if (const auto it = sema_.type_ids.find(*operand);
+                                        it != sema_.type_ids.end()) {
+                                        value = static_cast<int64_t>(it->second);
+                                    }
+                                }
+                                module_ = saved_module;
+                                exprs_ = saved_exprs;
+                            } else if (const auto folded = sema::evaluate_const_value(
+                                           *global->decl->init, path,
+                                           const_cast<sema::Program &>(sema_), diag_)) {
+                                if (const auto *num = std::get_if<int64_t>(&*folded)) value = *num;
+                            }
+                            if (value) {
+                                g.init.assign(g.size, 0);
+                                for (uint32_t byte = 0; byte < g.size && byte < 8; ++byte) {
+                                    g.init[byte] = static_cast<uint8_t>(*value >> (8 * byte));
+                                }
+                            }
+                        } else if (global->decl && global->decl->init &&
+                                    global->type.kind == sema::TypeKind::Slice) {
+                            if (const auto *text = std::get_if<ast::LiteralStringExpr>(&*global->decl->init)) {
+                                g.init.assign(g.size, 0);
+                                const auto data = intern_string(text->value);
+                                g.relocations.push_back({.kind = mir::Relocation::Kind::GlobalAddr,
+                                                          .offset = 0, .target = data});
+                                const auto length = static_cast<uint64_t>(text->value.size());
+                                for (uint32_t byte = 0; byte < pointer_bytes(); ++byte) {
+                                    g.init[pointer_bytes() + byte] =
+                                        static_cast<uint8_t>(length >> (8 * byte));
+                                }
+                            }
+                        }
                         result_.module.globals.push_back(std::move(g));
                         global_index_[key(path, name)] = static_cast<uint32_t>(result_.module.globals.size() - 1);
                     }
@@ -732,6 +784,51 @@ namespace mirgen {
                     if (instance.return_types.empty()) b.ret();
                     else b.unreachable();
                 }
+            }
+
+            // The '@init' runner: a plain '_init' calling every '@init' function in
+            // Program::init_call_order (already topologically sorted by sema), which the
+            // backends' entry glue runs before 'main'. A fallible initializer that
+            // returns Failed exits 1, exactly as codegen's emit_init does.
+            void emit_init_runner() {
+                if (options_.noinit || sema_.init_call_order.empty()) return;
+
+                mir::Function f;
+                f.name = "_init";
+                f.linkage = mir::Linkage::External;
+                f.signature = result_.module.intern_signature(mir::Signature{});
+                f.has_body = true;
+                result_.module.functions.push_back(std::move(f));
+                const auto fn_index = static_cast<uint32_t>(result_.module.functions.size() - 1);
+
+                mir::Builder b(result_.module, fn_index);
+                const auto entry = b.create_block("entry");
+                b.set_insert_point(entry);
+
+                for (const auto &[mod_path, fn_name] : sema_.init_call_order) {
+                    const auto it = function_index_.find(key(mod_path, fn_name));
+                    const auto *fn_sym = symbol_function(mod_path, fn_name);
+                    if (it == function_index_.end() || !fn_sym) continue;
+                    if (fn_sym->return_types.empty()) {
+                        b.call(it->second, mir::Ty::Void, {});
+                        continue;
+                    }
+                    // '@init' may return 'error(...)': check the tag, exit 1 on Failed.
+                    const auto layout = multi_return_layout(fn_sym->return_types);
+                    const auto slot = b.add_slot(layout.size, layout.align, "init.err");
+                    const auto blob = b.slot_addr(slot);
+                    b.call(it->second, mir::Ty::Void, {blob});
+                    const auto tag = b.load(mir::Ty::I32, blob);
+                    const auto failed = b.create_block("init_failed");
+                    const auto ok = b.create_block("init_ok");
+                    b.branch(b.compare(mir::Op::ICmpNe, tag, b.const_int(mir::Ty::I32, 0)),
+                              failed, ok);
+                    b.set_insert_point(failed);
+                    b.call(libc_exit_fn(), mir::Ty::Void, {b.const_int(mir::Ty::I32, 1)});
+                    b.unreachable();
+                    b.set_insert_point(ok);
+                }
+                b.ret();
             }
 
             // Trait-impl methods live ONLY in Program::trait_impls_by_type -- an
@@ -2326,8 +2423,14 @@ namespace mirgen {
                 const auto offset = b.binary(mir::Op::Mul, usize, b.load(usize, b.slot_addr(index_slot)),
                                               b.const_int(usize, size_of(element)));
                 const auto element_address = b.ptr_add(data, offset);
-                if (element_is_ref || !is_scalar(element)) {
+                if (element_is_ref) {
                     b.store(b.slot_addr(element_slot), element_address);
+                } else if (!is_scalar(element)) {
+                    // A by-value aggregate binding COPIES the element: every reader
+                    // treats an aggregate local's slot as holding the aggregate itself
+                    // (storing the address here was the same bug bind_param had).
+                    b.mem_copy(b.slot_addr(element_slot), element_address,
+                                b.const_int(usize, size_of(element)));
                 } else {
                     b.store(b.slot_addr(element_slot), b.load(scalar_type(element), element_address));
                 }
@@ -3295,6 +3398,18 @@ namespace mirgen {
                     return b.load(scalar_type(result_type), address);
                 }
 
+                // '!x' is the negation of x's TRUTHINESS, and emit_condition is the one
+                // place that knows every truthiness shape -- bools, integer "!= 0",
+                // pointer null tests, and an error value's Ok/Failed tag. Routing through
+                // anything else regressed exactly once: '!err' took the aggregate's
+                // ADDRESS down the pointer path and was always false. Handled before the
+                // generic operand emission so the operand is evaluated exactly once.
+                if (un.op == ast::UnaryOp::LogicalNot) {
+                    const auto condition = emit_condition(b, un.operand);
+                    if (condition == mir::NO_VALUE) return mir::NO_VALUE;
+                    return b.unary(mir::Op::Not, mir::Ty::I1, condition);
+                }
+
                 const auto operand = emit_expr(b, un.operand);
                 if (operand == mir::NO_VALUE) return mir::NO_VALUE;
                 const auto ty = b.value_type(operand);
@@ -3302,16 +3417,6 @@ namespace mirgen {
                 switch (un.op) {
                 case ast::UnaryOp::Negate:
                     return b.unary(mir::is_float(ty) ? mir::Op::FNeg : mir::Op::Neg, ty, operand);
-                case ast::UnaryOp::LogicalNot:
-                    // On a bool this is Op::Not, which is width-correct for I1. On an
-                    // integer (the truthiness form) it is "== 0", and on a pointer it is a
-                    // null test -- comparing a pointer against a const.int would have been
-                    // ill-typed, which is what the MIR verifier caught.
-                    if (ty == mir::Ty::I1) return b.unary(mir::Op::Not, ty, operand);
-                    if (ty == mir::Ty::Ptr) return b.compare(mir::Op::ICmpEq, operand, b.const_null());
-                    if (mir::is_integer(ty)) return b.compare(mir::Op::ICmpEq, operand, b.const_int(ty, 0));
-                    unsupported("'!' on this operand type", un.location);
-                    return mir::NO_VALUE;
                 case ast::UnaryOp::BitwiseNot:
                     return b.unary(mir::Op::Not, ty, operand);
                 default:
@@ -3659,12 +3764,20 @@ namespace mirgen {
                 const auto value = emit_expr(b, cast.value);
                 if (value == mir::NO_VALUE) return mir::NO_VALUE;
                 // A slice or array operand casting to a pointer hands over its data word /
-                // base address, not the header's address.
+                // base address, not the header's address -- and an 'any' its DATA word
+                // (word 1 of {id, data}), which is the whole point of the cast.
                 if (scalar_type(target) == mir::Ty::Ptr &&
                     (from.kind == sema::TypeKind::Slice || from.kind == sema::TypeKind::Array)) {
                     return coerce_arg(b, value, target, from);
                 }
-                return coerce_to(b, value, scalar_type(target), signed_type(from));
+                if (scalar_type(target) == mir::Ty::Ptr && from.kind == sema::TypeKind::Any) {
+                    return b.load(mir::Ty::Ptr, b.ptr_add_const(value, pointer_bytes()));
+                }
+                // float -> int reads its signedness from the TARGET (which rounding form
+                // to use); every other direction reads it from the source.
+                const bool signedness = from.is_float() && !target.is_float()
+                    ? signed_type(target) : signed_type(from);
+                return coerce_to(b, value, scalar_type(target), signedness);
             }
 
             auto emit_slice_cast(mir::Builder &b, const ast::CastExpr &cast, const sema::ResolvedType &target) -> mir::ValueId {
@@ -4726,9 +4839,11 @@ namespace mirgen {
                                         old_value, b.const_int(ty, step));
                 }
                 b.store(address, updated);
-                // Mirage's '++'/'--' are statements in practice; yielding the NEW value is
-                // the conservative choice and matches what an assignment expression returns.
-                return updated;
+                // Prefix yields the updated value, postfix the ORIGINAL -- the C rule,
+                // which codegen implements and which mem.mir's byte-copy loop
+                // ('d++.* = s++.*') depends on: returning the new value there shifted
+                // every copy one byte forward and zeroed each string's first byte.
+                return incr.is_prefix ? updated : old_value;
             }
 
             // A call to a monomorphized generic instance -- a direct call to the function
@@ -5590,7 +5705,18 @@ namespace mirgen {
                 const auto signature = signature_for(info->param_types, info->return_types, info->is_variadic);
                 const auto &sig = result_.module.signatures[signature];
 
-                const auto callee = emit_expr(b, call.callee);
+                // The callee's POINTER VALUE, never its address. emit_expr cannot be
+                // trusted for the load decision here: sema records no expr_type for a
+                // call's callee, so a member-expression callee ('h.f') would fall through
+                // the aggregate path and yield the field's address — type-correct MIR
+                // that calls a stack address. Found by the differential harness on the
+                // first native run, exactly as the validation plan intended.
+                mir::ValueId callee;
+                if (const auto address = emit_address(b, call.callee); address != mir::NO_VALUE) {
+                    callee = b.load(mir::Ty::Ptr, address);
+                } else {
+                    callee = emit_expr(b, call.callee);
+                }
                 if (callee == mir::NO_VALUE) return mir::NO_VALUE;
 
                 // An aggregate or multi-return result travels through a caller-owned sret
@@ -5720,6 +5846,25 @@ namespace mirgen {
                 }
                 if (from == mir::Ty::Ptr && mir::is_integer(target)) {
                     return b.convert(mir::Op::PtrToInt, target, value);
+                }
+                // int <-> float is a VALUE conversion, never a reinterpretation. Falling
+                // through to Bitcast here silently turned 'cast(x, u64)' on a float into
+                // its raw bit pattern -- type-correct MIR that printed 4614256650576692846
+                // for 3.14159. I1 is boolean, so it zero-extends first rather than
+                // sign-converting.
+                if (mir::is_integer(from) && mir::is_float(target)) {
+                    const auto widened = from == mir::Ty::I1
+                        ? b.convert(mir::Op::ZExt, mir::Ty::I32, value) : value;
+                    return b.convert(source_is_signed && from != mir::Ty::I1
+                                         ? mir::Op::SIToFP : mir::Op::UIToFP,
+                                      target, widened);
+                }
+                if (mir::is_float(from) && mir::is_integer(target)) {
+                    // The TARGET's signedness decides the rounding form; coerce_to only
+                    // carries the source's, so the caller passes the target's own through
+                    // the same flag for this direction (see emit_cast).
+                    return b.convert(source_is_signed ? mir::Op::FPToSI : mir::Op::FPToUI,
+                                      target, value);
                 }
                 return b.convert(mir::Op::Bitcast, target, value);
             }

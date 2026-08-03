@@ -42,6 +42,10 @@ add_library(mirage_core OBJECT
         src/compiler/mir.hpp
         src/compiler/mir_passes.cpp
         src/compiler/mirgen.cpp
+        src/compiler/backend_x86.cpp
+        src/compiler/backend_x86.hpp
+        src/compiler/elf_writer.cpp
+        src/compiler/elf_writer.hpp
         src/compiler/x86_encoder.cpp
         src/compiler/x86_encoder.hpp
         src/compiler/mirgen.hpp

@@ -47,6 +47,16 @@ BASELINE = Path(__file__).resolve().parent / "examples_expected.json"
 # or a real bug, never a skip.
 NATIVE_UNAVAILABLE = "the native backend cannot produce objects yet"
 
+# Fixtures that deliberately print an UNSPECIFIED value, so the two backends may
+# legitimately disagree on stdout. Each entry names the line in the fixture that says
+# so; exit codes are still compared.
+EXIT_CODE_ONLY = {
+    # "val2 is undefined on the Failed path" — its own comment. LLVM leaves stack
+    # garbage there, the native backend leaves a deterministic zero; both are valid
+    # instances of unspecified.
+    "example_fnptr3",
+}
+
 failures = 0
 
 
@@ -102,9 +112,11 @@ def main() -> int:
         if native_code != 0 and "cannot lower" in native_err:
             not_lowered.append(name)
             continue
-        if (llvm_code, llvm_out) == (native_code, native_out):
+        compare_stdout = name not in EXIT_CODE_ONLY
+        if llvm_code == native_code and (not compare_stdout or llvm_out == native_out):
             matched += 1
-            print(f"ok: {name}: backends agree (exit {llvm_code})")
+            print(f"ok: {name}: backends agree (exit {llvm_code})"
+                  + ("" if compare_stdout else " [exit code only]"))
             continue
         fail(f"{name}: llvm (exit {llvm_code}) vs native (exit {native_code}) diverge"
              + (f"\n  llvm stdout:   {llvm_out!r}\n  native stdout: {native_out!r}"
