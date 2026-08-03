@@ -237,12 +237,14 @@ This is what determines whether the effort succeeds.
    both backends; all 35 tests pass under each. Test mode needs its own synthesized
    entry (wrappers + `Test_Info` + `_run_tests`), which is why running it caught that
    `--backend=native` had been emitting a crashing test binary.
-3. **Encoder differential**: assemble every instruction-table entry with both this encoder
-   and `as`, byte-compare. This catches the class of bug that produces working-but-wrong
-   code, and pays for itself within a day. PARTLY DONE: `tests/x86_encoder_test.cpp` pins
-   every emitter's bytes, cross-checked against `as` output by hand at authoring time.
-   Automating the comparison (shelling out to `as` from the test) is still worth doing
-   before the instruction table grows much further.
+3. **Encoder differential** — DONE. `tests/x86_encoder_test.cpp` pins every emitter's
+   bytes and, with `--dump`, emits each form's AT&T spelling beside them;
+   `tests/x86_encoder_differential_test.py` assembles those with `as` and compares.
+   Where the two differ, the comparison is SEMANTIC rather than whitelisted: both byte
+   sequences are disassembled by `objdump` and their instruction text compared, so this
+   encoder's deliberate uniform disp32/imm32 forms pass while a wrong opcode, register
+   or displacement fails. Verified to work by injecting a swapped ModRM reg/rm field:
+   21 of 40 instructions failed. Skips cleanly when binutils is absent.
 4. **Machine-level verifier** after register allocation, checking interference.
 5. **`mirage303`** (90 files, ~2s, links raylib) as the integration smoke test. It
    exercises `ext fn` struct ABI, function pointers, traits and `#link` together, which no
