@@ -537,9 +537,57 @@ it caught), and `README.md`'s backend paragraph and flag list.
   failing test*, where the differential harness can only report a diverging exit
   code.
 
-Next per `docs/backend.md`: stage 6's linear-scan allocator plus a machine-level
-verifier, differential-tested against this trivial allocator — which stays
-permanently as `--regalloc=trivial`, the standing triage tool.
+## Stage 6 — linear-scan register allocation: **done, differential-tested both ways**
+
+`--regalloc=linear` is the native default; `--regalloc=trivial` keeps the stage-4/5
+discipline alive permanently as the triage tool. One deliberate deviation from the
+handoff's sketch, with the reason stated: there is NO separate machine IR. MIR is
+already SSA-shaped (one def per value, block params instead of phi), so MIR values
+ARE the virtual registers; `x86_regalloc.cpp` assigns each an interval-long location
+(register or 8-byte frame area) and ONE emission engine in `backend_x86.cpp` reads
+operands from wherever the assignment put them. Trivial = "everything spilled"
+through the SAME templates, which is exactly what makes it diagnostic: reproduce
+under trivial → shared-engine bug; linear only → allocator bug. That split found
+both real bugs this stage produced (below) within minutes.
+
+The requirements all hold: 14 allocatable GPRs + 16 XMMs as separate classes,
+caller/callee-saved split (callee-saved preferred for call-crossing intervals,
+saved/restored in the prologue/epilogue only when actually used), fixed-register
+constraints as per-position KILL RANGES (`div`/`idiv` own `rdx:rax`, shifts own
+`cl`, `switch`/`stackalloc` templates own their scratch, calls clobber every
+caller-saved register and all XMMs, asm blocks own their sema-computed clobber set
+plus every register they name), and spilling with save/restore around calls — an
+interval live across calls may hold a caller-saved register with
+`save_around_calls`, parked in its save area across exactly the calls it crosses.
+Eligibility is per-call, not per-interval: an interval merely USED at a call (an
+argument) would read a stale save area there, so only calls it genuinely crosses
+tolerate the overlap. Block arguments keep the two-phase staging-slot transfer
+(rotation-proof by construction); entry parameters stage through memory the same
+way, so no parallel-move resolver exists anywhere.
+
+The machine verifier (validation #4) re-checks pairwise interference and kill-range
+violations after every allocation and turns any finding into a hard compile error;
+`x86_regalloc_test.cpp` pins the constraint properties in ctest. Both differential
+harnesses now sweep the native side under BOTH allocators on every run.
+
+Two real miscompiles found and fixed, both invisible to every pre-stage-6 suite:
+
+- **Liveness stretched mid-block defs back to block start.** A call result's
+  conservative interval then "crossed" its own defining call, was granted
+  save-around, and the post-call restore clobbered the freshly committed result
+  (`example_default_params` exited 1). Live-THROUGH values stretch to block start;
+  defined-in-block values start at their def.
+- **`xor sil, 1` encoded as `xor dh, 1`.** Byte ALU/unary ops on SPL/BPL/SIL/DIL
+  need a forced REX prefix; without it the encoding addresses AH/CH/DH/BH. The
+  trivial allocator's fixed scratch set (RAX/RCX/RDX) can never reach those
+  encodings, which is why stages 4–5 never saw it — the whole reflection fixture
+  cluster failed because one `not` of an `i1` in RSI flipped a bit of RDX instead.
+  Pinned in the encoder tests and the GNU `as` differential.
+
+Perf sanity (hash loop, 2×10⁸ iterations): trivial 1372ms, linear 425ms, LLVM
+381ms — 3.2× over trivial, within ~12% of LLVM, identical outputs.
+
+Next per `docs/backend.md`: stages 7–9 (wasm), then stage 10 (flip, soak, delete).
 
 Remaining:
 

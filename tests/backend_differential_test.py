@@ -66,13 +66,15 @@ def fail(message: str) -> None:
     print(f"FAIL: {message}")
 
 
-def run_backend(directory: Path, action: str, backend: str, timeout: int):
+def run_backend(directory: Path, action: str, backend: str, timeout: int,
+                regalloc: str | None = None):
+    extra = [f"--regalloc={regalloc}"] if regalloc else []
     with tempfile.TemporaryDirectory() as tmp:
         if action == "run":
-            argv = [str(MIRAGE), "run", str(directory), f"--backend={backend}"]
+            argv = [str(MIRAGE), "run", str(directory), f"--backend={backend}", *extra]
         else:
             argv = [str(MIRAGE), "build", str(directory), "-o", str(Path(tmp) / "out"),
-                    f"--backend={backend}"]
+                    f"--backend={backend}", *extra]
         try:
             result = subprocess.run(argv, capture_output=True, text=True,
                                     timeout=timeout, cwd=REPO_ROOT)
@@ -104,24 +106,38 @@ def main() -> int:
         timeout = spec.get("timeout", 60)
 
         llvm_code, llvm_out, _ = run_backend(directory, action, "llvm", timeout)
-        native_code, native_out, native_err = run_backend(directory, action, "native", timeout)
 
-        if NATIVE_UNAVAILABLE in native_err:
-            unavailable += 1
+        # Both register allocators (docs/backend.md stage 6): linear is the one
+        # under test; trivial is the standing triage baseline. A fixture passes
+        # only when BOTH agree with LLVM, so a linear-scan miscompile and a
+        # shared-emission miscompile are distinguishable from one run's output.
+        fixture_ok = True
+        skipped = False
+        for regalloc in ("linear", "trivial"):
+            native_code, native_out, native_err = run_backend(
+                directory, action, "native", timeout, regalloc)
+            if NATIVE_UNAVAILABLE in native_err:
+                unavailable += 1
+                skipped = True
+                break
+            if native_code != 0 and "cannot lower" in native_err:
+                not_lowered.append(name)
+                skipped = True
+                break
+            compare_stdout = name not in EXIT_CODE_ONLY
+            if llvm_code == native_code and (not compare_stdout or llvm_out == native_out):
+                continue
+            fixture_ok = False
+            fail(f"{name}: llvm (exit {llvm_code}) vs native/{regalloc} "
+                 f"(exit {native_code}) diverge"
+                 + (f"\n  llvm stdout:   {llvm_out!r}\n  native stdout: {native_out!r}"
+                    if llvm_out != native_out else "")
+                 + (f"\n  native stderr: {native_err.strip()[:300]}" if native_err.strip() else ""))
+        if skipped or not fixture_ok:
             continue
-        if native_code != 0 and "cannot lower" in native_err:
-            not_lowered.append(name)
-            continue
-        compare_stdout = name not in EXIT_CODE_ONLY
-        if llvm_code == native_code and (not compare_stdout or llvm_out == native_out):
-            matched += 1
-            print(f"ok: {name}: backends agree (exit {llvm_code})"
-                  + ("" if compare_stdout else " [exit code only]"))
-            continue
-        fail(f"{name}: llvm (exit {llvm_code}) vs native (exit {native_code}) diverge"
-             + (f"\n  llvm stdout:   {llvm_out!r}\n  native stdout: {native_out!r}"
-                if llvm_out != native_out else "")
-             + (f"\n  native stderr: {native_err.strip()[:300]}" if native_err.strip() else ""))
+        matched += 1
+        print(f"ok: {name}: backends agree (exit {llvm_code})"
+              + ("" if name not in EXIT_CODE_ONLY else " [exit code only]"))
 
     total = len(candidates)
     print(f"\n{total} positive fixtures: {matched} matched, {failures} mismatched, "

@@ -48,6 +48,8 @@ add_library(mirage_core OBJECT
         src/compiler/elf_writer.hpp
         src/compiler/x86_encoder.cpp
         src/compiler/x86_encoder.hpp
+        src/compiler/x86_regalloc.cpp
+        src/compiler/x86_regalloc.hpp
         src/compiler/mirgen.hpp
         src/compiler/module_resolver.cpp
         src/compiler/module_resolver.hpp
@@ -141,6 +143,21 @@ add_executable(x86_encoder_test
         src/compiler/x86_encoder.cpp
         src/compiler/x86_encoder.hpp
 )
+
+add_executable(x86_regalloc_test
+        tests/x86_regalloc_test.cpp
+        src/compiler/mir.cpp
+        src/compiler/mir.hpp
+        src/compiler/x86_regalloc.cpp
+        src/compiler/x86_regalloc.hpp
+)
+
+target_include_directories(x86_regalloc_test
+        PRIVATE src
+)
+
+add_test(NAME x86_regalloc_test COMMAND x86_regalloc_test)
+set_tests_properties(x86_regalloc_test PROPERTIES TIMEOUT 10)
 
 target_include_directories(x86_encoder_test
         PRIVATE src

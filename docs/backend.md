@@ -5,16 +5,19 @@ lines, plus the object-emission and target-selection code in `src/main.cpp`). It
 replaced by a Mirage-specific IR and native object generation for `x86_64` and `wasm`, so
 that the compiler is standalone — no LLVM, no external toolchain beyond a linker.
 
-**Status (2026-08-03).** Stages 1–5 are done. `--backend=native` is a complete pipeline —
+**Status (2026-08-03).** Stages 1–6 are done. `--backend=native` is a complete pipeline —
 sema → MIR (`mirgen.cpp`) → `promote_slots` + `peephole` (`mir_passes.cpp`) → verify →
-x86-64 selection with the trivial allocator (`backend_x86.cpp`) → machine code
-(`x86_encoder.cpp`) → a relocatable object (`elf_writer.cpp`) → the same linker
-invocation the LLVM path uses. **`tests/backend_differential_test.py` reports 74 of 74
-positive corpus fixtures producing identical exit codes and stdout under both
-backends**, and every construct the corpus contains lowers — inline `asm` included.
+linear-scan register allocation (`x86_regalloc.cpp`, with its machine-level interference
+verifier) → x86-64 emission (`backend_x86.cpp`) → machine code (`x86_encoder.cpp`) → a
+relocatable object (`elf_writer.cpp`) → the same linker invocation the LLVM path uses.
+**`tests/backend_differential_test.py` reports 74 of 74 positive corpus fixtures
+producing identical exit codes and stdout under both backends — with the native side run
+under BOTH register allocators** — and every construct the corpus contains lowers,
+inline `asm` included. `--regalloc=trivial` keeps the stage-4/5 discipline alive as the
+standing triage tool.
 
 LLVM remains the default (`--backend=llvm`) and the only path for wasm. What remains is
-stages 6–10 below: a real register allocator, the wasm backends, and the flip-and-delete.
+stages 7–10 below: the wasm backends and the flip-and-delete.
 
 The per-increment history, including the fifteen silent miscompiles the differential
 harness caught, is in `TODO.md`.
@@ -129,16 +132,35 @@ pre-coloured operands and an explicit clobber set — which sema already compute
 compiler-internal asm blobs (freestanding `exit` and `write` syscalls, `_start`'s stack
 realign) stop being asm at all and become machine instructions directly.
 
-**6. Linear-scan register allocator + machine verifier.** Differential-test against
-trivial. Hard requirements, all of which real programs exercise: 14 allocatable GPRs
-(`rsp`/`rbp` reserved) and 16 XMMs from separate classes; caller/callee-saved split;
-fixed-register constraints (`div`/`idiv` clobber `rdx:rax`, variable shifts need `cl`,
-System V argument and return registers); spilling and interval splitting around calls.
+**6. Linear-scan register allocator + machine verifier.** — DONE (`x86_regalloc.cpp`).
+Differential-tested against trivial on every harness run. The hard requirements all hold:
+14 allocatable GPRs (`rsp`/`rbp` reserved) and 16 XMMs as separate classes;
+caller/callee-saved split; fixed-register constraints (`div`/`idiv` clobber `rdx:rax`,
+variable shifts need `cl`, System V argument and return registers); spilling with
+save/restore splitting around calls.
 
-This is the component most likely to harbour a subtle miscompile — code that runs and is
-wrong. Two defences: a machine-level verifier re-checking live-range interference after
-allocation, and keeping `--regalloc=trivial` permanently as the triage tool ("if it also
-misbehaves under trivial, the bug is not in the allocator").
+How it actually landed, and the one deliberate deviation: there is NO separate machine
+IR. MIR is already SSA-shaped (one def per value, block parameters instead of phi), so
+MIR values ARE the virtual registers, and the allocator assigns each an interval-long
+location — register or 8-byte frame area — that ONE emission engine in `backend_x86.cpp`
+reads operands from. `--regalloc=trivial` is the degenerate assignment (everything
+spilled) through the SAME templates, which is what keeps it meaningful as a triage tool:
+a bug that reproduces under trivial is in the shared engine, one that does not is in the
+allocator. Fixed-register needs are modelled as per-position KILL RANGES the allocator
+must route around; call clobbers are kill ranges an interval may overlap only with
+`save_around_calls` — the emitter parks it in its save area across exactly the calls it
+crosses, which is this design's interval-splitting form. Intervals are conservative
+single ranges `[start, end]`; holes cost register pressure, never correctness.
+
+The predicted subtle-miscompile risk was real, twice, both caught by the differential
+harness within one run: a liveness bug (values defined mid-block stretched back to block
+start, letting a call result "cross" its own defining call and be clobbered by its own
+save-around restore), and an ENCODER bug the trivial allocator could never reach ('xor
+sil, 1' encoding as 'xor dh, 1' — byte ops on SPL/BPL/SIL/DIL need a forced REX prefix,
+and the trivial scratch set RAX/RCX/RDX never touches those encodings). The machine
+verifier re-checks pairwise interference and kill-range violations after every
+allocation and aborts the compile on any finding; `tests/x86_regalloc_test.cpp` pins the
+constraint properties in ctest.
 
 **7. wasm, standalone.** Structurally easier than x86-64 in two ways and harder in one.
 

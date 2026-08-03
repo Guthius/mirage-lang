@@ -29,6 +29,10 @@ namespace x86 {
     };
     enum class XReg : uint8_t {
         XMM0 = 0, XMM1 = 1, XMM2 = 2, XMM3 = 3, XMM4 = 4, XMM5 = 5, XMM6 = 6, XMM7 = 7,
+        // The REX-extended half, reachable since the linear-scan allocator (stage 6)
+        // treats all 16 as one class. The existing emitters already route the high
+        // bit through rex(), so these encode correctly everywhere XReg is accepted.
+        XMM8 = 8, XMM9 = 9, XMM10 = 10, XMM11 = 11, XMM12 = 12, XMM13 = 13, XMM14 = 14, XMM15 = 15,
     };
 
     // Operand width in bits. Byte operations on SPL/BPL/SIL/DIL need a REX prefix
@@ -114,6 +118,7 @@ namespace x86 {
         void movsd_store(Reg base, int32_t disp, XReg src);
         void sse_arith(uint8_t opcode, bool is_double, XReg dst, XReg src); // 0x58 add, 0x5C sub, 0x59 mul, 0x5E div
         void ucomis(bool is_double, XReg a, XReg b);
+        void movaps(XReg dst, XReg src); // xmm <- xmm bit copy (both scalar widths)
         void cvt_i2f(bool to_double, Width from, XReg dst, Reg src);  // cvtsi2ss/sd
         void cvt_f2i(bool from_double, Width to, Reg dst, XReg src);  // cvttss/sd2si
         void cvt_f2f(bool to_double, XReg dst, XReg src);             // cvtss2sd / cvtsd2ss
@@ -148,6 +153,16 @@ namespace x86 {
         void unary_r(uint8_t slot, Width w, Reg reg);
         void push_m(Reg base, int32_t disp);
         void pop_m(Reg base, int32_t disp);
+
+        // --- spilled-operand folding (stage 6) ----------------------------------
+        // Memory forms the register allocator's emission engine folds spilled
+        // operands into, so a spill costs one memory operand rather than a scratch
+        // register + reload. Same encoding families as the register forms above.
+        void div_m(Reg base, int32_t disp);   // div qword [base+disp]
+        void idiv_m(Reg base, int32_t disp);  // idiv qword [base+disp]
+        void imul_rm(Reg dst, Reg base, int32_t disp);
+        void sse_arith_m(uint8_t opcode, bool is_double, XReg dst, Reg base, int32_t disp);
+        void ucomis_m(bool is_double, XReg a, Reg base, int32_t disp);
 
       private:
         struct PendingJump {

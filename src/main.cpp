@@ -50,6 +50,10 @@ namespace {
         // '--backend=llvm|native'. Defaults to llvm until stage 10 (docs/backend.md);
         // keeping both alive is what makes differential testing possible.
         std::string backend = "llvm";
+        // '--regalloc=linear|trivial' (native backend). Trivial is the standing
+        // triage tool (docs/backend.md stage 6): if a bug reproduces under it,
+        // the bug is not in the linear-scan allocator.
+        std::string regalloc = "linear";
         // debugging surface until it can produce objects (docs/backend.md, stage 2).
         bool emit_mir = false;
         bool freestanding = false;
@@ -92,6 +96,7 @@ namespace {
                      << "  --emit-mir           Print Mirage IR to stdout instead of compiling (native backend)\n"
                      << "  --mir-opt            With --emit-mir: run the stage-3 MIR passes before printing\n"
                      << "  --backend=<name>     Code generator: 'llvm' (default) or 'native' (in development)\n"
+                     << "  --regalloc=<name>    Native register allocator: 'linear' (default) or 'trivial' (triage)\n"
                      << "  --freestanding       Compile without standard library\n"
                      << "  --noinit             Skip generating/calling the synthesized '@init'-runner '_init'\n"
                      << "  --nortti             Disable runtime type information ('type_info_of'); sets '$rtti_enabled' to false\n"
@@ -127,6 +132,13 @@ namespace {
                 if (options.backend != "llvm" && options.backend != "native") {
                     llvm::errs() << "error: unknown backend '" << options.backend
                                  << "' (expected 'llvm' or 'native')\n";
+                    return std::nullopt;
+                }
+            } else if (arg.starts_with("--regalloc=")) {
+                options.regalloc = arg.substr(std::string("--regalloc=").size());
+                if (options.regalloc != "linear" && options.regalloc != "trivial") {
+                    llvm::errs() << "error: unknown register allocator '" << options.regalloc
+                                 << "' (expected 'linear' or 'trivial')\n";
                     return std::nullopt;
                 }
             } else if (arg == "--freestanding") {
@@ -896,7 +908,10 @@ auto main(const int argc, char *argv[]) -> int {
 
         const auto object_start = std::chrono::steady_clock::now();
         const auto generated = backend_x86::generate(lowered.module, lowered.test_info_global,
-                                                      lowered.test_runner_function);
+                                                      lowered.test_runner_function,
+                                                      options.regalloc == "trivial"
+                                                          ? backend_x86::RegAlloc::Trivial
+                                                          : backend_x86::RegAlloc::Linear);
         if (!generated.ok) {
             for (const auto &error : generated.errors) {
                 llvm::errs() << "error: native backend: " << error << "\n";

@@ -52,18 +52,26 @@ def main() -> int:
     # assertions rather than exit-code comparisons, which is exactly what a backend
     # swap needs -- a native miscompile shows up here as a FAILED TEST naming itself,
     # where the differential harness would only report a diverging exit code.
-    for backend in ("llvm", "native"):
+    # The native backend runs under both register allocators (docs/backend.md
+    # stage 6): linear is the one under test, trivial the triage baseline.
+    variants = (
+        ("llvm", []),
+        ("native/linear", ["--backend=native", "--regalloc=linear"]),
+        ("native/trivial", ["--backend=native", "--regalloc=trivial"]),
+    )
+    for label, extra in variants:
         for module in modules:
+            argv = [str(MIRAGE), "test", str(module), f"--std={STD}"]
+            argv.extend(extra if extra else ["--backend=llvm"])
             result = subprocess.run(
-                [str(MIRAGE), "test", str(module), f"--std={STD}", f"--backend={backend}"],
-                capture_output=True, text=True, timeout=300, cwd=REPO_ROOT,
+                argv, capture_output=True, text=True, timeout=300, cwd=REPO_ROOT,
             )
             # The harness's own table is the useful output; pass it through verbatim
             # rather than re-summarizing it less well.
             sys.stdout.write(result.stdout)
             if result.returncode != 0:
                 failures += 1
-                print(f"FAIL: {module.name} under --backend={backend} "
+                print(f"FAIL: {module.name} under {label} "
                       f"exited {result.returncode}")
                 # Compilation errors land on stderr and would otherwise be invisible.
                 for line in result.stderr.splitlines():
@@ -74,7 +82,8 @@ def main() -> int:
     if failures:
         print(f"{failures} module/backend combination(s) with failures")
         return 1
-    print(f"all {len(modules)} Mirage test module(s) passed on both backends")
+    print(f"all {len(modules)} Mirage test module(s) passed on llvm, native/linear "
+          f"and native/trivial")
     return 0
 
 

@@ -72,6 +72,7 @@ Options:
 --emit-mir                Print Mirage IR to stdout instead of compiling (native backend)
 --mir-opt                 With --emit-mir: run the MIR optimization passes before printing
 --backend=<name>          Code generator: 'llvm' (default) or 'native' (x86-64 Linux)
+--regalloc=<name>         Native register allocator: 'linear' (default) or 'trivial' (triage)
 --freestanding            Compile without standard library
 --load <path>             Compile a module nothing imports (may be repeated)
 --noinit                  Skip generating/calling the synthesized '@init'-runner '_init'

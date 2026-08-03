@@ -144,6 +144,36 @@ int main(int argc, char **argv) {
           {0x55, 0x41, 0x5f});
     check("ud2", [](x86::Encoder &e) { e.ud2(); }, {0x0f, 0x0b}, "ud2");
 
+    // Stage-6 additions: the REX-extended XMM half and the memory forms the
+    // register allocator's emission engine folds spilled operands into.
+    check("movaps xmm2, xmm9", [](x86::Encoder &e) { e.movaps(XReg::XMM2, XReg::XMM9); },
+          {0x41, 0x0f, 0x28, 0xd1}, "movaps %xmm9, %xmm2");
+    check("movsd xmm12, [rbp-16]", [](x86::Encoder &e) { e.movsd_load(XReg::XMM12, Reg::RBP, -16); },
+          {0xf2, 0x44, 0x0f, 0x10, 0xa5, 0xf0, 0xff, 0xff, 0xff}, "movsd -0x10(%rbp), %xmm12");
+    check("addss xmm8, xmm15", [](x86::Encoder &e) { e.sse_arith(0x58, false, XReg::XMM8, XReg::XMM15); },
+          {0xf3, 0x45, 0x0f, 0x58, 0xc7}, "addss %xmm15, %xmm8");
+    check("movq xmm8, rax", [](x86::Encoder &e) { e.mov_r_x(XReg::XMM8, Reg::RAX); },
+          {0x66, 0x4c, 0x0f, 0x6e, 0xc0}, "movq %rax, %xmm8");
+    check("div qword [rbp-24]", [](x86::Encoder &e) { e.div_m(Reg::RBP, -24); },
+          {0x48, 0xf7, 0xb5, 0xe8, 0xff, 0xff, 0xff}, "divq -0x18(%rbp)");
+    check("idiv qword [rsp+8]", [](x86::Encoder &e) { e.idiv_m(Reg::RSP, 8); },
+          {0x48, 0xf7, 0xbc, 0x24, 0x08, 0x00, 0x00, 0x00}, "idivq 0x8(%rsp)");
+    check("imul r13, [rbp-8]", [](x86::Encoder &e) { e.imul_rm(Reg::R13, Reg::RBP, -8); },
+          {0x4c, 0x0f, 0xaf, 0xad, 0xf8, 0xff, 0xff, 0xff}, "imul -0x8(%rbp), %r13");
+    check("divsd xmm3, [rbp-32]", [](x86::Encoder &e) { e.sse_arith_m(0x5E, true, XReg::XMM3, Reg::RBP, -32); },
+          {0xf2, 0x0f, 0x5e, 0x9d, 0xe0, 0xff, 0xff, 0xff}, "divsd -0x20(%rbp), %xmm3");
+    check("ucomiss xmm1, [rbp+16]", [](x86::Encoder &e) { e.ucomis_m(false, XReg::XMM1, Reg::RBP, 16); },
+          {0x0f, 0x2e, 0x8d, 0x10, 0x00, 0x00, 0x00}, "ucomiss 0x10(%rbp), %xmm1");
+    check("ucomisd xmm10, [rbp]", [](x86::Encoder &e) { e.ucomis_m(true, XReg::XMM10, Reg::RBP, 0); },
+          {0x66, 0x44, 0x0f, 0x2e, 0x95, 0x00, 0x00, 0x00, 0x00}, "ucomisd 0x0(%rbp), %xmm10");
+    // Byte ALU/unary ops on SPL/BPL/SIL/DIL need a forced REX or they address
+    // AH/CH/DH/BH instead. 'xor sil, 1' as 'xor dh, 1' was a real linear-scan
+    // miscompile; the trivial allocator's fixed scratch set could never reach it.
+    check("xor sil, 1", [](x86::Encoder &e) { e.alu_ri(Alu::Xor, Width::W8, Reg::RSI, 1); },
+          {0x40, 0x80, 0xf6, 0x01}, "xor $1, %sil");
+    check("neg dil", [](x86::Encoder &e) { e.unary_r(3, Width::W8, Reg::RDI); },
+          {0x40, 0xf6, 0xdf}, "neg %dil");
+
     // A backward and a forward jump, resolved through labels: jmp rel32 counts from
     // the END of the 5-byte instruction.
     check("label round-trip",

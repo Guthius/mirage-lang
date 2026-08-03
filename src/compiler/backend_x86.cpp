@@ -1,26 +1,52 @@
 #include "backend_x86.hpp"
 
 #include "x86_encoder.hpp"
+#include "x86_regalloc.hpp"
 
-// The trivial-regalloc code generator (see the header). The whole discipline in one
-// paragraph: every MIR value owns an 8-byte frame slot at [rbp - offset]; every MIR
-// frame slot (aggregates) owns an aligned area below those; each instruction loads
-// its operands from their slots into fixed scratch registers (RAX/RCX/RDX for
-// integers and pointers, XMM0/XMM1 for floats), computes, and stores the result back
-// to its own slot. No liveness, no allocation decisions, no cross-instruction state.
+// The x86-64 code generator, stage 6 shape: one emission engine that reads every
+// operand from wherever the register allocator put it — a physical register or an
+// 8-byte frame area — and writes results the same way. '--regalloc=trivial' is the
+// degenerate assignment (everything spilled), which reproduces the stage-4/5
+// discipline through the SAME templates and stays forever as the triage tool;
+// '--regalloc=linear' is the real allocator in x86_regalloc.cpp.
 //
-// Block parameters get TWO slots each: a staging slot every incoming jump writes,
-// and the canonical slot the block body reads. The jump copies all its arguments
-// into staging first and staging into canonical second, which makes the classic
-// swap/rotation hazard ('jump header(%b, %a)' where a and b ARE the header's
-// parameters) impossible by construction rather than by analysis.
+// Invariants the templates rely on:
 //
-// Calls follow System V: integer/pointer arguments in RDI RSI RDX RCX R8 R9, floats
-// in XMM0-7, the rest on the stack (16-byte aligned at the call), AL = the number of
-// vector registers used for a variadic callee. Mirage's own convention is
-// deliberately identical at the scalar level, so one path serves both.
+//  - CANONICAL FORM. An integer value in a register or spill area is always
+//    zero-extended to 64 bits; templates that need sign re-extend explicitly
+//    (movsx), and every result is re-canonicalized at its type's width before it
+//    is committed. This is the register-world restatement of the trivial
+//    allocator's narrow-store/zero-extending-load convention, so both modes
+//    compute identical bit patterns.
+//
+//  - EARLY DEFS. The allocator defines straight-line results at the same position
+//    their operands are read (x86_regalloc.hpp), so a result register never
+//    aliases an operand register and two-address templates ('mov dst, a; op dst,
+//    b') are safe by construction. Call and asm results are defined late, after
+//    the clobber point.
+//
+//  - KILL RANGES. Templates that need registers by name (div/idiv: rdx:rax,
+//    shifts: cl, stackalloc: rax, calls: every caller-saved register and all
+//    XMMs, asm: its clobber set) had those registers reserved by the allocator at
+//    those positions. Everything else acquires scratch dynamically from registers
+//    that are dead at the current instruction, falling back to push/pop around
+//    the one instruction in the (rare) case none is free.
+//
+//  - BLOCK ARGUMENTS go through per-parameter staging slots in memory: every jump
+//    writes all its arguments into staging first and staging into the parameters'
+//    homes second, which makes the classic swap/rotation hazard impossible by
+//    construction rather than by analysis — the same reasoning the trivial
+//    backend used, kept because it is proof, not inertia.
+//
+// Calls follow System V: integer/pointer arguments in RDI RSI RDX RCX R8 R9,
+// floats in XMM0-7, the rest on the stack (16-byte aligned at the call), AL = the
+// number of vector registers used for a variadic callee. Values the allocator
+// parked with save_around_calls are stored to their save areas before the call
+// sequence begins and reloaded after it ends — the interval-splitting-around-
+// calls form docs/backend.md stage 6 requires.
 
 #include <algorithm>
+#include <cstdlib>
 #include <format>
 #include <optional>
 #include <string>
@@ -45,6 +71,13 @@ namespace backend_x86 {
             }
         }
 
+        auto greg(const x86ra::PhysReg reg) -> Reg { return static_cast<Reg>(reg); }
+        auto xreg(const x86ra::PhysReg reg) -> XReg {
+            return static_cast<XReg>(reg - x86ra::FIRST_XMM);
+        }
+        auto bit(const Reg reg) -> uint32_t { return 1u << static_cast<uint32_t>(reg); }
+        auto bit(const XReg reg) -> uint32_t { return 1u << (16 + static_cast<uint32_t>(reg)); }
+
         const Reg INT_ARG_REGS[6] = {Reg::RDI, Reg::RSI, Reg::RDX, Reg::RCX, Reg::R8, Reg::R9};
 
         struct FunctionContext {
@@ -52,36 +85,68 @@ namespace backend_x86 {
             const mir::Function &fn;
             x86::Encoder &enc;
             std::vector<std::string> &errors;
-            // Symbol index per module function/global, filled by the module walk.
             const std::vector<uint32_t> &function_symbols;
             const std::vector<uint32_t> &global_symbols;
+            const x86ra::Result &ra;
 
-            std::unordered_map<mir::ValueId, int32_t> value_offset;   // rbp-relative
-            std::unordered_map<mir::ValueId, int32_t> staging_offset; // block params only
-            std::vector<int32_t> slot_offset;                          // MIR slots
+            // ---- frame ----------------------------------------------------------
+            std::vector<int32_t> slot_offset;                       // MIR slots
+            std::vector<int32_t> area_offset;                       // spill/save areas
+            std::unordered_map<mir::ValueId, int32_t> staging_offset; // block params
+            int32_t callee_save_offset[16] = {};
             int32_t frame_size = 0;
             std::vector<x86::Label> block_labels;
 
-            void error(std::string message) {
-                errors.push_back(std::move(message));
+            uint32_t memcpy_symbol = 0;
+            uint32_t memset_symbol = 0;
+            uint32_t fmod_symbol = 0;
+            uint32_t fmodf_symbol = 0;
+
+            // ---- emission sweep (dynamic scratch + save-around) -----------------
+            struct ActiveInterval {
+                uint32_t start = 0;
+                uint32_t end = 0;
+                mir::ValueId value = mir::NO_VALUE;
+                x86ra::PhysReg reg = x86ra::NO_PHYS;
+                bool save_around = false;
+            };
+            std::vector<ActiveInterval> active;
+            size_t next_interval = 0;
+            uint32_t current_index = 0;
+            uint32_t lease_mask = 0; // one bit per PhysReg currently leased
+
+            void error(std::string message) { errors.push_back(std::move(message)); }
+
+            // ---- assignment access ----------------------------------------------
+            [[nodiscard]] auto assignment(const mir::ValueId v) const -> const x86ra::Assignment & {
+                return ra.values[v];
+            }
+            [[nodiscard]] auto in_reg(const mir::ValueId v) const -> bool {
+                return !assignment(v).spilled;
+            }
+            [[nodiscard]] auto val_gpr(const mir::ValueId v) const -> Reg {
+                return greg(assignment(v).reg);
+            }
+            [[nodiscard]] auto val_xmm(const mir::ValueId v) const -> XReg {
+                return xreg(assignment(v).reg);
+            }
+            [[nodiscard]] auto val_off(const mir::ValueId v) const -> int32_t {
+                return area_offset[assignment(v).spill_index];
+            }
+            [[nodiscard]] auto is_double(const mir::ValueId v) const -> bool {
+                return fn.values[v].type == mir::Ty::F64;
             }
 
             // ---- frame layout ----------------------------------------------------
             void layout_frame() {
                 int32_t offset = 0;
-                const auto place8 = [&]() {
+                const auto place8 = [&] {
                     offset += 8;
                     return -offset;
                 };
-                for (const auto &block : fn.blocks) {
-                    for (const auto param : block.params) {
-                        value_offset[param] = place8();
-                        staging_offset[param] = place8();
-                    }
-                    for (const auto &inst : block.insts) {
-                        if (inst.result != mir::NO_VALUE) {
-                            value_offset[inst.result] = place8();
-                        }
+                for (Reg r : {Reg::RBX, Reg::R12, Reg::R13, Reg::R14, Reg::R15}) {
+                    if (ra.used_callee_saved & bit(r)) {
+                        callee_save_offset[static_cast<int>(r)] = place8();
                     }
                 }
                 slot_offset.resize(fn.slots.size());
@@ -92,59 +157,312 @@ namespace backend_x86 {
                     offset = (offset + align - 1) / align * align;
                     slot_offset[i] = -offset;
                 }
+                area_offset.resize(ra.spill_area_count);
+                for (uint32_t i = 0; i < ra.spill_area_count; ++i) area_offset[i] = place8();
+                for (const auto &block : fn.blocks) {
+                    for (const auto param : block.params) staging_offset[param] = place8();
+                }
                 frame_size = (offset + 15) / 16 * 16;
             }
 
-            // ---- scratch-register value movement ---------------------------------
-            void load_value(const mir::ValueId value, const Reg reg) {
-                const auto type = fn.values[value].type;
-                const auto width = width_of(type);
-                if (width == Width::W64) {
-                    enc.load(Width::W64, reg, Reg::RBP, value_offset.at(value));
-                } else {
-                    // Narrow loads zero-extend into the full register so 64-bit scratch
-                    // arithmetic on addresses and indices is never fed garbage.
-                    enc.load(width, reg, Reg::RBP, value_offset.at(value));
-                    if (width != Width::W32) enc.movzx(width, reg, reg);
+            // ---- sweep ----------------------------------------------------------
+            void advance_to(const uint32_t index) {
+                current_index = index;
+                const auto low = x86ra::pos_e(index);
+                std::erase_if(active, [&](const ActiveInterval &a) { return a.end < low; });
+                const auto limit = x86ra::pos_l(index);
+                while (next_interval < ra.intervals.size() &&
+                       ra.intervals[next_interval].start <= limit) {
+                    const auto &interval = ra.intervals[next_interval++];
+                    const auto &as = ra.values[interval.value];
+                    if (!as.spilled) {
+                        active.push_back({interval.start, interval.end, interval.value,
+                                          as.reg, as.save_around_calls});
+                    }
                 }
             }
-            void store_result(const mir::ValueId value, const Reg reg) {
-                enc.store(width_of(fn.values[value].type), Reg::RBP, value_offset.at(value), reg);
+
+            [[nodiscard]] auto occupied(const x86ra::PhysReg reg) const -> bool {
+                if (lease_mask & (1u << reg)) return true;
+                for (const auto &a : active) {
+                    if (a.reg == reg) return true;
+                }
+                return false;
             }
-            void store_at(const mir::ValueId value, const int32_t offset, const Reg reg) {
-                enc.store(width_of(fn.values[value].type), Reg::RBP, offset, reg);
+
+            // ---- dynamic scratch -------------------------------------------------
+            // A leased register is dead at the current instruction, or failing that
+            // a pushed victim restored on release. Templates that lease and also
+            // move RSP are forbidden (StackAlloc uses its statically killed RAX).
+            struct Lease {
+                Reg reg = Reg::RAX;
+                bool pushed = false;
+                bool held = false;
+            };
+            struct XLease {
+                XReg reg = XReg::XMM0;
+                bool saved = false;
+                bool held = false;
+            };
+
+            auto lease_gpr(const uint32_t exclude) -> Lease {
+                static const Reg CANDIDATES[] = {Reg::R10, Reg::R11, Reg::RAX, Reg::RCX,
+                                                  Reg::RDX, Reg::RSI, Reg::RDI, Reg::R8,
+                                                  Reg::R9,  Reg::RBX, Reg::R12, Reg::R13,
+                                                  Reg::R14, Reg::R15};
+                for (const auto reg : CANDIDATES) {
+                    if ((exclude & bit(reg)) || occupied(static_cast<x86ra::PhysReg>(reg))) continue;
+                    lease_mask |= bit(reg);
+                    return {reg, false, true};
+                }
+                for (const auto reg : CANDIDATES) {
+                    if (exclude & bit(reg)) continue;
+                    enc.push_r(reg);
+                    lease_mask |= bit(reg);
+                    return {reg, true, true};
+                }
+                error("internal error: no scratch register available");
+                return {Reg::RAX, false, false};
+            }
+            void release(Lease &lease) {
+                if (!lease.held) return;
+                lease_mask &= ~bit(lease.reg);
+                if (lease.pushed) enc.pop_r(lease.reg);
+                lease.held = false;
+            }
+
+            auto lease_xmm(const uint32_t exclude) -> XLease {
+                for (int i = 15; i >= 0; --i) {
+                    const auto reg = static_cast<XReg>(i);
+                    if ((exclude & bit(reg)) ||
+                        occupied(static_cast<x86ra::PhysReg>(x86ra::FIRST_XMM + i))) continue;
+                    lease_mask |= bit(reg);
+                    return {reg, false, true};
+                }
+                // Park a victim in a fresh stack cell; no call intervenes before
+                // release, so the momentary RSP adjustment is invisible.
+                for (int i = 15; i >= 0; --i) {
+                    const auto reg = static_cast<XReg>(i);
+                    if (exclude & bit(reg)) continue;
+                    enc.sub_rsp(16);
+                    enc.movsd_store(Reg::RSP, 0, reg);
+                    lease_mask |= bit(reg);
+                    return {reg, true, true};
+                }
+                error("internal error: no scratch XMM register available");
+                return {XReg::XMM0, false, false};
+            }
+            void release(XLease &lease) {
+                if (!lease.held) return;
+                lease_mask &= ~bit(lease.reg);
+                if (lease.saved) {
+                    enc.movsd_load(lease.reg, Reg::RSP, 0);
+                    enc.add_rsp(16);
+                }
+                lease.held = false;
+            }
+
+            // Exclusion mask of the registers the named values are assigned to.
+            [[nodiscard]] auto excl(const std::initializer_list<mir::ValueId> values) const -> uint32_t {
+                uint32_t mask = 0;
+                for (const auto v : values) {
+                    if (v != mir::NO_VALUE && in_reg(v)) mask |= 1u << assignment(v).reg;
+                }
+                return mask;
+            }
+
+            // ---- value movement --------------------------------------------------
+            // Copy an integer-class value into a specific register, canonical form.
+            void gpr_into(const mir::ValueId v, const Reg dst) {
+                if (in_reg(v)) {
+                    if (val_gpr(v) != dst) enc.mov_rr(Width::W64, dst, val_gpr(v));
+                } else {
+                    enc.load(Width::W64, dst, Reg::RBP, val_off(v));
+                }
+            }
+            // Sign-extended read at the value's own width (trivial's load_signed).
+            void gpr_into_signed(const mir::ValueId v, const Reg dst) {
+                const auto width = width_of(fn.values[v].type);
+                gpr_into(v, dst);
+                if (width != Width::W64) enc.movsx(width, dst, dst);
+            }
+            // Returns a register currently holding v; loads into 'lease' if spilled.
+            auto use_gpr(const mir::ValueId v, const uint32_t extra_exclude) -> std::pair<Reg, Lease> {
+                if (in_reg(v)) return {val_gpr(v), Lease{}};
+                auto lease = lease_gpr(extra_exclude);
+                enc.load(Width::W64, lease.reg, Reg::RBP, val_off(v));
+                return {lease.reg, lease};
+            }
+            void xmm_into(const mir::ValueId v, const XReg dst) {
+                if (in_reg(v)) {
+                    if (val_xmm(v) != dst) enc.movaps(dst, val_xmm(v));
+                } else if (is_double(v)) {
+                    enc.movsd_load(dst, Reg::RBP, val_off(v));
+                } else {
+                    enc.movss_load(dst, Reg::RBP, val_off(v));
+                }
+            }
+            auto use_xmm(const mir::ValueId v, const uint32_t extra_exclude) -> std::pair<XReg, XLease> {
+                if (in_reg(v)) return {val_xmm(v), XLease{}};
+                auto lease = lease_xmm(extra_exclude);
+                xmm_into(v, lease.reg);
+                return {lease.reg, lease};
+            }
+
+            // Target register for an integer result: the assigned one, or a scratch
+            // to compute in before commit_gpr stores it.
+            auto def_gpr(const mir::ValueId v, const uint32_t exclude) -> std::pair<Reg, Lease> {
+                if (in_reg(v)) return {val_gpr(v), Lease{}};
+                auto lease = lease_gpr(exclude);
+                return {lease.reg, lease};
+            }
+            auto def_xmm(const mir::ValueId v, const uint32_t exclude) -> std::pair<XReg, XLease> {
+                if (in_reg(v)) return {val_xmm(v), XLease{}};
+                auto lease = lease_xmm(exclude);
+                return {lease.reg, lease};
+            }
+
+            // Re-establish canonical (zero-extended) form at the type's width.
+            void canonicalize(const Reg reg, const mir::Ty type) {
+                switch (width_of(type)) {
+                case Width::W8:
+                case Width::W16:
+                    enc.movzx(width_of(type), reg, reg);
+                    break;
+                case Width::W32:
+                    enc.mov_rr(Width::W32, reg, reg); // mov r32, r32 zero-extends
+                    break;
+                case Width::W64:
+                    break;
+                }
+            }
+
+            void commit_gpr(const mir::ValueId v, const Reg computed) {
+                if (in_reg(v)) {
+                    if (val_gpr(v) != computed) enc.mov_rr(Width::W64, val_gpr(v), computed);
+                } else {
+                    enc.store(Width::W64, Reg::RBP, val_off(v), computed);
+                }
+            }
+            void commit_xmm(const mir::ValueId v, const XReg computed) {
+                if (in_reg(v)) {
+                    if (val_xmm(v) != computed) enc.movaps(val_xmm(v), computed);
+                } else if (is_double(v)) {
+                    enc.movsd_store(Reg::RBP, val_off(v), computed);
+                } else {
+                    enc.movss_store(Reg::RBP, val_off(v), computed);
+                }
             }
 
             // ---- constants and addresses -----------------------------------------
             void materialize(const mir::Inst &inst) {
-                switch (inst.op) {
-                case mir::Op::ConstInt:
-                    enc.mov_ri(Reg::RAX, inst.imm);
-                    break;
-                case mir::Op::ConstFloat:
-                    enc.mov_ri(Reg::RAX, inst.imm); // the payload is already raw bits
-                    break;
-                case mir::Op::ConstNull:
-                    enc.zero(Reg::RAX);
-                    break;
-                case mir::Op::GlobalAddr:
-                    enc.lea_rip(Reg::RAX, global_symbols[inst.a], 0);
-                    break;
-                case mir::Op::FuncAddr:
-                    enc.lea_rip(Reg::RAX, function_symbols[inst.a], 0);
-                    break;
-                case mir::Op::SlotAddr:
-                    enc.lea(Reg::RAX, Reg::RBP, slot_offset[inst.a]);
-                    break;
-                default:
+                if (inst.op == mir::Op::ConstFloat) {
+                    // Raw bits ride a GPR into either an XMM home or the spill area.
+                    auto lease = lease_gpr(0);
+                    enc.mov_ri(lease.reg, inst.imm);
+                    if (in_reg(inst.result)) {
+                        enc.mov_r_x(val_xmm(inst.result), lease.reg);
+                    } else if (inst.type == mir::Ty::F64) {
+                        enc.store(Width::W64, Reg::RBP, val_off(inst.result), lease.reg);
+                    } else {
+                        enc.store(Width::W32, Reg::RBP, val_off(inst.result), lease.reg);
+                    }
+                    release(lease);
                     return;
                 }
-                store_result(inst.result, Reg::RAX);
+                auto [dst, lease] = def_gpr(inst.result, 0);
+                switch (inst.op) {
+                case mir::Op::ConstInt: {
+                    // Canonical form is decided here, at materialization: the
+                    // immediate is masked to the type's width, zero-extended.
+                    const auto bits = mir::type_bits(inst.type, module.pointer_bits);
+                    auto value = static_cast<uint64_t>(inst.imm);
+                    if (bits != 0 && bits < 64) value &= (uint64_t{1} << bits) - 1;
+                    enc.mov_ri(dst, static_cast<int64_t>(value));
+                    break;
+                }
+                case mir::Op::ConstNull:
+                    enc.zero(dst);
+                    break;
+                case mir::Op::GlobalAddr:
+                    enc.lea_rip(dst, global_symbols[inst.a], 0);
+                    break;
+                case mir::Op::FuncAddr:
+                    enc.lea_rip(dst, function_symbols[inst.a], 0);
+                    break;
+                case mir::Op::SlotAddr:
+                    enc.lea(dst, Reg::RBP, slot_offset[inst.a]);
+                    break;
+                default:
+                    break;
+                }
+                commit_gpr(inst.result, dst);
+                release(lease);
             }
 
             // ---- calls -----------------------------------------------------------
+            [[nodiscard]] auto crosses_current_call(const ActiveInterval &a) const -> bool {
+                return a.start < x86ra::pos_u(current_index) &&
+                       a.end > x86ra::pos_l(current_index);
+            }
+
+            void call_saves() {
+                for (const auto &a : active) {
+                    if (!a.save_around || !crosses_current_call(a)) continue;
+                    const auto off = area_offset[ra.values[a.value].save_index];
+                    if (x86ra::is_xmm(a.reg)) enc.movsd_store(Reg::RBP, off, xreg(a.reg));
+                    else enc.store(Width::W64, Reg::RBP, off, greg(a.reg));
+                }
+            }
+            void call_restores() {
+                for (const auto &a : active) {
+                    if (!a.save_around || !crosses_current_call(a)) continue;
+                    const auto off = area_offset[ra.values[a.value].save_index];
+                    if (x86ra::is_xmm(a.reg)) enc.movsd_load(xreg(a.reg), Reg::RBP, off);
+                    else enc.load(Width::W64, greg(a.reg), Reg::RBP, off);
+                }
+            }
+
+            // Where to read a value from inside a call template: its callee-saved
+            // register, or a frame offset (its spill area, or — for a caller-saved
+            // save-around value whose register the template may already have
+            // clobbered — its save area, written by call_saves() above).
+            struct CallOperand {
+                bool mem = false;
+                x86ra::PhysReg reg = x86ra::NO_PHYS;
+                int32_t off = 0;
+            };
+            [[nodiscard]] auto call_operand(const mir::ValueId v) const -> CallOperand {
+                const auto &as = assignment(v);
+                if (as.spilled) return {.mem = true, .off = area_offset[as.spill_index]};
+                if (as.save_around_calls) {
+                    for (const auto &a : active) {
+                        if (a.value == v && crosses_current_call(a)) {
+                            return {.mem = true, .off = area_offset[as.save_index]};
+                        }
+                    }
+                }
+                return {.mem = false, .reg = as.reg};
+            }
+            void call_arg_into_gpr(const mir::ValueId v, const Reg dst) {
+                const auto operand = call_operand(v);
+                if (operand.mem) enc.load(Width::W64, dst, Reg::RBP, operand.off);
+                else if (greg(operand.reg) != dst) enc.mov_rr(Width::W64, dst, greg(operand.reg));
+            }
+            void call_arg_into_xmm(const mir::ValueId v, const XReg dst) {
+                const auto operand = call_operand(v);
+                if (!operand.mem) {
+                    if (xreg(operand.reg) != dst) enc.movaps(dst, xreg(operand.reg));
+                } else if (is_double(v)) {
+                    enc.movsd_load(dst, Reg::RBP, operand.off);
+                } else {
+                    enc.movss_load(dst, Reg::RBP, operand.off);
+                }
+            }
+
             void emit_call(const mir::Inst &inst, const bool indirect) {
-                // Classify arguments by their VALUE type: floats ride XMM registers.
+                call_saves();
+
                 std::vector<mir::ValueId> args(inst.args.begin(), inst.args.end());
                 std::vector<int> int_slot(args.size(), -1);
                 std::vector<int> float_slot(args.size(), -1);
@@ -161,25 +479,24 @@ namespace backend_x86 {
                     }
                 }
 
-                // Stack arguments, pushed via an aligned reservation. The frame keeps
-                // RSP 16-aligned between calls, so only the reservation itself matters.
+                // Stack arguments through an aligned reservation, staged via RAX
+                // (statically killed at every call).
                 const auto reserve = static_cast<int32_t>((stack_args.size() + 1) / 2 * 16);
                 if (reserve > 0) enc.sub_rsp(reserve);
                 for (size_t i = 0; i < stack_args.size(); ++i) {
-                    load_value(args[stack_args[i]], Reg::RAX);
+                    call_arg_into_gpr(args[stack_args[i]], Reg::RAX);
                     enc.store(Width::W64, Reg::RSP, static_cast<int32_t>(i * 8), Reg::RAX);
                 }
 
                 // An indirect target goes to R11 BEFORE the argument registers are
                 // live; R11 is caller-saved and never an argument register.
-                if (indirect) load_value(inst.a, Reg::R11);
+                if (indirect) call_arg_into_gpr(inst.a, Reg::R11);
 
                 for (size_t i = 0; i < args.size(); ++i) {
                     if (float_slot[i] >= 0) {
-                        load_value(args[i], Reg::RAX);
-                        enc.mov_r_x(static_cast<XReg>(float_slot[i]), Reg::RAX);
+                        call_arg_into_xmm(args[i], static_cast<XReg>(float_slot[i]));
                     } else if (int_slot[i] >= 0) {
-                        load_value(args[i], INT_ARG_REGS[int_slot[i]]);
+                        call_arg_into_gpr(args[i], INT_ARG_REGS[int_slot[i]]);
                     }
                 }
 
@@ -198,26 +515,36 @@ namespace backend_x86 {
 
                 if (inst.result != mir::NO_VALUE) {
                     if (mir::is_float(fn.values[inst.result].type)) {
-                        enc.mov_x_r(Reg::RAX, XReg::XMM0);
+                        commit_xmm(inst.result, XReg::XMM0);
+                    } else {
+                        canonicalize(Reg::RAX, inst.type);
+                        commit_gpr(inst.result, Reg::RAX);
                     }
-                    store_result(inst.result, Reg::RAX);
                 }
+                call_restores();
             }
 
-            // libc memcpy/memset carry the mem.copy/mem.set ops; the symbols are
-            // appended to the module symbol table by the caller and passed in here.
-            uint32_t memcpy_symbol = 0;
-            uint32_t memset_symbol = 0;
+            // libc memcpy/memset carry the mem.copy/mem.set ops. These are calls:
+            // saves/restores and the caller-saved argument registers apply exactly
+            // as for a user call.
             void emit_mem_op(const mir::Inst &inst, const bool is_set) {
-                load_value(inst.a, Reg::RDI);
-                load_value(inst.b, Reg::RSI);
-                load_value(inst.c, Reg::RDX);
-                if (is_set) {
-                    // memset takes an int; the byte was zero-extended by load_value.
-                    enc.call_sym(memset_symbol);
-                } else {
-                    enc.call_sym(memcpy_symbol);
-                }
+                call_saves();
+                call_arg_into_gpr(inst.a, Reg::RDI);
+                call_arg_into_gpr(inst.b, Reg::RSI);
+                call_arg_into_gpr(inst.c, Reg::RDX);
+                enc.call_sym(is_set ? memset_symbol : memcpy_symbol);
+                call_restores();
+            }
+
+            void emit_frem(const mir::Inst &inst) {
+                const bool dbl = inst.type == mir::Ty::F64;
+                call_saves();
+                call_arg_into_xmm(inst.a, XReg::XMM0);
+                call_arg_into_xmm(inst.b, XReg::XMM1);
+                enc.mov_ri(Reg::RAX, 2);
+                enc.call_sym(dbl ? fmod_symbol : fmodf_symbol);
+                commit_xmm(inst.result, XReg::XMM0);
+                call_restores();
             }
 
             // ---- comparisons -----------------------------------------------------
@@ -237,346 +564,70 @@ namespace backend_x86 {
             }
 
             void emit_icmp(const mir::Inst &inst) {
-                const auto width = width_of(fn.values[inst.a].type);
-                load_value(inst.a, Reg::RAX);
-                load_value(inst.b, Reg::RCX);
-                enc.alu_rr(Alu::Cmp, width == Width::W64 ? Width::W64 : Width::W32,
-                            Reg::RAX, Reg::RCX);
-                enc.setcc(icmp_cond(inst.op), Reg::RAX);
-                store_result(inst.result, Reg::RAX);
+                const auto width = width_of(fn.values[inst.a].type) == Width::W64
+                    ? Width::W64 : Width::W32;
+                auto [ar, alease] = use_gpr(inst.a, excl({inst.b, inst.result}));
+                if (in_reg(inst.b)) {
+                    enc.alu_rr(Alu::Cmp, width, ar, val_gpr(inst.b));
+                } else {
+                    enc.alu_rm(Alu::Cmp, width, ar, Reg::RBP, val_off(inst.b));
+                }
+                release(alease);
+                auto [dst, dlease] = def_gpr(inst.result, excl({inst.a, inst.b}));
+                enc.setcc(icmp_cond(inst.op), dst);
+                enc.movzx(Width::W8, dst, dst);
+                commit_gpr(inst.result, dst);
+                release(dlease);
             }
 
             void emit_fcmp(const mir::Inst &inst) {
-                const bool is_double = fn.values[inst.a].type == mir::Ty::F64;
-                const auto load_x = [&](const mir::ValueId v, const XReg x) {
-                    load_value(v, Reg::RAX);
-                    enc.mov_r_x(x, Reg::RAX);
-                };
-                // Olt/Ole compare through the swapped operands so the ABOVE-family
-                // conditions serve all four orderings; unordered then reads as false
-                // for every one of them except equality, which needs the parity fixup.
+                const bool dbl = fn.values[inst.a].type == mir::Ty::F64;
+                // Olt/Ole compare through swapped operands so the ABOVE-family
+                // conditions serve all four orderings; unordered then reads false
+                // for every one except equality, which needs the parity fixup.
+                const bool swap = inst.op == mir::Op::FCmpOlt || inst.op == mir::Op::FCmpOle;
+                const auto first = swap ? inst.b : inst.a;
+                const auto second = swap ? inst.a : inst.b;
+
+                auto [fx, flease] = use_xmm(first, excl({second}));
+                if (in_reg(second)) {
+                    enc.ucomis(dbl, fx, val_xmm(second));
+                } else {
+                    enc.ucomis_m(dbl, fx, Reg::RBP, val_off(second));
+                }
+                release(flease);
+
+                auto [dst, dlease] = def_gpr(inst.result, 0);
                 switch (inst.op) {
+                case mir::Op::FCmpOeq: {
+                    auto parity = lease_gpr(bit(dst));
+                    enc.setcc(Cond::E, dst);
+                    enc.setcc(Cond::NP, parity.reg);
+                    enc.alu_rr(Alu::And, Width::W8, dst, parity.reg);
+                    release(parity);
+                    break;
+                }
+                case mir::Op::FCmpOne: enc.setcc(Cond::NE, dst); break;
                 case mir::Op::FCmpOlt:
+                case mir::Op::FCmpOgt: enc.setcc(Cond::A, dst); break;
                 case mir::Op::FCmpOle:
-                    load_x(inst.b, XReg::XMM0);
-                    load_x(inst.a, XReg::XMM1);
-                    break;
-                default:
-                    load_x(inst.a, XReg::XMM0);
-                    load_x(inst.b, XReg::XMM1);
-                    break;
+                case mir::Op::FCmpOge: enc.setcc(Cond::AE, dst); break;
+                default: enc.setcc(Cond::E, dst); break;
                 }
-                enc.ucomis(is_double, XReg::XMM0, XReg::XMM1);
-                switch (inst.op) {
-                case mir::Op::FCmpOeq:
-                    enc.setcc(Cond::E, Reg::RAX);
-                    enc.setcc(Cond::NP, Reg::RCX);
-                    enc.alu_rr(Alu::And, Width::W8, Reg::RAX, Reg::RCX);
-                    break;
-                case mir::Op::FCmpOne: enc.setcc(Cond::NE, Reg::RAX); break;
-                case mir::Op::FCmpOlt:
-                case mir::Op::FCmpOgt: enc.setcc(Cond::A, Reg::RAX); break;
-                case mir::Op::FCmpOle:
-                case mir::Op::FCmpOge: enc.setcc(Cond::AE, Reg::RAX); break;
-                default: enc.setcc(Cond::E, Reg::RAX); break;
-                }
-                store_result(inst.result, Reg::RAX);
+                enc.movzx(Width::W8, dst, dst);
+                commit_gpr(inst.result, dst);
+                release(dlease);
             }
-
-            // ---- the per-instruction walk ----------------------------------------
-            void emit_inst(const mir::Inst &inst, const mir::BlockId block_id) {
-                using Op = mir::Op;
-                switch (inst.op) {
-                case Op::ConstInt: case Op::ConstFloat: case Op::ConstNull:
-                case Op::GlobalAddr: case Op::FuncAddr: case Op::SlotAddr:
-                    materialize(inst);
-                    return;
-
-                case Op::Load: {
-                    load_value(inst.a, Reg::RCX);
-                    const auto width = width_of(inst.type);
-                    enc.load(width, Reg::RAX, Reg::RCX, 0);
-                    if (width != Width::W64 && width != Width::W32) enc.movzx(width, Reg::RAX, Reg::RAX);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-                case Op::Store: {
-                    load_value(inst.a, Reg::RCX);
-                    load_value(inst.b, Reg::RAX);
-                    enc.store(width_of(fn.values[inst.b].type), Reg::RCX, 0, Reg::RAX);
-                    return;
-                }
-                case Op::MemCopy: emit_mem_op(inst, false); return;
-                case Op::MemSet: emit_mem_op(inst, true); return;
-
-                case Op::StackAlloc: {
-                    // Extend the frame by a 16-aligned amount and hand back the new top.
-                    // RSP is free to move here: the epilogue restores it from RBP, and
-                    // every call's own stack-argument reservation is balanced, so a
-                    // dynamic allocation simply survives until the function returns.
-                    load_value(inst.a, Reg::RAX);
-                    enc.alu_ri(Alu::Add, Width::W64, Reg::RAX, 15);
-                    enc.alu_ri(Alu::And, Width::W64, Reg::RAX, -16);
-                    enc.alu_rr(Alu::Sub, Width::W64, Reg::RSP, Reg::RAX);
-                    // Keep RSP itself 16-aligned for the next call.
-                    enc.alu_ri(Alu::And, Width::W64, Reg::RSP, -16);
-                    enc.mov_rr(Width::W64, Reg::RAX, Reg::RSP);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-
-                case Op::PtrAddConst: {
-                    load_value(inst.a, Reg::RAX);
-                    enc.lea(Reg::RAX, Reg::RAX, static_cast<int32_t>(inst.imm));
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-                case Op::PtrAdd: {
-                    load_value(inst.a, Reg::RAX);
-                    load_value(inst.b, Reg::RCX);
-                    enc.alu_rr(Alu::Add, Width::W64, Reg::RAX, Reg::RCX);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-
-                case Op::Add: case Op::Sub: case Op::And: case Op::Or: case Op::Xor: {
-                    load_value(inst.a, Reg::RAX);
-                    load_value(inst.b, Reg::RCX);
-                    const auto alu = inst.op == Op::Add ? Alu::Add
-                                   : inst.op == Op::Sub ? Alu::Sub
-                                   : inst.op == Op::And ? Alu::And
-                                   : inst.op == Op::Or  ? Alu::Or : Alu::Xor;
-                    enc.alu_rr(alu, Width::W64, Reg::RAX, Reg::RCX);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-                case Op::Mul: {
-                    load_value(inst.a, Reg::RAX);
-                    load_value(inst.b, Reg::RCX);
-                    enc.imul_rr(Reg::RAX, Reg::RCX);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-                case Op::SDiv: case Op::SRem: {
-                    // Sign-extend the operands to 64 bits first: the narrow values in
-                    // their slots were stored zero-extended.
-                    load_signed(inst.a, Reg::RAX);
-                    load_signed(inst.b, Reg::RCX);
-                    enc.cqo();
-                    enc.idiv_r(Reg::RCX);
-                    store_result(inst.result, inst.op == Op::SDiv ? Reg::RAX : Reg::RDX);
-                    return;
-                }
-                case Op::UDiv: case Op::URem: {
-                    load_value(inst.a, Reg::RAX);
-                    load_value(inst.b, Reg::RCX);
-                    enc.zero(Reg::RDX);
-                    enc.div_r(Reg::RCX);
-                    store_result(inst.result, inst.op == Op::UDiv ? Reg::RAX : Reg::RDX);
-                    return;
-                }
-                case Op::Shl: case Op::LShr: case Op::AShr: {
-                    if (inst.op == Op::AShr) load_signed(inst.a, Reg::RAX);
-                    else load_value(inst.a, Reg::RAX);
-                    load_value(inst.b, Reg::RCX);
-                    if (inst.op == Op::Shl) enc.shl_cl(Width::W64, Reg::RAX);
-                    else if (inst.op == Op::LShr) enc.shr_cl(Width::W64, Reg::RAX);
-                    else enc.sar_cl(Width::W64, Reg::RAX);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-                case Op::Not: {
-                    load_value(inst.a, Reg::RAX);
-                    if (inst.type == mir::Ty::I1) {
-                        enc.alu_ri(Alu::Xor, Width::W8, Reg::RAX, 1);
-                    } else {
-                        enc.not_r(Width::W64, Reg::RAX);
-                    }
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-                case Op::Neg: {
-                    load_value(inst.a, Reg::RAX);
-                    enc.neg_r(Width::W64, Reg::RAX);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-
-                case Op::FAdd: case Op::FSub: case Op::FMul: case Op::FDiv: {
-                    const bool is_double = inst.type == mir::Ty::F64;
-                    load_value(inst.a, Reg::RAX);
-                    enc.mov_r_x(XReg::XMM0, Reg::RAX);
-                    load_value(inst.b, Reg::RAX);
-                    enc.mov_r_x(XReg::XMM1, Reg::RAX);
-                    const uint8_t opcode = inst.op == Op::FAdd ? 0x58
-                                          : inst.op == Op::FSub ? 0x5C
-                                          : inst.op == Op::FMul ? 0x59 : 0x5E;
-                    enc.sse_arith(opcode, is_double, XReg::XMM0, XReg::XMM1);
-                    enc.mov_x_r(Reg::RAX, XReg::XMM0);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-                case Op::FRem: {
-                    // No hardware frem: libm fmod/fmodf via the same call machinery.
-                    const bool is_double = inst.type == mir::Ty::F64;
-                    load_value(inst.a, Reg::RAX);
-                    enc.mov_r_x(XReg::XMM0, Reg::RAX);
-                    load_value(inst.b, Reg::RAX);
-                    enc.mov_r_x(XReg::XMM1, Reg::RAX);
-                    enc.mov_ri(Reg::RAX, 2); // AL: two vector args (fmod is not variadic, but harmless)
-                    enc.call_sym(is_double ? fmod_symbol : fmodf_symbol);
-                    enc.mov_x_r(Reg::RAX, XReg::XMM0);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-                case Op::FNeg: {
-                    load_value(inst.a, Reg::RAX);
-                    const bool is_double = inst.type == mir::Ty::F64;
-                    enc.mov_ri(Reg::RCX, is_double ? static_cast<int64_t>(0x8000000000000000ULL)
-                                                    : 0x80000000LL);
-                    enc.alu_rr(Alu::Xor, Width::W64, Reg::RAX, Reg::RCX);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-
-                case Op::ICmpEq: case Op::ICmpNe:
-                case Op::ICmpSlt: case Op::ICmpSle: case Op::ICmpSgt: case Op::ICmpSge:
-                case Op::ICmpUlt: case Op::ICmpUle: case Op::ICmpUgt: case Op::ICmpUge:
-                    emit_icmp(inst);
-                    return;
-                case Op::FCmpOeq: case Op::FCmpOne:
-                case Op::FCmpOlt: case Op::FCmpOle: case Op::FCmpOgt: case Op::FCmpOge:
-                    emit_fcmp(inst);
-                    return;
-
-                case Op::Trunc: case Op::Bitcast: case Op::PtrToInt: case Op::IntToPtr: {
-                    // Pure representation moves: the slot write at the RESULT's width is
-                    // the whole operation.
-                    load_value(inst.a, Reg::RAX);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-                case Op::ZExt: {
-                    load_value(inst.a, Reg::RAX); // already zero-extended by load
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-                case Op::SExt: {
-                    load_signed(inst.a, Reg::RAX);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-                case Op::FPTrunc: case Op::FPExt: {
-                    const bool to_double = inst.type == mir::Ty::F64;
-                    load_value(inst.a, Reg::RAX);
-                    enc.mov_r_x(XReg::XMM0, Reg::RAX);
-                    enc.cvt_f2f(to_double, XReg::XMM0, XReg::XMM0);
-                    enc.mov_x_r(Reg::RAX, XReg::XMM0);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-                case Op::SIToFP: case Op::UIToFP: {
-                    // The unsigned 64-bit edge (values >= 2^63) is knowingly emitted as
-                    // the signed conversion; narrower unsigned sources were already
-                    // zero-extended, which makes the signed instruction exact for them.
-                    if (inst.op == Op::SIToFP) load_signed(inst.a, Reg::RAX);
-                    else load_value(inst.a, Reg::RAX);
-                    enc.cvt_i2f(inst.type == mir::Ty::F64, Width::W64, XReg::XMM0, Reg::RAX);
-                    enc.mov_x_r(Reg::RAX, XReg::XMM0);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-                case Op::FPToSI: case Op::FPToUI: {
-                    const bool from_double = fn.values[inst.a].type == mir::Ty::F64;
-                    load_value(inst.a, Reg::RAX);
-                    enc.mov_r_x(XReg::XMM0, Reg::RAX);
-                    enc.cvt_f2i(from_double, Width::W64, Reg::RAX, XReg::XMM0);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-
-                case Op::Select: {
-                    const auto skip = enc.make_label();
-                    const auto done = enc.make_label();
-                    load_value(inst.a, Reg::RAX);
-                    enc.test_rr(Width::W8, Reg::RAX, Reg::RAX);
-                    enc.jcc(Cond::E, skip);
-                    load_value(inst.b, Reg::RAX);
-                    enc.jmp(done);
-                    enc.bind(skip);
-                    load_value(inst.c, Reg::RAX);
-                    enc.bind(done);
-                    store_result(inst.result, Reg::RAX);
-                    return;
-                }
-
-                case Op::Call: emit_call(inst, false); return;
-                case Op::CallIndirect: emit_call(inst, true); return;
-                case Op::Asm: emit_asm(inst); return;
-
-                case Op::Jump: {
-                    pass_block_args(inst.a, inst.args);
-                    enc.jmp(block_labels[inst.a]);
-                    return;
-                }
-                case Op::Branch: {
-                    load_value(inst.a, Reg::RAX);
-                    enc.test_rr(Width::W8, Reg::RAX, Reg::RAX);
-                    enc.jcc(Cond::NE, block_labels[inst.b]);
-                    enc.jmp(block_labels[inst.c]);
-                    return;
-                }
-                case Op::Switch: {
-                    // Case values are stored 32-bit-truncated (Builder::switch_on) and
-                    // read back sign-extended. A narrow scrutinee therefore compares at
-                    // 32 bits on the RAW pattern — a 64-bit compare would disagree about
-                    // negative values, since load_value zero-extends the scrutinee.
-                    const bool wide = width_of(fn.values[inst.a].type) == Width::W64;
-                    load_value(inst.a, Reg::RAX);
-                    for (size_t i = 0; i + 1 < inst.args.size(); i += 2) {
-                        if (wide) {
-                            enc.mov_ri(Reg::RCX,
-                                        static_cast<int64_t>(static_cast<int32_t>(inst.args[i])));
-                            enc.alu_rr(Alu::Cmp, Width::W64, Reg::RAX, Reg::RCX);
-                        } else {
-                            enc.mov_ri(Reg::RCX, inst.args[i]); // raw 32-bit pattern
-                            enc.alu_rr(Alu::Cmp, Width::W32, Reg::RAX, Reg::RCX);
-                        }
-                        enc.jcc(Cond::E, block_labels[inst.args[i + 1]]);
-                    }
-                    enc.jmp(block_labels[inst.b]);
-                    return;
-                }
-                case Op::Return: {
-                    if (!inst.args.empty()) {
-                        load_value(inst.args.front(), Reg::RAX);
-                        if (mir::is_float(fn.values[inst.args.front()].type)) {
-                            enc.mov_r_x(XReg::XMM0, Reg::RAX);
-                        }
-                    }
-                    emit_epilogue();
-                    return;
-                }
-                case Op::Unreachable:
-                    enc.ud2();
-                    return;
-                }
-                error(std::format("unhandled MIR op '{}' in block {}", op_name(inst.op), block_id));
-            }
-
-            uint32_t fmod_symbol = 0;
-            uint32_t fmodf_symbol = 0;
 
             // ---- inline asm ------------------------------------------------------
-            // Every operand is already resolved (sema) and every variable operand is a
-            // pointer to a FRAME SLOT (mirgen pins them), so an asm instruction encodes
-            // directly against [rbp - offset] with no register allocation and no
-            // constraint model at all — the simplification the plan predicted from
-            // owning the allocator.
+            // Unchanged in substance from stage 5: every variable operand is a
+            // pointer to a pinned FRAME SLOT, so an asm instruction encodes against
+            // [rbp - offset] with no constraint model. The allocator reserved every
+            // register the block names, so nothing live is sitting in them.
             struct AsmArg {
                 bool is_memory = false;
-                int32_t disp = 0;   // memory: rbp-relative
-                Reg reg = Reg::RAX; // register operand
+                int32_t disp = 0;
+                Reg reg = Reg::RAX;
                 int64_t imm = 0;
                 bool is_imm = false;
                 Width width = Width::W64;
@@ -614,8 +665,8 @@ namespace backend_x86 {
                 }
             }
 
-            // The rbp offset a variable operand's pointer refers to. Only a slot address
-            // qualifies -- which is all mirgen ever produces for an asm operand.
+            // The rbp offset a variable operand's pointer refers to. Only a slot
+            // address qualifies — which is all mirgen ever produces for one.
             auto slot_disp_of(const mir::ValueId value) const -> std::optional<int32_t> {
                 const auto &def = fn.values[value];
                 if (def.is_param || def.block >= fn.blocks.size()) return std::nullopt;
@@ -672,9 +723,7 @@ namespace backend_x86 {
                     emit_asm_instruction(instruction, args);
                 }
 
-                // 'asm -> reg': that register's value AT BLOCK EXIT is the expression's
-                // result. Stored immediately, with nothing emitted in between that could
-                // disturb it.
+                // 'asm -> reg': that register's value AT BLOCK EXIT is the result.
                 if (inst.result == mir::NO_VALUE) return;
                 const auto reg = reg_by_name(block.result_register);
                 if (!reg) {
@@ -682,11 +731,10 @@ namespace backend_x86 {
                                        block.result_register));
                     return;
                 }
-                store_result(inst.result, *reg);
+                canonicalize(*reg, inst.type);
+                commit_gpr(inst.result, *reg);
             }
 
-            // The operand width an instruction runs at: a register operand names it
-            // explicitly ('eax' is 32), otherwise the variable's own width decides.
             static auto asm_width(const std::vector<AsmArg> &args) -> Width {
                 for (const auto &arg : args) {
                     if (!arg.is_memory && !arg.is_imm) return arg.width;
@@ -767,36 +815,474 @@ namespace backend_x86 {
                     return;
                 }
 
-                // Loud refusal, naming the instruction: an asm block the encoder cannot
-                // render must never be silently dropped from the output.
+                // Loud refusal, naming the instruction: an asm block the encoder
+                // cannot render must never be silently dropped from the output.
                 error(std::format("inline asm: cannot encode '{}' with {} operand(s) in this form "
                                    "(line {})", m, args.size(), instruction.line));
             }
 
-            void load_signed(const mir::ValueId value, const Reg reg) {
-                const auto width = width_of(fn.values[value].type);
-                if (width == Width::W64) {
-                    enc.load(Width::W64, reg, Reg::RBP, value_offset.at(value));
-                } else {
-                    enc.load(width, reg, Reg::RBP, value_offset.at(value));
-                    enc.movsx(width, reg, reg);
+            // ---- block arguments -------------------------------------------------
+            void pass_block_args(const mir::BlockId target, const std::vector<uint32_t> &args) {
+                const auto &params = fn.blocks[target].params;
+                // Phase 1: every argument into its parameter's staging slot.
+                for (size_t i = 0; i < args.size() && i < params.size(); ++i) {
+                    const auto arg = args[i];
+                    const auto staging = staging_offset.at(params[i]);
+                    if (in_reg(arg) && mir::is_float(fn.values[arg].type)) {
+                        enc.movsd_store(Reg::RBP, staging, val_xmm(arg));
+                    } else if (in_reg(arg)) {
+                        enc.store(Width::W64, Reg::RBP, staging, val_gpr(arg));
+                    } else {
+                        auto lease = lease_gpr(0);
+                        enc.load(Width::W64, lease.reg, Reg::RBP, val_off(arg));
+                        enc.store(Width::W64, Reg::RBP, staging, lease.reg);
+                        release(lease);
+                    }
+                }
+                // Phase 2: staging into the parameters' homes.
+                for (size_t i = 0; i < args.size() && i < params.size(); ++i) {
+                    load_param_from_staging(params[i]);
                 }
             }
 
-            void pass_block_args(const mir::BlockId target, const std::vector<uint32_t> &args) {
-                const auto &params = fn.blocks[target].params;
-                // Two phases through the staging slots: rotation-safe by construction.
-                for (size_t i = 0; i < args.size() && i < params.size(); ++i) {
-                    load_value(args[i], Reg::RAX);
-                    store_at(params[i], staging_offset.at(params[i]), Reg::RAX);
+            void load_param_from_staging(const mir::ValueId param) {
+                const auto staging = staging_offset.at(param);
+                if (in_reg(param)) {
+                    if (mir::is_float(fn.values[param].type)) {
+                        if (is_double(param)) enc.movsd_load(val_xmm(param), Reg::RBP, staging);
+                        else enc.movss_load(val_xmm(param), Reg::RBP, staging);
+                    } else {
+                        enc.load(Width::W64, val_gpr(param), Reg::RBP, staging);
+                    }
+                } else {
+                    auto lease = lease_gpr(0);
+                    enc.load(Width::W64, lease.reg, Reg::RBP, staging);
+                    enc.store(Width::W64, Reg::RBP, val_off(param), lease.reg);
+                    release(lease);
                 }
-                for (size_t i = 0; i < args.size() && i < params.size(); ++i) {
-                    enc.load(Width::W64, Reg::RAX, Reg::RBP, staging_offset.at(params[i]));
-                    enc.store(Width::W64, Reg::RBP, value_offset.at(params[i]), Reg::RAX);
+            }
+
+            // ---- the per-instruction walk ----------------------------------------
+            void emit_inst(const mir::Inst &inst, const mir::BlockId block_id) {
+                using Op = mir::Op;
+                switch (inst.op) {
+                case Op::ConstInt: case Op::ConstFloat: case Op::ConstNull:
+                case Op::GlobalAddr: case Op::FuncAddr: case Op::SlotAddr:
+                    materialize(inst);
+                    return;
+
+                case Op::Load: {
+                    if (mir::is_float(inst.type)) {
+                        auto [addr, alease] = use_gpr(inst.a, excl({inst.result}));
+                        auto [dst, dlease] = def_xmm(inst.result, 0);
+                        if (inst.type == mir::Ty::F64) enc.movsd_load(dst, addr, 0);
+                        else enc.movss_load(dst, addr, 0);
+                        commit_xmm(inst.result, dst);
+                        release(dlease);
+                        release(alease);
+                        return;
+                    }
+                    auto [addr, alease] = use_gpr(inst.a, excl({inst.result}));
+                    auto [dst, dlease] = def_gpr(inst.result, excl({inst.a}) | bit(addr));
+                    const auto width = width_of(inst.type);
+                    enc.load(width, dst, addr, 0);
+                    if (width == Width::W8 || width == Width::W16) enc.movzx(width, dst, dst);
+                    commit_gpr(inst.result, dst);
+                    release(dlease);
+                    release(alease);
+                    return;
                 }
+                case Op::Store: {
+                    if (mir::is_float(fn.values[inst.b].type)) {
+                        auto [addr, alease] = use_gpr(inst.a, excl({inst.b}));
+                        auto [src, slease] = use_xmm(inst.b, 0);
+                        if (is_double(inst.b)) enc.movsd_store(addr, 0, src);
+                        else enc.movss_store(addr, 0, src);
+                        release(slease);
+                        release(alease);
+                        return;
+                    }
+                    auto [addr, alease] = use_gpr(inst.a, excl({inst.b}));
+                    auto [src, slease] = use_gpr(inst.b, excl({inst.a}) | bit(addr));
+                    enc.store(width_of(fn.values[inst.b].type), addr, 0, src);
+                    release(slease);
+                    release(alease);
+                    return;
+                }
+                case Op::MemCopy: emit_mem_op(inst, false); return;
+                case Op::MemSet: emit_mem_op(inst, true); return;
+
+                case Op::StackAlloc: {
+                    // Extend the frame by a 16-aligned amount and hand back the new
+                    // top. RAX is statically killed here — a dynamic lease could
+                    // push/pop, which must never straddle an RSP adjustment.
+                    gpr_into(inst.a, Reg::RAX);
+                    enc.alu_ri(Alu::Add, Width::W64, Reg::RAX, 15);
+                    enc.alu_ri(Alu::And, Width::W64, Reg::RAX, -16);
+                    enc.alu_rr(Alu::Sub, Width::W64, Reg::RSP, Reg::RAX);
+                    enc.alu_ri(Alu::And, Width::W64, Reg::RSP, -16);
+                    enc.mov_rr(Width::W64, Reg::RAX, Reg::RSP);
+                    commit_gpr(inst.result, Reg::RAX);
+                    return;
+                }
+
+                case Op::PtrAddConst: {
+                    auto [dst, dlease] = def_gpr(inst.result, excl({inst.a}));
+                    if (in_reg(inst.a)) {
+                        enc.lea(dst, val_gpr(inst.a), static_cast<int32_t>(inst.imm));
+                    } else {
+                        enc.load(Width::W64, dst, Reg::RBP, val_off(inst.a));
+                        enc.lea(dst, dst, static_cast<int32_t>(inst.imm));
+                    }
+                    commit_gpr(inst.result, dst);
+                    release(dlease);
+                    return;
+                }
+                case Op::PtrAdd: {
+                    auto [dst, dlease] = def_gpr(inst.result, excl({inst.a, inst.b}));
+                    gpr_into(inst.a, dst);
+                    if (in_reg(inst.b)) enc.alu_rr(Alu::Add, Width::W64, dst, val_gpr(inst.b));
+                    else enc.alu_rm(Alu::Add, Width::W64, dst, Reg::RBP, val_off(inst.b));
+                    commit_gpr(inst.result, dst);
+                    release(dlease);
+                    return;
+                }
+
+                case Op::Add: case Op::Sub: case Op::And: case Op::Or: case Op::Xor: {
+                    const auto alu = inst.op == Op::Add ? Alu::Add
+                                   : inst.op == Op::Sub ? Alu::Sub
+                                   : inst.op == Op::And ? Alu::And
+                                   : inst.op == Op::Or  ? Alu::Or : Alu::Xor;
+                    auto [dst, dlease] = def_gpr(inst.result, excl({inst.a, inst.b}));
+                    gpr_into(inst.a, dst);
+                    if (in_reg(inst.b)) enc.alu_rr(alu, Width::W64, dst, val_gpr(inst.b));
+                    else enc.alu_rm(alu, Width::W64, dst, Reg::RBP, val_off(inst.b));
+                    // And/Or/Xor of canonical operands stay canonical; Add/Sub can
+                    // carry into the bits above a narrow type's width.
+                    if (inst.op == Op::Add || inst.op == Op::Sub) canonicalize(dst, inst.type);
+                    commit_gpr(inst.result, dst);
+                    release(dlease);
+                    return;
+                }
+                case Op::Mul: {
+                    auto [dst, dlease] = def_gpr(inst.result, excl({inst.a, inst.b}));
+                    gpr_into(inst.a, dst);
+                    if (in_reg(inst.b)) enc.imul_rr(dst, val_gpr(inst.b));
+                    else enc.imul_rm(dst, Reg::RBP, val_off(inst.b));
+                    canonicalize(dst, inst.type);
+                    commit_gpr(inst.result, dst);
+                    release(dlease);
+                    return;
+                }
+                case Op::SDiv: case Op::SRem: {
+                    // RAX/RDX are statically killed. Operands are sign-extended
+                    // from their width — the canonical form is zero-extended, and a
+                    // spilled slot holds that zero-extended form, so idiv_m's
+                    // 64-bit memory read would be wrong for a narrow operand.
+                    gpr_into_signed(inst.a, Reg::RAX);
+                    enc.cqo();
+                    const auto b_width = width_of(fn.values[inst.b].type);
+                    if (in_reg(inst.b) && b_width == Width::W64) {
+                        enc.idiv_r(val_gpr(inst.b));
+                    } else if (!in_reg(inst.b) && b_width == Width::W64) {
+                        enc.idiv_m(Reg::RBP, val_off(inst.b));
+                    } else {
+                        auto lease = lease_gpr(excl({inst.a, inst.b, inst.result}) |
+                                                bit(Reg::RAX) | bit(Reg::RDX));
+                        gpr_into_signed(inst.b, lease.reg);
+                        enc.idiv_r(lease.reg);
+                        release(lease);
+                    }
+                    const auto out = inst.op == Op::SDiv ? Reg::RAX : Reg::RDX;
+                    canonicalize(out, inst.type);
+                    commit_gpr(inst.result, out);
+                    return;
+                }
+                case Op::UDiv: case Op::URem: {
+                    gpr_into(inst.a, Reg::RAX);
+                    enc.zero(Reg::RDX);
+                    if (in_reg(inst.b)) enc.div_r(val_gpr(inst.b));
+                    else enc.div_m(Reg::RBP, val_off(inst.b));
+                    commit_gpr(inst.result, inst.op == Op::UDiv ? Reg::RAX : Reg::RDX);
+                    return;
+                }
+                case Op::Shl: case Op::LShr: case Op::AShr: {
+                    // RCX is statically killed for the count.
+                    gpr_into(inst.b, Reg::RCX);
+                    auto [dst, dlease] = def_gpr(inst.result,
+                                                  excl({inst.a, inst.b}) | bit(Reg::RCX));
+                    if (inst.op == Op::AShr) gpr_into_signed(inst.a, dst);
+                    else gpr_into(inst.a, dst);
+                    if (inst.op == Op::Shl) enc.shl_cl(Width::W64, dst);
+                    else if (inst.op == Op::LShr) enc.shr_cl(Width::W64, dst);
+                    else enc.sar_cl(Width::W64, dst);
+                    if (inst.op != Op::LShr) canonicalize(dst, inst.type);
+                    commit_gpr(inst.result, dst);
+                    release(dlease);
+                    return;
+                }
+                case Op::Not: {
+                    auto [dst, dlease] = def_gpr(inst.result, excl({inst.a}));
+                    gpr_into(inst.a, dst);
+                    if (inst.type == mir::Ty::I1) {
+                        enc.alu_ri(Alu::Xor, Width::W8, dst, 1);
+                    } else {
+                        enc.not_r(Width::W64, dst);
+                        canonicalize(dst, inst.type);
+                    }
+                    commit_gpr(inst.result, dst);
+                    release(dlease);
+                    return;
+                }
+                case Op::Neg: {
+                    auto [dst, dlease] = def_gpr(inst.result, excl({inst.a}));
+                    gpr_into(inst.a, dst);
+                    enc.neg_r(Width::W64, dst);
+                    canonicalize(dst, inst.type);
+                    commit_gpr(inst.result, dst);
+                    release(dlease);
+                    return;
+                }
+
+                case Op::FAdd: case Op::FSub: case Op::FMul: case Op::FDiv: {
+                    const bool dbl = inst.type == mir::Ty::F64;
+                    const uint8_t opcode = inst.op == Op::FAdd ? 0x58
+                                          : inst.op == Op::FSub ? 0x5C
+                                          : inst.op == Op::FMul ? 0x59 : 0x5E;
+                    auto [dst, dlease] = def_xmm(inst.result, excl({inst.a, inst.b}));
+                    xmm_into(inst.a, dst);
+                    if (in_reg(inst.b)) enc.sse_arith(opcode, dbl, dst, val_xmm(inst.b));
+                    else enc.sse_arith_m(opcode, dbl, dst, Reg::RBP, val_off(inst.b));
+                    commit_xmm(inst.result, dst);
+                    release(dlease);
+                    return;
+                }
+                case Op::FRem: emit_frem(inst); return;
+                case Op::FNeg: {
+                    // Flip the sign bit through a GPR: cheap, and works identically
+                    // for register-resident and spilled operands.
+                    const bool dbl = inst.type == mir::Ty::F64;
+                    auto lease = lease_gpr(0);
+                    if (in_reg(inst.a)) {
+                        enc.mov_x_r(lease.reg, val_xmm(inst.a));
+                    } else {
+                        enc.load(width_of(fn.values[inst.a].type), lease.reg, Reg::RBP,
+                                  val_off(inst.a));
+                    }
+                    auto mask = lease_gpr(bit(lease.reg));
+                    enc.mov_ri(mask.reg, dbl ? static_cast<int64_t>(0x8000000000000000ULL)
+                                              : 0x80000000LL);
+                    enc.alu_rr(Alu::Xor, Width::W64, lease.reg, mask.reg);
+                    release(mask);
+                    if (in_reg(inst.result)) {
+                        enc.mov_r_x(val_xmm(inst.result), lease.reg);
+                    } else {
+                        enc.store(dbl ? Width::W64 : Width::W32, Reg::RBP,
+                                   val_off(inst.result), lease.reg);
+                    }
+                    release(lease);
+                    return;
+                }
+
+                case Op::ICmpEq: case Op::ICmpNe:
+                case Op::ICmpSlt: case Op::ICmpSle: case Op::ICmpSgt: case Op::ICmpSge:
+                case Op::ICmpUlt: case Op::ICmpUle: case Op::ICmpUgt: case Op::ICmpUge:
+                    emit_icmp(inst);
+                    return;
+                case Op::FCmpOeq: case Op::FCmpOne:
+                case Op::FCmpOlt: case Op::FCmpOle: case Op::FCmpOgt: case Op::FCmpOge:
+                    emit_fcmp(inst);
+                    return;
+
+                case Op::Trunc: {
+                    auto [dst, dlease] = def_gpr(inst.result, excl({inst.a}));
+                    gpr_into(inst.a, dst);
+                    canonicalize(dst, inst.type);
+                    commit_gpr(inst.result, dst);
+                    release(dlease);
+                    return;
+                }
+                case Op::ZExt: case Op::PtrToInt: case Op::IntToPtr: {
+                    // The operand is already canonical (zero-extended); the move is
+                    // the whole operation.
+                    auto [dst, dlease] = def_gpr(inst.result, excl({inst.a}));
+                    gpr_into(inst.a, dst);
+                    commit_gpr(inst.result, dst);
+                    release(dlease);
+                    return;
+                }
+                case Op::SExt: {
+                    auto [dst, dlease] = def_gpr(inst.result, excl({inst.a}));
+                    gpr_into_signed(inst.a, dst);
+                    canonicalize(dst, inst.type);
+                    commit_gpr(inst.result, dst);
+                    release(dlease);
+                    return;
+                }
+                case Op::Bitcast: {
+                    // Same-width reinterpretation, possibly across classes. Route
+                    // the raw bits through a GPR; the source width picks the load.
+                    const bool src_float = mir::is_float(fn.values[inst.a].type);
+                    const bool dst_float = mir::is_float(inst.type);
+                    auto lease = lease_gpr(excl({inst.a, inst.result}));
+                    if (src_float && in_reg(inst.a)) {
+                        enc.mov_x_r(lease.reg, val_xmm(inst.a));
+                        if (fn.values[inst.a].type == mir::Ty::F32) canonicalize(lease.reg, mir::Ty::I32);
+                    } else {
+                        gpr_into(inst.a, lease.reg);
+                        if (!in_reg(inst.a) && src_float &&
+                            fn.values[inst.a].type == mir::Ty::F32) {
+                            canonicalize(lease.reg, mir::Ty::I32);
+                        }
+                    }
+                    if (dst_float) {
+                        if (in_reg(inst.result)) {
+                            enc.mov_r_x(val_xmm(inst.result), lease.reg);
+                        } else {
+                            enc.store(inst.type == mir::Ty::F64 ? Width::W64 : Width::W32,
+                                       Reg::RBP, val_off(inst.result), lease.reg);
+                        }
+                    } else {
+                        commit_gpr(inst.result, lease.reg);
+                    }
+                    release(lease);
+                    return;
+                }
+                case Op::FPTrunc: case Op::FPExt: {
+                    const bool to_double = inst.type == mir::Ty::F64;
+                    auto [dst, dlease] = def_xmm(inst.result, excl({inst.a}));
+                    xmm_into(inst.a, dst);
+                    enc.cvt_f2f(to_double, dst, dst);
+                    commit_xmm(inst.result, dst);
+                    release(dlease);
+                    return;
+                }
+                case Op::SIToFP: case Op::UIToFP: {
+                    // The unsigned 64-bit edge (values >= 2^63) is knowingly emitted
+                    // as the signed conversion; narrower unsigned sources are already
+                    // zero-extended, which makes the signed instruction exact.
+                    auto lease = lease_gpr(excl({inst.a, inst.result}));
+                    if (inst.op == Op::SIToFP) gpr_into_signed(inst.a, lease.reg);
+                    else gpr_into(inst.a, lease.reg);
+                    auto [dst, dlease] = def_xmm(inst.result, 0);
+                    enc.cvt_i2f(inst.type == mir::Ty::F64, Width::W64, dst, lease.reg);
+                    commit_xmm(inst.result, dst);
+                    release(dlease);
+                    release(lease);
+                    return;
+                }
+                case Op::FPToSI: case Op::FPToUI: {
+                    const bool from_double = fn.values[inst.a].type == mir::Ty::F64;
+                    auto [src, slease] = use_xmm(inst.a, 0);
+                    auto [dst, dlease] = def_gpr(inst.result, excl({inst.a}));
+                    enc.cvt_f2i(from_double, Width::W64, dst, src);
+                    canonicalize(dst, inst.type);
+                    commit_gpr(inst.result, dst);
+                    release(dlease);
+                    release(slease);
+                    return;
+                }
+
+                case Op::Select: {
+                    // Branchy on purpose: both classes share one shape, and the
+                    // untaken side's operand is simply never read.
+                    auto [cond, clease] = use_gpr(inst.a, excl({inst.b, inst.c, inst.result}));
+                    const auto skip = enc.make_label();
+                    const auto done = enc.make_label();
+                    enc.test_rr(Width::W8, cond, cond);
+                    release(clease);
+                    if (mir::is_float(inst.type)) {
+                        auto [dst, dlease] = def_xmm(inst.result, excl({inst.b, inst.c}));
+                        enc.jcc(Cond::E, skip);
+                        xmm_into(inst.b, dst);
+                        enc.jmp(done);
+                        enc.bind(skip);
+                        xmm_into(inst.c, dst);
+                        enc.bind(done);
+                        commit_xmm(inst.result, dst);
+                        release(dlease);
+                    } else {
+                        auto [dst, dlease] = def_gpr(inst.result,
+                                                      excl({inst.a, inst.b, inst.c}));
+                        enc.jcc(Cond::E, skip);
+                        gpr_into(inst.b, dst);
+                        enc.jmp(done);
+                        enc.bind(skip);
+                        gpr_into(inst.c, dst);
+                        enc.bind(done);
+                        commit_gpr(inst.result, dst);
+                        release(dlease);
+                    }
+                    return;
+                }
+
+                case Op::Call: emit_call(inst, false); return;
+                case Op::CallIndirect: emit_call(inst, true); return;
+                case Op::Asm: emit_asm(inst); return;
+
+                case Op::Jump: {
+                    pass_block_args(inst.a, inst.args);
+                    enc.jmp(block_labels[inst.a]);
+                    return;
+                }
+                case Op::Branch: {
+                    auto [cond, clease] = use_gpr(inst.a, 0);
+                    enc.test_rr(Width::W8, cond, cond);
+                    release(clease);
+                    enc.jcc(Cond::NE, block_labels[inst.b]);
+                    enc.jmp(block_labels[inst.c]);
+                    return;
+                }
+                case Op::Switch: {
+                    // Case values are stored 32-bit-truncated (Builder::switch_on)
+                    // and read back sign-extended. A narrow scrutinee compares at 32
+                    // bits on the RAW pattern — a 64-bit compare would disagree
+                    // about negative values, since the canonical form zero-extends.
+                    // RAX/RCX are statically killed here: the compare loop branches
+                    // away mid-template, so leased scratch (whose push/pop must stay
+                    // balanced) cannot be used.
+                    const bool wide = width_of(fn.values[inst.a].type) == Width::W64;
+                    const auto scrutinee = in_reg(inst.a) ? val_gpr(inst.a)
+                        : (gpr_into(inst.a, Reg::RAX), Reg::RAX);
+                    for (size_t i = 0; i + 1 < inst.args.size(); i += 2) {
+                        if (wide) {
+                            enc.mov_ri(Reg::RCX,
+                                        static_cast<int64_t>(static_cast<int32_t>(inst.args[i])));
+                            enc.alu_rr(Alu::Cmp, Width::W64, scrutinee, Reg::RCX);
+                        } else {
+                            enc.mov_ri(Reg::RCX, inst.args[i]); // raw 32-bit pattern
+                            enc.alu_rr(Alu::Cmp, Width::W32, scrutinee, Reg::RCX);
+                        }
+                        enc.jcc(Cond::E, block_labels[inst.args[i + 1]]);
+                    }
+                    enc.jmp(block_labels[inst.b]);
+                    return;
+                }
+                case Op::Return: {
+                    if (!inst.args.empty()) {
+                        const auto value = inst.args.front();
+                        if (mir::is_float(fn.values[value].type)) {
+                            xmm_into(value, XReg::XMM0);
+                        } else {
+                            gpr_into(value, Reg::RAX);
+                        }
+                    }
+                    emit_epilogue();
+                    return;
+                }
+                case Op::Unreachable:
+                    enc.ud2();
+                    return;
+                }
+                error(std::format("unhandled MIR op '{}' in block {}", op_name(inst.op), block_id));
             }
 
             void emit_epilogue() {
+                for (Reg r : {Reg::RBX, Reg::R12, Reg::R13, Reg::R14, Reg::R15}) {
+                    if (ra.used_callee_saved & bit(r)) {
+                        enc.load(Width::W64, r, Reg::RBP, callee_save_offset[static_cast<int>(r)]);
+                    }
+                }
                 enc.mov_rr(Width::W64, Reg::RSP, Reg::RBP);
                 enc.pop_r(Reg::RBP);
                 enc.ret();
@@ -811,34 +1297,52 @@ namespace backend_x86 {
                 enc.push_r(Reg::RBP);
                 enc.mov_rr(Width::W64, Reg::RBP, Reg::RSP);
                 if (frame_size > 0) enc.sub_rsp(frame_size);
+                for (Reg r : {Reg::RBX, Reg::R12, Reg::R13, Reg::R14, Reg::R15}) {
+                    if (ra.used_callee_saved & bit(r)) {
+                        enc.store(Width::W64, Reg::RBP, callee_save_offset[static_cast<int>(r)], r);
+                    }
+                }
 
-                // Incoming arguments (the entry block's parameters) spill from their
-                // System V registers; stack-passed extras sit above the return address.
+                // Incoming arguments. Phase 1 parks every register-passed argument
+                // in memory (the parameter's spill area, or its staging slot when
+                // it lives in a register), phase 2 stages stack-passed extras
+                // through RAX, and phase 3 loads register-homed parameters — an
+                // ordering that never reads an argument register after another
+                // parameter's home register was written.
                 int ints = 0;
                 int floats = 0;
                 int32_t caller_stack = 16; // saved RBP + return address
                 if (!fn.blocks.empty()) {
-                    for (const auto param : fn.blocks.front().params) {
+                    const auto &params = fn.blocks.front().params;
+                    std::vector<mir::ValueId> reg_homed;
+                    for (const auto param : params) {
+                        const auto home = in_reg(param) ? staging_offset.at(param) : val_off(param);
+                        if (in_reg(param)) reg_homed.push_back(param);
                         if (mir::is_float(fn.values[param].type)) {
                             if (floats < 8) {
-                                enc.mov_x_r(Reg::RAX, static_cast<XReg>(floats++));
-                                store_result(param, Reg::RAX);
+                                enc.movsd_store(Reg::RBP, home, static_cast<XReg>(floats++));
                                 continue;
                             }
                         } else if (ints < 6) {
-                            store_result(param, INT_ARG_REGS[ints++]);
+                            enc.store(Width::W64, Reg::RBP, home, INT_ARG_REGS[ints++]);
                             continue;
                         }
                         enc.load(Width::W64, Reg::RAX, Reg::RBP, caller_stack);
                         caller_stack += 8;
-                        store_result(param, Reg::RAX);
+                        enc.store(Width::W64, Reg::RBP, home, Reg::RAX);
+                    }
+                    for (const auto param : reg_homed) {
+                        load_param_from_staging(param);
                     }
                 }
 
+                uint32_t index = 0;
                 for (size_t b = 0; b < fn.blocks.size(); ++b) {
                     enc.bind(block_labels[b]);
                     for (const auto &inst : fn.blocks[b].insts) {
+                        advance_to(index);
                         emit_inst(inst, static_cast<mir::BlockId>(b));
+                        ++index;
                     }
                 }
             }
@@ -846,7 +1350,7 @@ namespace backend_x86 {
     }
 
     auto generate(const mir::Module &module, const uint32_t test_info,
-                   const uint32_t test_runner) -> Result {
+                   const uint32_t test_runner, const RegAlloc regalloc) -> Result {
         Result result;
         elf::Object &object = result.object;
 
@@ -955,9 +1459,31 @@ namespace backend_x86 {
         const auto fmodf_symbol = runtime_symbol("fmodf");
 
         // ---- bodies ----------------------------------------------------------
+        const auto mode = regalloc == RegAlloc::Trivial ? x86ra::Mode::Trivial
+                                                         : x86ra::Mode::Linear;
+        // Debug bisection hook: functions at index >= MIRAGE_RA_LINEAR_LIMIT fall
+        // back to the trivial allocator, which binary-searches a linear-scan
+        // miscompile down to one function. Unset in normal operation.
+        size_t linear_limit = SIZE_MAX;
+        if (const char *env = std::getenv("MIRAGE_RA_LINEAR_LIMIT")) {
+            linear_limit = static_cast<size_t>(std::strtoull(env, nullptr, 10));
+        }
+        size_t body_index = 0;
         for (size_t i = 0; i < module.functions.size(); ++i) {
             const auto &fn = module.functions[i];
             if (!fn.has_body) continue;
+
+            const auto fn_mode = body_index++ < linear_limit ? mode : x86ra::Mode::Trivial;
+            const auto allocation = x86ra::allocate(module, fn, fn_mode);
+            if (!allocation.errors.empty()) {
+                // The machine verifier found interference: an allocator bug. Never
+                // emit from a failed allocation — wrong code is the one outcome
+                // this backend must not produce.
+                for (const auto &finding : allocation.errors) {
+                    result.errors.push_back("register allocator: " + finding);
+                }
+                break;
+            }
 
             // 16-align each function's entry.
             while (object.text.size() % 16 != 0) object.text.push_back(0x90);
@@ -971,6 +1497,7 @@ namespace backend_x86 {
                 .errors = result.errors,
                 .function_symbols = function_symbols,
                 .global_symbols = global_symbols,
+                .ra = allocation,
             };
             ctx.memcpy_symbol = memcpy_symbol;
             ctx.memset_symbol = memset_symbol;
@@ -1009,7 +1536,7 @@ namespace backend_x86 {
             if (module.functions[i].name == "_init") init_index = static_cast<int32_t>(i);
         }
         const bool test_mode = test_info != UINT32_MAX && test_runner != UINT32_MAX;
-        if (main_index >= 0 || test_mode) {
+        if ((main_index >= 0 || test_mode) && result.errors.empty()) {
             const auto exit_symbol = runtime_symbol("exit");
             while (object.text.size() % 16 != 0) object.text.push_back(0x90);
             const auto start = object.text.size();

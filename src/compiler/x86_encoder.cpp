@@ -178,7 +178,11 @@ namespace x86 {
     void Encoder::alu_ri(const Alu op, const Width w, const Reg dst, const int32_t imm) {
         const auto d = static_cast<uint8_t>(dst);
         if (w == Width::W16) byte(0x66);
-        rex(w == Width::W64, 0, d);
+        // Byte ops on SPL/BPL/SIL/DIL need the REX prefix to mean those registers;
+        // without it 'xor sil, 1' silently becomes 'xor dh, 1'. Found by the
+        // linear-scan allocator, whose result registers reach here — the trivial
+        // allocator's fixed scratch set (RAX/RCX/RDX) never could.
+        rex(w == Width::W64, 0, d, w == Width::W8 && needs_byte_rex(d));
         byte(w == Width::W8 ? 0x80 : 0x81);
         modrm_reg(static_cast<uint8_t>(op), d);
         if (w == Width::W8) byte(static_cast<uint8_t>(imm));
@@ -292,6 +296,13 @@ namespace x86 {
         byte(is_double ? 0xF2 : 0xF3);
         rex(false, static_cast<uint8_t>(dst), static_cast<uint8_t>(src));
         byte(0x0F); byte(opcode);
+        modrm_reg(static_cast<uint8_t>(dst), static_cast<uint8_t>(src));
+    }
+    void Encoder::movaps(const XReg dst, const XReg src) {
+        // 0F 28 /r moves all 128 bits, which is a superset of the scalar copy the
+        // allocator needs; no 66/F3/F2 prefix.
+        rex(false, static_cast<uint8_t>(dst), static_cast<uint8_t>(src));
+        byte(0x0F); byte(0x28);
         modrm_reg(static_cast<uint8_t>(dst), static_cast<uint8_t>(src));
     }
     void Encoder::ucomis(const bool is_double, const XReg a, const XReg b) {
@@ -441,9 +452,42 @@ namespace x86 {
     void Encoder::unary_r(const uint8_t slot, const Width w, const Reg reg) {
         const auto r = static_cast<uint8_t>(reg);
         if (w == Width::W16) byte(0x66);
-        rex(w == Width::W64, 0, r);
+        rex(w == Width::W64, 0, r, w == Width::W8 && needs_byte_rex(r));
         byte(slot <= 1 ? (w == Width::W8 ? 0xFE : 0xFF) : (w == Width::W8 ? 0xF6 : 0xF7));
         modrm_reg(slot, r);
+    }
+
+    // --- spilled-operand folding (stage 6) --------------------------------------
+
+    void Encoder::div_m(const Reg base, const int32_t disp) {
+        rex(true, 0, static_cast<uint8_t>(base));
+        byte(0xF7);
+        modrm_mem(6, base, disp);
+    }
+    void Encoder::idiv_m(const Reg base, const int32_t disp) {
+        rex(true, 0, static_cast<uint8_t>(base));
+        byte(0xF7);
+        modrm_mem(7, base, disp);
+    }
+    void Encoder::imul_rm(const Reg dst, const Reg base, const int32_t disp) {
+        const auto d = static_cast<uint8_t>(dst);
+        rex(true, d, static_cast<uint8_t>(base));
+        byte(0x0F);
+        byte(0xAF);
+        modrm_mem(d, base, disp);
+    }
+    void Encoder::sse_arith_m(const uint8_t opcode, const bool is_double, const XReg dst,
+                               const Reg base, const int32_t disp) {
+        byte(is_double ? 0xF2 : 0xF3);
+        rex(false, static_cast<uint8_t>(dst), static_cast<uint8_t>(base));
+        byte(0x0F); byte(opcode);
+        modrm_mem(static_cast<uint8_t>(dst), base, disp);
+    }
+    void Encoder::ucomis_m(const bool is_double, const XReg a, const Reg base, const int32_t disp) {
+        if (is_double) byte(0x66);
+        rex(false, static_cast<uint8_t>(a), static_cast<uint8_t>(base));
+        byte(0x0F); byte(0x2E);
+        modrm_mem(static_cast<uint8_t>(a), base, disp);
     }
 
     void Encoder::push_m(const Reg base, const int32_t disp) {
