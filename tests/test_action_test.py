@@ -277,10 +277,10 @@ def case_driver():
     check(r7.returncode != 0 and "'-o' is not supported with 'mirage test'" in r7.stderr,
           "'-o' is rejected under 'test' rather than silently ignored")
 
-    # '--emit-ir' is how you inspect the generated wrappers; it prints and does not run.
-    r8 = run("test", one("@test\nfn t() -> error(E) { return_ok }\n"), "--emit-ir")
+    # '--emit-mir' is how you inspect the generated wrappers; it prints and does not run.
+    r8 = run("test", one("@test\nfn t() -> error(E) { return_ok }\n"), "--emit-mir")
     check(r8.returncode == 0 and "__mirage_test_wrapper_0" in r8.stdout,
-          "'--emit-ir' under 'test' shows the synthesized per-test wrapper")
+          "'--emit-mir' under 'test' shows the synthesized per-test wrapper")
     check("running 1 test" not in r8.stdout, "and does not run the tests")
 
 

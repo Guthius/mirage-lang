@@ -15,6 +15,7 @@ after building:
 """
 
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -77,6 +78,41 @@ def main() -> int:
     # A valid invocation is unaffected; examples/start returns 42.
     result = run("run", str(START_EXAMPLE))
     check(result.returncode == 42, f"'run examples/start' still exits 42 (got {result.returncode})")
+
+    # ---- target selection and the '$option' defaults -------------------------
+    # docs/backend.md's driver section: "Keep the '$option' value strings
+    # byte-identical" across the llvm::Triple removal, because every
+    # '#compile_only_if' in the standard library switches on build/target_os and
+    # build/target_arch. A program that prints them is the pin.
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "main.mir").write_text(
+            'ext fn printf(fmt: *u8, ...) -> i32\n'
+            'pub fn main() -> i32 {\n'
+            '    printf("%s %s\\n", cast($option("build/target_os"), *u8),\n'
+            '           cast($option("build/target_arch"), *u8))\n'
+            '    return 0\n'
+            '}\n')
+        host = subprocess.run([str(MIRAGE_BINARY), "run", tmp],
+                              capture_output=True, text=True, timeout=60, cwd=REPO_ROOT)
+        check(host.stdout.strip() == "Linux X86_64",
+              f"host defaults are 'Linux X86_64' (got {host.stdout.strip()!r})")
+        # The wasm targets report Wasm32/Wasm32, as the LLVM triple mapping did.
+        wasm = subprocess.run(
+            [str(MIRAGE_BINARY), "build", tmp, "--target=wasm32-unknown-unknown",
+             "--emit-mir"],
+            capture_output=True, text=True, timeout=60, cwd=REPO_ROOT)
+        check(wasm.returncode == 0, "a wasm32 target selects cleanly")
+
+    # Every '--target=' spelling the LLVM build accepted still parses, and an
+    # unknown one is refused by name rather than silently treated as the host.
+    for spelling in ("x86_64-linux", "x86_64-unknown-linux-gnu", "wasm32",
+                     "wasm32-unknown-unknown", "wasm32-wasi", "wasm32-emscripten",
+                     "wasm32-unknown-emscripten"):
+        result = run("build", str(START_EXAMPLE), f"--target={spelling}", "--emit-mir")
+        check(result.returncode == 0, f"'--target={spelling}' is accepted")
+    bad = run("build", str(START_EXAMPLE), "--target=aarch64-linux-gnu")
+    check(bad.returncode != 0, "an unsupported target fails rather than compiling for the host")
+    check("unsupported target" in bad.stderr, "the failure names the target and lists what is supported")
 
     print()
     if failures:

@@ -156,36 +156,41 @@ def main() -> int:
     # One panic helper per error union TYPE, not per call site — example_optional_error
     # drops the same '?Alloc_Error' at five different places.
     ir = subprocess.run(
-        [str(MIRAGE_BINARY), "build", str(EXAMPLES / "example_optional_error"), "--emit-ir"],
+        [str(MIRAGE_BINARY), "build", str(EXAMPLES / "example_optional_error"), "--emit-mir"],
         capture_output=True,
         text=True,
         timeout=30,
     )
     helper_definitions = [
         line for line in ir.stdout.splitlines()
-        if line.startswith("define") and "__mirage_panic_unhandled_error" in line
+        if line.startswith("fn ") and "__mirage_panic_unhandled_error" in line
     ]
     check(
         len(helper_definitions) == 1,
         f"example_optional_error: exactly one panic helper emitted (got {len(helper_definitions)})",
     )
 
-    # Freestanding builds link -nostdlib, so the panic path must use raw syscalls rather
-    # than libc write()/exit().
+    # Freestanding builds link -nostdlib, so the panic path must reach the kernel
+    # itself rather than calling libc write()/exit(). The native backend emits the
+    # syscall sequence as inline asm; a libc call here would fail to link, which is
+    # exactly the bug this pins (it was live until the LLVM removal forced the
+    # native path to own the freestanding case too).
     freestanding = subprocess.run(
         [str(MIRAGE_BINARY), "build", str(EXAMPLES / "example_optional_error"),
-         "--emit-ir", "--freestanding"],
+         "--emit-mir", "--freestanding"],
         capture_output=True,
         text=True,
         timeout=30,
     )
+    panic_body = freestanding.stdout.split("__mirage_panic_unhandled_error", 1)
+    panic_body = panic_body[1] if len(panic_body) > 1 else ""
     check(
-        "declare i64 @write" not in freestanding.stdout,
-        "example_optional_error: freestanding panic path does not call libc write()",
+        "call @write" not in panic_body and "call @exit" not in panic_body,
+        "example_optional_error: freestanding panic path does not call libc write()/exit()",
     )
     check(
-        '"={rax},{rax},{rdi},{rsi},{rdx}' in freestanding.stdout,
-        "example_optional_error: freestanding panic path emits the write syscall",
+        "asm" in panic_body and "syscall.arg" in freestanding.stdout,
+        "example_optional_error: freestanding panic path emits syscalls instead",
     )
 
     print()

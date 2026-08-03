@@ -107,15 +107,14 @@ def main() -> int:
             wasm_bin = Path(tmp) / f"{name}.wasm"
 
             build_x86 = subprocess.run(
-                [str(MIRAGE), "build", str(directory), "--backend=native",
-                 "-o", str(x86_bin)],
+                [str(MIRAGE), "build", str(directory), "-o", str(x86_bin)],
                 capture_output=True, text=True, timeout=timeout, cwd=REPO_ROOT)
             if build_x86.returncode != 0:
                 fail(f"{name}: x86 native build failed\n  {build_x86.stderr.strip()[:300]}")
                 continue
 
             build_wasm = subprocess.run(
-                [str(MIRAGE), "build", str(directory), "--backend=native",
+                [str(MIRAGE), "build", str(directory),
                  "--target=wasm32-unknown-unknown", "-o", str(wasm_bin)],
                 capture_output=True, text=True, timeout=timeout, cwd=REPO_ROOT)
             if build_wasm.returncode != 0:

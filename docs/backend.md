@@ -5,13 +5,32 @@ lines, plus the object-emission and target-selection code in `src/main.cpp`). It
 replaced by a Mirage-specific IR and native object generation for `x86_64` and `wasm`, so
 that the compiler is standalone — no LLVM, no external toolchain beyond a linker.
 
-**Status (2026-08-03, second update).** Stages 1–10 are done, with stage 10's deletion
-half deliberately deferred: **`--backend=native` is now the DEFAULT** on the targets it
-owns (x86_64-linux and wasm32, both standalone and emscripten); `--backend=llvm` remains
-selectable through the soak period — the differential harnesses are most valuable
-exactly while the new default is newest — and `--emit-ir` forces the LLVM path, since
-it prints LLVM IR by definition. Other targets (an aarch64 cross-compile) auto-select
-LLVM unchanged. `codegen.cpp` and the LLVM dependency are deleted only after the soak.
+**Status (2026-08-03, final).** All ten stages are done, deletion included: **LLVM is
+gone.** `codegen.cpp`, `find_package(LLVM)`, `--backend` and `--emit-ir` no longer exist;
+the compiler links no LLVM library and target selection runs on its own `Target` type
+rather than `llvm::Triple`. What remains is the compiler proper: sema → MIR
+(`--emit-mir`) → passes → x86-64 machine code through linear-scan allocation and the ELF
+writer, or WebAssembly as a standalone module or a relocatable object for `emcc`. The
+only external tool is a linker.
+
+Measured at the removal (clean builds, same machine): **31.2s → 29.1s** wall clock and
+**725 MB → 692 MB** of build tree. The modest delta is because the LLVM here was a shared
+libLLVM the build only linked against; the meaningful change is the dependency itself —
+`mirage` no longer needs LLVM installed to build or run.
+
+Supported `--target=` spellings are now enumerated rather than parsed generously:
+`x86_64-linux` (and its `-unknown-linux-gnu` spellings), `wasm32-unknown-unknown`,
+`wasm32-wasi`, `wasm32-unknown-emscripten`. Anything else is refused by name, where the
+LLVM build would have attempted a cross-compile it could not finish. The `$option`
+strings (`"Linux"`, `"X86_64"`, `"Wasm32"`) are byte-identical to what the triple-based
+code produced and pinned by `tests/cli_test.py`, because every `#compile_only_if` in the
+standard library switches on them.
+
+**What the removal cost:** `@section("name")` no longer works. `elf_writer` emits the
+fixed System V section set, so a named section cannot be honored; it is now refused BY
+NAME rather than silently ignored (which is what the native path had been doing since
+the default flipped). Reinstating it means arbitrary named sections in the ELF writer —
+the one open item this deletion creates.
 
 The original status paragraph, kept for the record: `--backend=native` is a complete
 pipeline —

@@ -51,9 +51,9 @@ def run(example_dir: str) -> subprocess.CompletedProcess:
     return subprocess.run([out_path], capture_output=True, text=True, timeout=30)
 
 
-def emit_ir(example_dir: str) -> str:
+def emit_mir(example_dir: str) -> str:
     return subprocess.run(
-        [str(MIRAGE_BINARY), "build", str(EXAMPLES / example_dir), "--emit-ir"],
+        [str(MIRAGE_BINARY), "build", str(EXAMPLES / example_dir), "--emit-mir"],
         capture_output=True, text=True, timeout=30, check=True,
     ).stdout
 
@@ -110,18 +110,18 @@ def main() -> int:
         result.stdout.strip() == "42 2 5 -1 5 7 1",
         f"example_any_rvalue: non-addressable sources coerce correctly (got {result.stdout.strip()!r})",
     )
-    # The value being right does not distinguish .rodata from a stack spill, so assert on the
-    # emitted IR too: two compile-time-constant sources (42 and the "hello" slice header) must
-    # become private constants, and the three runtime rvalues (x + 1, five(), -x) must become
-    # entry-block temporaries. Getting this backwards is silently correct but pointlessly slow.
-    ir = emit_ir("example_any_rvalue")
+    # The value being right does not distinguish a constant from a stack spill, so
+    # assert on the emitted MIR too: the compile-time-constant sources become
+    # constant globals, and the runtime rvalues (x + 1, five(), -x) become frame
+    # slots. Getting this backwards is silently correct but pointlessly slow.
+    ir = emit_mir("example_any_rvalue")
     check(
-        ir.count("@.any.") >= 2 and "private unnamed_addr constant" in ir,
-        "example_any_rvalue: constant sources are emitted as private .rodata globals",
+        len([line for line in ir.splitlines() if line.startswith("const @")]) >= 2,
+        "example_any_rvalue: constant sources are emitted as constant globals",
     )
     check(
-        ir.count("%any.tmp") >= 3,
-        "example_any_rvalue: runtime rvalue sources are spilled to entry-block temporaries",
+        ir.count("any.tmp") >= 3,
+        "example_any_rvalue: runtime rvalue sources are spilled to frame slots",
     )
 
     # Not just "did not crash": the trait method must come back as the DEGRADED

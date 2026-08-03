@@ -7,25 +7,6 @@ project(Mirage LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 
-find_package(LLVM REQUIRED CONFIG)
-message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
-message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
-
-if (LLVM_LINK_LLVM_DYLIB)
-    set(LLVM_LIBS LLVM)
-else ()
-    llvm_map_components_to_libnames(LLVM_LIBS
-            core
-            support
-            irreader
-            passes
-            x86asmparser
-            x86codegen
-            x86desc
-            x86info
-    )
-endif ()
-
 # Shared compiler core (lexer, parser, module resolver, sema) - LLVM-free,
 # reused by both the `mirage` compiler and the `mirage-lsp` language server.
 add_library(mirage_core OBJECT
@@ -80,22 +61,13 @@ add_library(mirage_core OBJECT
 target_include_directories(mirage_core PUBLIC src)
 
 add_executable(mirage
-        src/compiler/codegen.cpp
-        src/compiler/codegen.hpp
         src/main.cpp
         $<TARGET_OBJECTS:mirage_core>
 )
 
 target_include_directories(mirage
-        SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS}
         PRIVATE src
 )
-
-target_link_libraries(mirage
-        PUBLIC ${LLVM_LIBS}
-)
-
-target_compile_definitions(mirage PUBLIC ${LLVM_DEFINITIONS})
 
 add_executable(lexer_asi_test
         tests/lexer_asi_test.cpp

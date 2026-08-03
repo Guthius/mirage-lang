@@ -48,8 +48,8 @@ def build(example, *extra):
     return run(["build", f"examples/{example}", "-o", "/dev/null", *extra])
 
 
-def emit_ir(example, *extra):
-    return run(["build", f"examples/{example}", "--emit-ir", *extra])
+def emit_mir(example, *extra):
+    return run(["build", f"examples/{example}", "--emit-mir", *extra])
 
 
 def execute(example, *extra):
@@ -83,7 +83,7 @@ def case_unguarded_call_is_an_error():
 def case_type_info_globals_are_suppressed():
     """The point of the flag: no Type_Info constants and no lookup table in the binary.
 
-    Checked on emitted IR rather than on behaviour, because a program can take the
+    Checked on emitted MIR rather than on behaviour, because a program can take the
     reflection-free path at RUNTIME while the compiler still emitted every Type_Info
     global -- which is exactly the bug this test was written after finding. Sema's three
     types_needing_info registration sites ('type_of', 'type_info_of(type_of(T))', and
@@ -91,12 +91,12 @@ def case_type_info_globals_are_suppressed():
     """
     symbols = ("@.type_info", "@__mirage_type_info_table")
 
-    on = emit_ir("example_nortti_guarded")
+    on = emit_mir("example_nortti_guarded")
     check(any(s in on.stdout for s in symbols),
           "with rtti: the fixture really does emit Type_Info globals (guards the negative below)")
 
-    off = emit_ir("example_nortti_guarded", "--nortti")
-    check(off.returncode == 0, "--nortti IR emission succeeds")
+    off = emit_mir("example_nortti_guarded", "--nortti")
+    check(off.returncode == 0, "--nortti MIR emission succeeds")
     for s in symbols:
         check(s not in off.stdout, f"--nortti emits no '{s}'")
 

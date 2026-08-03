@@ -12,7 +12,7 @@ diverges at run time against clang-compiled code.
 Two parts:
 
   1. The positive corpus, compiled for wasm32-unknown-emscripten with
-     '--backend=native' and compared against the native x86-64 build (exit code
+     for wasm32-unknown-emscripten and compared against the x86-64 build (exit code
      and stdout). Named refusals (inline asm, funcptr↔anyptr) and fixtures that
      need the host filesystem (emscripten's MEMFS is empty) are counted, never
      silently passed.
@@ -116,15 +116,14 @@ def main() -> int:
             em_js = Path(tmp) / f"{name}.js"
 
             build_x86 = subprocess.run(
-                [str(MIRAGE), "build", str(directory), "--backend=native",
-                 "-o", str(x86_bin)],
+                [str(MIRAGE), "build", str(directory), "-o", str(x86_bin)],
                 capture_output=True, text=True, timeout=timeout, cwd=REPO_ROOT)
             if build_x86.returncode != 0:
                 fail(f"{name}: x86 native build failed\n  {build_x86.stderr.strip()[:300]}")
                 continue
 
             build_em = subprocess.run(
-                [str(MIRAGE), "build", str(directory), "--backend=native",
+                [str(MIRAGE), "build", str(directory),
                  "--target=wasm32-unknown-emscripten", "-o", str(em_js)],
                 capture_output=True, text=True, timeout=timeout, cwd=REPO_ROOT, env=env)
             if build_em.returncode != 0:
@@ -171,7 +170,7 @@ def main() -> int:
         else:
             abi_js = Path(tmp) / "abi.js"
             build_abi = subprocess.run(
-                [str(MIRAGE), "build", str(abi_dir), "--backend=native",
+                [str(MIRAGE), "build", str(abi_dir),
                  "--target=wasm32-unknown-emscripten", "-o", str(abi_js)],
                 capture_output=True, text=True, timeout=120, cwd=REPO_ROOT, env=env)
             if build_abi.returncode != 0:

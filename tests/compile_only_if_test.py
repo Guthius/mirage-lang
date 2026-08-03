@@ -78,11 +78,17 @@ def test_excluded_file_contributes_no_links() -> None:
 
 
 def test_excluded_file_absent_from_ir() -> None:
-    result = mirage("build", EXAMPLES / "example_compile_only_if", "--emit-ir")
-    check(result.returncode == 0, "Linux build emits IR cleanly (llvm::verifyModule runs inside codegen)")
-    check("linux" in result.stdout, "IR contains the included file's 'linux' string")
-    check("wasm" not in result.stdout and "js_console_log" not in result.stdout,
-          "IR contains nothing from the excluded wasm file (no symbols, no strings, no ext decls)")
+    # MIR prints a string global by SIZE, not by contents, so the string-literal
+    # form of this check has no MIR equivalent — the two 'run' cases above already
+    # prove which file's platform_name() executed. What MIR does show, and what
+    # actually matters here, is that the excluded file contributes no DECLARATION:
+    # its 'ext fn js_console_log' would appear as a 'declare' if the file had been
+    # compiled in.
+    result = mirage("build", EXAMPLES / "example_compile_only_if", "--emit-mir")
+    check(result.returncode == 0, "Linux build emits MIR cleanly (the verifier runs inside mirgen)")
+    check("platform_name" in result.stdout, "MIR contains the included file's 'platform_name'")
+    check("js_console_log" not in result.stdout,
+          "MIR contains no declaration from the excluded wasm file")
 
 
 def test_excluded_file_is_still_type_checked() -> None:
@@ -118,10 +124,10 @@ def test_excluded_file_trait_impl() -> None:
     result = mirage("run", example, "--opt", "build/target_os=Wasm32")
     check(result.returncode == 4, f"Wasm32 build runs wasm_impl's Reporter (exit {result.returncode} == 4)")
 
-    result = mirage("build", example, "--emit-ir")
-    check(result.returncode == 0, "Linux build emits IR cleanly")
+    result = mirage("build", example, "--emit-mir")
+    check(result.returncode == 0, "Linux build emits MIR cleanly")
     check("Wasm_Reporter" not in result.stdout,
-          "the excluded file's impl reaches no vtable or symbol in the emitted IR")
+          "the excluded file's impl reaches no vtable or symbol in the emitted MIR")
 
 
 def test_directive_error_shapes() -> None:

@@ -61,26 +61,31 @@ def main() -> int:
         return 1
 
     try:
-        # The declaration must be SysV-coerced, not passed as a raw aggregate. A by-value
-        # '[2]f32' is one SSE eightbyte and must lower exactly like 'struct { float x, y; }'.
+        # The declaration must be SysV-classified, not passed as a raw aggregate.
+        # Asserted on MIR, which now records the ABI decision directly (the LLVM
+        # IR this used to grep is gone): a by-value '[2]f32' is ONE SSE eightbyte
+        # and must lower exactly like 'struct { float x, y; }'.
         ir = subprocess.run(
-            [str(MIRAGE_BINARY), "build", str(FIXTURE), "--emit-ir"],
+            [str(MIRAGE_BINARY), "build", str(FIXTURE), "--emit-mir"],
             capture_output=True, text=True, timeout=60, cwd=REPO_ROOT,
         )
-        check("declare float @sum_arr(<2 x float>)" in ir.stdout,
-              "by-value [2]f32 is coerced to <2 x float>, not passed as [2 x float]")
+        check("@sum_arr(f64)" in ir.stdout,
+              "by-value [2]f32 is classified as one SSE eightbyte, not passed indirectly")
+        check("@sum_two_words(i64, i64)" in ir.stdout,
+              "a two-eightbyte struct passes as two INTEGER words")
         # A packed field straddling an eightbyte boundary forces MEMORY class; classifying the
         # two halves independently would put it in registers instead.
-        check("@sum_straddle(ptr byval" in ir.stdout and "align 8)" in ir.stdout,
-              "straddling packed struct is passed byval with align 8, as clang does")
+        check("@sum_straddle(ptr byval(" in ir.stdout,
+              "straddling packed struct is passed byval (MEMORY class), as clang does")
+        check("@sum_big(ptr byval(24, align 8))" in ir.stdout,
+              "a >16-byte struct is passed byval at its own size and alignment")
 
-        # Every backend/allocator: the native path implements SysV aggregate
+        # Both allocators: the native path implements SysV aggregate
         # classification itself (mirgen's C lowering), and this run pins it
         # against C code compiled by clang.
         for label, extra in (
-            ("llvm", []),
-            ("native/linear", ["--backend=native", "--regalloc=linear"]),
-            ("native/trivial", ["--backend=native", "--regalloc=trivial"]),
+            ("linear", ["--regalloc=linear"]),
+            ("trivial", ["--regalloc=trivial"]),
         ):
             result = subprocess.run(
                 [str(MIRAGE_BINARY), "run", str(FIXTURE), *extra],
@@ -90,22 +95,23 @@ def main() -> int:
                   f"[{label}] aggregates cross the C boundary intact: "
                   f"exit {result.returncode} == {EXPECTED_EXIT}")
 
-        # The same fixture under the WebAssembly ABI, which has no register-packing tier:
-        # every one of these is a multi-element aggregate, so all four go indirectly. The
-        # expected shapes were read off emcc for the equivalent C (a 'long long' struct,
-        # since C 'long' is 4 bytes on wasm32), not derived from the same rules twice.
-        # '--emit-ir' stops before the link, so the x86 helper.o above is irrelevant here.
+        # The same fixture under the WebAssembly ABI, which has no register-packing
+        # tier: every one of these is a multi-element aggregate, so all four go
+        # indirectly (clang's wasm rule — a recursively-single-scalar aggregate
+        # would pass directly). The contrast with the x86 shapes above is the whole
+        # point; '--emit-mir' stops before the link, so the x86 helper.o is
+        # irrelevant here.
         wasm_ir = subprocess.run(
-            [str(MIRAGE_BINARY), "build", str(FIXTURE), "--target=wasm32-unknown-emscripten", "--emit-ir"],
+            [str(MIRAGE_BINARY), "build", str(FIXTURE), "--target=wasm32-unknown-emscripten", "--emit-mir"],
             capture_output=True, text=True, timeout=60, cwd=REPO_ROOT,
         )
-        check(wasm_ir.returncode == 0, "wasm32 build of the ABI fixture emits IR cleanly")
-        check("declare float @sum_arr(ptr byval([2 x float]) align 4)" in wasm_ir.stdout,
-              "wasm32: by-value [2]f32 goes indirectly, NOT coerced to <2 x float> as on x86-64")
-        check("@sum_big(ptr byval" in wasm_ir.stdout and "@sum_two_words(ptr byval" in wasm_ir.stdout,
-              "wasm32: multi-field structs are passed byval")
-        check("@sum_straddle(ptr byval" in wasm_ir.stdout and "align 1)" in wasm_ir.stdout,
-              "wasm32: a packed struct keeps its natural align 1 (no 8-byte stack-slot minimum)")
+        check(wasm_ir.returncode == 0, "wasm32 build of the ABI fixture emits MIR cleanly")
+        check("@sum_arr(ptr)" in wasm_ir.stdout,
+              "wasm32: by-value [2]f32 goes indirectly, NOT packed into one word as on x86-64")
+        check("@sum_big(ptr)" in wasm_ir.stdout and "@sum_two_words(ptr)" in wasm_ir.stdout,
+              "wasm32: multi-field structs pass by reference")
+        check("byval(" not in wasm_ir.stdout,
+              "wasm32: no byval stack copies — the pointer itself IS the argument")
     finally:
         helper_o.unlink(missing_ok=True)
 

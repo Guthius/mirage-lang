@@ -1,6 +1,6 @@
 # Mirage
 
-Mirage is a compiled, statically-typed systems language that targets native code via LLVM. It is designed for low-level programming with a clean, expression-oriented syntax and direct interoperability with C libraries.
+Mirage is a compiled, statically-typed systems language with its own code generator — it emits x86-64 machine code and WebAssembly directly, with no LLVM dependency. It is designed for low-level programming with a clean, expression-oriented syntax and direct interoperability with C libraries.
 
 ## Features
 
@@ -25,18 +25,17 @@ Mirage is a compiled, statically-typed systems language that targets native code
 - [`docs/spec.md`](docs/spec.md) — the language specification.
 - [`docs/grammar.md`](docs/grammar.md) — the full grammar, with notes on the places the
   parser deliberately defers a decision to sema.
-- [`docs/backend.md`](docs/backend.md) — the design record for replacing LLVM with a
-  Mirage-specific IR and native `x86_64`/`wasm` object generation. **The native backend
-  is the default** on the targets it owns: x86_64-linux (linear-scan register
-  allocation, matching LLVM on the whole corpus), `wasm32-unknown-unknown` (a finished
-  standalone `.wasm`, run differentially under node) and `wasm32-unknown-emscripten`
-  (a relocatable object linked by `emcc`, real libc included). `--backend=llvm` stays
-  selectable through the soak period, is forced by `--emit-ir`, and remains the
-  automatic choice for targets the native backend does not cover.
+- [`docs/backend.md`](docs/backend.md) — the design record for the code generator that
+  replaced LLVM: a Mirage-specific IR (`--emit-mir`) lowered to x86-64 machine code
+  through a linear-scan register allocator and an ELF writer, or to WebAssembly as a
+  finished standalone `.wasm` (`--target=wasm32-unknown-unknown`) or a relocatable
+  object for `emcc` (`--target=wasm32-unknown-emscripten`). No LLVM is involved at any
+  point; the only external tool is a linker.
 
 ## Building
 
-**Requirements:** CMake, Ninja, Clang, LLVM 15+
+**Requirements:** CMake 3.28+, Ninja, a C++23 compiler, and a linker
+(`clang` by default, `emcc` for the emscripten target)
 
 ```sh
 just build          # configure + build -> ./build/mirage
@@ -60,7 +59,7 @@ mirage build my_project             # compile to ./a.out
 mirage build -o myprogram my_project
 mirage run my_project               # compile and run
 mirage test my_project              # run the module's '@test' functions
-mirage build --emit-ir my_project   # print LLVM IR to stdout instead of compiling
+mirage build --emit-mir my_project  # print Mirage IR to stdout instead of compiling
 mirage build --freestanding my_project
 ```
 
@@ -72,11 +71,9 @@ Options:
 --std=<path>              Override the module root (takes precedence over MIRAGE_MODULES_ROOT)
 --cc=<program>            Linker driver to invoke (default: clang, or $MIRAGE_CC)
 --target=<triple>         Cross-compile for <triple> (default: the host triple)
---emit-ir                 Print LLVM IR to stdout instead of compiling
 --emit-mir                Print Mirage IR to stdout instead of compiling (native backend)
 --mir-opt                 With --emit-mir: run the MIR optimization passes before printing
---backend=<name>          Code generator: 'native' (default on x86_64-linux/wasm32) or 'llvm'
---regalloc=<name>         Native register allocator: 'linear' (default) or 'trivial' (triage)
+--regalloc=<name>         Register allocator: 'linear' (default) or 'trivial' (triage)
 --freestanding            Compile without standard library
 --load <path>             Compile a module nothing imports (may be repeated)
 --noinit                  Skip generating/calling the synthesized '@init'-runner '_init'
@@ -119,7 +116,7 @@ fn addition_works() -> error(Check) {
 ```
 
 A `@test` takes no parameters and returns exactly `error(...)`; the Ok/Failed tag is the
-result. `-o` is rejected under `test` (the binary is a temporary); `--emit-ir` shows the
+result. `-o` is rejected under `test` (the binary is a temporary); `--emit-mir` shows the
 generated per-test wrappers without running anything. The runtime half lives in the standard library's `core/testing`, which the compiler
 loads automatically. `--load <path>` additionally compiles a module nothing imports —
 useful for tests that live outside the import graph, and for `@init`-based driver

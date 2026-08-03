@@ -17,9 +17,6 @@ Flags:
     --strict            treat a changed diagnostic message as a failure, not a warning
     --update-baseline   re-derive tests/examples_expected.json from current behavior
     --only NAME         restrict the run to a single example directory (repeatable)
-    --backend NAME      pass '--backend=NAME' to every compiler invocation (the
-                        differential plan in docs/backend.md; the baseline itself is
-                        always recorded against the default backend)
 
 Re-blessing the baseline is never a standalone commit: run --update-baseline as part
 of the fix that changed the behavior, and review the resulting JSON hunk like any
@@ -40,7 +37,7 @@ BASELINE = Path(__file__).resolve().parent / "examples_expected.json"
 
 DEFAULT_TIMEOUT = 60
 
-# Extra arguments appended to every compiler invocation ('--backend=...'); set once
+# Extra arguments appended to every compiler invocation; set once
 # from the command line in main().
 BACKEND_ARGS: list[str] = []
 
@@ -82,11 +79,11 @@ SPECIAL_CASES: dict[str, dict] = {
 }
 
 # Actions, in the order auto-derivation tries them:
-#   "emit-ir"         mirage build <dir> --emit-ir --freestanding
+#   "emit-mir"        mirage build <dir> --emit-mir --freestanding
 #   "link-directives" mirage build <dir> --print-link-directives
 #   "build"           mirage build <dir> -o <tmp>       (compile + link only)
 #   "run"             mirage run <dir>                  (compile, link, execute)
-ACTIONS = ("emit-ir", "link-directives", "build", "run")
+ACTIONS = ("emit-mir", "link-directives", "build", "run")
 
 
 def example_dirs() -> list[Path]:
@@ -115,13 +112,13 @@ def run_action(directory: Path, action: str, extra_args: list[str], timeout: int
     invoked from.
     """
     with tempfile.TemporaryDirectory() as tmp:
-        if action == "emit-ir":
+        if action == "emit-mir":
             # --freestanding suppresses codegen.cpp's "hosted build requires
             # 'pub fn main()'" check, which fires for library-style modules even under
-            # --emit-ir. Without it every such module pins at exit 1, which would mask
+            # --emit-mir. Without it every such module pins at exit 1, which would mask
             # a real regression behind an already-failing exit code; with it they pin
             # at exit 0 and any new front-end or codegen error flips them red.
-            argv = [str(MIRAGE_BINARY), "build", str(directory), "--emit-ir", "--freestanding"]
+            argv = [str(MIRAGE_BINARY), "build", str(directory), "--emit-mir", "--freestanding"]
         elif action == "link-directives":
             argv = [str(MIRAGE_BINARY), "build", str(directory), "--print-link-directives"]
         elif action == "build":
@@ -172,7 +169,7 @@ def derive_entry(directory: Path) -> dict:
     elif not has_main(directory):
         # A library-style module: exercise parse + sema + codegen, but stop short of
         # the link, which would fail on an undefined 'main'.
-        action = "emit-ir"
+        action = "emit-mir"
     else:
         code, _, stderr = run_action(directory, "build", extra_args, timeout)
         if code != 0:
@@ -224,11 +221,7 @@ def main() -> int:
     parser.add_argument("--strict", action="store_true", help="diagnostic drift fails")
     parser.add_argument("--update-baseline", action="store_true")
     parser.add_argument("--only", action="append", default=[], metavar="NAME")
-    parser.add_argument("--backend", default=None, metavar="NAME",
-                        help="pass --backend=NAME to every compiler invocation")
     args = parser.parse_args()
-    if args.backend:
-        BACKEND_ARGS.append(f"--backend={args.backend}")
 
     if not MIRAGE_BINARY.exists():
         print(f"error: {MIRAGE_BINARY} not found — run 'just build' first", file=sys.stderr)

@@ -4162,7 +4162,7 @@ Compiles `<module>`, discovers every `@test` function in the program, and runs t
 forks a child process per case, which neither has.
 
 `-o` is rejected under `test`: the compiled test binary is a temporary that is run and then
-deleted, so there is no output to name. `--emit-ir` works and is the way to inspect the
+deleted, so there is no output to name. `--emit-mir` works and is the way to inspect the
 generated per-test wrappers and the `Test_Info` constant — it prints the IR and does not run
 anything.
 

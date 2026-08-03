@@ -251,8 +251,10 @@ namespace mirgen {
 
             void unsupported(const std::string &what, const SourceLocation &loc) {
                 result_.unsupported.insert(what);
-                diag_.report_error(DiagnosticStage::Codegen, loc, std::format(
-                    "the native backend cannot lower {} yet; use '--backend=llvm' for this program", what));
+                // No 'use --backend=llvm' escape hatch any more: that backend is
+                // gone. The message states the limit and stops.
+                diag_.report_error(DiagnosticStage::Codegen, loc,
+                    std::format("cannot compile {}", what));
             }
 
             // ---- types -------------------------------------------------------------
@@ -337,6 +339,21 @@ namespace mirgen {
                     if (!seen.contains(entry.first)) out.emplace_back(&entry.first, &entry.second);
                 }
                 return out;
+            }
+
+            // '@section("name")' has no native representation yet: elf_writer's
+            // section table is the fixed System V set (.text/.data/.rodata/.bss),
+            // and the wasm formats have no analogue at all. It WAS honored on the
+            // LLVM path, so removing that backend removes the feature — reported
+            // by name rather than silently ignored, which is the standing rule
+            // for anything mirgen cannot lower. Reinstating it means arbitrary
+            // named sections in the ELF writer (TODO.md §8).
+            void diagnose_unsupported_section(const std::vector<ast::Attribute> &attributes) {
+                for (const auto &attribute : attributes) {
+                    if (attribute.name != "section") continue;
+                    unsupported("'@section' (the native backend emits only the standard "
+                                 "ELF sections)", attribute.location);
+                }
             }
 
             void declare_globals() {
@@ -958,6 +975,7 @@ namespace mirgen {
                             f.is_naked = fn->decl && std::ranges::any_of(
                                 fn->decl->attributes,
                                 [](const ast::Attribute &a) { return a.name == "naked"; });
+                            if (fn->decl) diagnose_unsupported_section(fn->decl->attributes);
                             std::optional<CAbiPlan> c_plan;
                             if (f.conv == mir::CallConv::C) {
                                 auto plan = build_c_abi_plan(fn->params, fn->return_types);
@@ -1076,6 +1094,8 @@ namespace mirgen {
                                     "must not reference");
                                 continue;
                             }
+
+                            diagnose_unsupported_section(info.decl->attributes);
 
                             const auto k = key_for_method(info);
                             mir::Function f;
@@ -1277,6 +1297,7 @@ namespace mirgen {
                     for (const auto &impl_info : impls) {
                         for (const auto &info : impl_info.methods | std::views::values) {
                             if (!info.is_resolved || !info.decl) continue;
+                            diagnose_unsupported_section(info.decl->attributes);
                             const auto k = key(impl_info.impl_module, key_for_method(info));
                             if (method_index_.contains(k)) continue;
 
@@ -5769,6 +5790,72 @@ namespace mirgen {
                 return runtime_ext_fn("exit", std::move(sig), libc_exit_);
             }
 
+            // ---- freestanding panic primitives -----------------------------------
+            // Under '--freestanding' the program links -nostdlib, so the panic path
+            // cannot call write()/exit(): it must reach the kernel itself. These
+            // emit the Linux x86-64 syscall sequence as an inline-asm block —
+            // possible only since the backend gained inline asm, which is why the
+            // LLVM path owned this alone until now. The operands ride frame slots,
+            // exactly as any other asm variable operand does.
+            void emit_syscall3(mir::Builder &b, const int64_t number, const mir::ValueId a0,
+                                const mir::ValueId a1, const mir::ValueId a2) {
+                const auto usize = usize_ty();
+                const auto slot = [&](const mir::ValueId value, const mir::Ty type) {
+                    const auto s = b.add_slot(std::max(1u, mir::type_bits(type, options_.pointer_bits) / 8),
+                                               8, "syscall.arg");
+                    slots_escaping_.insert(s);
+                    b.store(b.slot_addr(s), value);
+                    return b.slot_addr(s);
+                };
+                const auto a0_ptr = slot(a0, usize);
+                const auto a1_ptr = slot(a1, mir::Ty::Ptr);
+                const auto a2_ptr = slot(a2, usize);
+
+                mir::AsmBlock block;
+                block.clobbers_memory = true;
+                block.clobbered_families = {"rax", "rdi", "rsi", "rdx", "rcx", "r11"};
+                const auto reg = [](const char *name) {
+                    return mir::AsmOperand{.kind = mir::AsmOperand::Kind::Register,
+                                            .reg = name, .width_bits = 64};
+                };
+                const auto imm = [](const int64_t value) {
+                    return mir::AsmOperand{.kind = mir::AsmOperand::Kind::Immediate, .imm = value};
+                };
+                const auto var = [](const uint32_t index) {
+                    return mir::AsmOperand{.kind = mir::AsmOperand::Kind::Variable,
+                                            .width_bits = 64, .arg_index = index};
+                };
+                block.instructions.push_back({.mnemonic = "mov", .operands = {reg("rax"), imm(number)}});
+                block.instructions.push_back({.mnemonic = "mov", .operands = {reg("rdi"), var(0)}});
+                block.instructions.push_back({.mnemonic = "mov", .operands = {reg("rsi"), var(1)}});
+                block.instructions.push_back({.mnemonic = "mov", .operands = {reg("rdx"), var(2)}});
+                block.instructions.push_back({.mnemonic = "syscall", .operands = {}});
+
+                result_.module.asm_blocks.push_back(std::move(block));
+                b.asm_block(static_cast<uint32_t>(result_.module.asm_blocks.size() - 1),
+                             mir::Ty::Void, {a0_ptr, a1_ptr, a2_ptr});
+            }
+
+            void emit_syscall_exit(mir::Builder &b, const int64_t status) {
+                mir::AsmBlock block;
+                block.clobbers_memory = true;
+                block.clobbered_families = {"rax", "rdi", "rcx", "r11"};
+                const auto reg = [](const char *name) {
+                    return mir::AsmOperand{.kind = mir::AsmOperand::Kind::Register,
+                                            .reg = name, .width_bits = 64};
+                };
+                const auto imm = [](const int64_t value) {
+                    return mir::AsmOperand{.kind = mir::AsmOperand::Kind::Immediate, .imm = value};
+                };
+                // 231 = exit_group, which terminates every thread as libc exit does.
+                block.instructions.push_back({.mnemonic = "mov", .operands = {reg("rax"), imm(231)}});
+                block.instructions.push_back({.mnemonic = "mov", .operands = {reg("rdi"), imm(status)}});
+                block.instructions.push_back({.mnemonic = "syscall", .operands = {}});
+                result_.module.asm_blocks.push_back(std::move(block));
+                b.asm_block(static_cast<uint32_t>(result_.module.asm_blocks.size() - 1),
+                             mir::Ty::Void, {});
+            }
+
             // Writes one member's qualified name ('Type.Variant') into the name slots and
             // jumps to 'done': a compile-time switch over the member's own discriminants,
             // or the bare type name when it has none (codegen's
@@ -5891,10 +5978,22 @@ namespace mirgen {
                 }
 
                 pb.set_insert_point(write_block);
+                const std::string prefix = "panic: unhandled ";
+                if (options_.freestanding) {
+                    // No libc to call: write(2)/exit_group(2) through raw syscalls.
+                    const auto fd = pb.const_int(usize, 2);
+                    emit_syscall3(pb, 1, fd, pb.global_addr(intern_string(prefix)),
+                                   pb.const_int(usize, static_cast<int64_t>(prefix.size())));
+                    emit_syscall3(pb, 1, fd, pb.load(mir::Ty::Ptr, name_ptr),
+                                   pb.load(usize, name_len));
+                    emit_syscall3(pb, 1, fd, site_ptr, site_len);
+                    emit_syscall_exit(pb, 101);
+                    pb.unreachable();
+                    return fn_index;
+                }
                 const auto write_fn = libc_write_fn();
                 const auto &write_sig = result_.module.signatures[result_.module.functions[write_fn].signature];
                 const auto stderr_fd = pb.const_int(mir::Ty::I32, 2);
-                const std::string prefix = "panic: unhandled ";
                 pb.call(write_fn, write_sig.result,
                          {stderr_fd, pb.global_addr(intern_string(prefix)),
                           pb.const_int(usize, static_cast<int64_t>(prefix.size()))});

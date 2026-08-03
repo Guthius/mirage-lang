@@ -42,11 +42,11 @@ def compile_source(source: str, *extra):
         )
 
 
-def emit_ir(source: str, *extra):
+def emit_mir(source: str, *extra):
     with tempfile.TemporaryDirectory() as tmp:
         (Path(tmp) / "main.mir").write_text(source)
         return subprocess.run(
-            [str(MIRAGE), "build", tmp, "--emit-ir", *extra],
+            [str(MIRAGE), "build", tmp, "--emit-mir", *extra],
             capture_output=True, text=True, timeout=60, cwd=REPO_ROOT,
         )
 
@@ -157,21 +157,21 @@ def case_no_discard_on_trait_methods():
 # ---------------------------------------------------------------- @export
 
 def case_export():
-    ir = emit_ir("@export\npub fn exported() -> i32 { return 1 }\n"
+    ir = emit_mir("@export\npub fn exported() -> i32 { return 1 }\n"
                  "pub fn main() -> i32 { return exported() }\n")
-    check("define i32 @exported()" in ir.stdout,
+    check("fn export @exported() -> i32" in ir.stdout,
           "bare '@export' emits the declaration's own name, unmangled")
 
-    ir = emit_ir('@export("custom_name")\npub fn renamed() -> i32 { return 1 }\n'
+    ir = emit_mir('@export("custom_name")\npub fn renamed() -> i32 { return 1 }\n'
                  "pub fn main() -> i32 { return renamed() }\n")
-    check("define i32 @custom_name()" in ir.stdout, "'@export(\"name\")' emits that name")
+    check("fn export @custom_name() -> i32" in ir.stdout, "'@export(\"name\")' emits that name")
     check("@renamed" not in ir.stdout, "the original name is not also emitted")
 
     # A non-pub function is normally internal; '@export' forces external linkage, or the
     # symbol would not be visible to a linker at all.
-    ir = emit_ir("@export\nfn private_but_exported() -> i32 { return 1 }\n"
+    ir = emit_mir("@export\nfn private_but_exported() -> i32 { return 1 }\n"
                  "pub fn main() -> i32 { return private_but_exported() }\n")
-    check("define i32 @private_but_exported()" in ir.stdout,
+    check("fn export @private_but_exported() -> i32" in ir.stdout,
           "'@export' on a non-pub function still gets external linkage")
 
     expect_error('@export("a")\npub fn f() -> i32 { return 1 }\n'
@@ -217,16 +217,16 @@ def case_export():
 
     # Methods: '@export' changes only the symbol's name and linkage, so it IS honoured
     # there (a codegen path that was silently ignoring it until this was checked).
-    ir = emit_ir("pub type T = struct { x: i32 }\n"
+    ir = emit_mir("pub type T = struct { x: i32 }\n"
                  "impl T {\n  @export(\"method_get\")\n  pub fn get(self) -> i32 { return self.x }\n}\n"
                  "pub fn main() -> i32 { mut t: T = default  return t.get() }\n")
-    check("define i32 @method_get(ptr" in ir.stdout, "'@export' on an impl method emits that symbol")
+    check("fn export @method_get(" in ir.stdout, "'@export' on an impl method emits that symbol")
 
-    ir2 = emit_ir("pub type Shape = trait { fn area(self) -> i32 }\n"
+    ir2 = emit_mir("pub type Shape = trait { fn area(self) -> i32 }\n"
                   "pub type Sq = struct { s: i32 }\n"
                   "impl Shape for Sq {\n  @export(\"trait_area\")\n  fn area(self) -> i32 { return self.s * self.s }\n}\n"
                   "pub fn main() -> i32 { mut q: Sq = default  const h: Shape = &q  return h.area() }\n")
-    check("define i32 @trait_area(ptr" in ir2.stdout, "'@export' on a trait-impl method emits that symbol")
+    check("fn export @trait_area(" in ir2.stdout, "'@export' on a trait-impl method emits that symbol")
 
     expect_error("pub type T = struct { x: i32 }\n"
                  "impl T {\n  @export(\"dup\")\n  pub fn get(self) -> i32 { return self.x }\n}\n"
@@ -238,17 +238,19 @@ def case_export():
 def case_export_on_globals():
     """'@export' on a module-scope 'mut'/'const'. The parser accepts an attribute clause
     there solely for this; every other attribute is rejected by name."""
-    ir = emit_ir('@export("counter")\npub mut count: i32 = 0\n'
+    ir = emit_mir('@export("counter")\npub mut count: i32 = 0\n'
                  "pub fn main() -> i32 { return count }\n")
-    check("@counter = global" in ir.stdout, "'@export(\"name\")' on a mut global emits that symbol")
+    check("global @counter" in ir.stdout and "export" in ir.stdout.split("@counter")[1][:60],
+          "'@export(\"name\")' on a mut global emits that symbol")
 
-    ir2 = emit_ir("@export\npub const limit: i32 = 7\npub fn main() -> i32 { return limit }\n")
-    check("@limit = constant" in ir2.stdout, "bare '@export' on a const global uses its own name")
+    ir2 = emit_mir("@export\npub const limit: i32 = 7\npub fn main() -> i32 { return limit }\n")
+    check("const @limit" in ir2.stdout and "export" in ir2.stdout.split("@limit")[1][:60],
+          "bare '@export' on a const global uses its own name")
 
     # As for functions, '@export' forces external linkage even on a non-pub declaration --
     # otherwise the symbol would not be visible to a linker at all.
-    ir3 = emit_ir('@export("hidden")\nmut secret: i32 = 3\npub fn main() -> i32 { return secret }\n')
-    check("@hidden = global" in ir3.stdout and "internal" not in ir3.stdout.split("@hidden")[1][:40],
+    ir3 = emit_mir('@export("hidden")\nmut secret: i32 = 3\npub fn main() -> i32 { return secret }\n')
+    check("global @hidden" in ir3.stdout and "export" in ir3.stdout.split("@hidden")[1][:60],
           "'@export' on a non-pub global still gets external linkage")
 
     expect_error("@naked\npub mut x: i32 = 0\npub fn main() -> i32 { return x }\n",

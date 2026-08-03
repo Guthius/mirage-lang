@@ -48,21 +48,19 @@ def main() -> int:
         print(f"FAIL: no test modules found under {SUITE_ROOT}")
         return 1
 
-    # Both backends (docs/backend.md, validation #2): 'tests/mir' carries real
-    # assertions rather than exit-code comparisons, which is exactly what a backend
-    # swap needs -- a native miscompile shows up here as a FAILED TEST naming itself,
-    # where the differential harness would only report a diverging exit code.
-    # The native backend runs under both register allocators (docs/backend.md
-    # stage 6): linear is the one under test, trivial the triage baseline.
+    # 'tests/mir' carries real assertions rather than exit-code comparisons,
+    # which is what a backend change needs: a miscompile shows up here as a
+    # FAILED TEST naming itself, where a differential run could only report a
+    # diverging exit code.
+    # Both register allocators (docs/backend.md stage 6): linear is the one
+    # under test, trivial the triage baseline.
     variants = (
-        ("llvm", []),
-        ("native/linear", ["--backend=native", "--regalloc=linear"]),
-        ("native/trivial", ["--backend=native", "--regalloc=trivial"]),
+        ("linear", ["--regalloc=linear"]),
+        ("trivial", ["--regalloc=trivial"]),
     )
     for label, extra in variants:
         for module in modules:
-            argv = [str(MIRAGE), "test", str(module), f"--std={STD}"]
-            argv.extend(extra if extra else ["--backend=llvm"])
+            argv = [str(MIRAGE), "test", str(module), f"--std={STD}", *extra]
             result = subprocess.run(
                 argv, capture_output=True, text=True, timeout=300, cwd=REPO_ROOT,
             )
@@ -82,8 +80,7 @@ def main() -> int:
     if failures:
         print(f"{failures} module/backend combination(s) with failures")
         return 1
-    print(f"all {len(modules)} Mirage test module(s) passed on llvm, native/linear "
-          f"and native/trivial")
+    print(f"all {len(modules)} Mirage test module(s) passed under both allocators")
     return 0
 
 

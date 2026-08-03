@@ -72,10 +72,12 @@ CASES = [
         [],
     ),
     (
+        # '@section' has no native representation (elf_writer emits the fixed
+        # System V section set), so it is refused BY NAME rather than ignored.
         "example_attr_section",
         "build",
-        True,
-        [],
+        False,
+        ["cannot compile '@section'"],
         [],
     ),
     (
@@ -155,10 +157,12 @@ CASES = [
         [],
     ),
     (
+        # '@section' has no native representation (elf_writer emits the fixed
+        # System V section set), so it is refused BY NAME rather than ignored.
         "example_attr_section_method",
         "build",
-        True,
-        [],
+        False,
+        ["cannot compile '@section'"],
         [],
     ),
     (
@@ -169,10 +173,12 @@ CASES = [
         [],
     ),
     (
+        # '@section' has no native representation (elf_writer emits the fixed
+        # System V section set), so it is refused BY NAME rather than ignored.
         "example_attr_section_trait_method",
         "build",
-        True,
-        [],
+        False,
+        ["cannot compile '@section'"],
         [],
     ),
     (

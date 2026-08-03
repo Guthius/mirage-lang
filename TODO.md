@@ -42,7 +42,7 @@ Every behavioural claim here was reproduced against `build/mirage`.
   (`@export` on module-scope globals) and `61a0811` (`@no_discard` on trait methods, binding
   every caller reaching them through a handle).
 
-## 3. The backend — **ALL TEN STAGES DONE** (LLVM deletion deferred to post-soak)
+## 3. The backend — **ALL TEN STAGES DONE, LLVM DELETED**
 
 `docs/backend.md` is the design record: stages, sequencing, validation strategy, decisions
 D1–D8. It is CURRENT — status, stage list and validation section all reflect reality.
@@ -817,3 +817,34 @@ Remaining:
   `ast::Program::module_order` (source order). Never a reproducibility bug; the point is
   that an unrelated change no longer reshuffles the whole output, which matters because
   reading and diffing emitted IR is the backend port's primary debugging surface.
+
+
+## 8. After the LLVM deletion (branch `drop-llvm`)
+
+`codegen.cpp`, `find_package(LLVM)`, `--backend` and `--emit-ir` are gone; target
+selection runs on the driver's own `Target` type. Clean build 31.2s → 29.1s, build
+tree 725 MB → 692 MB, and `mirage` no longer needs LLVM installed at all.
+
+Three things the removal surfaced, all fixed here:
+
+- **`@section` was silently ignored** on the native path (so, since the stage-10
+  flip, in every build). elf_writer emits the fixed System V section set, so it
+  cannot be honored; it is now refused BY NAME. **This is the one feature the
+  deletion costs**, and reinstating it means arbitrary named sections in the ELF
+  writer — the single open item this work creates.
+- **The freestanding panic path called libc.** `--freestanding` links `-nostdlib`,
+  so the unhandled-error panic's `write`/`exit` calls could never link; the LLVM
+  path had emitted raw syscalls. Now mirgen does too, as an inline-asm block —
+  possible only because stage 5 gave the native backend inline asm. Pinned by
+  error_optional_test.
+- **`--emit-mir` under `test` printed a module no build produces**: it never passed
+  the testing module path, so the synthesized wrappers, `Test_Info` and runner entry
+  were all absent from the output one inspects specifically to see them.
+
+Test migration: every `--emit-ir` assertion moved to `--emit-mir`, which now prints
+the C-ABI signature metadata (`byval(size, align)`, `cret2(...)`, `csret`) so the two
+ABI suites assert on the compiler's own classification rather than on LLVM's
+rendering of it — a sharper test than what it replaced. `backend_differential_test.py`
+is deleted: with one backend there is nothing to differentiate. The wasm and
+emscripten differentials, both allocators, and the `$option`/target-spelling pins in
+cli_test.py carry the coverage forward.

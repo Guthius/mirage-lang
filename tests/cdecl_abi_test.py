@@ -60,35 +60,38 @@ def main() -> int:
 
     try:
         ir = subprocess.run(
-            [str(MIRAGE_BINARY), "build", str(FIXTURE), "--emit-ir"],
+            [str(MIRAGE_BINARY), "build", str(FIXTURE), "--emit-mir"],
             capture_output=True, text=True, timeout=60, cwd=REPO_ROOT,
         )
-        check(ir.returncode == 0, "the '@cdecl' fixture emits IR cleanly")
+        check(ir.returncode == 0, "the '@cdecl' fixture emits MIR cleanly")
 
-        # The DEFINITIONS must carry the C signature, not the raw Mirage one. Checking the
-        # emitted shapes as well as the runtime behaviour catches the case where two
-        # symmetric bugs cancel out and the program still produces the right answer.
-        check("define i32 @mir_pair_sum(i64" in ir.stdout,
-              "a one-INTEGER-eightbyte struct parameter is coerced to i64")
-        check("define <2 x float> @mir_vec2_make(float" in ir.stdout,
-              "a one-SSE-eightbyte struct return is coerced to <2 x float>")
-        check("@mir_big_sum(ptr byval" in ir.stdout,
+        # The DEFINITIONS must carry the C signature, not the raw Mirage one.
+        # Asserted on MIR, which records the classification directly now that the
+        # LLVM IR this used to grep is gone. Checking the emitted shapes as well as
+        # the runtime behaviour catches the case where two symmetric bugs cancel
+        # out and the program still produces the right answer.
+        check("@mir_pair_sum(%0: i64) -> i32" in ir.stdout,
+              "a one-INTEGER-eightbyte struct parameter is classified as i64")
+        check("@mir_vec2_make(%0: f32, %2: f32) -> f64" in ir.stdout,
+              "a one-SSE-eightbyte struct return comes back in one SSE word")
+        check("@mir_vec3_make" in ir.stdout and "cret2(sse, sse)" in ir.stdout,
+              "a two-SSE-eightbyte return uses the two-register return convention")
+        check("@mir_big_sum(%0: ptr byval(32, align 8))" in ir.stdout,
               "a >16-byte struct parameter is passed byval (MEMORY class)")
-        check("@mir_big_make(ptr sret" in ir.stdout,
-              "a >16-byte struct return uses a hidden sret pointer")
+        check("csret" in ir.stdout,
+              "a >16-byte struct return uses a hidden sret pointer, returned in RAX")
         # '@export' means the mangled module-path name is gone entirely.
-        check("__mir_" not in ir.stdout.split("define")[1] if "define" in ir.stdout else False,
+        check("@__mir_" not in ir.stdout.split("fn export cdecl")[1] if "fn export cdecl" in ir.stdout else False,
               "'@export' emits the bare name, not the module-mangled one")
 
-        # The actual round trip, under every backend/allocator: the native path
-        # implements the SysV aggregate ABI itself (mirgen's C lowering, stage 8
-        # prerequisite), and this fixture is what pins it against real C code.
-        # Mirage's 'main' forwards the C side's failure count, so a non-zero exit
-        # is the number of mismatched checks and stderr names each one.
+        # The actual round trip, under both allocators: the native backend
+        # implements the SysV aggregate ABI itself (mirgen's C lowering), and this
+        # fixture is what pins it against real C code. Mirage's 'main' forwards the
+        # C side's failure count, so a non-zero exit is the number of mismatched
+        # checks and stderr names each one.
         for label, extra in (
-            ("llvm", []),
-            ("native/linear", ["--backend=native", "--regalloc=linear"]),
-            ("native/trivial", ["--backend=native", "--regalloc=trivial"]),
+            ("linear", ["--regalloc=linear"]),
+            ("trivial", ["--regalloc=trivial"]),
         ):
             result = subprocess.run(
                 [str(MIRAGE_BINARY), "run", str(FIXTURE), *extra],

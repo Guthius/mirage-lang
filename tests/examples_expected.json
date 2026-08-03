@@ -1,6 +1,6 @@
 {
   "builder": {
-    "action": "emit-ir",
+    "action": "emit-mir",
     "exit": 0
   },
   "compiler": {
@@ -268,8 +268,9 @@
     "exit": 0
   },
   "example_attr_section": {
-    "action": "run",
-    "exit": 0
+    "action": "build",
+    "diag": "examples/example_attr_section/main.mir:7:1: error: cannot compile '@section' (the native backend emits only the standard ELF sections)",
+    "exit": 1
   },
   "example_attr_section_empty": {
     "action": "build",
@@ -277,8 +278,9 @@
     "exit": 1
   },
   "example_attr_section_method": {
-    "action": "run",
-    "exit": 0
+    "action": "build",
+    "diag": "examples/example_attr_section_method/main.mir:13:5: error: cannot compile '@section' (the native backend emits only the standard ELF sections)",
+    "exit": 1
   },
   "example_attr_section_method_empty": {
     "action": "build",
@@ -286,8 +288,9 @@
     "exit": 1
   },
   "example_attr_section_trait_method": {
-    "action": "run",
-    "exit": 0
+    "action": "build",
+    "diag": "examples/example_attr_section_trait_method/main.mir:19:5: error: cannot compile '@section' (the native backend emits only the standard ELF sections)",
+    "exit": 1
   },
   "example_attr_unknown": {
     "action": "build",
@@ -450,7 +453,7 @@
     "exit": 10
   },
   "example_enum_def": {
-    "action": "emit-ir",
+    "action": "emit-mir",
     "exit": 0
   },
   "example_env_invalid_enum": {
@@ -1160,19 +1163,19 @@
     "exit": 24
   },
   "fmt": {
-    "action": "emit-ir",
+    "action": "emit-mir",
     "exit": 0
   },
   "io": {
-    "action": "emit-ir",
+    "action": "emit-mir",
     "exit": 0
   },
   "lexer": {
-    "action": "emit-ir",
+    "action": "emit-mir",
     "exit": 0
   },
   "mem": {
-    "action": "emit-ir",
+    "action": "emit-mir",
     "exit": 0
   },
   "range_test": {
@@ -1184,7 +1187,7 @@
     "exit": 42
   },
   "string": {
-    "action": "emit-ir",
+    "action": "emit-mir",
     "exit": 0
   },
   "test_io": {
@@ -1196,7 +1199,7 @@
     "exit": 32
   },
   "vector": {
-    "action": "emit-ir",
+    "action": "emit-mir",
     "exit": 0
   }
 }

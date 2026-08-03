@@ -1,25 +1,15 @@
 #include "compiler/backend_wasm.hpp"
 #include "compiler/backend_x86.hpp"
-#include "compiler/codegen.hpp"
 #include "compiler/elf_writer.hpp"
 #include "compiler/mirgen.hpp"
 #include "compiler/module_resolver.hpp"
 #include "compiler/sema.hpp"
 #include "compiler/source_manager.hpp"
 
-#include <llvm/IR/Module.h>
-#include <llvm/IR/LegacyPassManager.h>
-#include <llvm/MC/TargetRegistry.h>
-#include <llvm/Support/CodeGen.h>
-#include <llvm/Support/FileSystem.h>
-#include <llvm/Support/TargetSelect.h>
-#include <llvm/Support/raw_ostream.h>
-#include <llvm/Target/TargetMachine.h>
-#include <llvm/Target/TargetOptions.h>
-#include <llvm/TargetParser/Host.h>
-#include <llvm/TargetParser/Triple.h>
 
 #include <cerrno>
+#include <fstream>
+#include <iostream>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -43,17 +33,10 @@ namespace {
 
     struct Options {
         Action action = Action::None;
-        bool emit_ir = false;
         // '--emit-mir': lower to Mirage IR and print it. The native backend's primary
         // '--mir-opt': additionally run the stage-3 passes (promote_slots) before
         // printing — the debugging view of what the later stages actually consume.
         bool mir_opt = false;
-        // '--backend=llvm|native'. Empty means AUTO (stage 10): native for the
-        // targets the native backend owns — x86_64-linux and wasm32 — and llvm
-        // for anything else (an aarch64 cross-compile, say). '--backend=llvm'
-        // stays available through the soak period: the differential harnesses
-        // are most valuable exactly while the new default is newest.
-        std::string backend;
         // '--regalloc=linear|trivial' (native backend). Trivial is the standing
         // triage tool (docs/backend.md stage 6): if a bug reproduces under it,
         // the bug is not in the linear-scan allocator.
@@ -83,7 +66,7 @@ namespace {
     };
 
     auto print_usage(const char *argv0) -> void {
-        llvm::errs() << "Usage: " << argv0 << " <action> <module> [options]\n"
+        std::cerr << "Usage: " << argv0 << " <action> <module> [options]\n"
                      << "\n"
                      << "Actions:\n"
                      << "  build   Compile a module to an executable\n"
@@ -96,11 +79,9 @@ namespace {
                      << "  --std=<path>         Override the module root (takes precedence over MIRAGE_MODULES_ROOT)\n"
                      << "  --cc=<program>       Linker driver to invoke (default: clang, or $MIRAGE_CC)\n"
                      << "  --target=<triple>    Cross-compile for <triple> (default: the host triple)\n"
-                     << "  --emit-ir            Print LLVM IR to stdout instead of compiling\n"
-                     << "  --emit-mir           Print Mirage IR to stdout instead of compiling (native backend)\n"
-                     << "  --mir-opt            With --emit-mir: run the stage-3 MIR passes before printing\n"
-                     << "  --backend=<name>     Code generator: 'native' (default on x86_64-linux/wasm32) or 'llvm'\n"
-                     << "  --regalloc=<name>    Native register allocator: 'linear' (default) or 'trivial' (triage)\n"
+                     << "  --emit-mir           Print Mirage IR to stdout instead of compiling\n"
+                     << "  --mir-opt            With --emit-mir: run the MIR passes before printing\n"
+                     << "  --regalloc=<name>    Register allocator: 'linear' (default) or 'trivial' (triage)\n"
                      << "  --freestanding       Compile without standard library\n"
                      << "  --noinit             Skip generating/calling the synthesized '@init'-runner '_init'\n"
                      << "  --nortti             Disable runtime type information ('type_info_of'); sets '$rtti_enabled' to false\n"
@@ -126,22 +107,25 @@ namespace {
                 print_usage(argv[0]);
                 std::exit(0);
             } else if (arg == "--emit-ir") {
-                options.emit_ir = true;
+                std::cerr << "error: '--emit-ir' was removed with the LLVM backend; "
+                              "'--emit-mir' prints the native IR\n";
+                return std::nullopt;
             } else if (arg == "--emit-mir") {
                 options.emit_mir = true;
             } else if (arg == "--mir-opt") {
                 options.mir_opt = true;
             } else if (arg.starts_with("--backend=")) {
-                options.backend = arg.substr(std::string("--backend=").size());
-                if (options.backend != "llvm" && options.backend != "native") {
-                    llvm::errs() << "error: unknown backend '" << options.backend
-                                 << "' (expected 'llvm' or 'native')\n";
+                // Tolerated as a no-op for 'native' so scripts from the soak
+                // period keep working; 'llvm' is gone.
+                if (arg != "--backend=native") {
+                    std::cerr << "error: the LLVM backend was removed; the native "
+                                  "backend is the only code generator\n";
                     return std::nullopt;
                 }
             } else if (arg.starts_with("--regalloc=")) {
                 options.regalloc = arg.substr(std::string("--regalloc=").size());
                 if (options.regalloc != "linear" && options.regalloc != "trivial") {
-                    llvm::errs() << "error: unknown register allocator '" << options.regalloc
+                    std::cerr << "error: unknown register allocator '" << options.regalloc
                                  << "' (expected 'linear' or 'trivial')\n";
                     return std::nullopt;
                 }
@@ -161,25 +145,25 @@ namespace {
                 options.eager_generic_check = false;
             } else if (arg == "--opt") {
                 if (i + 1 >= argc) {
-                    llvm::errs() << "mirage: '--opt' requires an argument of the form 'key=value'\n";
+                    std::cerr << "mirage: '--opt' requires an argument of the form 'key=value'\n";
                     return std::nullopt;
                 }
                 const std::string kv = argv[++i];
                 const auto eq = kv.find('=');
                 if (eq == std::string::npos) {
-                    llvm::errs() << "mirage: --opt requires 'key=value'\n";
+                    std::cerr << "mirage: --opt requires 'key=value'\n";
                     return std::nullopt;
                 }
                 options.opt_values[kv.substr(0, eq)] = kv.substr(eq + 1);
             } else if (arg == "--load") {
                 if (i + 1 >= argc) {
-                    llvm::errs() << "mirage: '--load' requires a module path\n";
+                    std::cerr << "mirage: '--load' requires a module path\n";
                     return std::nullopt;
                 }
                 options.forced_modules.emplace_back(argv[++i]);
             } else if (arg == "-o" || arg == "--output") {
                 if (i + 1 >= argc) {
-                    llvm::errs() << "mirage: '" << arg << "' requires an output filename\n";
+                    std::cerr << "mirage: '" << arg << "' requires an output filename\n";
                     return std::nullopt;
                 }
                 options.output = argv[++i];
@@ -192,7 +176,7 @@ namespace {
                 options.target = arg.substr(9);
             } else if (arg == "-l") {
                 if (i + 1 >= argc) {
-                    llvm::errs() << "mirage: '-l' requires a library name\n";
+                    std::cerr << "mirage: '-l' requires a library name\n";
                     return std::nullopt;
                 }
                 options.libs.push_back(argv[++i]);
@@ -206,13 +190,13 @@ namespace {
                 } else if (arg == "test") {
                     options.action = Action::Test;
                 } else {
-                    llvm::errs() << "mirage: unknown action '" << arg << "'; expected 'build', 'run' or 'test'\n";
+                    std::cerr << "mirage: unknown action '" << arg << "'; expected 'build', 'run' or 'test'\n";
                     return std::nullopt;
                 }
             } else if (options.module_path.empty()) {
                 options.module_path = arg;
             } else {
-                llvm::errs() << "mirage: unexpected argument '" << arg << "'\n";
+                std::cerr << "mirage: unexpected argument '" << arg << "'\n";
                 return std::nullopt;
             }
         }
@@ -232,7 +216,7 @@ namespace {
         std::error_code temp_dir_error;
         const auto temp_dir = std::filesystem::temp_directory_path(temp_dir_error);
         if (temp_dir_error) {
-            llvm::errs() << "mirage: cannot locate a temporary directory: "
+            std::cerr << "mirage: cannot locate a temporary directory: "
                          << temp_dir_error.message() << "\n";
             return {};
         }
@@ -244,7 +228,7 @@ namespace {
             ? mkstemp(tmpl.data())
             : mkstemps(tmpl.data(), static_cast<int>(suffix.size()));
         if (fd < 0) {
-            llvm::errs() << "mirage: cannot create a temporary file in " << temp_dir.string()
+            std::cerr << "mirage: cannot create a temporary file in " << temp_dir.string()
                          << ": " << std::strerror(errno) << "\n";
             return {};
         }
@@ -252,115 +236,64 @@ namespace {
         return std::filesystem::path(tmpl);
     }
 
-    // The triple everything downstream is compiled for: '--target=' if given, else the host.
-    // Normalized, so the shorthands a user actually types ('wasm32-emscripten') become the
-    // canonical triples LLVM's TargetRegistry and the ABI predicates below expect.
-    //
-    // Computed before sema, not just before codegen: the '$option' target defaults AND the
-    // pointer width the front end lays types out with both come from it.
-    auto selected_triple(const Options &options) -> llvm::Triple {
-        return llvm::Triple(options.target.empty()
-            ? llvm::sys::getDefaultTargetTriple()
-            : llvm::Triple::normalize(options.target));
+    // The compiler's own target model (stage 10: target selection no longer
+    // goes through llvm::Triple — LLVM is gone). Exactly the targets the native
+    // backend owns; anything else is refused by the parser below with the full
+    // list, where the LLVM build would have attempted a cross-compile.
+    enum class TargetKind : uint8_t { X86_64_Linux, Wasm32_Unknown, Wasm32_Wasi, Wasm32_Emscripten };
+    struct Target {
+        TargetKind kind = TargetKind::X86_64_Linux;
+        [[nodiscard]] auto is_wasm() const -> bool { return kind != TargetKind::X86_64_Linux; }
+        [[nodiscard]] auto is_emscripten() const -> bool { return kind == TargetKind::Wasm32_Emscripten; }
+        [[nodiscard]] auto pointer_bits() const -> uint32_t { return is_wasm() ? 32u : 64u; }
+        // The canonical spelling, for diagnostics.
+        [[nodiscard]] auto name() const -> const char * {
+            switch (kind) {
+            case TargetKind::X86_64_Linux:      return "x86_64-unknown-linux-gnu";
+            case TargetKind::Wasm32_Unknown:    return "wasm32-unknown-unknown";
+            case TargetKind::Wasm32_Wasi:       return "wasm32-wasi";
+            case TargetKind::Wasm32_Emscripten: return "wasm32-unknown-emscripten";
+            }
+            return "?";
+        }
+    };
+
+    // Accepts the '--target=' spellings that worked before the LLVM removal
+    // (llvm::Triple::normalize was forgiving about vendor/OS fields), plus the
+    // bare shorthands people actually type. Empty means the host, which this
+    // compiler only exists on as x86_64-linux today.
+    auto parse_target(const std::string &spelling) -> std::optional<Target> {
+        if (spelling.empty()) return Target{TargetKind::X86_64_Linux};
+        const auto is = [&](const char *candidate) { return spelling == candidate; };
+        if (is("x86_64-linux") || is("x86_64-unknown-linux") || is("x86_64-unknown-linux-gnu") ||
+            is("x86_64-pc-linux-gnu") || is("x86_64-linux-gnu")) {
+            return Target{TargetKind::X86_64_Linux};
+        }
+        if (is("wasm32") || is("wasm32-unknown-unknown")) {
+            return Target{TargetKind::Wasm32_Unknown};
+        }
+        if (is("wasm32-wasi") || is("wasm32-unknown-wasi")) {
+            return Target{TargetKind::Wasm32_Wasi};
+        }
+        if (is("wasm32-emscripten") || is("wasm32-unknown-emscripten")) {
+            return Target{TargetKind::Wasm32_Emscripten};
+        }
+        return std::nullopt;
     }
 
-    // Creates the TargetMachine for 'target_triple'. Called once BEFORE codegen (so the module
-    // is built under the real DataLayout — implicit alignments and constant folds during
-    // IR construction depend on it) and reused for object emission.
-    auto create_target_machine(const llvm::Triple &target_triple, const bool is_cross) -> std::unique_ptr<llvm::TargetMachine> {
-        // Only a cross build needs the whole registry; the host path stays on the three
-        // native initializers it always used, which is both cheaper and keeps a broken
-        // non-native backend out of the way of ordinary builds.
-        if (is_cross) {
-            llvm::InitializeAllTargetInfos();
-            llvm::InitializeAllTargets();
-            llvm::InitializeAllTargetMCs();
-            llvm::InitializeAllAsmPrinters();
-            llvm::InitializeAllAsmParsers();
-        } else {
-            llvm::InitializeNativeTarget();
-            llvm::InitializeNativeTargetAsmPrinter();
-            llvm::InitializeNativeTargetAsmParser();
-        }
-
-        std::string error;
-        // The Triple overload only arrived in LLVM 21 (CI runs 18), and 22
-        // deprecates the StringRef one — so both spellings stay, guarded.
-#if LLVM_VERSION_MAJOR >= 21
-        const auto *target = llvm::TargetRegistry::lookupTarget(target_triple, error);
-#else
-        const auto *target = llvm::TargetRegistry::lookupTarget(target_triple.getTriple(), error);
-#endif
-        if (!target) {
-            llvm::errs() << "mirage: " << error << "\n";
-            return nullptr;
-        }
-
-        llvm::TargetOptions target_options;
-        auto target_machine = std::unique_ptr<llvm::TargetMachine>(
-            target->createTargetMachine(target_triple, "generic", "", target_options, std::nullopt));
-        if (!target_machine) {
-            llvm::errs() << "mirage: failed to create target machine\n";
-        }
-        return target_machine;
+    // Default 'build/target_os'/'build/target_arch' $option values, used only when
+    // the user didn't pass an explicit '--opt' override — matching
+    // OperatingSystem/Architecture's variant names in the (separately-maintained)
+    // stdlib Core/Compiler/Options module, so both name-based and value-based
+    // $option coercion work. These strings are BYTE-IDENTICAL to what the
+    // llvm::Triple-based code produced; tests/cli_test.py pins them, because every
+    // '#compile_only_if' in the standard library switches on them.
+    auto default_target_os(const Target &target) -> std::string {
+        return target.is_wasm() ? "Wasm32" : "Linux";
     }
 
-    auto emit_object_file(llvm::Module &module, llvm::TargetMachine &target_machine_ref, const std::filesystem::path &object_path) -> bool {
-        auto *target_machine = &target_machine_ref;
-
-        std::error_code ec;
-        llvm::raw_fd_ostream out(object_path.string(), ec, llvm::sys::fs::OF_None);
-        if (ec) {
-            llvm::errs() << "mirage: cannot open object file '" << object_path.string() << "': " << ec.message() << "\n";
-            return false;
-        }
-
-        llvm::legacy::PassManager pass_manager;
-        if (target_machine->addPassesToEmitFile(pass_manager, out, nullptr, llvm::CodeGenFileType::ObjectFile)) {
-            llvm::errs() << "mirage: target cannot emit object files\n";
-            return false;
-        }
-
-        pass_manager.run(module);
-        out.flush();
-
-        // CLI-12 asks for pass_manager.run()'s discarded result to be checked. It is
-        // deliberately not checked: legacy::PassManager::run returns whether any pass MODIFIED
-        // the module, not whether emission succeeded, so treating false as failure would reject
-        // valid output. The genuine failure signal for this step is the output stream's error
-        // state -- a write that failed partway (a full disk, a revoked file) would otherwise
-        // leave a truncated object for the linker to choke on with no explanation from here.
-        // The real emission-setup failure is already caught by addPassesToEmitFile above.
-        if (out.has_error()) {
-            llvm::errs() << "mirage: failed writing object file '" << object_path.string()
-                         << "': " << out.error().message() << "\n";
-            out.clear_error();
-            return false;
-        }
-        return true;
-    }
-
-    // Default 'build/target_os'/'build/target_arch' $option values derived from the host
-    // triple, used only when the user didn't pass an explicit '--opt' override — matching
-    // OperatingSystem/Architecture's variant names in the (separately-maintained) stdlib
-    // Core/Compiler/Options module, so both name-based and value-based $option coercion work.
-    auto default_target_os(const llvm::Triple &triple) -> std::string {
-        if (triple.isOSLinux()) return "Linux";
-        if (triple.isOSWindows()) return "Windows";
-        if (triple.isMacOSX()) return "MacOS";
-        if (triple.isWasm()) return "Wasm32";
-        return "Other";
-    }
-
-    auto default_target_arch(const llvm::Triple &triple) -> std::string {
-        switch (triple.getArch()) {
-        case llvm::Triple::x86:      return "X86";
-        case llvm::Triple::x86_64:   return "X86_64";
-        case llvm::Triple::aarch64:  return "Arm64";
-        case llvm::Triple::wasm32:   return "Wasm32";
-        case llvm::Triple::wasm64:   return "Wasm64p32";
-        default:                     return "Other";
-        }
+    auto default_target_arch(const Target &target) -> std::string {
+        return target.is_wasm() ? "Wasm32" : "X86_64";
     }
 
     // The linker driver, in precedence order: '--cc=', then $MIRAGE_CC, then a default read
@@ -368,24 +301,24 @@ namespace {
     // emscripten runtime into a loadable .js/.html), 'clang' otherwise. Mirrors how '--std='
     // overrides MIRAGE_PATH, which previously had no equivalent here -- the driver was
     // hardcoded, so a cross-compile or a non-default toolchain had no way in.
-    auto resolve_cc(const Options &options, const llvm::Triple &target_triple) -> std::string {
+    auto resolve_cc(const Options &options, const Target &target) -> std::string {
         if (!options.cc.empty()) {
             return options.cc;
         }
         if (const char *env_value = std::getenv("MIRAGE_CC"); env_value != nullptr && *env_value != '\0') {
             return env_value;
         }
-        return target_triple.isWasm() ? "emcc" : "clang";
+        return target.is_wasm() ? "emcc" : "clang";
     }
 
     auto link_executable(const std::filesystem::path &object_path, const std::filesystem::path &output_path,
-                          const Options &options, const llvm::Triple &target_triple,
+                          const Options &options, const Target &target,
                           const std::vector<sema::LinkDirective> &link_directives) -> bool {
-        std::vector<std::string> args{resolve_cc(options, target_triple)};
+        std::vector<std::string> args{resolve_cc(options, target)};
         // wasm links through emscripten's own startup (it owns 'main' and brings up the
         // runtime before calling it), and neither of the two position-independence flags
         // means anything to a wasm module — emcc rejects '-no-pie' outright.
-        if (target_triple.isWasm()) {
+        if (target.is_wasm()) {
             // Nothing to add: every wasm-specific link input arrives as a '#link' directive.
         } else if (options.freestanding) {
             args.emplace_back("-ffreestanding");
@@ -438,28 +371,28 @@ namespace {
 
         const pid_t pid = fork();
         if (pid < 0) {
-            llvm::errs() << "mirage: fork failed: " << std::strerror(errno) << "\n";
+            std::cerr << "mirage: fork failed: " << std::strerror(errno) << "\n";
             return false;
         }
         if (pid == 0) {
             execvp(argv[0], argv.data());
             // Only reached if exec failed; the parent sees this as exit status 127.
-            llvm::errs() << "mirage: cannot execute '" << args[0] << "': " << std::strerror(errno) << "\n";
+            std::cerr << "mirage: cannot execute '" << args[0] << "': " << std::strerror(errno) << "\n";
             _exit(127);
         }
 
         int status = 0;
         if (waitpid(pid, &status, 0) < 0) {
-            llvm::errs() << "mirage: waitpid failed: " << std::strerror(errno) << "\n";
+            std::cerr << "mirage: waitpid failed: " << std::strerror(errno) << "\n";
             return false;
         }
         if (WIFSIGNALED(status)) {
-            llvm::errs() << "mirage: linker '" << args[0] << "' was killed by signal "
+            std::cerr << "mirage: linker '" << args[0] << "' was killed by signal "
                          << WTERMSIG(status) << " (" << strsignal(WTERMSIG(status)) << ")\n";
             return false;
         }
         if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            llvm::errs() << "mirage: linker '" << args[0] << "' exited with status "
+            std::cerr << "mirage: linker '" << args[0] << "' exited with status "
                          << WEXITSTATUS(status) << "\n";
             return false;
         }
@@ -488,7 +421,7 @@ namespace {
         return "?";
     }
 
-    void dump_expr(const ast::Expr &expr, llvm::raw_ostream &out) {
+    void dump_expr(const ast::Expr &expr, std::ostream &out) {
         std::visit(
             [&]<typename T>(const T &v) {
                 using V = std::decay_t<T>;
@@ -537,7 +470,7 @@ namespace {
             expr);
     }
 
-    void dump_stmt(const ast::Stmt &stmt, llvm::raw_ostream &out, int indent) {
+    void dump_stmt(const ast::Stmt &stmt, std::ostream &out, int indent) {
         const std::string pad(static_cast<size_t>(indent) * 2, ' ');
         std::visit(
             [&]<typename T>(const T &v) {
@@ -565,7 +498,7 @@ namespace {
             stmt);
     }
 
-    void dump_decl(const ast::Decl &decl, llvm::raw_ostream &out) {
+    void dump_decl(const ast::Decl &decl, std::ostream &out) {
         std::visit(
             [&]<typename T>(const T &v) {
                 using V = std::decay_t<T>;
@@ -599,7 +532,7 @@ namespace {
 // it -- shared verbatim by the LLVM and native backends, which differ only in how
 // the object file's bytes came to exist.
 auto link_and_finish(const std::filesystem::path &object_path, const Options &options,
-                      const llvm::Triple &target_triple,
+                      const Target &target,
                       const std::vector<sema::LinkDirective> &link_directives,
                       const std::chrono::steady_clock::time_point start_time,
                       const std::chrono::steady_clock::duration object_elapsed) -> int {
@@ -619,7 +552,7 @@ auto link_and_finish(const std::filesystem::path &object_path, const Options &op
     }
 
     const auto link_start = std::chrono::steady_clock::now();
-    if (!link_executable(object_path, exe_path, options, target_triple, link_directives)) {
+    if (!link_executable(object_path, exe_path, options, target, link_directives)) {
         // link_executable already printed a detailed diagnostic; no second banner. For
         // 'run', the executable path is an mkstemp placeholder that would otherwise be
         // orphaned in $TMPDIR on every failed link.
@@ -635,7 +568,7 @@ auto link_and_finish(const std::filesystem::path &object_path, const Options &op
     std::error_code remove_error;
     std::filesystem::remove(object_path, remove_error);
 
-    llvm::errs() << std::format(
+    std::cerr << std::format(
         "  object:  {}ms\n"
         "  link:    {}ms\n",
         to_ms(object_elapsed), to_ms(link_elapsed));
@@ -643,19 +576,19 @@ auto link_and_finish(const std::filesystem::path &object_path, const Options &op
     const auto elapsed = std::chrono::steady_clock::now() - start_time;
     const auto secs = std::chrono::duration<double>(elapsed).count();
     if (executes_output) {
-        llvm::errs() << std::format("Compiled '{}' in {:.2f}s\n", options.module_path, secs);
+        std::cerr << std::format("Compiled '{}' in {:.2f}s\n", options.module_path, secs);
     } else {
-        llvm::errs() << std::format("Compiled '{}' -> '{}' in {:.2f}s\n", options.module_path, options.output, secs);
+        std::cerr << std::format("Compiled '{}' -> '{}' in {:.2f}s\n", options.module_path, options.output, secs);
     }
     // Flush before fork() so nothing still buffered here is inherited by the child and
     // written out a second time from the child's copy of the buffer.
-    llvm::outs().flush();
-    llvm::errs().flush();
+    std::cout.flush();
+    std::cerr.flush();
 
     if (executes_output) {
         const pid_t pid = fork();
         if (pid < 0) {
-            llvm::errs() << "mirage: fork failed\n";
+            std::cerr << "mirage: fork failed\n";
             std::filesystem::remove(exe_path, remove_error);
             return 1;
         }
@@ -669,7 +602,7 @@ auto link_and_finish(const std::filesystem::path &object_path, const Options &op
         std::filesystem::remove(exe_path, remove_error);
         if (WIFEXITED(status)) {
             const int code = WEXITSTATUS(status);
-            llvm::errs() << std::format("process exited with code {}\n", code);
+            std::cerr << std::format("process exited with code {}\n", code);
             return code;
         }
         if (WIFSIGNALED(status)) {
@@ -677,7 +610,7 @@ auto link_and_finish(const std::filesystem::path &object_path, const Options &op
             // segfaulted looked like an ordinary non-zero exit -- which is exactly how
             // CODEGEN-1's stack-exhaustion crash stayed invisible through 'mirage run'.
             const int sig = WTERMSIG(status);
-            llvm::errs() << std::format("process was killed by signal {} ({})\n", sig, strsignal(sig));
+            std::cerr << std::format("process was killed by signal {} ({})\n", sig, strsignal(sig));
             return 128 + sig;
         }
         return 1;
@@ -707,21 +640,28 @@ auto main(const int argc, char *argv[]) -> int {
     // SELECTED triple, so '--target=wasm32-unknown-emscripten' alone flips every
     // '#compile_only_if(target_os == .Wasm32)' file in the standard library without the
     // caller having to restate it as a '--opt'.
-    const auto target_triple = selected_triple(options);
-    options.opt_values.try_emplace("build/target_os", default_target_os(target_triple));
-    options.opt_values.try_emplace("build/target_arch", default_target_arch(target_triple));
+    const auto parsed_target = parse_target(options.target);
+    if (!parsed_target) {
+        std::cerr << "error: unsupported target '" << options.target << "'\n"
+                  << "       supported: x86_64-linux (the host), wasm32-unknown-unknown,\n"
+                  << "       wasm32-wasi, wasm32-unknown-emscripten\n";
+        return 1;
+    }
+    const auto target = *parsed_target;
+    options.opt_values.try_emplace("build/target_os", default_target_os(target));
+    options.opt_values.try_emplace("build/target_arch", default_target_arch(target));
 
     // 'mirage test' validation, up front rather than after a full compile. The harness in
     // 'core/testing' forks a child per test case for crash isolation, so it needs POSIX
     // process primitives that neither a freestanding target nor wasm can provide.
     if (options.action == Action::Test) {
         if (options.freestanding) {
-            llvm::errs() << "mirage: 'mirage test' is not supported with '--freestanding' (test isolation\n"
+            std::cerr << "mirage: 'mirage test' is not supported with '--freestanding' (test isolation\n"
                             "       requires POSIX process primitives not available in freestanding builds)\n";
             return 1;
         }
-        if (target_triple.isWasm()) {
-            llvm::errs() << "mirage: 'mirage test' is not supported for target '" << target_triple.str()
+        if (target.is_wasm()) {
+            std::cerr << "mirage: 'mirage test' is not supported for target '" << target.name()
                          << "' (test isolation requires POSIX process primitives)\n";
             return 1;
         }
@@ -729,7 +669,7 @@ auto main(const int argc, char *argv[]) -> int {
         // for '-o' to name. Rejected rather than ignored: silently accepting it looked like
         // it had worked and left the user looking for a file that was never written.
         if (options.output_explicit) {
-            llvm::errs() << "mirage: '-o' is not supported with 'mirage test'; the test binary is temporary\n"
+            std::cerr << "mirage: '-o' is not supported with 'mirage test'; the test binary is temporary\n"
                             "       (use '--emit-ir' to inspect what was generated)\n";
             return 1;
         }
@@ -743,8 +683,8 @@ auto main(const int argc, char *argv[]) -> int {
     // beside it) that only a browser can start, so say that up front rather than after a
     // full compile — and before the link step, where emcc would reject the extensionless
     // temp file 'run' hands it with a message about suffixes.
-    if (options.action == Action::Run && target_triple.isWasm()) {
-        llvm::errs() << "mirage: 'run' is not supported for target '" << target_triple.str()
+    if (options.action == Action::Run && target.is_wasm()) {
+        std::cerr << "mirage: 'run' is not supported for target '" << target.name()
                      << "'; use 'build -o <file>.html' and open the result in a browser\n";
         return 1;
     }
@@ -768,7 +708,7 @@ auto main(const int argc, char *argv[]) -> int {
         // resolve and where, which is usually what narrows down the one that didn't.
         if (options.print_module_search) {
             for (const auto &record : ast.module_search_trace) {
-                llvm::outs() << std::format("{} -> '{}' -> {}  [{}]\n",
+                std::cout << std::format("{} -> '{}' -> {}  [{}]\n",
                     record.importer, record.import_path, record.resolved_path, record.root_label);
             }
         }
@@ -778,7 +718,7 @@ auto main(const int argc, char *argv[]) -> int {
 
     if (options.print_module_search) {
         for (const auto &record : ast.module_search_trace) {
-            llvm::outs() << std::format("{} -> '{}' -> {}  [{}]\n",
+            std::cout << std::format("{} -> '{}' -> {}  [{}]\n",
                 record.importer, record.import_path, record.resolved_path, record.root_label);
         }
         return 0;
@@ -787,7 +727,7 @@ auto main(const int argc, char *argv[]) -> int {
     if (options.dump_ast) {
         if (const auto root_it = ast.modules.find(ast.root_module_path); root_it != ast.modules.end()) {
             for (const auto &decl : ast::all_decls(root_it->second)) {
-                dump_decl(decl, llvm::outs());
+                dump_decl(decl, std::cout);
             }
         }
         return 0;
@@ -797,7 +737,7 @@ auto main(const int argc, char *argv[]) -> int {
     const auto sema = sema::check_program(ast, diag, sema::Options{
         .opt_values = options.opt_values,
         .eager_generic_check = options.eager_generic_check,
-        .pointer_size = target_triple.isArch64Bit() ? 8u : 4u,
+        .pointer_size = target.pointer_bits() / 8,
         .rtti_enabled = !options.nortti,
         .test_mode = options.action == Action::Test,
     });
@@ -810,7 +750,7 @@ auto main(const int argc, char *argv[]) -> int {
         for (const auto &link : sema.link_directives) {
             const char *category = link.category == sema::LinkCategory::Lib ? "lib"
                                   : link.category == sema::LinkCategory::System ? "system" : "flag";
-            llvm::outs() << category << " " << link.data << "  (from " << link.source_module << ")\n";
+            std::cout << category << " " << link.data << "  (from " << link.source_module << ")\n";
         }
         return 0;
     }
@@ -846,7 +786,7 @@ auto main(const int argc, char *argv[]) -> int {
                    !std::holds_alternative<sema::FunctionSymbol>(runner->second);
         };
         if (missing_contract()) {
-            llvm::errs() << "mirage: 'core/testing' could not be resolved or does not expose the expected\n"
+            std::cerr << "mirage: 'core/testing' could not be resolved or does not expose the expected\n"
                             "        testing contract (Test_Function, Test_Case, Test_Info, _run_tests) —\n"
                             "        required for 'mirage test'\n";
             return 1;
@@ -859,7 +799,13 @@ auto main(const int argc, char *argv[]) -> int {
     if (options.emit_mir) {
         auto lowered = mirgen::generate(ast, sema, diag, mirgen::Options{
             .noinit = options.noinit,
-            .pointer_bits = target_triple.isArch64Bit() ? 64u : 32u,
+            .freestanding = options.freestanding,
+            // Under 'test', print the module the test binary would be built
+            // from — the synthesized wrappers, Test_Info and runner entry
+            // included. Omitting this made '--emit-mir' show a module that no
+            // build ever produces, which is exactly what one inspects it for.
+            .testing_module_path = testing_module_path,
+            .pointer_bits = target.pointer_bits(),
         });
         if (options.mir_opt && lowered.ok) {
             mir::promote_slots(lowered.module);
@@ -867,74 +813,53 @@ auto main(const int argc, char *argv[]) -> int {
             // The pass must leave a well-formed module behind; a failure here is a
             // pass bug, reported as such rather than passed downstream silently.
             for (const auto &error : mir::verify(lowered.module)) {
-                llvm::errs() << "error: internal error: promote_slots produced malformed MIR: "
+                std::cerr << "error: internal error: promote_slots produced malformed MIR: "
                              << error.message << "\n";
                 lowered.ok = false;
             }
         }
-        llvm::outs() << mir::print(lowered.module);
+        std::cout << mir::print(lowered.module);
         if (!lowered.unsupported.empty()) {
             // A coverage report, not a failure list: mirgen is grown construct by construct,
             // and this says exactly how far it has got on THIS program.
-            llvm::errs() << "\nnot yet lowered by the native backend:\n";
+            std::cerr << "\nnot yet lowered by the native backend:\n";
             for (const auto &what : lowered.unsupported) {
-                llvm::errs() << "  - " << what << "\n";
+                std::cerr << "  - " << what << "\n";
             }
         }
         return lowered.ok ? 0 : 1;
     }
 
-    // '--backend=native': the native pipeline. Lower, run the MIR passes, verify,
-    // then either x86-64 machine code through the register allocator and the SAME
-    // link/run tail the LLVM path uses, or (stage 7) a finished standalone .wasm
-    // written straight to the output — whole-program compilation leaves nothing
-    // for a linker to do on that target.
-    // Backend AUTO-selection (stage 10): the native backend is the default for
-    // the targets it owns; everything else stays on LLVM. '--emit-ir' prints
-    // LLVM IR by definition, so it forces the LLVM path regardless.
-    {
-        const bool native_capable =
-            target_triple.getArch() == llvm::Triple::wasm32 ||
-            (target_triple.getArch() == llvm::Triple::x86_64 && target_triple.isOSLinux());
-        if (options.backend.empty()) {
-            options.backend = native_capable ? "native" : "llvm";
-        }
-        if (options.emit_ir) options.backend = "llvm";
-        if (options.backend == "native" && !native_capable) {
-            llvm::errs() << "error: the native backend supports x86_64-linux and wasm32 "
-                         << "targets (docs/backend.md)\n";
-            return 1;
-        }
-    }
-
-    // The front-end banner, shared by both backends (it used to live inside the
-    // LLVM path, so flipping the default silently dropped the file/token counts
-    // and the parsing/sema timings). stderr, as ever: stdout carries only what
-    // was asked for. Each backend appends its own 'codegen' line below.
+    // The front-end banner. stderr, as ever: stdout carries only what was
+    // asked for.
     const auto to_ms = [](auto elapsed) {
         return std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
     };
-    llvm::errs() << std::format(
+    std::cerr << std::format(
         "Processed {} file(s), {} token(s)\n"
         "  parsing: {}ms\n"
         "  sema:    {}ms\n",
         ast.file_count, ast.token_count,
         to_ms(parse_elapsed), to_ms(sema_elapsed));
 
-    if (options.backend == "native") {
-        const bool wasm_target = target_triple.getArch() == llvm::Triple::wasm32;
+    // The native pipeline — the only one, since stage 10's deletion half: lower,
+    // run the MIR passes, verify, then per target either x86-64 machine code and
+    // the link/run tail, or a wasm module/object.
+    const bool wasm_target = target.is_wasm();
+    {
         const auto codegen_start = std::chrono::steady_clock::now();
         auto lowered = mirgen::generate(ast, sema, diag, mirgen::Options{
             .noinit = options.noinit,
             .validate_entry = !options.freestanding,
+            .freestanding = options.freestanding,
             .testing_module_path = testing_module_path, // resolved above; empty unless 'test'
-            .pointer_bits = target_triple.isArch64Bit() ? 64u : 32u,
+            .pointer_bits = target.pointer_bits(),
         });
         if (!lowered.ok) {
             if (!lowered.unsupported.empty()) {
-                llvm::errs() << "\nnot yet lowered by the native backend:\n";
+                std::cerr << "\nnot yet lowered by the native backend:\n";
                 for (const auto &what : lowered.unsupported) {
-                    llvm::errs() << "  - " << what << "\n";
+                    std::cerr << "  - " << what << "\n";
                 }
             }
             return 1;
@@ -942,11 +867,11 @@ auto main(const int argc, char *argv[]) -> int {
         mir::promote_slots(lowered.module);
         mir::peephole(lowered.module);
         for (const auto &error : mir::verify(lowered.module)) {
-            llvm::errs() << "error: internal error: MIR passes produced malformed MIR: "
+            std::cerr << "error: internal error: MIR passes produced malformed MIR: "
                          << error.message << "\n";
             return 1;
         }
-        llvm::errs() << std::format("  codegen: {}ms\n",
+        std::cerr << std::format("  codegen: {}ms\n",
                                      to_ms(std::chrono::steady_clock::now() - codegen_start));
 
         if (wasm_target) {
@@ -955,12 +880,12 @@ auto main(const int argc, char *argv[]) -> int {
             // link tail the LLVM path uses — libc, the web runtime and raylib's
             // ports all come from there (decision D5). Anything else: the final
             // standalone .wasm module, written straight to the output.
-            if (target_triple.isOSEmscripten()) {
+            if (target.is_emscripten()) {
                 const auto generated = backend_wasm::generate_object(
                     lowered.module, lowered.test_info_global, lowered.test_runner_function);
                 if (!generated.ok) {
                     for (const auto &error : generated.errors) {
-                        llvm::errs() << "error: native backend: " << error << "\n";
+                        std::cerr << "error: native backend: " << error << "\n";
                     }
                     return 1;
                 }
@@ -968,17 +893,16 @@ auto main(const int argc, char *argv[]) -> int {
                 if (object_path.empty()) {
                     return 1;
                 }
-                std::error_code write_error;
-                llvm::raw_fd_ostream out(object_path.string(), write_error);
-                if (write_error) {
-                    llvm::errs() << "error: cannot write '" << object_path.string() << "'\n";
+                std::ofstream out(object_path, std::ios::binary);
+                if (!out) {
+                    std::cerr << "error: cannot write '" << object_path.string() << "'\n";
                     return 1;
                 }
                 out.write(reinterpret_cast<const char *>(generated.bytes.data()),
-                           static_cast<size_t>(generated.bytes.size()));
+                           static_cast<std::streamsize>(generated.bytes.size()));
                 out.close();
                 const auto object_elapsed = std::chrono::steady_clock::now() - object_start;
-                return link_and_finish(object_path, options, target_triple,
+                return link_and_finish(object_path, options, target,
                                         sema.link_directives, start_time, object_elapsed);
             }
             const auto generated = backend_wasm::generate(lowered.module,
@@ -986,25 +910,24 @@ auto main(const int argc, char *argv[]) -> int {
                                                            lowered.test_runner_function);
             if (!generated.ok) {
                 for (const auto &error : generated.errors) {
-                    llvm::errs() << "error: native backend: " << error << "\n";
+                    std::cerr << "error: native backend: " << error << "\n";
                 }
                 return 1;
             }
-            std::error_code write_error;
-            llvm::raw_fd_ostream out(options.output, write_error);
-            if (write_error) {
-                llvm::errs() << "error: cannot write '" << options.output << "'\n";
+            std::ofstream out(options.output, std::ios::binary);
+            if (!out) {
+                std::cerr << "error: cannot write '" << options.output << "'\n";
                 return 1;
             }
             out.write(reinterpret_cast<const char *>(generated.bytes.data()),
-                       static_cast<size_t>(generated.bytes.size()));
+                       static_cast<std::streamsize>(generated.bytes.size()));
             out.close();
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - object_start);
-            llvm::errs() << "  wasm:    " << elapsed.count() << "ms\n";
+            std::cerr << "  wasm:    " << elapsed.count() << "ms\n";
             const auto total = std::chrono::duration_cast<std::chrono::duration<double>>(
                 std::chrono::steady_clock::now() - start_time);
-            llvm::errs() << std::format("Compiled '{}' -> '{}' in {:.2f}s\n",
+            std::cerr << std::format("Compiled '{}' -> '{}' in {:.2f}s\n",
                                          options.module_path, options.output, total.count());
             return 0;
         }
@@ -1017,7 +940,7 @@ auto main(const int argc, char *argv[]) -> int {
                                                           : backend_x86::RegAlloc::Linear);
         if (!generated.ok) {
             for (const auto &error : generated.errors) {
-                llvm::errs() << "error: native backend: " << error << "\n";
+                std::cerr << "error: native backend: " << error << "\n";
             }
             return 1;
         }
@@ -1027,62 +950,22 @@ auto main(const int argc, char *argv[]) -> int {
             return 1;
         }
         {
-            std::error_code write_error;
-            llvm::raw_fd_ostream out(object_path.string(), write_error);
-            if (write_error) {
-                llvm::errs() << "error: cannot write '" << object_path.string() << "'\n";
+            std::ofstream out(object_path, std::ios::binary);
+            if (!out) {
+                std::cerr << "error: cannot write '" << object_path.string() << "'\n";
                 return 1;
             }
             out.write(reinterpret_cast<const char *>(bytes.data()),
-                       static_cast<size_t>(bytes.size()));
+                       static_cast<std::streamsize>(bytes.size()));
+            if (!out) {
+                std::cerr << "error: failed writing '" << object_path.string() << "'\n";
+                return 1;
+            }
         }
         const auto object_elapsed = std::chrono::steady_clock::now() - object_start;
-        return link_and_finish(object_path, options, target_triple, sema.link_directives,
+        return link_and_finish(object_path, options, target, sema.link_directives,
                                 start_time, object_elapsed);
     }
 
-    const auto codegen_start = std::chrono::steady_clock::now();
-    const auto target_machine = create_target_machine(target_triple, !options.target.empty());
-    if (!target_machine) {
-        return 1;
-    }
-    // Keeps the LLVMContext alive alongside the module for the rest of this
-    // function — the module must be destroyed (function exit, reverse member order)
-    // before the context that owns its types and constants.
-    const auto [llvm_context, llvm_module] = codegen::generate(ast, sema, diag, {
-        .freestanding = options.freestanding,
-        .noinit = options.noinit,
-        .target_triple = target_machine->getTargetTriple().str(),
-        .data_layout = target_machine->createDataLayout().getStringRepresentation(),
-        .testing_module_path = testing_module_path,
-    });
-    if (!llvm_module || diag.has_errors()) {
-        return 1;
-    }
-    const auto codegen_elapsed = std::chrono::steady_clock::now() - codegen_start;
-    // The file/token counts and parsing/sema timings were already printed by the
-    // shared banner above the backend split; only this path's own stage remains.
-    llvm::errs() << std::format("  codegen: {}ms\n", to_ms(codegen_elapsed));
-
-    if (options.emit_ir) {
-        llvm_module->print(llvm::outs(), nullptr);
-        return 0;
-    }
-
-    const auto object_path = make_temp_file(".o");
-    if (object_path.empty()) {
-        return 1;
-    }
-    const auto object_start = std::chrono::steady_clock::now();
-    if (!emit_object_file(*llvm_module, *target_machine, object_path)) {
-        // Clean up the partial/empty temp object, as the link-failure and success paths below
-        // both do. mkstemp already created the file, so returning here always leaked one.
-        std::error_code object_error;
-        std::filesystem::remove(object_path, object_error);
-        return 1;
-    }
-    const auto object_elapsed = std::chrono::steady_clock::now() - object_start;
-
-    return link_and_finish(object_path, options, target_triple, sema.link_directives,
-                            start_time, object_elapsed);
 }
+

@@ -855,9 +855,22 @@ namespace mir {
             out += i < fn.params.size()
                 ? std::format("{}: {}", value_ref(fn, fn.params[i]), type_name(sig.params[i]))
                 : std::string(type_name(sig.params[i]));
+            // C-ABI metadata (mir.hpp Signature): a byval parameter is a pointer
+            // whose POINTEE the backend copies onto the outgoing stack. Printed
+            // because it is a real part of the signature — without it two very
+            // different lowerings render identically as 'ptr'.
+            if (i < sig.byval_sizes.size() && sig.byval_sizes[i] != 0) {
+                out += std::format(" byval({}, align {})", sig.byval_sizes[i],
+                                    i < sig.byval_aligns.size() ? sig.byval_aligns[i] : 1);
+            }
         }
         if (sig.is_variadic) out += sig.params.empty() ? "..." : ", ...";
         out += ")";
+        if (sig.c_ret_words == 2) {
+            out += std::format(" cret2({}, {})", sig.c_ret_sse[0] ? "sse" : "int",
+                                sig.c_ret_sse[1] ? "sse" : "int");
+        }
+        if (sig.c_sret) out += " csret";
         if (sig.result != Ty::Void) out += std::format(" -> {}", type_name(sig.result));
         if (!fn.import_module.empty()) {
             out += std::format(" import(\"{}\", \"{}\")", fn.import_module, fn.import_name);
