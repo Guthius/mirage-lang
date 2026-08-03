@@ -321,6 +321,26 @@ Done:
   few singletons. The freestanding panic path (syscall, no libc) is deferred with
   inline `asm`, which it needs.
 
+- **Stage 2, twenty-first increment** — reflection. Type_Info descriptors are constant
+  globals assembled as BYTE BLOBS with relocations — the representation codegen's
+  bespoke packed LLVM struct types were fighting to express — with every offset from
+  sema: nested payload structs spliced at field offsets, name strings and entry slices
+  as relocations to interned/backing globals, `Type_Kind_Or_Info` degrading a shapeless
+  or cyclic reference to `.kind(K)`, one descriptor per `types_needing_info` entry (an
+  ordered set), and the sorted `__mirage_type_info_table`. `type_info_of(type_of(T))`
+  folds to the descriptor's address (nil for builtin scalar ids 1–15);
+  a runtime id — including `type_of(any)`'s word-0 load — goes through the same inline
+  binary search codegen emits. Value-to-`any` coercions ride the emit_expr funnel:
+  a two-word `{id, data}` blob, scalars spilled to a frame temporary.
+
+  **Coverage: 136 of 271; zero verifier failures.** Cleared: `type_info_of` 18→0,
+  `any` coercions, `type_of(any)`.
+
+  Remaining: inline `asm` (18, stage 5 by design, freestanding panic path with it),
+  defaulted arguments on trait/generic-shaped method calls (6), a residual
+  dropped-error tail (3), `stackalloc` (1), a forwarded multi-return with slot
+  coercions (2), and singletons (~8).
+
 Remaining:
 
 - **Stage 2, rest** — aggregates (structs, arrays, slices, trait handles, `any`, error

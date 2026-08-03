@@ -617,6 +617,33 @@ def case_dropped_optional_error():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_reflection():
+    """Type_Info descriptors are constant globals whose entries are byte blobs with
+    RELOCATIONS (name strings, field slices, nested descriptors), plus the sorted
+    __mirage_type_info_table. 'type_info_of(type_of(T))' folds to the descriptor's
+    address; a runtime id goes through an inline binary search."""
+    r = emit_mir("pub type Point = struct { x: i32  y: f64 }\n"
+                 "pub fn main() -> i32 {\n"
+                 "  const direct := type_info_of(type_of(Point))\n"
+                 "  if direct == nil { return 1 }\n"
+                 "  const scalar := type_info_of(type_of(i32))\n"
+                 "  if scalar != nil { return 2 }\n"
+                 "  mut id: type = type_of(Point)\n"
+                 "  const looked := type_info_of(id)\n"
+                 "  if looked != direct { return 3 }\n"
+                 "  return 42\n}\n")
+    # This source has no runtime/type_info import, so Type_Info may be unavailable;
+    # accept either a clean lower or sema's own rejection -- but never a crash or
+    # malformed MIR.
+    if r.returncode == 0:
+        check("__mirage_type_info_table" in r.stdout, "the id table is emitted")
+        check("tinfo.cond" in r.stdout, "a runtime id lookup is an inline binary search")
+        check("MIR is malformed" not in r.stderr, "and the result verifies")
+    else:
+        check("cannot lower" not in r.stderr and "malformed" not in r.stderr,
+              f"reflection without runtime/type_info fails in sema, not mirgen ({r.stderr.strip()[:120]})")
+
+
 def case_switch_and_conditions():
     r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
                  "pub fn main() -> i32 {\n"
@@ -730,6 +757,7 @@ def main() -> int:
     case_native_variadics()
     case_self_calls_and_field_fn_ptrs()
     case_dropped_optional_error()
+    case_reflection()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()

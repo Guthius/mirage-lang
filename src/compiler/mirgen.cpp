@@ -9,6 +9,7 @@
 #include <ranges>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace mirgen {
     namespace {
@@ -45,6 +46,7 @@ namespace mirgen {
                 declare_trait_methods();
                 declare_generic_functions();
                 declare_vtables();
+                declare_type_info_globals();
                 emit_function_bodies();
                 emit_method_bodies();
                 emit_trait_method_bodies();
@@ -2681,7 +2683,6 @@ namespace mirgen {
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::CastExpr>>) return "a cast";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::BracedInitializerExpr>>) return "a braced initializer";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) return "'type_of'";
-                else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeInfoOfExpr>>) return "'type_info_of'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::LenExpr>>) return "'len'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SliceExpr>>) return "a slice expression";
                 else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) return "a '.variant' reference";
@@ -2720,7 +2721,38 @@ namespace mirgen {
                     it != exprs_->expr_trait_handle_coercions.end()) {
                     return emit_trait_handle_coercion(b, natural, it->second);
                 }
+                if (const auto it = exprs_->expr_any_coercions.find(expr_key);
+                    it != exprs_->expr_any_coercions.end()) {
+                    return emit_any_coercion(b, natural, it->second);
+                }
                 return natural;
+            }
+
+            // A value-to-'any' coercion (sema::AnyCoercion): a two-word {id, data} blob.
+            // Where 'data' points depends on the source: an 'anyptr' already IS the data
+            // word; an aggregate's value is its address; a scalar spills to a frame
+            // temporary -- identical lifetime to what 'mut tmp := <expr>' would produce,
+            // which is codegen's own degrade path for non-addressable sources.
+            auto emit_any_coercion(mir::Builder &b, const mir::ValueId natural, const sema::AnyCoercion &ac) -> mir::ValueId {
+                uint64_t id = 0;
+                if (const auto it = sema_.type_ids.find(ac.source_type); it != sema_.type_ids.end()) {
+                    id = it->second;
+                }
+
+                mir::ValueId data = natural;
+                if (ac.source_type.kind != sema::TypeKind::Anyptr && is_scalar(ac.source_type)) {
+                    const auto spill = b.add_slot(std::max(1u, size_of(ac.source_type)),
+                                                   std::max(1u, align_of(ac.source_type)), "any.tmp");
+                    b.store(b.slot_addr(spill), natural);
+                    slots_escaping_.insert(spill);
+                    data = b.slot_addr(spill);
+                }
+
+                const auto slot = b.add_slot(pointer_bytes() * 2, pointer_bytes(), "any");
+                const auto base = b.slot_addr(slot);
+                b.store(base, b.const_int(mir::Ty::I64, static_cast<int64_t>(id)));
+                b.store(b.ptr_add_const(base, pointer_bytes()), data);
+                return base;
             }
 
             // A two-word {data, vtable} trait handle built in a fresh slot; an aggregate,
@@ -2902,9 +2934,35 @@ namespace mirgen {
                         return b.const_int(mir::Ty::I8, static_cast<int64_t>(v.value));
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeOfExpr>>) {
-                        // 'type_of(T)' is a compile-time constant: the type's interned id,
-                        // which sema assigned. Nothing is computed at runtime.
+                        // 'type_of(x)' on an 'any' reads the value's id word at runtime;
+                        // anything else is the compile-time interned id sema assigned.
+                        if (expr_type(v->operand).kind == sema::TypeKind::Any) {
+                            const auto any_addr = emit_expr(b, v->operand);
+                            if (any_addr == mir::NO_VALUE) return mir::NO_VALUE;
+                            return b.load(mir::Ty::I64, any_addr);
+                        }
                         return emit_type_id(b, expr, v->location);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::TypeInfoOfExpr>>) {
+                        // Fast path: 'type_info_of(type_of(T))' -- sema folded T's id at
+                        // check time. Nil for builtin scalar ids (1-15); else the already-
+                        // emitted descriptor's address. Anything else is the inline binary
+                        // search over '__mirage_type_info_table'.
+                        if (exprs_) {
+                            if (const auto it = exprs_->expr_type_info_const_id.find(sema::get_expr_key(expr));
+                                it != exprs_->expr_type_info_const_id.end()) {
+                                const auto id = it->second;
+                                if (id >= 1 && id <= 15) return b.const_null();
+                                if (const auto ty_it = sema_.types_needing_info_types.find(id);
+                                    ty_it != sema_.types_needing_info_types.end()) {
+                                    if (const auto global = type_info_ptr_for(ty_it->second)) {
+                                        return b.global_addr(*global);
+                                    }
+                                }
+                                return b.const_null();
+                            }
+                        }
+                        return emit_type_info_runtime_lookup(b, *v);
 
                     } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>> ||
                                           std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
@@ -3653,6 +3711,679 @@ namespace mirgen {
             //
             // Interned by content, matching codegen: the same literal appearing twice must
             // not produce two globals.
+            // ---- reflection: 'type_info_of' and the Type_Info globals --------------
+            // Transliterated from codegen's Part 4/5. Where LLVM needed bespoke packed
+            // struct types (a typed constant cannot hold a relocation inside an i8 array),
+            // MIR constants are BYTE BLOBS with relocations, which is the representation
+            // the LLVM path was fighting to express -- so the builders here are the
+            // simpler, direct form of the same layout arithmetic. Every offset comes from
+            // sema, as everywhere else.
+
+            // A constant under assembly: bytes plus pending relocations, becoming a
+            // mir::Global (or a slice of one) verbatim.
+            struct ConstBlob {
+                std::vector<uint8_t> bytes;
+                std::vector<mir::Relocation> relocs;
+
+                void put_int(const uint32_t offset, const uint64_t value, const uint32_t size) {
+                    for (uint32_t i = 0; i < size; ++i) {
+                        bytes.at(offset + i) = static_cast<uint8_t>(value >> (8 * i));
+                    }
+                }
+                void put_global_ptr(const uint32_t offset, const uint32_t global_index) {
+                    relocs.push_back({.kind = mir::Relocation::Kind::GlobalAddr,
+                                       .offset = offset, .target = global_index});
+                }
+                void splice(const uint32_t offset, const ConstBlob &child) {
+                    std::copy(child.bytes.begin(), child.bytes.end(), bytes.begin() + offset);
+                    for (auto reloc : child.relocs) {
+                        reloc.offset += offset;
+                        relocs.push_back(reloc);
+                    }
+                }
+            };
+
+            [[nodiscard]] auto blob_of(const uint32_t size) const -> ConstBlob {
+                ConstBlob b;
+                b.bytes.assign(size, 0);
+                return b;
+            }
+
+            std::unordered_map<sema::ResolvedType, uint32_t> type_info_globals_by_type_;
+            std::unordered_set<sema::ResolvedType> type_info_emitting_;
+            uint32_t type_info_table_global_ = UINT32_MAX;
+            size_t type_info_table_size_ = 0;
+            size_t type_info_backing_counter_ = 0;
+
+            [[nodiscard]] auto find_union_by_name(const std::string &name) const -> const sema::UnionInfo * {
+                for (const auto &mod : sema_.modules | std::views::values) {
+                    if (const auto it = mod.symbols.find(name); it != mod.symbols.end()) {
+                        if (const auto *ts = std::get_if<sema::TypeSymbol>(&it->second);
+                            ts && ts->resolved && ts->resolved->kind == sema::TypeKind::Union) {
+                            const auto *u = sema_.union_at(ts->resolved->union_index);
+                            if (u && u->layout_done && !u->variants.empty()) return u;
+                        }
+                    }
+                }
+                return nullptr;
+            }
+            [[nodiscard]] auto find_type_info_union() const -> const sema::UnionInfo * {
+                return find_union_by_name("Type_Info");
+            }
+            static auto find_type_info_variant(const sema::UnionInfo &u, const std::string &name)
+                -> const sema::TaggedUnionVariant * {
+                const auto it = std::ranges::find(u.variants, name, &sema::TaggedUnionVariant::name);
+                return it == u.variants.end() ? nullptr : &*it;
+            }
+            [[nodiscard]] auto find_resolved_type_by_name(const std::string &module_path, const std::string &name) const
+                -> std::optional<sema::ResolvedType> {
+                const auto mod_it = sema_.modules.find(module_path);
+                if (mod_it == sema_.modules.end()) return std::nullopt;
+                const auto sym_it = mod_it->second.symbols.find(name);
+                if (sym_it == mod_it->second.symbols.end()) return std::nullopt;
+                const auto *ts = std::get_if<sema::TypeSymbol>(&sym_it->second);
+                if (!ts || !ts->resolved) return std::nullopt;
+                return *ts->resolved;
+            }
+
+            // Fixed numbering from runtime/type_info.mir's own Type_Kind enum -- distinct
+            // from Program::type_ids' numbering. Gaps at 13/15/19 are values whose kinds
+            // turned out unreachable; the neighbours kept their numbers (see codegen).
+            [[nodiscard]] auto mirage_type_kind_value(const sema::ResolvedType &type) const -> uint32_t {
+                switch (type.kind) {
+                case sema::TypeKind::U8:     return 1;
+                case sema::TypeKind::U16:    return 2;
+                case sema::TypeKind::U32:    return 3;
+                case sema::TypeKind::U64:    return 4;
+                case sema::TypeKind::I8:     return 5;
+                case sema::TypeKind::I16:    return 6;
+                case sema::TypeKind::I32:    return 7;
+                case sema::TypeKind::I64:    return 8;
+                case sema::TypeKind::F32:    return 9;
+                case sema::TypeKind::F64:    return 10;
+                case sema::TypeKind::USize:  return 11;
+                case sema::TypeKind::Bool:   return 12;
+                case sema::TypeKind::Anyptr: return 14;
+                case sema::TypeKind::Pointer:  return 16;
+                case sema::TypeKind::Slice:    return 17;
+                case sema::TypeKind::Array:    return 18;
+                case sema::TypeKind::Struct:   return 20;
+                case sema::TypeKind::Enum:     return 21;
+                case sema::TypeKind::Union: {
+                    const auto *info = sema_.union_at(type.union_index);
+                    if (!info) return 22;
+                    if (info->is_error_union) return 27;
+                    return info->is_tagged ? 23 : 22;
+                }
+                case sema::TypeKind::Bitset:   return 24;
+                case sema::TypeKind::Function: return 25;
+                case sema::TypeKind::Trait:    return 26;
+                case sema::TypeKind::Void:     return 28;
+                case sema::TypeKind::Type:     return 29;
+                case sema::TypeKind::Any:      return 30;
+                default: return 0;
+                }
+            }
+
+            auto const_global_from(ConstBlob blob, std::string name, const uint32_t align) -> uint32_t {
+                mir::Global g;
+                g.name = std::move(name);
+                g.linkage = mir::Linkage::Internal;
+                g.is_constant = true;
+                g.size = static_cast<uint32_t>(blob.bytes.size());
+                g.align = std::max(1u, align);
+                g.init = std::move(blob.bytes);
+                g.relocations = std::move(blob.relocs);
+                result_.module.globals.push_back(std::move(g));
+                return static_cast<uint32_t>(result_.module.globals.size() - 1);
+            }
+
+            // A {ptr, len} slice blob over private constant backing storage; the all-zero
+            // {nil, 0} form for an empty element list, matching nil-coerced slices.
+            auto blob_slice_of(const std::vector<ConstBlob> &elements, const uint32_t element_size,
+                                const uint32_t element_align, const char *name_prefix) -> ConstBlob {
+                auto slice = blob_of(pointer_bytes() * 2);
+                if (elements.empty()) return slice;
+                auto backing = blob_of(static_cast<uint32_t>(elements.size()) * element_size);
+                for (size_t i = 0; i < elements.size(); ++i) {
+                    if (elements[i].bytes.size() != element_size) {
+                        diag_.report_error(DiagnosticStage::Codegen, {}, std::format(
+                            "internal error: '{}' element constant is {} bytes, expected {}",
+                            name_prefix, elements[i].bytes.size(), element_size));
+                        continue;
+                    }
+                    backing.splice(static_cast<uint32_t>(i) * element_size, elements[i]);
+                }
+                const auto global = const_global_from(std::move(backing),
+                    std::format("{}.{}", name_prefix, type_info_backing_counter_++), element_align);
+                slice.put_global_ptr(0, global);
+                slice.put_int(pointer_bytes(), elements.size(), pointer_bytes());
+                return slice;
+            }
+
+            auto blob_named_element_slice(const std::string &module_path, const std::string &element_type_name,
+                                           const std::vector<ConstBlob> &elements, const char *name_prefix) -> ConstBlob {
+                const auto ty = find_resolved_type_by_name(module_path, element_type_name);
+                const uint32_t size = ty ? size_of(*ty) : 0;
+                const uint32_t align = ty ? align_of(*ty) : 1;
+                return blob_slice_of(elements, size, align, name_prefix);
+            }
+
+            auto blob_string(const std::string &text) -> ConstBlob {
+                auto slice = blob_of(pointer_bytes() * 2);
+                slice.put_global_ptr(0, intern_string(text));
+                slice.put_int(pointer_bytes(), text.size(), pointer_bytes());
+                return slice;
+            }
+
+            struct TypeInfoFieldAssignment {
+                std::string name;
+                ConstBlob value;
+            };
+
+            // A struct constant: fields spliced at their sema offsets over a zero blob.
+            // An assignment naming an absent field is a hard error, not a silent skip --
+            // it would otherwise reflect as all-zero data after a type_info.mir rename.
+            auto blob_struct(const int struct_index, const std::vector<TypeInfoFieldAssignment> &assignments) -> ConstBlob {
+                const auto *info = sema_.struct_at(struct_index);
+                if (!info) return blob_of(0);
+                auto blob = blob_of(std::max(1u, info->size));
+                for (const auto &a : assignments) {
+                    const auto it = std::ranges::find(info->fields, a.name, &sema::StructField::name);
+                    if (it == info->fields.end()) {
+                        diag_.report_error(DiagnosticStage::Codegen, {}, std::format(
+                            "internal error: runtime/type_info's payload struct has no field '{}'", a.name));
+                        continue;
+                    }
+                    if (a.value.bytes.size() != size_of(it->type)) {
+                        diag_.report_error(DiagnosticStage::Codegen, {}, std::format(
+                            "internal error: runtime/type_info field '{}' constant is {} bytes, expected {}",
+                            a.name, a.value.bytes.size(), size_of(it->type)));
+                        continue;
+                    }
+                    blob.splice(it->offset, a.value);
+                }
+                return blob;
+            }
+
+            auto blob_tagged_union(const sema::UnionInfo &u, const sema::TaggedUnionVariant &variant,
+                                    const ConstBlob &payload) -> ConstBlob {
+                auto blob = blob_of(std::max(1u, u.size));
+                blob.put_int(0, static_cast<uint64_t>(variant.tag_value), 4);
+                if (variant.payload_struct_index >= 0 && !payload.bytes.empty()) {
+                    blob.splice(u.payload_offset, payload);
+                }
+                return blob;
+            }
+
+            auto blob_int(const uint64_t value, const uint32_t size) -> ConstBlob {
+                auto blob = blob_of(size);
+                blob.put_int(0, value, size);
+                return blob;
+            }
+            auto blob_global_ptr(const uint32_t global_index) -> ConstBlob {
+                auto blob = blob_of(pointer_bytes());
+                blob.put_global_ptr(0, global_index);
+                return blob;
+            }
+
+            // Every '*Type_Info' reference funnels through here, memoized by the
+            // ResolvedType itself. nullopt is 'nil': a kind with no shape to describe, or
+            // a recursive back-reference (broken with nil rather than recursing forever).
+            auto type_info_ptr_for(const sema::ResolvedType &ty) -> std::optional<uint32_t> {
+                const auto has_shape = [&] {
+                    switch (ty.kind) {
+                    case sema::TypeKind::Pointer:  return ty.pointee_index >= 0;
+                    case sema::TypeKind::Slice:    return ty.slice_index >= 0;
+                    case sema::TypeKind::Array:    return ty.array_index >= 0;
+                    case sema::TypeKind::Struct:   return ty.struct_index >= 0;
+                    case sema::TypeKind::Enum:     return ty.enum_index >= 0;
+                    case sema::TypeKind::Union:    return ty.union_index >= 0;
+                    case sema::TypeKind::Bitset:   return ty.bitset_index >= 0;
+                    case sema::TypeKind::Function: return ty.fn_index >= 0;
+                    case sema::TypeKind::Trait:    return true;
+                    default:                       return false;
+                    }
+                }();
+                if (!has_shape) return std::nullopt;
+                if (const auto it = type_info_globals_by_type_.find(ty); it != type_info_globals_by_type_.end()) {
+                    return it->second;
+                }
+                if (type_info_emitting_.contains(ty)) return std::nullopt;
+                const auto *type_info_union = find_type_info_union();
+                if (!type_info_union) return std::nullopt;
+                return emit_type_info_global(ty, *type_info_union);
+            }
+
+            // '.info(&descriptor)' when a real descriptor exists, '.kind(K)' otherwise --
+            // a nested reference is never information-free.
+            auto blob_type_kind_or_info(const sema::ResolvedType &ty) -> ConstBlob {
+                const auto *u = find_union_by_name("Type_Kind_Or_Info");
+                if (!u) {
+                    diag_.report_error(DiagnosticStage::Codegen, {},
+                        "internal error: runtime/type_info does not define 'Type_Kind_Or_Info'");
+                    return blob_of(16);
+                }
+                const auto info_global = type_info_ptr_for(ty);
+                const auto *variant = find_type_info_variant(*u, info_global ? "info" : "kind");
+                if (!variant || variant->payload_struct_index < 0) {
+                    diag_.report_error(DiagnosticStage::Codegen, {}, std::format(
+                        "internal error: 'Type_Kind_Or_Info' has no '{}' variant", info_global ? "info" : "kind"));
+                    return blob_of(std::max(1u, u->size));
+                }
+                const auto payload = blob_struct(variant->payload_struct_index, {
+                    {"v", info_global ? blob_global_ptr(*info_global)
+                                       : blob_int(mirage_type_kind_value(ty), 4)},
+                });
+                return blob_tagged_union(*u, *variant, payload);
+            }
+
+            // As above, behind a pointer -- for the one field where nil must mean "no
+            // payload at all" (Type_Info_Tagged_Variant::payload).
+            auto type_kind_or_info_global(const sema::ResolvedType &ty) -> uint32_t {
+                const auto *u = find_union_by_name("Type_Kind_Or_Info");
+                return const_global_from(blob_type_kind_or_info(ty),
+                    std::format(".type_kind_or_info.{}", type_info_backing_counter_++),
+                    u ? u->align : 8);
+            }
+
+            auto blob_named_entry(const std::string &module_path, const std::string &type_name,
+                                   const std::vector<TypeInfoFieldAssignment> &assignments) -> ConstBlob {
+                const auto ty = find_resolved_type_by_name(module_path, type_name);
+                if (!ty || ty->kind != sema::TypeKind::Struct) return blob_of(0);
+                return blob_struct(ty->struct_index, assignments);
+            }
+
+            auto blob_generic_arg_kind(const sema::ResolvedType &field_type, const sema::GenericArgValue &arg) -> ConstBlob {
+                const auto *u = field_type.kind == sema::TypeKind::Union
+                    ? sema_.union_at(field_type.union_index) : nullptr;
+                if (!u) {
+                    diag_.report_error(DiagnosticStage::Codegen, {},
+                        "internal error: Type_Info_Generic_Arg's 'kind' field is not a union");
+                    return blob_of(std::max(1u, size_of(field_type)));
+                }
+                const auto *variant = find_type_info_variant(*u, arg.is_type ? "is_type" : "is_scalar");
+                if (!variant) {
+                    diag_.report_error(DiagnosticStage::Codegen, {}, std::format(
+                        "internal error: Type_Info_Generic_Arg's 'kind' union has no '{}' variant",
+                        arg.is_type ? "is_type" : "is_scalar"));
+                    return blob_of(std::max(1u, u->size));
+                }
+                ConstBlob payload;
+                if (!arg.is_type && variant->payload_struct_index >= 0) {
+                    int64_t raw_value = 0;
+                    if (const auto *iv = std::get_if<int64_t>(&arg.value_arg)) raw_value = *iv;
+                    payload = blob_struct(variant->payload_struct_index,
+                                           {{"v", blob_int(static_cast<uint64_t>(raw_value), 8)}});
+                }
+                return blob_tagged_union(*u, *variant, payload);
+            }
+
+            auto blob_generic_arg_entry(const std::string &module_path, const std::string &param_name,
+                                         const sema::GenericArgValue &arg) -> ConstBlob {
+                const auto ty = find_resolved_type_by_name(module_path, "Type_Info_Generic_Arg");
+                if (!ty || ty->kind != sema::TypeKind::Struct) return blob_of(0);
+                const auto *info = sema_.struct_at(ty->struct_index);
+                if (!info) return blob_of(0);
+                const auto kind_field = std::ranges::find(info->fields, "kind", &sema::StructField::name);
+                if (kind_field == info->fields.end()) {
+                    diag_.report_error(DiagnosticStage::Codegen, {},
+                        "internal error: Type_Info_Generic_Arg has no field 'kind'");
+                    return blob_of(std::max(1u, info->size));
+                }
+                return blob_struct(ty->struct_index, {
+                    {"name", blob_string(param_name)},
+                    {"type_info", blob_type_kind_or_info(arg.is_type ? arg.type_arg : arg.value_arg_scalar_type)},
+                    {"kind", blob_generic_arg_kind(kind_field->type, arg)},
+                });
+            }
+
+            void push_generic_args_assignments(const std::string &module_path,
+                                                const std::optional<sema::GenericInstanceInfo> &generic_instance,
+                                                std::vector<TypeInfoFieldAssignment> &assignments) {
+                std::vector<ConstBlob> arg_entries;
+                if (generic_instance) {
+                    const auto param_names = generic_param_names(*generic_instance);
+                    for (size_t i = 0; i < generic_instance->args.size(); ++i) {
+                        const auto &name = i < param_names.size() ? param_names[i] : std::string{};
+                        arg_entries.push_back(blob_generic_arg_entry(module_path, name, generic_instance->args[i]));
+                    }
+                }
+                assignments.push_back({"is_generic", blob_int(generic_instance.has_value() ? 1 : 0, 1)});
+                assignments.push_back({"generic_args",
+                    blob_named_element_slice(module_path, "Type_Info_Generic_Arg", arg_entries, ".type_info_generic_args")});
+            }
+
+            [[nodiscard]] auto generic_param_names(const sema::GenericInstanceInfo &instance) const
+                -> std::vector<std::string> {
+                const auto mod_it = sema_.modules.find(instance.decl_module);
+                if (mod_it == sema_.modules.end()) return {};
+                const auto sym_it = mod_it->second.symbols.find(instance.decl_name);
+                if (sym_it == mod_it->second.symbols.end()) return {};
+                const auto *ts = std::get_if<sema::TypeSymbol>(&sym_it->second);
+                if (!ts || !ts->decl) return {};
+                std::vector<std::string> names;
+                names.reserve(ts->decl->generic_params.size());
+                for (const auto &p : ts->decl->generic_params) names.push_back(p.name);
+                return names;
+            }
+
+            auto emit_type_info_global(const sema::ResolvedType &ty, const sema::UnionInfo &type_info_union)
+                -> std::optional<uint32_t> {
+                type_info_emitting_.insert(ty);
+                const auto &module_path = type_info_union.module_path;
+                const auto usize_bytes = pointer_bytes();
+
+                const auto field_entry = [&](const std::string &name, const sema::ResolvedType &type, uint64_t offset) {
+                    return blob_named_entry(module_path, "Type_Info_Field", {
+                        {"name", blob_string(name)},
+                        {"base_type", blob_type_kind_or_info(type)},
+                        {"offset", blob_int(offset, usize_bytes)},
+                    });
+                };
+
+                std::string variant_name;
+                std::vector<TypeInfoFieldAssignment> assignments;
+
+                switch (ty.kind) {
+                case sema::TypeKind::Pointer:
+                    variant_name = "Pointer";
+                    if (const auto *pointee = sema_.pointee_at(ty.pointee_index)) {
+                        assignments.push_back({"base_type", blob_type_kind_or_info(*pointee)});
+                    }
+                    break;
+                case sema::TypeKind::Slice:
+                    variant_name = "Slice";
+                    if (const auto *info = sema_.slice_at(ty.slice_index)) {
+                        assignments.push_back({"base_type", blob_type_kind_or_info(info->element_type)});
+                    }
+                    break;
+                case sema::TypeKind::Array:
+                    variant_name = "Array";
+                    if (const auto *info = sema_.array_at(ty.array_index)) {
+                        assignments.push_back({"base_type", blob_type_kind_or_info(info->element_type)});
+                        assignments.push_back({"length", blob_int(info->count, usize_bytes)});
+                    }
+                    break;
+                case sema::TypeKind::Struct: {
+                    variant_name = "Struct";
+                    const auto *info = sema_.struct_at(ty.struct_index);
+                    if (!info) break;
+                    const auto [tmod, tname] = sema::find_type_module_and_name(ty, sema_);
+                    std::vector<ConstBlob> field_entries;
+                    for (const auto &f : info->fields) {
+                        field_entries.push_back(field_entry(f.name, f.type, f.offset));
+                    }
+                    assignments.push_back({"name", blob_string(tname)});
+                    assignments.push_back({"fields",
+                        blob_named_element_slice(module_path, "Type_Info_Field", field_entries, ".type_info_fields")});
+                    assignments.push_back({"size", blob_int(info->size, usize_bytes)});
+                    assignments.push_back({"align", blob_int(info->align, usize_bytes)});
+                    assignments.push_back({"packed", blob_int(info->is_packed ? 1 : 0, 1)});
+                    push_generic_args_assignments(module_path, info->generic_instance, assignments);
+                    break;
+                }
+                case sema::TypeKind::Enum: {
+                    variant_name = "Enum";
+                    const auto *info = sema_.enum_at(ty.enum_index);
+                    if (!info) break;
+                    const auto [tmod, tname] = sema::find_type_module_and_name(ty, sema_);
+                    std::vector<ConstBlob> variant_entries;
+                    for (const auto &f : info->fields) {
+                        variant_entries.push_back(blob_named_entry(module_path, "Type_Info_Enum_Variant", {
+                            {"name", blob_string(f.name)},
+                            {"value", blob_int(static_cast<uint64_t>(f.value), 8)},
+                        }));
+                    }
+                    assignments.push_back({"name", blob_string(tname)});
+                    assignments.push_back({"variants",
+                        blob_named_element_slice(module_path, "Type_Info_Enum_Variant", variant_entries, ".type_info_variants")});
+                    assignments.push_back({"storage_kind", blob_int(mirage_type_kind_value(info->underlying_type), 4)});
+                    assignments.push_back({"size",
+                        blob_int(sema::primitive_size(info->underlying_type.kind, options_.pointer_bits / 8), usize_bytes)});
+                    push_generic_args_assignments(module_path, info->generic_instance, assignments);
+                    break;
+                }
+                case sema::TypeKind::Union: {
+                    const auto *info = sema_.union_at(ty.union_index);
+                    if (!info) break;
+                    const auto [tmod, tname] = sema::find_type_module_and_name(ty, sema_);
+                    if (info->is_error_union) {
+                        variant_name = "Error";
+                        std::vector<ConstBlob> members;
+                        for (const auto &m : info->error_member_types) {
+                            const auto member_global = type_info_ptr_for(m);
+                            members.push_back(member_global ? blob_global_ptr(*member_global)
+                                                             : blob_of(usize_bytes));
+                        }
+                        assignments.push_back({"members",
+                            blob_slice_of(members, usize_bytes, usize_bytes, ".type_info_err_members")});
+                        assignments.push_back({"is_optional", blob_int(info->is_optional ? 1 : 0, 1)});
+                    } else if (info->is_tagged) {
+                        variant_name = "Tagged_Union";
+                        std::vector<ConstBlob> variant_entries;
+                        for (const auto &v : info->variants) {
+                            // 'payload_type', not the payload STRUCT: the one-field wrapper
+                            // is a compiler artifact that must not leak into RTTI.
+                            auto payload = blob_of(usize_bytes);
+                            if (v.payload_struct_index >= 0) {
+                                payload.put_global_ptr(0, type_kind_or_info_global(v.payload_type));
+                            }
+                            variant_entries.push_back(blob_named_entry(module_path, "Type_Info_Tagged_Variant", {
+                                {"name", blob_string(v.name)},
+                                {"tag_value", blob_int(static_cast<uint64_t>(v.tag_value), 4)},
+                                {"payload", payload},
+                            }));
+                        }
+                        assignments.push_back({"name", blob_string(tname)});
+                        assignments.push_back({"variants",
+                            blob_named_element_slice(module_path, "Type_Info_Tagged_Variant", variant_entries, ".type_info_tagged_variants")});
+                        assignments.push_back({"size", blob_int(info->size, usize_bytes)});
+                        assignments.push_back({"align", blob_int(info->align, usize_bytes)});
+                        push_generic_args_assignments(module_path, info->generic_instance, assignments);
+                    } else {
+                        variant_name = "Union";
+                        std::vector<ConstBlob> member_entries;
+                        for (const auto &m : info->members) {
+                            member_entries.push_back(field_entry(m.name, m.type, 0));
+                        }
+                        assignments.push_back({"name", blob_string(tname)});
+                        assignments.push_back({"members",
+                            blob_named_element_slice(module_path, "Type_Info_Field", member_entries, ".type_info_umembers")});
+                        assignments.push_back({"size", blob_int(info->size, usize_bytes)});
+                        assignments.push_back({"align", blob_int(info->align, usize_bytes)});
+                        push_generic_args_assignments(module_path, info->generic_instance, assignments);
+                    }
+                    break;
+                }
+                case sema::TypeKind::Bitset: {
+                    variant_name = "Bitset";
+                    const auto *info = sema_.bitset_at(ty.bitset_index);
+                    if (!info) break;
+                    const auto [tmod, tname] = sema::find_type_module_and_name(ty, sema_);
+                    assignments.push_back({"name", blob_string(tname)});
+                    const auto member_global = type_info_ptr_for(info->member_enum_type);
+                    assignments.push_back({"member_type", member_global ? blob_global_ptr(*member_global)
+                                                                          : blob_of(usize_bytes)});
+                    assignments.push_back({"storage_kind", blob_int(mirage_type_kind_value(info->storage_type), 4)});
+                    assignments.push_back({"size",
+                        blob_int(sema::primitive_size(info->storage_type.kind, options_.pointer_bits / 8), usize_bytes)});
+                    push_generic_args_assignments(module_path, info->generic_instance, assignments);
+                    break;
+                }
+                case sema::TypeKind::Function: {
+                    variant_name = "Function";
+                    const auto *info = sema_.fn_signature_at(ty.fn_index);
+                    if (!info) break;
+                    std::vector<ConstBlob> param_entries;
+                    for (size_t i = 0; i < info->param_types.size(); ++i) {
+                        const std::string pname = i < info->param_names.size() ? info->param_names[i] : std::string{};
+                        param_entries.push_back(blob_named_entry(module_path, "Type_Info_Param", {
+                            {"name", blob_string(pname)},
+                            {"type_info", blob_type_kind_or_info(info->param_types[i])},
+                        }));
+                    }
+                    std::vector<ConstBlob> return_values;
+                    for (const auto &rt : info->return_types) {
+                        return_values.push_back(blob_type_kind_or_info(rt));
+                    }
+                    assignments.push_back({"params",
+                        blob_named_element_slice(module_path, "Type_Info_Param", param_entries, ".type_info_params")});
+                    assignments.push_back({"return_types",
+                        blob_named_element_slice(module_path, "Type_Kind_Or_Info", return_values, ".type_info_returns")});
+                    assignments.push_back({"is_variadic", blob_int(info->is_variadic ? 1 : 0, 1)});
+                    break;
+                }
+                case sema::TypeKind::Trait: {
+                    variant_name = "Trait";
+                    const auto *info = sema_.trait_at(ty.trait_index);
+                    const auto [tmod, tname] = sema::find_type_module_and_name(ty, sema_);
+                    std::vector<ConstBlob> method_entries;
+                    if (info) {
+                        for (const auto &m : info->methods) {
+                            // No interned function type to recurse into: degrades to
+                            // '.kind(Function)', name reflected either way.
+                            method_entries.push_back(blob_named_entry(module_path, "Type_Info_Method", {
+                                {"name", blob_string(m.name)},
+                                {"type_info", blob_type_kind_or_info(sema::ResolvedType{.kind = sema::TypeKind::Function})},
+                            }));
+                        }
+                    }
+                    assignments.push_back({"name", blob_string(tname)});
+                    assignments.push_back({"methods",
+                        blob_named_element_slice(module_path, "Type_Info_Method", method_entries, ".type_info_methods")});
+                    break;
+                }
+                default:
+                    break;
+                }
+
+                type_info_emitting_.erase(ty);
+                if (variant_name.empty()) return std::nullopt;
+
+                const auto *variant = find_type_info_variant(type_info_union, variant_name);
+                if (!variant || variant->payload_struct_index < 0) {
+                    diag_.report_error(DiagnosticStage::Codegen, {}, std::format(
+                        "internal error: runtime/type_info's Type_Info union has no '{}' variant", variant_name));
+                    return std::nullopt;
+                }
+                const auto payload = blob_struct(variant->payload_struct_index, assignments);
+                const auto global = const_global_from(
+                    blob_tagged_union(type_info_union, *variant, payload),
+                    std::format(".type_info.{}", type_info_globals_by_type_.size()),
+                    type_info_union.align);
+                type_info_globals_by_type_[ty] = global;
+                return global;
+            }
+
+            // One descriptor per type in Program::types_needing_info (an ordered set, so
+            // emission order is deterministic), plus the sorted binary-search table over
+            // all of them. A strict no-op for a program that never touches reflection.
+            void declare_type_info_globals() {
+                if (sema_.types_needing_info.empty()) return;
+                const auto *type_info_union = find_type_info_union();
+                if (!type_info_union) return;
+
+                for (const auto id : sema_.types_needing_info) {
+                    const auto ty_it = sema_.types_needing_info_types.find(id);
+                    if (ty_it == sema_.types_needing_info_types.end()) continue;
+                    type_info_ptr_for(ty_it->second);
+                }
+                if (type_info_globals_by_type_.empty()) return;
+
+                // Entries are {id: u64, info: ptr} -- 16 bytes each, sorted by id (the set
+                // iterates in order), which is what the inline binary search assumes.
+                std::vector<std::pair<uint64_t, uint32_t>> entries;
+                for (const auto id : sema_.types_needing_info) {
+                    const auto ty_it = sema_.types_needing_info_types.find(id);
+                    if (ty_it == sema_.types_needing_info_types.end()) continue;
+                    const auto global_it = type_info_globals_by_type_.find(ty_it->second);
+                    if (global_it == type_info_globals_by_type_.end()) continue;
+                    entries.emplace_back(id, global_it->second);
+                }
+                if (entries.empty()) return;
+
+                const uint32_t entry_size = 8 + pointer_bytes();
+                auto table = blob_of(static_cast<uint32_t>(entries.size()) * entry_size);
+                for (size_t i = 0; i < entries.size(); ++i) {
+                    const auto at = static_cast<uint32_t>(i) * entry_size;
+                    table.put_int(at, entries[i].first, 8);
+                    table.put_global_ptr(at + 8, entries[i].second);
+                }
+                type_info_table_global_ = const_global_from(std::move(table), "__mirage_type_info_table", 8);
+                type_info_table_size_ = entries.size();
+            }
+
+            // Inline binary search over the table (never a runtime function call, per the
+            // reflection design), in this file's slot-based loop idiom. Yields nil for a
+            // key with no entry -- a builtin scalar's id observed at runtime.
+            auto emit_type_info_runtime_lookup(mir::Builder &b, const ast::TypeInfoOfExpr &expr) -> mir::ValueId {
+                if (type_info_table_global_ == UINT32_MAX || type_info_table_size_ == 0) {
+                    return b.const_null();
+                }
+                const auto operand_type = expr_type(expr.operand);
+                mir::ValueId key = mir::NO_VALUE;
+                if (operand_type.kind == sema::TypeKind::Any) {
+                    // An 'any' value's word 0 is its type id.
+                    const auto any_addr = emit_expr(b, expr.operand);
+                    if (any_addr == mir::NO_VALUE) return mir::NO_VALUE;
+                    key = b.load(mir::Ty::I64, any_addr);
+                } else {
+                    key = emit_expr(b, expr.operand); // already an i64 'type' id
+                    if (key == mir::NO_VALUE) return mir::NO_VALUE;
+                }
+
+                const uint32_t entry_size = 8 + pointer_bytes();
+                const auto lo_slot = b.slot_addr(b.add_slot(8, 8, "tinfo.lo"));
+                const auto hi_slot = b.slot_addr(b.add_slot(8, 8, "tinfo.hi"));
+                const auto result_slot = b.slot_addr(b.add_slot(pointer_bytes(), pointer_bytes(), "tinfo.result"));
+                b.store(lo_slot, b.const_int(mir::Ty::I64, 0));
+                b.store(hi_slot, b.const_int(mir::Ty::I64, static_cast<int64_t>(type_info_table_size_ - 1)));
+                b.store(result_slot, b.const_null());
+
+                const auto cond = b.create_block("tinfo.cond");
+                const auto body = b.create_block("tinfo.body");
+                const auto found = b.create_block("tinfo.found");
+                const auto checklt = b.create_block("tinfo.checklt");
+                const auto narrow_hi = b.create_block("tinfo.narrow_hi");
+                const auto narrow_lo = b.create_block("tinfo.narrow_lo");
+                const auto end = b.create_block("tinfo.end");
+                b.jump(cond);
+
+                b.set_insert_point(cond);
+                b.branch(b.compare(mir::Op::ICmpSle, b.load(mir::Ty::I64, lo_slot), b.load(mir::Ty::I64, hi_slot)),
+                          body, end);
+
+                b.set_insert_point(body);
+                const auto lo = b.load(mir::Ty::I64, lo_slot);
+                const auto hi = b.load(mir::Ty::I64, hi_slot);
+                const auto mid = b.binary(mir::Op::Add, mir::Ty::I64, lo,
+                    b.binary(mir::Op::UDiv, mir::Ty::I64, b.binary(mir::Op::Sub, mir::Ty::I64, hi, lo),
+                              b.const_int(mir::Ty::I64, 2)));
+                const auto entry_ptr = b.ptr_add(b.global_addr(type_info_table_global_),
+                    b.binary(mir::Op::Mul, mir::Ty::I64, mid, b.const_int(mir::Ty::I64, entry_size)));
+                const auto entry_id = b.load(mir::Ty::I64, entry_ptr);
+                b.branch(b.compare(mir::Op::ICmpEq, key, entry_id), found, checklt);
+
+                b.set_insert_point(found);
+                b.store(result_slot, b.load(mir::Ty::Ptr, b.ptr_add_const(entry_ptr, 8)));
+                b.jump(end);
+
+                b.set_insert_point(checklt);
+                b.branch(b.compare(mir::Op::ICmpUlt, key, entry_id), narrow_hi, narrow_lo);
+
+                b.set_insert_point(narrow_hi);
+                b.store(hi_slot, b.binary(mir::Op::Sub, mir::Ty::I64, mid, b.const_int(mir::Ty::I64, 1)));
+                b.jump(cond);
+
+                b.set_insert_point(narrow_lo);
+                b.store(lo_slot, b.binary(mir::Op::Add, mir::Ty::I64, mid, b.const_int(mir::Ty::I64, 1)));
+                b.jump(cond);
+
+                b.set_insert_point(end);
+                return b.load(mir::Ty::Ptr, result_slot);
+            }
+
             // ---- the unhandled-error runtime ---------------------------------------
 
             // Lazily-declared libc entry points for the panic path. Deduplicated against
