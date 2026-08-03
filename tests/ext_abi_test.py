@@ -74,12 +74,21 @@ def main() -> int:
         check("@sum_straddle(ptr byval" in ir.stdout and "align 8)" in ir.stdout,
               "straddling packed struct is passed byval with align 8, as clang does")
 
-        result = subprocess.run(
-            [str(MIRAGE_BINARY), "run", str(FIXTURE)],
-            capture_output=True, text=True, timeout=120, cwd=REPO_ROOT,
-        )
-        check(result.returncode == EXPECTED_EXIT,
-              f"aggregates cross the C boundary intact: exit {result.returncode} == {EXPECTED_EXIT}")
+        # Every backend/allocator: the native path implements SysV aggregate
+        # classification itself (mirgen's C lowering), and this run pins it
+        # against C code compiled by clang.
+        for label, extra in (
+            ("llvm", []),
+            ("native/linear", ["--backend=native", "--regalloc=linear"]),
+            ("native/trivial", ["--backend=native", "--regalloc=trivial"]),
+        ):
+            result = subprocess.run(
+                [str(MIRAGE_BINARY), "run", str(FIXTURE), *extra],
+                capture_output=True, text=True, timeout=120, cwd=REPO_ROOT,
+            )
+            check(result.returncode == EXPECTED_EXIT,
+                  f"[{label}] aggregates cross the C boundary intact: "
+                  f"exit {result.returncode} == {EXPECTED_EXIT}")
 
         # The same fixture under the WebAssembly ABI, which has no register-packing tier:
         # every one of these is a multi-element aggregate, so all four go indirectly. The

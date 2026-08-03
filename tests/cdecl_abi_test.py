@@ -80,16 +80,24 @@ def main() -> int:
         check("__mir_" not in ir.stdout.split("define")[1] if "define" in ir.stdout else False,
               "'@export' emits the bare name, not the module-mangled one")
 
-        # The actual round trip. Mirage's 'main' forwards the C side's failure count, so a
-        # non-zero exit is the number of mismatched checks and stderr names each one.
-        result = subprocess.run(
-            [str(MIRAGE_BINARY), "run", str(FIXTURE)],
-            capture_output=True, text=True, timeout=120, cwd=REPO_ROOT,
-        )
-        detail = "\n".join(line for line in result.stderr.splitlines() if "cdecl ABI FAIL" in line)
-        check(result.returncode == 0,
-              f"C calls into '@cdecl' Mirage functions and every value survives (exit {result.returncode})"
-              + (f"\n{detail}" if detail else ""))
+        # The actual round trip, under every backend/allocator: the native path
+        # implements the SysV aggregate ABI itself (mirgen's C lowering, stage 8
+        # prerequisite), and this fixture is what pins it against real C code.
+        # Mirage's 'main' forwards the C side's failure count, so a non-zero exit
+        # is the number of mismatched checks and stderr names each one.
+        for label, extra in (
+            ("llvm", []),
+            ("native/linear", ["--backend=native", "--regalloc=linear"]),
+            ("native/trivial", ["--backend=native", "--regalloc=trivial"]),
+        ):
+            result = subprocess.run(
+                [str(MIRAGE_BINARY), "run", str(FIXTURE), *extra],
+                capture_output=True, text=True, timeout=120, cwd=REPO_ROOT,
+            )
+            detail = "\n".join(line for line in result.stderr.splitlines() if "cdecl ABI FAIL" in line)
+            check(result.returncode == 0,
+                  f"[{label}] C calls into '@cdecl' Mirage functions and every value survives "
+                  f"(exit {result.returncode})" + (f"\n{detail}" if detail else ""))
     finally:
         helper_o.unlink(missing_ok=True)
 

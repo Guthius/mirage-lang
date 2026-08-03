@@ -96,6 +96,12 @@ namespace backend_x86 {
             int32_t callee_save_offset[16] = {};
             int32_t frame_size = 0;
             std::vector<x86::Label> block_labels;
+            // C-ABI support areas (mir.hpp Signature metadata): a stash for a
+            // call's two-word-return out-pointer, this function's own two-word
+            // return blob, and the sret pointer kept for the RAX-on-return rule.
+            int32_t cret_stash_offset = 0;
+            int32_t cret_blob_offset = 0;
+            int32_t sret_stash_offset = 0;
 
             uint32_t memcpy_symbol = 0;
             uint32_t memset_symbol = 0;
@@ -162,6 +168,24 @@ namespace backend_x86 {
                 for (const auto &block : fn.blocks) {
                     for (const auto param : block.params) staging_offset[param] = place8();
                 }
+
+                bool calls_two_word_ret = false;
+                for (const auto &block : fn.blocks) {
+                    for (const auto &inst : block.insts) {
+                        if (inst.op != mir::Op::Call && inst.op != mir::Op::CallIndirect) continue;
+                        const auto signature = inst.op == mir::Op::CallIndirect
+                            ? inst.b : module.functions[inst.a].signature;
+                        if (module.signatures[signature].c_ret_words == 2) calls_two_word_ret = true;
+                    }
+                }
+                if (calls_two_word_ret) cret_stash_offset = place8();
+                const auto &own_sig = module.signatures[fn.signature];
+                if (own_sig.c_ret_words == 2) {
+                    place8();
+                    cret_blob_offset = place8(); // 16 contiguous bytes
+                }
+                if (own_sig.c_sret) sret_stash_offset = place8();
+
                 frame_size = (offset + 15) / 16 * 16;
             }
 
@@ -461,31 +485,72 @@ namespace backend_x86 {
             }
 
             void emit_call(const mir::Inst &inst, const bool indirect) {
+                const auto signature = indirect ? inst.b : module.functions[inst.a].signature;
+                const auto &sig = module.signatures[signature];
                 call_saves();
 
                 std::vector<mir::ValueId> args(inst.args.begin(), inst.args.end());
+
+                // A two-eightbyte C return: the trailing MIR argument is the
+                // out-pointer, never passed physically. Stash it now, while its
+                // location is still valid, and store the return registers through
+                // it after the call.
+                const bool two_word_ret = sig.c_ret_words == 2;
+                if (two_word_ret && !args.empty()) {
+                    call_arg_into_gpr(args.back(), Reg::RAX);
+                    enc.store(Width::W64, Reg::RBP, cret_stash_offset, Reg::RAX);
+                    args.pop_back();
+                }
+
+                const auto byval_of = [&](const size_t i) -> uint32_t {
+                    return i < sig.byval_sizes.size() ? sig.byval_sizes[i] : 0;
+                };
+
+                // Classify: SysV MEMORY-class (byval) arguments always go to the
+                // stack, sized and aligned as the aggregate; everything else takes
+                // the next register of its class or an 8-byte stack cell.
                 std::vector<int> int_slot(args.size(), -1);
                 std::vector<int> float_slot(args.size(), -1);
-                std::vector<size_t> stack_args;
+                std::vector<int32_t> stack_off(args.size(), -1);
                 int ints = 0;
                 int floats = 0;
+                int32_t stack_bytes = 0;
                 for (size_t i = 0; i < args.size(); ++i) {
-                    if (mir::is_float(fn.values[args[i]].type)) {
+                    if (const auto byval = byval_of(i)) {
+                        const auto align = std::max<int32_t>(
+                            8, i < sig.byval_aligns.size()
+                                   ? static_cast<int32_t>(sig.byval_aligns[i]) : 8);
+                        stack_bytes = (stack_bytes + align - 1) / align * align;
+                        stack_off[i] = stack_bytes;
+                        stack_bytes += static_cast<int32_t>((byval + 7) / 8 * 8);
+                    } else if (mir::is_float(fn.values[args[i]].type)) {
                         if (floats < 8) float_slot[i] = floats++;
-                        else stack_args.push_back(i);
+                        else { stack_off[i] = stack_bytes; stack_bytes += 8; }
                     } else {
                         if (ints < 6) int_slot[i] = ints++;
-                        else stack_args.push_back(i);
+                        else { stack_off[i] = stack_bytes; stack_bytes += 8; }
                     }
                 }
 
                 // Stack arguments through an aligned reservation, staged via RAX
-                // (statically killed at every call).
-                const auto reserve = static_cast<int32_t>((stack_args.size() + 1) / 2 * 16);
+                // (statically killed at every call); byval aggregates copy in
+                // 8-byte chunks through R11, whose only later use (the indirect
+                // callee) comes after this loop.
+                const auto reserve = (stack_bytes + 15) / 16 * 16;
                 if (reserve > 0) enc.sub_rsp(reserve);
-                for (size_t i = 0; i < stack_args.size(); ++i) {
-                    call_arg_into_gpr(args[stack_args[i]], Reg::RAX);
-                    enc.store(Width::W64, Reg::RSP, static_cast<int32_t>(i * 8), Reg::RAX);
+                for (size_t i = 0; i < args.size(); ++i) {
+                    if (stack_off[i] < 0) continue;
+                    if (const auto byval = byval_of(i)) {
+                        call_arg_into_gpr(args[i], Reg::R11);
+                        const auto rounded = static_cast<int32_t>((byval + 7) / 8 * 8);
+                        for (int32_t chunk = 0; chunk < rounded; chunk += 8) {
+                            enc.load(Width::W64, Reg::RAX, Reg::R11, chunk);
+                            enc.store(Width::W64, Reg::RSP, stack_off[i] + chunk, Reg::RAX);
+                        }
+                    } else {
+                        call_arg_into_gpr(args[i], Reg::RAX);
+                        enc.store(Width::W64, Reg::RSP, stack_off[i], Reg::RAX);
+                    }
                 }
 
                 // An indirect target goes to R11 BEFORE the argument registers are
@@ -500,13 +565,7 @@ namespace backend_x86 {
                     }
                 }
 
-                const bool variadic = [&] {
-                    if (indirect) {
-                        return module.signatures[inst.b].is_variadic;
-                    }
-                    return module.signatures[module.functions[inst.a].signature].is_variadic;
-                }();
-                if (variadic) enc.mov_ri(Reg::RAX, floats); // AL = vector count
+                if (sig.is_variadic) enc.mov_ri(Reg::RAX, floats); // AL = vector count
 
                 if (indirect) enc.call_r(Reg::R11);
                 else enc.call_sym(function_symbols[inst.a]);
@@ -520,6 +579,13 @@ namespace backend_x86 {
                         canonicalize(Reg::RAX, inst.type);
                         commit_gpr(inst.result, Reg::RAX);
                     }
+                }
+                if (two_word_ret) {
+                    enc.load(Width::W64, Reg::R11, Reg::RBP, cret_stash_offset);
+                    if (sig.c_ret_sse[0]) enc.movsd_store(Reg::R11, 0, XReg::XMM0);
+                    else enc.store(Width::W64, Reg::R11, 0, Reg::RAX);
+                    if (sig.c_ret_sse[1]) enc.movsd_store(Reg::R11, 8, XReg::XMM1);
+                    else enc.store(Width::W64, Reg::R11, 8, Reg::RDX);
                 }
                 call_restores();
             }
@@ -1267,6 +1333,19 @@ namespace backend_x86 {
                             gpr_into(value, Reg::RAX);
                         }
                     }
+                    // C-ABI return shapes for this function itself: a two-word
+                    // return loads rax/rdx (or xmm0/xmm1) from the blob its
+                    // synthetic out-param pointed at; the sret convention hands
+                    // the hidden pointer back in RAX.
+                    const auto &own_sig = module.signatures[fn.signature];
+                    if (own_sig.c_ret_words == 2) {
+                        if (own_sig.c_ret_sse[0]) enc.movsd_load(XReg::XMM0, Reg::RBP, cret_blob_offset);
+                        else enc.load(Width::W64, Reg::RAX, Reg::RBP, cret_blob_offset);
+                        if (own_sig.c_ret_sse[1]) enc.movsd_load(XReg::XMM1, Reg::RBP, cret_blob_offset + 8);
+                        else enc.load(Width::W64, Reg::RDX, Reg::RBP, cret_blob_offset + 8);
+                    } else if (own_sig.c_sret) {
+                        enc.load(Width::W64, Reg::RAX, Reg::RBP, sret_stash_offset);
+                    }
                     emit_epilogue();
                     return;
                 }
@@ -1312,18 +1391,46 @@ namespace backend_x86 {
                 int ints = 0;
                 int floats = 0;
                 int32_t caller_stack = 16; // saved RBP + return address
+                const auto &own_sig = module.signatures[fn.signature];
                 if (!fn.blocks.empty()) {
                     const auto &params = fn.blocks.front().params;
                     std::vector<mir::ValueId> reg_homed;
-                    for (const auto param : params) {
+                    for (size_t i = 0; i < params.size(); ++i) {
+                        const auto param = params[i];
                         const auto home = in_reg(param) ? staging_offset.at(param) : val_off(param);
                         if (in_reg(param)) reg_homed.push_back(param);
+                        // C-ABI shapes first (mir.hpp Signature metadata): a byval
+                        // parameter IS a pointer into the caller's stack area; the
+                        // synthetic two-word-return out-pointer aims at this
+                        // frame's own blob; the sret pointer is also stashed for
+                        // the RAX-on-return rule.
+                        const auto byval = i < own_sig.byval_sizes.size()
+                            ? own_sig.byval_sizes[i] : 0;
+                        if (byval != 0) {
+                            const auto align = std::max<int32_t>(
+                                8, i < own_sig.byval_aligns.size()
+                                       ? static_cast<int32_t>(own_sig.byval_aligns[i]) : 8);
+                            caller_stack = (caller_stack + align - 1) / align * align;
+                            enc.lea(Reg::RAX, Reg::RBP, caller_stack);
+                            caller_stack += static_cast<int32_t>((byval + 7) / 8 * 8);
+                            enc.store(Width::W64, Reg::RBP, home, Reg::RAX);
+                            continue;
+                        }
+                        if (own_sig.c_ret_words == 2 && i + 1 == params.size()) {
+                            enc.lea(Reg::RAX, Reg::RBP, cret_blob_offset);
+                            enc.store(Width::W64, Reg::RBP, home, Reg::RAX);
+                            continue;
+                        }
                         if (mir::is_float(fn.values[param].type)) {
                             if (floats < 8) {
                                 enc.movsd_store(Reg::RBP, home, static_cast<XReg>(floats++));
                                 continue;
                             }
                         } else if (ints < 6) {
+                            if (own_sig.c_sret && i == 0) {
+                                enc.store(Width::W64, Reg::RBP, sret_stash_offset,
+                                           INT_ARG_REGS[0]);
+                            }
                             enc.store(Width::W64, Reg::RBP, home, INT_ARG_REGS[ints++]);
                             continue;
                         }

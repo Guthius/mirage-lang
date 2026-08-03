@@ -146,7 +146,13 @@ namespace mir {
         for (size_t i = 0; i < signatures.size(); ++i) {
             const auto &existing = signatures[i];
             if (existing.result == sig.result && existing.is_variadic == sig.is_variadic &&
-                existing.params == sig.params) {
+                existing.params == sig.params &&
+                existing.byval_sizes == sig.byval_sizes &&
+                existing.byval_aligns == sig.byval_aligns &&
+                existing.c_ret_words == sig.c_ret_words &&
+                existing.c_ret_sse[0] == sig.c_ret_sse[0] &&
+                existing.c_ret_sse[1] == sig.c_ret_sse[1] &&
+                existing.c_sret == sig.c_sret) {
                 return static_cast<uint32_t>(i);
             }
         }

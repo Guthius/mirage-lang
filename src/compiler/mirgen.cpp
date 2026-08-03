@@ -123,6 +123,33 @@ namespace mirgen {
             // The hidden sret pointer of the body being emitted, or NO_VALUE when the
             // return is a plain scalar. Every 'return' of an aggregate writes through it.
             mir::ValueId sret_ = mir::NO_VALUE;
+            // ---- C ABI lowering types (the machinery lives with signature_for_c) --
+            struct CLeaf {
+                uint32_t offset = 0;
+                mir::Ty type = mir::Ty::I64;
+                uint32_t size = 0;
+            };
+            enum class CParamKind : uint8_t { Scalar, OneWord, TwoWords, Memory };
+            struct CLowering {
+                CParamKind kind = CParamKind::Scalar;
+                mir::Ty w0 = mir::Ty::I64;
+                mir::Ty w1 = mir::Ty::I64;
+                uint32_t int_words = 0;
+                uint32_t sse_words = 0;
+            };
+            struct CAbiPlan {
+                std::vector<CLowering> params; // one per SEMA parameter
+                CLowering ret;                 // meaningful when has_aggregate_ret
+                bool has_aggregate_ret = false;
+            };
+            // C-ABI lowering plans, one per C-convention function whose signature
+            // the plan actually changes (see c_plan_is_trivial). Filled at declare
+            // time; consulted by every call site and by emit_body.
+            std::unordered_map<uint32_t, CAbiPlan> c_abi_plans_;
+            // When the body being emitted returns a ONE-EIGHTBYTE C aggregate,
+            // sret_ points at a local blob and the 'ret' itself must carry the
+            // blob's first word in this type instead of returning void.
+            std::optional<mir::Ty> c_ret_load_ty_;
             // The return list of the body being emitted. 'try' needs it from expression
             // position, where emit_stmt's parameter does not reach.
             const std::vector<sema::ResolvedType> *current_returns_ = nullptr;
@@ -349,6 +376,225 @@ namespace mirgen {
                 return out;
             }
 
+            // ---- C ABI lowering (stage 8 prerequisite; docs/backend.md) ----------
+            // mirgen owns the C ABI: by the time MIR exists, every C-convention
+            // boundary is scalars, byval-marked pointers, and the signature
+            // metadata mir.hpp documents. x86-64 follows System V eightbyte
+            // classification; wasm32 follows clang's WebAssembly rule (an
+            // aggregate that is recursively one scalar passes as that scalar,
+            // everything else by reference). Keeping this in the front half is
+            // what lets both native backends stay scalar machines — and it is
+            // where the stage-4 native backend silently diverged from LLVM:
+            // aggregates crossed 'ext fn' boundaries as raw pointers, which SysV
+            // never passes that way. tests/ext_abi_test.py now runs both
+            // backends against a C helper to pin this.
+
+            // Flattens an aggregate to scalar leaves. False = a shape this does
+            // not classify (unions, error blobs, ...); callers treat that as
+            // MEMORY class, which is conservative for exotic types that cannot
+            // meaningfully cross a C boundary anyway.
+            auto collect_c_leaves(const sema::ResolvedType &type, const uint32_t base,
+                                   std::vector<CLeaf> &out) -> bool {
+                if (is_scalar(type)) {
+                    out.push_back({base, scalar_type(type), std::max(1u, size_of(type))});
+                    return true;
+                }
+                switch (type.kind) {
+                case sema::TypeKind::Struct: {
+                    const auto *info = sema_.struct_at(type.struct_index);
+                    if (!info) return false;
+                    for (const auto &field : info->fields) {
+                        if (!collect_c_leaves(field.type, base + field.offset, out)) return false;
+                    }
+                    return true;
+                }
+                case sema::TypeKind::Array: {
+                    const auto *info = sema_.array_at(type.array_index);
+                    if (!info) return false;
+                    const auto align = std::max(1u, align_of(info->element_type));
+                    const auto stride = (std::max(1u, size_of(info->element_type)) + align - 1)
+                                        / align * align;
+                    for (uint64_t i = 0; i < info->count; ++i) {
+                        if (!collect_c_leaves(info->element_type,
+                                               base + static_cast<uint32_t>(i * stride), out)) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                default:
+                    return false;
+                }
+            }
+
+            [[nodiscard]] auto wasm_c_abi() const -> bool { return options_.pointer_bits == 32; }
+
+            auto classify_c_aggregate(const sema::ResolvedType &type) -> CLowering {
+                const auto size = std::max(1u, size_of(type));
+                std::vector<CLeaf> leaves;
+                const bool flattened = collect_c_leaves(type, 0, leaves);
+
+                if (wasm_c_abi()) {
+                    // clang's WebAssembly rule: a recursively-single-scalar
+                    // aggregate passes directly AS that scalar; everything else
+                    // goes by reference (no byval copy metadata — the pointer
+                    // itself is the argument).
+                    if (flattened && leaves.size() == 1 && leaves[0].offset == 0) {
+                        return {.kind = CParamKind::OneWord, .w0 = leaves[0].type};
+                    }
+                    return {.kind = CParamKind::Memory};
+                }
+
+                if (!flattened || size > 16) return {.kind = CParamKind::Memory};
+                bool sse[2] = {true, true};
+                for (const auto &leaf : leaves) {
+                    // An unaligned member makes the whole aggregate MEMORY class
+                    // (the packed-struct rule).
+                    if (leaf.offset % std::min(leaf.size, 8u) != 0) {
+                        return {.kind = CParamKind::Memory};
+                    }
+                    const auto first = leaf.offset / 8;
+                    const auto last = (leaf.offset + leaf.size - 1) / 8;
+                    for (auto w = first; w <= last && w < 2; ++w) {
+                        if (!mir::is_float(leaf.type)) sse[w] = false;
+                    }
+                }
+                CLowering result;
+                result.w0 = sse[0] ? mir::Ty::F64 : mir::Ty::I64;
+                result.w1 = sse[1] ? mir::Ty::F64 : mir::Ty::I64;
+                if (size <= 8) {
+                    result.kind = CParamKind::OneWord;
+                    (sse[0] ? result.sse_words : result.int_words) = 1;
+                } else {
+                    result.kind = CParamKind::TwoWords;
+                    result.int_words = (sse[0] ? 0u : 1u) + (sse[1] ? 0u : 1u);
+                    result.sse_words = 2 - result.int_words;
+                }
+                return result;
+            }
+
+            // The full plan for a C-convention signature: classification plus the
+            // SysV register accounting that demotes an aggregate to MEMORY when
+            // its eightbytes no longer fit the remaining registers. Deterministic
+            // per signature, so caller and callee agree by construction.
+            auto build_c_abi_plan(const std::vector<sema::ResolvedType> &params,
+                                   const std::vector<sema::ResolvedType> &returns) -> CAbiPlan {
+                CAbiPlan plan;
+                uint32_t ints = 0;
+                uint32_t sses = 0;
+                if (returns.size() == 1 && !is_scalar(returns.front())) {
+                    plan.has_aggregate_ret = true;
+                    plan.ret = classify_c_aggregate(returns.front());
+                    if (plan.ret.kind == CParamKind::Memory && !wasm_c_abi()) {
+                        ints = 1; // the hidden sret pointer consumes RDI
+                    }
+                }
+                for (const auto &param : params) {
+                    if (is_scalar(param)) {
+                        plan.params.push_back({.kind = CParamKind::Scalar});
+                        (param.is_float() ? sses : ints) += 1;
+                        continue;
+                    }
+                    auto lowering = classify_c_aggregate(param);
+                    if (!wasm_c_abi() &&
+                        (lowering.kind == CParamKind::OneWord ||
+                         lowering.kind == CParamKind::TwoWords)) {
+                        if (ints + lowering.int_words > 6 || sses + lowering.sse_words > 8) {
+                            lowering = {.kind = CParamKind::Memory};
+                        } else {
+                            ints += lowering.int_words;
+                            sses += lowering.sse_words;
+                        }
+                    }
+                    plan.params.push_back(lowering);
+                }
+                return plan;
+            }
+
+            // Whether the plan changes anything relative to the Mirage shape —
+            // pure-scalar C signatures keep the plain path (and its coverage).
+            [[nodiscard]] static auto c_plan_is_trivial(const CAbiPlan &plan) -> bool {
+                if (plan.has_aggregate_ret) return false;
+                for (const auto &param : plan.params) {
+                    if (param.kind != CParamKind::Scalar) return false;
+                }
+                return true;
+            }
+
+            // The MIR signature for a C-convention function, from its plan.
+            [[nodiscard]] auto signature_for_c(const std::vector<sema::ResolvedType> &params,
+                                                const std::vector<sema::ResolvedType> &returns,
+                                                const bool is_variadic,
+                                                const CAbiPlan &plan) -> uint32_t {
+                mir::Signature sig;
+                sig.is_variadic = is_variadic;
+                std::vector<uint32_t> byval_sizes;
+                std::vector<uint32_t> byval_aligns;
+                bool any_byval = false;
+                const auto push_param = [&](const mir::Ty ty, const uint32_t byval_size,
+                                             const uint32_t byval_align) {
+                    sig.params.push_back(ty);
+                    byval_sizes.push_back(byval_size);
+                    byval_aligns.push_back(byval_align);
+                    any_byval |= byval_size != 0;
+                };
+
+                if (returns.size() == 1 && is_scalar(returns.front())) {
+                    sig.result = scalar_type(returns.front());
+                } else if (plan.has_aggregate_ret) {
+                    switch (plan.ret.kind) {
+                    case CParamKind::OneWord:
+                        sig.result = plan.ret.w0;
+                        break;
+                    case CParamKind::TwoWords:
+                        // The synthetic out-pointer is appended LAST, below.
+                        sig.c_ret_words = 2;
+                        sig.c_ret_sse[0] = plan.ret.w0 == mir::Ty::F64;
+                        sig.c_ret_sse[1] = plan.ret.w1 == mir::Ty::F64;
+                        break;
+                    default:
+                        // MEMORY: the hidden leading sret pointer; C additionally
+                        // returns it in RAX (wasm has no such rule).
+                        push_param(mir::Ty::Ptr, 0, 0);
+                        sig.c_sret = !wasm_c_abi();
+                        break;
+                    }
+                } else if (!returns.empty()) {
+                    // Multi-return through a C boundary has no C shape; keep the
+                    // Mirage sret blob (such a function is not C-callable anyway).
+                    push_param(mir::Ty::Ptr, 0, 0);
+                }
+
+                for (size_t i = 0; i < params.size(); ++i) {
+                    const auto &lowering = plan.params[i];
+                    switch (lowering.kind) {
+                    case CParamKind::Scalar:
+                        push_param(scalar_type(params[i]), 0, 0);
+                        break;
+                    case CParamKind::OneWord:
+                        push_param(lowering.w0, 0, 0);
+                        break;
+                    case CParamKind::TwoWords:
+                        push_param(lowering.w0, 0, 0);
+                        push_param(lowering.w1, 0, 0);
+                        break;
+                    case CParamKind::Memory:
+                        // On x86 a byval copy the backend spills to the stack; on
+                        // wasm the pointer itself IS the C argument.
+                        push_param(mir::Ty::Ptr,
+                                    wasm_c_abi() ? 0 : std::max(1u, size_of(params[i])),
+                                    wasm_c_abi() ? 0 : std::max(1u, align_of(params[i])));
+                        break;
+                    }
+                }
+                if (sig.c_ret_words == 2) push_param(mir::Ty::Ptr, 0, 0);
+                if (any_byval) {
+                    sig.byval_sizes = std::move(byval_sizes);
+                    sig.byval_aligns = std::move(byval_aligns);
+                }
+                return result_.module.intern_signature(std::move(sig));
+            }
+
             // The sema return list of a named function or 'ext fn' in 'path', or nullopt when
             // the name resolves to neither. An 'ext fn' declares at most one return.
             [[nodiscard]] auto symbol_return_types(const std::string &path, const std::string &name) const
@@ -543,11 +789,23 @@ namespace mirgen {
                             f.linkage = fn->is_pub || entry || fn->export_name
                                 ? mir::Linkage::External : mir::Linkage::Internal;
                             f.conv = fn->call_conv == sema::CallConv::C ? mir::CallConv::C : mir::CallConv::Mirage;
-                            f.signature = signature_for(fn->params, fn->return_types, fn->is_variadic);
+                            std::optional<CAbiPlan> c_plan;
+                            if (f.conv == mir::CallConv::C) {
+                                auto plan = build_c_abi_plan(fn->params, fn->return_types);
+                                if (!c_plan_is_trivial(plan)) c_plan = std::move(plan);
+                            }
+                            f.signature = c_plan
+                                ? signature_for_c(fn->params, fn->return_types, fn->is_variadic, *c_plan)
+                                : signature_for(fn->params, fn->return_types, fn->is_variadic);
                             f.has_body = true;
                             result_.module.functions.push_back(std::move(f));
                             function_index_[key(path, name)] =
                                 static_cast<uint32_t>(result_.module.functions.size() - 1);
+                            if (c_plan) {
+                                c_abi_plans_.emplace(
+                                    static_cast<uint32_t>(result_.module.functions.size() - 1),
+                                    std::move(*c_plan));
+                            }
 
                         } else if (const auto *ext = std::get_if<sema::ExtFunctionSymbol>(&sym)) {
                             // 'ext fn's are process-globally deduplicated by bare name, as in
@@ -566,13 +824,22 @@ namespace mirgen {
                             f.conv = mir::CallConv::C;
                             std::vector<sema::ResolvedType> returns;
                             if (ext->return_type) returns.push_back(*ext->return_type);
-                            f.signature = signature_for(ext->params, returns, ext->is_variadic);
+                            auto c_plan = build_c_abi_plan(ext->params, returns);
+                            const bool lowered = !c_plan_is_trivial(c_plan);
+                            f.signature = lowered
+                                ? signature_for_c(ext->params, returns, ext->is_variadic, c_plan)
+                                : signature_for(ext->params, returns, ext->is_variadic);
                             f.has_body = false;
                             f.import_module = ext->import_module;
                             f.import_name = ext->import_name;
                             result_.module.functions.push_back(std::move(f));
                             function_index_[key(path, name)] =
                                 static_cast<uint32_t>(result_.module.functions.size() - 1);
+                            if (lowered) {
+                                c_abi_plans_.emplace(
+                                    static_cast<uint32_t>(result_.module.functions.size() - 1),
+                                    std::move(c_plan));
+                            }
                         }
                     }
                 }
@@ -711,6 +978,7 @@ namespace mirgen {
                 local_types_.clear();
                 slots_escaping_.clear();
                 sret_ = mir::NO_VALUE;
+                c_ret_load_ty_.reset();
                 loop_stack_.clear();
                 defer_scopes_.clear();
                 next_block_is_loop_body_ = false;
@@ -983,6 +1251,7 @@ namespace mirgen {
                 local_types_.clear();
                 slots_escaping_.clear();
                 sret_ = mir::NO_VALUE;
+                c_ret_load_ty_.reset();
                 loop_stack_.clear();
                 defer_scopes_.clear();
                 next_block_is_loop_body_ = false;
@@ -1083,6 +1352,7 @@ namespace mirgen {
                 local_types_.clear();
                 slots_escaping_.clear();
                 sret_ = mir::NO_VALUE;
+                c_ret_load_ty_.reset();
                 loop_stack_.clear();
                 defer_scopes_.clear();
                 next_block_is_loop_body_ = false;
@@ -1096,17 +1366,22 @@ namespace mirgen {
                 // emits. promote_slots undoes this for the ones that never escape.
                 const auto &sig = result_.module.signatures[result_.module.functions[fn_index].signature];
 
-                size_t first_param = 0;
-                if (returns_via_sret(fn.return_types)) {
-                    sret_ = b.add_block_param(entry, mir::Ty::Ptr);
-                    result_.module.functions[fn_index].params.push_back(sret_);
-                    first_param = 1;
-                }
+                c_ret_load_ty_.reset();
+                if (const auto plan_it = c_abi_plans_.find(fn_index); plan_it != c_abi_plans_.end()) {
+                    bind_c_params(b, entry, fn_index, fn, plan_it->second);
+                } else {
+                    size_t first_param = 0;
+                    if (returns_via_sret(fn.return_types)) {
+                        sret_ = b.add_block_param(entry, mir::Ty::Ptr);
+                        result_.module.functions[fn_index].params.push_back(sret_);
+                        first_param = 1;
+                    }
 
-                for (size_t i = 0; i < fn.params.size() && i + first_param < sig.params.size(); ++i) {
-                    const auto param_value = b.add_block_param(entry, sig.params[i + first_param]);
-                    result_.module.functions[fn_index].params.push_back(param_value);
-                    bind_param(b, fn.decl->params[i].name, fn.params[i], param_value);
+                    for (size_t i = 0; i < fn.params.size() && i + first_param < sig.params.size(); ++i) {
+                        const auto param_value = b.add_block_param(entry, sig.params[i + first_param]);
+                        result_.module.functions[fn_index].params.push_back(param_value);
+                        bind_param(b, fn.decl->params[i].name, fn.params[i], param_value);
+                    }
                 }
 
                 current_returns_ = &fn.return_types;
@@ -1149,6 +1424,83 @@ namespace mirgen {
                 for (const auto &scope : scopes | std::views::reverse) {
                     emit_defers_in_scope(b, scope, returns);
                     if (scope.is_loop_body) break;
+                }
+            }
+
+            // The C-convention analogue of the binding loop in emit_body: parameters
+            // arrive per the function's CAbiPlan — scalars as themselves, one/two-
+            // eightbyte aggregates as their word scalars (reassembled into a local
+            // slot), MEMORY-class ones as a pointer (on x86 the backend aims it at
+            // the caller's byval stack copy). A two-eightbyte return appends the
+            // synthetic out-pointer parameter; a one-eightbyte return redirects
+            // sret_ at a local blob whose first word the 'ret' then carries.
+            void bind_c_params(mir::Builder &b, const mir::BlockId entry, const uint32_t fn_index,
+                                const sema::FunctionSymbol &fn, const CAbiPlan &plan) {
+                auto &mir_fn = result_.module.functions[fn_index];
+                if (plan.has_aggregate_ret && plan.ret.kind == CParamKind::Memory) {
+                    sret_ = b.add_block_param(entry, mir::Ty::Ptr);
+                    mir_fn.params.push_back(sret_);
+                } else if (!plan.has_aggregate_ret && returns_via_sret(fn.return_types)) {
+                    // Multi-return kept in Mirage shape (not C-expressible).
+                    sret_ = b.add_block_param(entry, mir::Ty::Ptr);
+                    mir_fn.params.push_back(sret_);
+                }
+
+                for (size_t i = 0; i < fn.params.size() && i < plan.params.size(); ++i) {
+                    const auto &lowering = plan.params[i];
+                    const auto &name = fn.decl->params[i].name;
+                    const auto &type = fn.params[i];
+                    switch (lowering.kind) {
+                    case CParamKind::Scalar: {
+                        const auto value = b.add_block_param(entry, scalar_type(type));
+                        mir_fn.params.push_back(value);
+                        bind_param(b, name, type, value);
+                        break;
+                    }
+                    case CParamKind::OneWord:
+                    case CParamKind::TwoWords: {
+                        const auto w0 = b.add_block_param(entry, lowering.w0);
+                        mir_fn.params.push_back(w0);
+                        mir::ValueId w1 = mir::NO_VALUE;
+                        if (lowering.kind == CParamKind::TwoWords) {
+                            w1 = b.add_block_param(entry, lowering.w1);
+                            mir_fn.params.push_back(w1);
+                        }
+                        // The slot is word-padded so the word stores cannot spill
+                        // into a neighbour.
+                        const auto slot = b.add_slot(
+                            std::max(lowering.kind == CParamKind::TwoWords ? 16u : 8u,
+                                     size_of(type)),
+                            std::max(8u, align_of(type)), name);
+                        b.store(b.slot_addr(slot), w0);
+                        if (w1 != mir::NO_VALUE) {
+                            b.store(b.ptr_add_const(b.slot_addr(slot), 8), w1);
+                        }
+                        locals_[name] = slot;
+                        local_types_[name] = type;
+                        break;
+                    }
+                    case CParamKind::Memory: {
+                        const auto value = b.add_block_param(entry, mir::Ty::Ptr);
+                        mir_fn.params.push_back(value);
+                        bind_param(b, name, type, value);
+                        break;
+                    }
+                    }
+                }
+
+                if (plan.has_aggregate_ret) {
+                    if (plan.ret.kind == CParamKind::TwoWords) {
+                        sret_ = b.add_block_param(entry, mir::Ty::Ptr);
+                        mir_fn.params.push_back(sret_);
+                    } else if (plan.ret.kind == CParamKind::OneWord) {
+                        const auto slot = b.add_slot(std::max(8u, size_of(fn.return_types.front())),
+                                                      std::max(8u, align_of(fn.return_types.front())),
+                                                      "cret");
+                        slots_escaping_.insert(slot);
+                        sret_ = b.slot_addr(slot);
+                        c_ret_load_ty_ = plan.ret.w0;
+                    }
                 }
             }
 
@@ -1585,7 +1937,9 @@ namespace mirgen {
                 }
 
                 // An aggregate is copied through the caller's sret pointer and the function
-                // returns void; only a scalar is returned by value.
+                // returns void; only a scalar is returned by value. A C function whose
+                // aggregate return is ONE eightbyte instead returns the blob's first word
+                // (bind_c_params aimed sret_ at a local blob for exactly this).
                 if (returns_via_sret(returns)) {
                     if (sret_ == mir::NO_VALUE) {
                         unsupported("returning an aggregate from this function", stmt.location);
@@ -1598,7 +1952,11 @@ namespace mirgen {
                         return;
                     }
                     emit_defers_for_return(b, returns);
-                    b.ret();
+                    if (c_ret_load_ty_) {
+                        b.ret(b.load(*c_ret_load_ty_, sret_));
+                    } else {
+                        b.ret();
+                    }
                     return;
                 }
 
@@ -3607,6 +3965,114 @@ namespace mirgen {
                 }
             }
 
+            // A direct call through a C-ABI plan (see signature_for_c). Arguments
+            // and returns are reshaped exactly as the plan says; everything the
+            // Mirage path does beyond that (variadic slice collection, trait
+            // dispatch) cannot occur on a C callee.
+            auto emit_c_call(mir::Builder &b, const ast::CallExpr &call, const uint32_t fn_index,
+                              const CAbiPlan &plan, const std::string &callee_module,
+                              const std::string &callee_name) -> mir::ValueId {
+                const auto &sig = result_.module.signatures[result_.module.functions[fn_index].signature];
+                const auto *callee_params = symbol_param_types(callee_module, callee_name);
+                const auto callee_returns = symbol_return_types(callee_module, callee_name);
+
+                std::vector<mir::ValueId> args;
+                mir::ValueId ret_blob = mir::NO_VALUE;
+
+                if (plan.has_aggregate_ret && plan.ret.kind == CParamKind::Memory) {
+                    const auto &ret_type = callee_returns->front();
+                    const auto slot = b.add_slot(std::max(1u, size_of(ret_type)),
+                                                  std::max(1u, align_of(ret_type)), "cret");
+                    slots_escaping_.insert(slot);
+                    ret_blob = b.slot_addr(slot);
+                    args.push_back(ret_blob);
+                }
+
+                const auto fixed = plan.params.size();
+                if (call.args.size() < fixed) {
+                    // Defaulted arguments on a C-lowered callee would need the same
+                    // callee-context evaluation the Mirage path does; report rather
+                    // than mis-pass.
+                    unsupported("a defaulted argument at a C-ABI call", call.location);
+                    return mir::NO_VALUE;
+                }
+                for (size_t i = 0; i < call.args.size(); ++i) {
+                    auto value = emit_expr(b, call.args[i]);
+                    if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                    if (callee_params && i < callee_params->size()) {
+                        value = coerce_arg(b, value, (*callee_params)[i], expr_type(call.args[i]));
+                    }
+                    if (i >= fixed) {
+                        // The C-variadic tail: scalars pass raw; an aggregate here
+                        // has no lowering yet.
+                        if (!is_scalar(expr_type(call.args[i]))) {
+                            unsupported("an aggregate argument to a C variadic", call.location);
+                            return mir::NO_VALUE;
+                        }
+                        args.push_back(value);
+                        continue;
+                    }
+                    const auto &lowering = plan.params[i];
+                    const auto &ptype = callee_params && i < callee_params->size()
+                        ? (*callee_params)[i] : expr_type(call.args[i]);
+                    switch (lowering.kind) {
+                    case CParamKind::Scalar:
+                        args.push_back(coerce_to(b, value, scalar_type(ptype),
+                                                  signed_type(expr_type(call.args[i]))));
+                        break;
+                    case CParamKind::OneWord:
+                    case CParamKind::TwoWords: {
+                        // Word-pick through a padded staging slot: reading the
+                        // words straight off the source could overread a
+                        // smaller-than-16-byte object.
+                        const auto temp = b.add_slot(16, 8, "carg");
+                        const auto base = b.slot_addr(temp);
+                        b.mem_copy(base, value,
+                                    b.const_int(usize_ty(), std::max(1u, size_of(ptype))));
+                        args.push_back(b.load(lowering.w0, base));
+                        if (lowering.kind == CParamKind::TwoWords) {
+                            args.push_back(b.load(lowering.w1, b.ptr_add_const(base, 8)));
+                        }
+                        break;
+                    }
+                    case CParamKind::Memory: {
+                        const auto temp = b.add_slot(std::max(1u, size_of(ptype)),
+                                                      std::max(1u, align_of(ptype)), "cbyval");
+                        slots_escaping_.insert(temp);
+                        const auto base = b.slot_addr(temp);
+                        b.mem_copy(base, value,
+                                    b.const_int(usize_ty(), std::max(1u, size_of(ptype))));
+                        args.push_back(base);
+                        break;
+                    }
+                    }
+                }
+
+                if (plan.has_aggregate_ret && plan.ret.kind == CParamKind::TwoWords) {
+                    const auto &ret_type = callee_returns->front();
+                    const auto slot = b.add_slot(std::max(16u, size_of(ret_type)),
+                                                  std::max(8u, align_of(ret_type)), "cret");
+                    slots_escaping_.insert(slot);
+                    ret_blob = b.slot_addr(slot);
+                    args.push_back(ret_blob);
+                }
+
+                const auto result = b.call(fn_index, sig.result, args);
+                if (!plan.has_aggregate_ret) return result;
+                switch (plan.ret.kind) {
+                case CParamKind::OneWord: {
+                    const auto &ret_type = callee_returns->front();
+                    const auto slot = b.add_slot(std::max(8u, size_of(ret_type)),
+                                                  std::max(8u, align_of(ret_type)), "cret");
+                    const auto base = b.slot_addr(slot);
+                    b.store(base, result);
+                    return base;
+                }
+                default:
+                    return ret_blob;
+                }
+            }
+
             auto emit_call(mir::Builder &b, const ast::CallExpr &call, const ast::Expr &expr) -> mir::ValueId {
                 if (!module_path_) {
                     unsupported("this call form", call.location);
@@ -3686,6 +4152,15 @@ namespace mirgen {
                     return mir::NO_VALUE;
                 }
 
+
+                // A C-convention callee whose signature the ABI plan changed routes
+                // through the dedicated lowering: aggregates become eightbyte words,
+                // byval copies, or the return shapes mir.hpp's metadata documents.
+                if (const auto plan_it = c_abi_plans_.find(it->second);
+                    plan_it != c_abi_plans_.end()) {
+                    return emit_c_call(b, call, it->second, plan_it->second,
+                                        *callee_module, callee_name);
+                }
 
                 const auto &sig = result_.module.signatures[result_.module.functions[it->second].signature];
 

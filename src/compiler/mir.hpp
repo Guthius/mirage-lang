@@ -196,11 +196,34 @@ namespace mir {
     };
 
     // A deduplicated function signature. wasm's call_indirect needs these as type indices;
-    // x86-64 ignores them.
+    // x86-64 reads the C-ABI metadata below.
     struct Signature {
         std::vector<Ty> params;
         Ty result = Ty::Void;
         bool is_variadic = false;
+
+        // ---- C-ABI lowering metadata (stage 8 prerequisite) -------------------
+        // mirgen lowers CallConv::C signatures to scalars itself (SysV eightbyte
+        // classification on x86-64, clang's wasm rule on wasm32); these fields
+        // carry the two shapes MIR values cannot express. Empty/zero everywhere
+        // for Mirage-convention signatures.
+        //
+        // byval_sizes[i] != 0: param i is a POINTER at the MIR level whose
+        // pointee the x86 backend copies onto the outgoing stack (SysV MEMORY
+        // class), this many bytes at byval_aligns[i]. On a defined function the
+        // backend materializes the param as a pointer into the caller's stack
+        // area instead of reading an argument register.
+        std::vector<uint32_t> byval_sizes;
+        std::vector<uint32_t> byval_aligns;
+        // A two-eightbyte C return: the LAST param is a synthetic out-pointer
+        // that is never passed physically; the backend stores (after a call) or
+        // loads (at a definition's return) the two return registers through it —
+        // rax/rdx or xmm0/xmm1 per word, chosen by c_ret_sse.
+        uint8_t c_ret_words = 0;
+        bool c_ret_sse[2] = {false, false};
+        // The C sret convention (aggregate returns > 16 bytes) additionally
+        // returns the hidden pointer in RAX.
+        bool c_sret = false;
     };
 
     enum class Linkage : uint8_t { Internal, External };
