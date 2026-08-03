@@ -255,9 +255,27 @@ Done:
   (13), calls dropping an ignorable error (13), inline `asm` (16), `default` (6),
   `for-in` over non-array operands (6), argument spreads (4).
 
+- **Stage 2, seventeenth increment** — the next tail tier in one pass: range `for-in`
+  (a usize-width counting loop with the index bound to the COUNTER, the element
+  re-narrowed per iteration — codegen's RangeExpr arm), untagged unions (members alias
+  offset 0; the single-member literal; `lvalue_type` through a union), member chains
+  rooted at namespaced globals (`other.origin.x = 42`), `default`/`undefined` in
+  expression and initializer-element positions, bare-import call redirection to the
+  origin module's declaration, and defaulted arguments — evaluated at the call site in
+  the CALLEE's context (declaring module's tables, no caller locals in scope), with a
+  generic's defaults additionally emitted under the instance's substitution env and
+  its own expr tables.
+
+  **Coverage: 104 of 271; zero verifier failures.**
+
+  Largest remaining blockers: `type_info_of` (18) and the reflection tables behind
+  it, calls dropping an ignorable error (13, needs the runtime unhandled-error panic
+  path), inline `asm` (18, needs the stage-5 encoder), macro calls (`align_up` 9 +
+  `hook` 2 — expression-template expansion), argument spreads (4), `stackalloc`,
+  `$option` as a value, and a handful of singletons.
+
   Still entirely absent from stage 2: inline `asm`, global initializers,
-  `type_info_of`/reflection tables, defaulted arguments, the runtime
-  unhandled-error check.
+  `type_info_of`/reflection tables, macros, the runtime unhandled-error check.
 
 Remaining:
 

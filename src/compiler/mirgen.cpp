@@ -369,6 +369,43 @@ namespace mirgen {
                 return nullptr;
             }
 
+            [[nodiscard]] auto symbol_function(const std::string &path, const std::string &name) const
+                -> const sema::FunctionSymbol * {
+                const auto mod = sema_.modules.find(path);
+                if (mod == sema_.modules.end()) return nullptr;
+                const auto it = mod->second.symbols.find(name);
+                if (it == mod->second.symbols.end()) return nullptr;
+                return std::get_if<sema::FunctionSymbol>(&it->second);
+            }
+
+            // Emits a defaulted argument's expression at the call site, in the CALLEE's own
+            // context: the default lives in -- and was checked into the tables of -- the
+            // declaring module, with no caller locals in scope (a caller local sharing a
+            // name with something the default references must not shadow it).
+            auto emit_default_arg(mir::Builder &b, const ast::Expr &default_expr,
+                                   const std::string &declaring_module,
+                                   const sema::ExprSideTables *exprs_override) -> mir::ValueId {
+                const auto mod = sema_.modules.find(declaring_module);
+                if (mod == sema_.modules.end()) return mir::NO_VALUE;
+                const auto *saved_path = module_path_;
+                const auto *saved_module = module_;
+                const auto *saved_exprs = exprs_;
+                auto saved_locals = std::move(locals_);
+                auto saved_types = std::move(local_types_);
+                module_path_ = &mod->first;
+                module_ = &mod->second;
+                exprs_ = exprs_override ? exprs_override : &mod->second.exprs;
+                locals_.clear();
+                local_types_.clear();
+                const auto value = emit_expr(b, default_expr);
+                module_path_ = saved_path;
+                module_ = saved_module;
+                exprs_ = saved_exprs;
+                locals_ = std::move(saved_locals);
+                local_types_ = std::move(saved_types);
+                return value;
+            }
+
             // Representation changes between an argument's own type and the parameter's,
             // the argument-position half of store_aggregate_value: an array where a slice
             // is expected materializes a (data, len) header; a slice where a bare pointer
@@ -2168,6 +2205,10 @@ namespace mirgen {
             // would never advance and the loop would spin -- the classic desugaring bug.
             void emit_for_in(mir::Builder &b, const ast::ForInStmt &stmt,
                               const std::vector<sema::ResolvedType> &returns) {
+                if (const auto *range = std::get_if<std::unique_ptr<ast::RangeExpr>>(&stmt.iterable)) {
+                    emit_for_in_range(b, stmt, **range, returns);
+                    return;
+                }
                 const auto iterable_type = expr_type(stmt.iterable);
                 const auto usize = usize_ty();
 
@@ -2246,6 +2287,76 @@ namespace mirgen {
                 locals_ = saved_locals;
                 local_types_ = saved_types;
 
+                if (!b.block_is_terminated()) b.jump(step);
+
+                b.set_insert_point(step);
+                b.store(b.slot_addr(index_slot),
+                         b.binary(mir::Op::Add, usize, b.load(usize, b.slot_addr(index_slot)),
+                                   b.const_int(usize, 1)));
+                b.jump(header);
+
+                b.set_insert_point(exit);
+            }
+
+            // 'for i, x in a..b' -- a counting loop. The counter runs at usize width (sema
+            // binds the index as usize; a narrower slot would put stack garbage in a body
+            // read's high half), while the ELEMENT carries the range's own value type,
+            // narrowed back per iteration. Mirrors codegen's RangeExpr arm exactly.
+            void emit_for_in_range(mir::Builder &b, const ast::ForInStmt &stmt, const ast::RangeExpr &range,
+                                    const std::vector<sema::ResolvedType> &returns) {
+                const auto usize = usize_ty();
+                const auto upper_type = expr_type(range.upper);
+                const bool is_signed = signed_type(upper_type);
+                const auto value_ty = is_scalar(upper_type) ? scalar_type(upper_type) : usize;
+
+                const auto index_slot = b.add_slot(pointer_bytes(), pointer_bytes(),
+                                                    stmt.index_name == "_" ? "for.idx" : stmt.index_name);
+                mir::ValueId lower = range.lower ? emit_expr(b, *range.lower) : b.const_int(value_ty, 0);
+                if (lower == mir::NO_VALUE) return;
+                b.store(b.slot_addr(index_slot), coerce_to(b, lower, usize, is_signed));
+                const auto upper_raw = emit_expr(b, range.upper);
+                if (upper_raw == mir::NO_VALUE) return;
+                const auto upper = coerce_to(b, upper_raw, usize, is_signed);
+
+                uint32_t element_slot = UINT32_MAX;
+                if (stmt.element_name != "_") {
+                    element_slot = b.add_slot(std::max(1u, size_of(upper_type)),
+                                               std::max(1u, align_of(upper_type)), stmt.element_name);
+                }
+
+                const auto header = b.create_block("for.cond");
+                const auto body = b.create_block("for.body");
+                const auto step = b.create_block("for.step");
+                const auto exit = b.create_block("for.end");
+
+                b.jump(header);
+                b.set_insert_point(header);
+                const auto i = b.load(usize, b.slot_addr(index_slot));
+                b.branch(b.compare(is_signed ? mir::Op::ICmpSlt : mir::Op::ICmpUlt, i, upper), body, exit);
+
+                b.set_insert_point(body);
+                if (element_slot != UINT32_MAX) {
+                    const auto current = b.load(usize, b.slot_addr(index_slot));
+                    b.store(b.slot_addr(element_slot), coerce_to(b, current, value_ty, is_signed));
+                }
+
+                const auto saved_locals = locals_;
+                const auto saved_types = local_types_;
+                if (stmt.index_name != "_") {
+                    locals_[stmt.index_name] = index_slot;
+                    local_types_[stmt.index_name] = sema::ResolvedType{.kind = sema::TypeKind::USize};
+                }
+                if (element_slot != UINT32_MAX) {
+                    locals_[stmt.element_name] = element_slot;
+                    local_types_[stmt.element_name] = upper_type;
+                }
+
+                loop_stack_.push_back({step, exit});
+                next_block_is_loop_body_ = true;
+                emit_stmt(b, stmt.body, returns);
+                loop_stack_.pop_back();
+                locals_ = saved_locals;
+                local_types_ = saved_types;
                 if (!b.block_is_terminated()) b.jump(step);
 
                 b.set_insert_point(step);
@@ -2351,6 +2462,15 @@ namespace mirgen {
                             }
                         }
                     }
+                    // An untagged union member reads its own type out of the shared storage.
+                    if (object_type.kind == sema::TypeKind::Union) {
+                        if (const auto *info = sema_.union_at(object_type.union_index);
+                            info && !info->is_tagged) {
+                            for (const auto &m : info->members) {
+                                if (m.name == (*member)->member) return m.type;
+                            }
+                        }
+                    }
                 }
                 if (const auto *index = std::get_if<std::unique_ptr<ast::IndexOrInstantiateExpr>>(&expr)) {
                     const auto operand_type = lvalue_type((*index)->operand);
@@ -2419,7 +2539,16 @@ namespace mirgen {
             // module namespace. Auto-deref matches the language: 'p.x' on a '*Point' reads
             // through the pointer without an explicit '.*'.
             auto emit_member_address(mir::Builder &b, const ast::MemberExpr &member) -> mir::ValueId {
-                auto object_type = expr_type(member.object);
+                // 'mod.g' -- a global reached through a module namespace.
+                if (const auto *target = namespace_target(member.object)) {
+                    if (const auto g = global_index_.find(key(*target, member.member));
+                        g != global_index_.end()) {
+                        return b.global_addr(g->second);
+                    }
+                    return mir::NO_VALUE;
+                }
+
+                auto object_type = lvalue_type(member.object);
 
                 mir::ValueId base = mir::NO_VALUE;
                 if (object_type.kind == sema::TypeKind::Pointer) {
@@ -2431,9 +2560,20 @@ namespace mirgen {
                 } else {
                     base = emit_address(b, member.object);
                 }
-                if (base == mir::NO_VALUE || object_type.kind != sema::TypeKind::Struct) {
+                if (base == mir::NO_VALUE) return mir::NO_VALUE;
+
+                // An UNTAGGED union's members all alias its storage: every member lives at
+                // offset 0 (codegen's emit_union_expr_value stores there too).
+                if (object_type.kind == sema::TypeKind::Union) {
+                    const auto *info = sema_.union_at(object_type.union_index);
+                    if (info && !info->is_tagged) {
+                        for (const auto &m : info->members) {
+                            if (m.name == member.member) return base;
+                        }
+                    }
                     return mir::NO_VALUE;
                 }
+                if (object_type.kind != sema::TypeKind::Struct) return mir::NO_VALUE;
 
                 const auto *info = sema_.struct_at(object_type.struct_index);
                 if (!info) return mir::NO_VALUE;
@@ -2723,6 +2863,28 @@ namespace mirgen {
                         // 'type_of(T)' is a compile-time constant: the type's interned id,
                         // which sema assigned. Nothing is computed at runtime.
                         return emit_type_id(b, expr, v->location);
+
+                    } else if constexpr (std::is_same_v<V, ast::DefaultExpr>) {
+                        // In expression position (an assignment's RHS, a return value): a
+                        // scalar is its zero; an aggregate is a fresh zeroed slot whose
+                        // address is the value, like any other aggregate expression.
+                        const auto type = expr_type(expr);
+                        if (is_scalar(type)) {
+                            const auto ty = scalar_type(type);
+                            if (ty == mir::Ty::Ptr) return b.const_null();
+                            if (mir::is_float(ty)) return b.const_float(ty, 0.0);
+                            return b.const_int(ty, 0);
+                        }
+                        if (type.kind != sema::TypeKind::Invalid && type.kind != sema::TypeKind::Void) {
+                            const auto slot = b.add_slot(std::max(1u, size_of(type)),
+                                                          std::max(1u, align_of(type)), "default");
+                            const auto base = b.slot_addr(slot);
+                            b.mem_set(base, b.const_int(mir::Ty::I8, 0),
+                                       b.const_int(usize_ty(), size_of(type)));
+                            return base;
+                        }
+                        unsupported("'default' in this position", loc);
+                        return mir::NO_VALUE;
 
                     } else if constexpr (std::is_same_v<V, ast::DotIdentExpr>) {
                         return emit_dot_ident(b, v, expr);
@@ -3150,7 +3312,16 @@ namespace mirgen {
                         return emit_indirect_call(b, call);
                     }
                     callee_name = ident->name;
-                    it = function_index_.find(key(*module_path_, callee_name));
+                    // A bare import is an alias: the function itself was declared (once)
+                    // under its ORIGIN module, so the call redirects there.
+                    if (module_) {
+                        if (const auto origin = module_->bare_import_origins.find(callee_name);
+                            origin != module_->bare_import_origins.end()) {
+                            callee_module = &origin->second.module_path;
+                            callee_name = origin->second.symbol_name;
+                        }
+                    }
+                    it = function_index_.find(key(*callee_module, callee_name));
                 } else if (const auto *member = std::get_if<std::unique_ptr<ast::MemberExpr>>(&call.callee)) {
                     if (const auto *target = namespace_target((*member)->object)) {
                         callee_name = (*member)->member;
@@ -3204,6 +3375,25 @@ namespace mirgen {
                     args.push_back(slot < sig.params.size()
                         ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
                         : value);
+                }
+                // Trailing defaulted parameters, evaluated here in the callee's own context.
+                if (!sig.is_variadic && args.size() < sig.params.size()) {
+                    if (const auto *fn_sym = symbol_function(*callee_module, callee_name);
+                        fn_sym && fn_sym->decl) {
+                        const size_t implicit = via_sret ? 1 : 0;
+                        while (args.size() < sig.params.size()) {
+                            const size_t i = args.size() - implicit;
+                            if (i >= fn_sym->decl->params.size() ||
+                                !fn_sym->decl->params[i].default_value) {
+                                break;
+                            }
+                            const auto value = emit_default_arg(
+                                b, *fn_sym->decl->params[i].default_value, *callee_module, nullptr);
+                            if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                            args.push_back(coerce_to(b, value, sig.params[args.size()],
+                                                      i < fn_sym->params.size() && signed_type(fn_sym->params[i])));
+                        }
+                    }
                 }
                 if (!sig.is_variadic && args.size() != sig.params.size()) {
                     unsupported("a call with defaulted arguments", call.location);
@@ -3486,6 +3676,36 @@ namespace mirgen {
                         ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
                         : value);
                 }
+                // A generic's defaulted argument may reference the declaration's own generic
+                // parameters ('n := size_of(K)'); materialized HERE, so the instance's
+                // substitution env must be active for just these expressions, and the
+                // records live in the instance's own expr tables.
+                if (!sig.is_variadic && args.size() < sig.params.size()) {
+                    const auto &generic_params = instance.decl
+                        ? instance.decl->generic_params : *instance.generic_params_for_method;
+                    const auto env = sema::build_generic_binding_env(generic_params, instance.args);
+                    const sema::ActiveGenericEnvStack::PushGuard env_guard(
+                        const_cast<sema::Program &>(sema_).active_generic_env_stack, &env);
+                    const auto *instance_exprs = sema_.find_fn_instance_exprs(instance_idx);
+                    const size_t implicit = (sret_slot != mir::NO_VALUE ? 1 : 0) + (instance.impl_decl ? 1 : 0);
+                    while (args.size() < sig.params.size()) {
+                        const size_t i = args.size() - implicit;
+                        const ast::Expr *default_expr = nullptr;
+                        if (instance.decl && i < instance.decl->params.size() &&
+                            instance.decl->params[i].default_value) {
+                            default_expr = &*instance.decl->params[i].default_value;
+                        } else if (instance.impl_decl && i < instance.impl_decl->params.size() &&
+                                    instance.impl_decl->params[i].default_value) {
+                            default_expr = &*instance.impl_decl->params[i].default_value;
+                        }
+                        if (!default_expr) break;
+                        const auto value = emit_default_arg(b, *default_expr, instance.module_path, instance_exprs);
+                        if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                        args.push_back(coerce_to(b, value, sig.params[args.size()],
+                                                  i < instance.param_types.size() &&
+                                                      signed_type(instance.param_types[i])));
+                    }
+                }
                 if (!sig.is_variadic && args.size() != sig.params.size()) {
                     unsupported("a call with defaulted arguments", call.location);
                     return mir::NO_VALUE;
@@ -3638,6 +3858,18 @@ namespace mirgen {
                         ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
                         : value);
                 }
+                if (args.size() < sig.params.size() && info->decl) {
+                    const size_t implicit = (sret_slot != mir::NO_VALUE ? 1 : 0) + 1; // sret + self
+                    while (args.size() < sig.params.size()) {
+                        const size_t i = args.size() - implicit;
+                        if (i >= info->decl->params.size() || !info->decl->params[i].default_value) break;
+                        const auto value = emit_default_arg(
+                            b, *info->decl->params[i].default_value, info->impl_module, nullptr);
+                        if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                        args.push_back(coerce_to(b, value, sig.params[args.size()],
+                                                  i < info->param_types.size() && signed_type(info->param_types[i])));
+                    }
+                }
                 if (args.size() != sig.params.size()) {
                     unsupported("a method call with defaulted arguments", call.location);
                     return mir::NO_VALUE;
@@ -3678,6 +3910,28 @@ namespace mirgen {
                     return mir::NO_VALUE;
                 }
                 if (is_scalar(type)) {
+                    unsupported("this braced initializer", sema::get_expr_location(expr));
+                    return mir::NO_VALUE;
+                }
+                // An UNTAGGED union literal has exactly one member field (sema enforces);
+                // its value lands at offset 0 over a zeroed blob.
+                if (type.kind == sema::TypeKind::Union) {
+                    const auto *info = sema_.union_at(type.union_index);
+                    const auto *fields = std::get_if<ast::StructExpr>(&init);
+                    if (info && !info->is_tagged && fields && fields->fields.size() == 1) {
+                        const auto member = std::ranges::find(info->members, fields->fields.front().name,
+                                                               &sema::UnionMember::name);
+                        if (member != info->members.end()) {
+                            const auto slot = b.add_slot(std::max(1u, size_of(type)),
+                                                          std::max(1u, align_of(type)), "union");
+                            const auto base = b.slot_addr(slot);
+                            b.mem_set(base, b.const_int(mir::Ty::I8, 0), b.const_int(usize_ty(), size_of(type)));
+                            if (!store_element(b, base, 0, member->type, fields->fields.front().expr)) {
+                                return mir::NO_VALUE;
+                            }
+                            return base;
+                        }
+                    }
                     unsupported("this braced initializer", sema::get_expr_location(expr));
                     return mir::NO_VALUE;
                 }
@@ -3741,6 +3995,12 @@ namespace mirgen {
             // copied. Returns false if the element could not be lowered (already reported).
             auto store_element(mir::Builder &b, const mir::ValueId base, const uint32_t offset,
                                 const sema::ResolvedType &type, const ast::Expr &value) -> bool {
+                // 'default' is what the enclosing zero fill already produced; 'undefined'
+                // deliberately leaves the element unspecified. Neither needs a store.
+                if (std::holds_alternative<ast::DefaultExpr>(value) ||
+                    std::holds_alternative<ast::UndefinedExpr>(value)) {
+                    return true;
+                }
                 const auto address = b.ptr_add_const(base, offset);
                 const auto emitted = emit_expr(b, value);
                 if (emitted == mir::NO_VALUE) return false;

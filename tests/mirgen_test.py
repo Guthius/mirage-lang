@@ -530,6 +530,25 @@ def case_generic_instances():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_ranges_unions_defaults():
+    """Range for-in counts at usize width with the index bound to the COUNTER;
+    untagged union members alias offset 0; defaulted arguments evaluate in the
+    callee's own context at the call site."""
+    r = emit_mir("type U = union {\n  as_i64: i64\n  as_f64: f64\n}\n"
+                 "fn add(a: i32, b: i32 = 30) -> i32 { return a + b }\n"
+                 "pub fn main() -> i32 {\n"
+                 "  mut sum: i32 = 0\n"
+                 "  for i, x in 2..5 { sum += cast(i, i32) + x }\n"
+                 "  mut u: U = { .as_i64 = 7 }\n"
+                 "  u.as_i64 = 5\n"
+                 "  mut d: i32 = default\n"
+                 "  return sum + cast(u.as_i64, i32) + d + add(7)\n}\n")
+    check(r.returncode == 0, f"ranges/unions/defaults lower ({r.stderr.strip()[:140]})")
+    check("^for.cond" in r.stdout and "^for.step" in r.stdout, "a range is a counting loop")
+    check("const.int 30" in r.stdout, "the omitted argument's default is emitted at the call site")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_switch_and_conditions():
     r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
                  "pub fn main() -> i32 {\n"
@@ -638,6 +657,7 @@ def main() -> int:
     case_defer_ternary_sizeof()
     case_bitsets_and_slice_casts()
     case_generic_instances()
+    case_ranges_unions_defaults()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()
