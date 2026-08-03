@@ -29,15 +29,18 @@ Three repositories, all on disk as siblings:
 | `/mnt/projects/Projects/mirage303` | A 90-file VB6→Mirage game port; the real-world consumer. |
 
 The compiler is `mirec`/`mirage`: lexer → parser → module resolver → multi-phase sema →
-codegen. `mirage_core` (everything except `codegen.cpp` and `main.cpp`) links no LLVM;
-`mirage-lsp` links only `mirage_core`.
+code generation. There are now TWO code generators behind `--backend=`: `codegen.cpp`
+(LLVM, the default) and the native path — `mirgen.cpp` → `mir_passes.cpp` →
+`backend_x86.cpp` → `x86_encoder.cpp` → `elf_writer.cpp`. `mirage_core` (everything
+except `codegen.cpp` and `main.cpp`) links no LLVM, which is why the whole native path
+lives there; `mirage-lsp` links only `mirage_core`.
 
 ### Build and test
 
 ```sh
 cd /mnt/projects/Projects/Mirage/Mirage-Cpp
 just build            # configure + build → build/mirage, build/mirage-lsp
-just test             # ctest (6 targets) + every tests/*_test.py
+just test             # ctest (7 targets) + every tests/*_test.py
 ```
 
 `just test` defaults `MIRAGE_STD` to `../Mirage`; override it if your stdlib is elsewhere.
@@ -177,10 +180,18 @@ differential test is most valuable exactly when the new backend is newest.
 
 ### 3.2 Corpus migration (`TODO.md` §6.2)
 
-~145 positive fixtures in `examples/` are pinned by exit code in `examples_expected.json`.
-Decision D7 says they should become `@test` functions in `tests/mir/` with real assertions.
-Negative (compile-fail) fixtures stay in `examples/` — a program that does not compile
-cannot be a test function. Four modules / 35 tests have migrated so far as the pattern.
+**83** positive fixtures in `examples/` are pinned by exit code in `examples_expected.json`
+(the other 188 entries are negative, compile-fail fixtures). Decision D7 says the positive
+ones should become `@test` functions in `tests/mir/` with real assertions. Negative
+fixtures stay in `examples/` — a program that does not compile cannot be a test function.
+Four modules / 35 tests have migrated so far as the pattern.
+
+The 83/188 split is worth internalizing before reading any coverage claim about this
+corpus. "159 of 271 directories emit MIR cleanly" and "74 of 74 positive fixtures match
+under both backends" describe the same tree: most of the 271 are compile-fail fixtures
+that can never lower, and the ones that do lower but are not in the 74 are negative
+fixtures whose *sema* stage fails later. Prefer the 74/74 figure — it is the one tied to
+observable behaviour.
 
 Delete each migrated fixture's baseline entry in the same commit; the harness reports
 orphaned entries in both directions (`examples_smoke_test.py:243-246`).
@@ -215,8 +226,12 @@ exactly this reason — always pass it truthfully.
 three places; block params are simpler to allocate registers for and to lower to wasm.
 
 **Symbol mangling must match `codegen.cpp` exactly** (`__mir_<module>_<name>`,
-`Type::method`, `Type::Trait::method`). Both backends coexist until stage 10, and the
-differential test compares their symbols directly.
+`Type::method`, `Type::Trait::method`). Both backends coexist until stage 10, so a
+program's symbols must not change when the flag flips: anything linking against a Mirage
+object — C code, a second Mirage object, an `@export`ed name — would otherwise break on
+a backend switch alone. (The differential harness compares exit codes and stdout, not
+symbols; this invariant is not enforced by a test, which is exactly why it is written
+down here.)
 
 **Data-oriented, index-based, no templates/inheritance/variant-of-unique_ptr in MIR.** This
 compiler gets rewritten in Mirage; the port should be a transliteration, not a redesign.

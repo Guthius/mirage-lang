@@ -599,9 +599,11 @@ Remaining:
 - ~~**6.1** Stale known-bug annotation claiming `examples/lexer` hangs the parser.~~
   `cce8954` — it parses in ~3 ms; the hang was fixed by `85d73f9` and the comment was never
   updated.
-- **6.2** ~145 positive fixtures still pinned by exit code in `examples_expected.json`
+- **6.2** **83** positive fixtures still pinned by exit code in `examples_expected.json`
   rather than migrated to `@test` functions in `tests/mir/` (decision D7). **Deferred by
-  decision this session** in favour of the backend. Not a correctness gap — those fixtures
+  decision this session** in favour of the backend. (83 is a measurement, 2026-08-03; the
+  file's other 188 entries are negative fixtures, which stay by D7. An earlier "~145" here
+  was an estimate that was never a count.) Not a correctness gap — those fixtures
   all pass — but their assertions say "exit 24" where they could say what they expected.
   Clusters, largest first: generics 18, attributes 13, asm 9, traits 9, errors 7, types 7.
 - ~~**6.3** `#link(lib, …)` linking untested.~~ Claim was wrong: both `ext_abi_test.py` and
