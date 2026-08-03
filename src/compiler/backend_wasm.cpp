@@ -13,6 +13,7 @@
 // the corpus can express.
 
 #include <algorithm>
+#include <bit>
 #include <format>
 #include <string>
 #include <unordered_map>
@@ -90,6 +91,14 @@ namespace backend_wasm {
             uint32_t sp_global = 0;
             int64_t fmod_index = -1;
             int64_t fmodf_index = -1;
+            // Object mode (stage 8): addresses and indices become relocations
+            // against these symbol indices instead of resolved constants.
+            bool object_mode = false;
+            const std::vector<uint32_t> *fn_symbol = nullptr;     // per mir function
+            const std::vector<uint32_t> *data_symbol = nullptr;   // per mir global
+            uint32_t sp_symbol = 0;
+            int64_t fmod_symbol = -1;
+            int64_t fmodf_symbol = -1;
 
             wasm::Code code;
             std::vector<ValType> locals;             // beyond the parameters
@@ -116,6 +125,17 @@ namespace backend_wasm {
 
             void get(const mir::ValueId v) { code.local_get(value_local[v]); }
             void set(const mir::ValueId v) { code.local_set(value_local[v]); }
+
+            // Shadow-stack pointer access: a module-local global in a standalone
+            // build, the imported (relocated) 'env.__stack_pointer' in an object.
+            void sp_get() {
+                if (object_mode) code.global_get_reloc(0, sp_symbol);
+                else code.global_get(sp_global);
+            }
+            void sp_set() {
+                if (object_mode) code.global_set_reloc(0, sp_symbol);
+                else code.global_set(sp_global);
+            }
 
             [[nodiscard]] auto ty(const mir::ValueId v) const -> mir::Ty {
                 return fn.values[v].type;
@@ -314,13 +334,13 @@ namespace backend_wasm {
                     }
                     size = (size + 15) & ~15u;
 
-                    code.global_get(sp_global);
+                    sp_get();
                     code.local_set(va_saved_local);
-                    code.global_get(sp_global);
+                    sp_get();
                     code.i32_const(static_cast<int32_t>(size));
                     code.op(op::i32_sub);
                     code.local_tee(va_base_local);
-                    code.global_set(sp_global);
+                    sp_set();
                     for (size_t i = fixed; i < inst.args.size(); ++i) {
                         const auto arg = inst.args[i];
                         const auto type = ty(arg);
@@ -366,7 +386,10 @@ namespace backend_wasm {
                 if (c_variadic) code.local_get(va_base_local);
                 if (indirect) {
                     get(inst.a); // the table index
-                    code.call_indirect(type_of_sig[signature]);
+                    if (object_mode) code.call_indirect_reloc(type_of_sig[signature]);
+                    else code.call_indirect(type_of_sig[signature]);
+                } else if (object_mode) {
+                    code.call_reloc(wasm_index[inst.a], (*fn_symbol)[inst.a]);
                 } else {
                     code.call(wasm_index[inst.a]);
                 }
@@ -386,7 +409,7 @@ namespace backend_wasm {
                     // Rebalance immediately (not at function exit): a variadic
                     // call in a loop must not creep the shadow stack downward.
                     code.local_get(va_saved_local);
-                    code.global_set(sp_global);
+                    sp_set();
                 }
             }
 
@@ -418,10 +441,20 @@ namespace backend_wasm {
                     set(inst.result);
                     return;
                 case Op::GlobalAddr:
+                    if (object_mode) {
+                        code.i32_const_memory((*data_symbol)[inst.a], 0);
+                        set(inst.result);
+                        return;
+                    }
                     code.i32_const(static_cast<int32_t>(global_address[inst.a]));
                     set(inst.result);
                     return;
                 case Op::FuncAddr:
+                    if (object_mode) {
+                        code.i32_const_table((*fn_symbol)[inst.a]);
+                        set(inst.result);
+                        return;
+                    }
                     if (table_slot[inst.a] == 0) {
                         error(std::format("wasm backend: function '{}' address taken but "
                                            "not in the table", module.functions[inst.a].name));
@@ -437,13 +470,13 @@ namespace backend_wasm {
                     set(inst.result);
                     return;
                 case Op::StackAlloc:
-                    code.global_get(sp_global);
+                    sp_get();
                     push_address(inst.a);
                     code.op(op::i32_sub);
                     code.i32_const(-16);
                     code.op(op::i32_and);
                     code.local_tee(value_local[inst.result]);
-                    code.global_set(sp_global);
+                    sp_set();
                     return;
 
                 case Op::Load: {
@@ -621,7 +654,12 @@ namespace backend_wasm {
                     }
                     get(inst.a);
                     get(inst.b);
-                    code.call(static_cast<uint32_t>(callee));
+                    if (object_mode) {
+                        code.call_reloc(static_cast<uint32_t>(callee),
+                                         static_cast<uint32_t>(dbl ? fmod_symbol : fmodf_symbol));
+                    } else {
+                        code.call(static_cast<uint32_t>(callee));
+                    }
                     set(inst.result);
                     return;
                 }
@@ -795,7 +833,7 @@ namespace backend_wasm {
                 case Op::Return:
                     if (needs_frame) {
                         code.local_get(saved_sp_local);
-                        code.global_set(sp_global);
+                        sp_set();
                     }
                     if (!inst.args.empty()) get(inst.args.front());
                     code.return_op();
@@ -812,12 +850,12 @@ namespace backend_wasm {
                 assign_locals();
 
                 if (needs_frame) {
-                    code.global_get(sp_global);
+                    sp_get();
                     code.local_tee(saved_sp_local);
                     code.i32_const(static_cast<int32_t>(frame_size));
                     code.op(op::i32_sub);
                     code.local_tee(frame_local);
-                    code.global_set(sp_global);
+                    sp_set();
                 }
 
                 if (!use_dispatch) {
@@ -1101,6 +1139,250 @@ namespace backend_wasm {
             if (!fn.has_body || fn.linkage != mir::Linkage::External) continue;
             if (!taken.insert(fn.name).second) continue;
             out.exports.push_back({fn.name, wasm::ExportKind::Function, wasm_index[i]});
+        }
+
+        if (!result.errors.empty()) return result;
+        result.bytes = out.serialize();
+        result.ok = true;
+        return result;
+    }
+
+    auto generate_object(const mir::Module &module, const uint32_t test_info,
+                          const uint32_t test_runner) -> Result {
+        Result result;
+        if (module.pointer_bits != 32) {
+            result.errors.push_back("wasm backend: module was lowered with 64-bit pointers; "
+                                     "compile with a wasm32 target");
+            return result;
+        }
+
+        wasm::ObjectModule out;
+
+        // ---- reference scan (as in generate) ---------------------------------
+        std::unordered_set<uint32_t> referenced;
+        bool needs_fmod = false;
+        bool needs_fmodf = false;
+        std::vector<bool> address_taken(module.functions.size(), false);
+        for (const auto &fn : module.functions) {
+            if (!fn.has_body) continue;
+            for (const auto &block : fn.blocks) {
+                for (const auto &inst : block.insts) {
+                    if (inst.op == mir::Op::Call) referenced.insert(inst.a);
+                    if (inst.op == mir::Op::FuncAddr) {
+                        referenced.insert(inst.a);
+                        address_taken[inst.a] = true;
+                    }
+                    if (inst.op == mir::Op::FRem) {
+                        (inst.type == mir::Ty::F64 ? needs_fmod : needs_fmodf) = true;
+                    }
+                }
+            }
+        }
+        for (const auto &global : module.globals) {
+            for (const auto &reloc : global.relocations) {
+                if (reloc.kind == mir::Relocation::Kind::FunctionAddr) {
+                    referenced.insert(reloc.target);
+                    address_taken[reloc.target] = true;
+                }
+            }
+        }
+
+        std::vector<uint32_t> type_of_sig(module.signatures.size());
+        for (size_t i = 0; i < module.signatures.size(); ++i) {
+            type_of_sig[i] = out.intern_type(func_type_of(module, static_cast<uint32_t>(i)));
+        }
+
+        // ---- function index space and symbols, imports first ------------------
+        // Symbol i corresponds to function index i (imports, then defined, then
+        // the entry wrapper), followed by data symbols, then __stack_pointer.
+        std::vector<uint32_t> wasm_index(module.functions.size(), UINT32_MAX);
+        std::vector<uint32_t> fn_symbol(module.functions.size(), UINT32_MAX);
+        for (size_t i = 0; i < module.functions.size(); ++i) {
+            const auto &fn = module.functions[i];
+            if (fn.has_body || !referenced.contains(static_cast<uint32_t>(i))) continue;
+            wasm_index[i] = static_cast<uint32_t>(out.imports.size());
+            fn_symbol[i] = static_cast<uint32_t>(out.function_symbols.size());
+            out.imports.push_back({
+                .module = fn.import_module.empty() ? "env" : fn.import_module,
+                .name = fn.import_name.empty() ? fn.name : fn.import_name,
+                .type_index = type_of_sig[fn.signature],
+            });
+            out.function_symbols.push_back({.name = {}, .function_index = wasm_index[i],
+                                             .defined = false, .exported = false});
+        }
+        int64_t fmod_index = -1;
+        int64_t fmodf_index = -1;
+        int64_t fmod_symbol = -1;
+        int64_t fmodf_symbol = -1;
+        const auto add_runtime_import = [&](const char *name, const ValType ty) {
+            const auto index = static_cast<int64_t>(out.imports.size());
+            const auto symbol = static_cast<int64_t>(out.function_symbols.size());
+            out.imports.push_back({"env", name, out.intern_type({{ty, ty}, {ty}})});
+            out.function_symbols.push_back({.name = {}, .function_index = static_cast<uint32_t>(index),
+                                             .defined = false, .exported = false});
+            return std::pair{index, symbol};
+        };
+        if (needs_fmod) std::tie(fmod_index, fmod_symbol) = add_runtime_import("fmod", ValType::F64);
+        if (needs_fmodf) std::tie(fmodf_index, fmodf_symbol) = add_runtime_import("fmodf", ValType::F32);
+
+        const auto import_count = static_cast<uint32_t>(out.imports.size());
+        uint32_t defined = 0;
+        int64_t main_index = -1;
+        int64_t init_index = -1;
+        for (size_t i = 0; i < module.functions.size(); ++i) {
+            const auto &fn = module.functions[i];
+            if (!fn.has_body) continue;
+            wasm_index[i] = import_count + defined++;
+            fn_symbol[i] = static_cast<uint32_t>(out.function_symbols.size());
+            if (fn.name == "main") main_index = static_cast<int64_t>(i);
+            if (fn.name == "_init") init_index = static_cast<int64_t>(i);
+            out.function_symbols.push_back({
+                .name = fn.name,
+                .function_index = wasm_index[i],
+                .defined = true,
+                .exported = fn.linkage == mir::Linkage::External && fn.name != "main",
+            });
+        }
+        // The entry wrapper takes the C name 'main' (emscripten's runtime calls
+        // it); the user's own main keeps its body under an internal spelling.
+        const bool test_mode = test_info != UINT32_MAX && test_runner != UINT32_MAX;
+        const bool have_wrapper = main_index >= 0 || test_mode;
+        uint32_t wrapper_index = 0;
+        if (have_wrapper) {
+            if (main_index >= 0) out.function_symbols[fn_symbol[main_index]].name = "__original_main";
+            wrapper_index = import_count + defined;
+            out.function_symbols.push_back({.name = "main", .function_index = wrapper_index,
+                                             .defined = true, .exported = true});
+        }
+
+        // ---- table slots for address-taken functions ---------------------------
+        for (size_t i = 0; i < module.functions.size(); ++i) {
+            if (address_taken[i] && wasm_index[i] != UINT32_MAX) {
+                out.table_elements.push_back(wasm_index[i]);
+            }
+        }
+
+        // ---- data segments and symbols ----------------------------------------
+        // One segment per global; layout is wasm-ld's. BSS globals carry a
+        // zero-filled segment — small in this compiler's output, and simpler
+        // than the WASM_SEG_FLAG dance.
+        std::vector<uint32_t> data_symbol(module.globals.size(), UINT32_MAX);
+        const auto data_symbol_base = static_cast<uint32_t>(out.function_symbols.size());
+        for (size_t i = 0; i < module.globals.size(); ++i) {
+            const auto &global = module.globals[i];
+            const auto segment = static_cast<uint32_t>(out.segments.size());
+            data_symbol[i] = data_symbol_base + static_cast<uint32_t>(out.data_symbols.size());
+            const char *prefix = global.init.empty() ? ".bss."
+                                : global.is_constant ? ".rodata." : ".data.";
+            wasm::ObjectSegment seg;
+            seg.name = prefix + global.name;
+            seg.align_log2 = static_cast<uint32_t>(std::countr_zero(std::max(1u, global.align)));
+            seg.bytes = global.init.empty()
+                ? std::vector<uint8_t>(std::max(1u, global.size), 0) : global.init;
+            for (const auto &reloc : global.relocations) {
+                if (reloc.kind == mir::Relocation::Kind::FunctionAddr) {
+                    seg.relocs.push_back({wasm::reloc::TABLE_INDEX_I32, reloc.offset,
+                                          fn_symbol[reloc.target], 0});
+                } else {
+                    seg.relocs.push_back({wasm::reloc::MEMORY_ADDR_I32, reloc.offset,
+                                          /*patched below*/ 0, reloc.addend});
+                    seg.relocs.back().index = data_symbol_base; // placeholder
+                }
+            }
+            out.segments.push_back(std::move(seg));
+            out.data_symbols.push_back({.name = global.name, .segment = segment,
+                                         .offset = 0, .size = std::max(1u, global.size)});
+        }
+        // Data->data relocations could not know their targets' symbol indices on
+        // the first pass; resolve them now.
+        for (size_t i = 0; i < module.globals.size(); ++i) {
+            auto &seg = out.segments[i];
+            size_t entry = 0;
+            for (const auto &reloc : module.globals[i].relocations) {
+                if (reloc.kind == mir::Relocation::Kind::GlobalAddr) {
+                    seg.relocs[entry].index = data_symbol[reloc.target];
+                }
+                ++entry;
+            }
+        }
+        out.import_stack_pointer = true;
+        const auto sp_symbol = data_symbol_base + static_cast<uint32_t>(out.data_symbols.size());
+
+        // ---- bodies ----------------------------------------------------------
+        std::vector<uint32_t> no_slots(module.functions.size(), 0);
+        std::vector<uint32_t> empty_addresses(module.globals.size(), 0);
+        for (size_t i = 0; i < module.functions.size(); ++i) {
+            const auto &fn = module.functions[i];
+            if (!fn.has_body) continue;
+            FunctionContext ctx{
+                .module = module,
+                .fn = fn,
+                .errors = result.errors,
+                .wasm_index = wasm_index,
+                .type_of_sig = type_of_sig,
+                .global_address = empty_addresses,
+                .table_slot = no_slots,
+                .sp_global = 0,
+                .fmod_index = fmod_index,
+                .fmodf_index = fmodf_index,
+                .object_mode = true,
+                .fn_symbol = &fn_symbol,
+                .data_symbol = &data_symbol,
+                .sp_symbol = sp_symbol,
+                .fmod_symbol = fmod_symbol,
+                .fmodf_symbol = fmodf_symbol,
+            };
+            ctx.emit();
+            out.functions.push_back({
+                .type_index = out.intern_type(defined_func_type(module, fn)),
+                .locals = std::move(ctx.locals),
+                .body = std::move(ctx.code),
+            });
+        }
+
+        // ---- entry glue: the C main(argc, argv) emscripten calls ---------------
+        if (have_wrapper) {
+            wasm::Code body;
+            std::vector<ValType> locals;
+            if (init_index >= 0) body.call_reloc(wasm_index[init_index], fn_symbol[init_index]);
+            if (test_mode) {
+                body.i32_const_memory(data_symbol[test_info], 0);
+                body.call_reloc(wasm_index[test_runner], fn_symbol[test_runner]);
+                body.i32_const(0);
+                body.return_op();
+            } else {
+                const auto &main_sig = module.signatures[module.functions[main_index].signature];
+                const bool sret_main = main_sig.result == mir::Ty::Void && !main_sig.params.empty();
+                if (sret_main) {
+                    locals.push_back(ValType::I32); // 2: blob pointer (after argc/argv)
+                    const uint32_t blob = 2;
+                    body.global_get_reloc(0, sp_symbol);
+                    body.i32_const(128);
+                    body.op(op::i32_sub);
+                    body.local_tee(blob);
+                    body.global_set_reloc(0, sp_symbol);
+                    body.local_get(blob);
+                    body.call_reloc(wasm_index[main_index], fn_symbol[main_index]);
+                    body.local_get(blob);
+                    body.load(ValType::I32, 32, false, 0, 0);
+                    body.i32_const(0);
+                    body.op(op::i32_ne);
+                    body.local_get(blob);
+                    body.i32_const(128);
+                    body.op(op::i32_add);
+                    body.global_set_reloc(0, sp_symbol);
+                    body.return_op();
+                } else if (main_sig.result == mir::Ty::Void) {
+                    body.call_reloc(wasm_index[main_index], fn_symbol[main_index]);
+                    body.i32_const(0);
+                    body.return_op();
+                } else {
+                    body.call_reloc(wasm_index[main_index], fn_symbol[main_index]);
+                    body.return_op();
+                }
+            }
+            const auto wrapper_type = out.intern_type({{ValType::I32, ValType::I32}, {ValType::I32}});
+            out.functions.push_back({wrapper_type, std::move(locals), std::move(body)});
         }
 
         if (!result.errors.empty()) return result;

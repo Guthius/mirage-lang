@@ -31,11 +31,36 @@ namespace wasm {
         auto operator==(const FuncType &) const -> bool = default;
     };
 
+    // Relocation kinds a relocatable object uses (tool-conventions Linking.md),
+    // exactly the subset this backend emits.
+    namespace reloc {
+        inline constexpr uint8_t FUNCTION_INDEX_LEB = 0;
+        inline constexpr uint8_t TABLE_INDEX_SLEB = 1;
+        inline constexpr uint8_t TABLE_INDEX_I32 = 2;
+        inline constexpr uint8_t MEMORY_ADDR_LEB = 3;
+        inline constexpr uint8_t MEMORY_ADDR_SLEB = 4;
+        inline constexpr uint8_t MEMORY_ADDR_I32 = 5;
+        inline constexpr uint8_t TYPE_INDEX_LEB = 6;
+        inline constexpr uint8_t GLOBAL_INDEX_LEB = 7;
+    }
+
+    // One relocation inside a Code stream or a data segment. 'offset' is
+    // relative to the stream's own start; the serializer rebases it to the
+    // section payload. 'index' is a SYMBOL index — except for TYPE_INDEX_LEB,
+    // where it is the type index itself, per the spec's own irregularity.
+    struct Reloc {
+        uint8_t type = 0;
+        uint32_t offset = 0;
+        uint32_t index = 0;
+        int64_t addend = 0;
+    };
+
     // One function body's instruction stream. Every method appends exactly one
     // instruction (or immediate); the caller owns structure and stack discipline.
     class Code {
       public:
         std::vector<uint8_t> bytes;
+        std::vector<Reloc> relocs;
 
         // --- control ---
         void unreachable_op();
@@ -77,6 +102,16 @@ namespace wasm {
         // --- numeric (opcode passed raw; named constants below) ---
         void op(uint8_t opcode);
         void op_fc(uint32_t sub); // 0xFC-prefixed (trunc_sat, bulk memory)
+
+        // --- relocatable forms (stage 8) ---------------------------------------
+        // Each emits its instruction with a 5-byte PADDED immediate and records
+        // the relocation the linker patches it through.
+        void call_reloc(uint32_t function_index, uint32_t symbol);
+        void i32_const_table(uint32_t symbol);                  // TABLE_INDEX_SLEB
+        void i32_const_memory(uint32_t symbol, int64_t addend); // MEMORY_ADDR_SLEB
+        void global_get_reloc(uint32_t global_index, uint32_t symbol);
+        void global_set_reloc(uint32_t global_index, uint32_t symbol);
+        void call_indirect_reloc(uint32_t type_index);          // TYPE_INDEX_LEB
 
         void append(const Code &other);
     };
@@ -178,6 +213,54 @@ namespace wasm {
         std::vector<Global> globals;
         std::vector<Export> exports;
         std::vector<DataSegment> data;
+
+        auto intern_type(FuncType type) -> uint32_t;
+        [[nodiscard]] auto serialize() const -> std::vector<uint8_t>;
+    };
+
+    // ---- relocatable object (stage 8) ------------------------------------------
+    // The second output shape over the same encoder: a wasm OBJECT for wasm-ld /
+    // emcc, per tool-conventions Linking.md. Memory and the funcref table are
+    // IMPORTS ('env.__linear_memory', 'env.__indirect_function_table'), the shadow
+    // stack pointer is the imported global 'env.__stack_pointer', addresses and
+    // indices are relocations against a symbol table, and layout belongs to the
+    // linker. The section order and encodings mirror what emcc's own clang emits,
+    // decoded from a reference object rather than recalled from the spec.
+
+    struct ObjectFunctionSymbol {
+        std::string name;
+        uint32_t function_index = 0; // in this module's (imports-first) index space
+        bool defined = false;
+        bool exported = false; // WASM_SYM_EXPORTED — '@export' survives lld's GC
+    };
+
+    struct ObjectDataSymbol {
+        std::string name;
+        uint32_t segment = 0;
+        uint32_t offset = 0;
+        uint32_t size = 0;
+    };
+
+    struct ObjectSegment {
+        std::string name;      // '.data.<sym>' / '.rodata.<sym>' / '.bss.<sym>'
+        uint32_t align_log2 = 0;
+        std::vector<uint8_t> bytes;
+        std::vector<Reloc> relocs; // offsets relative to this segment's bytes
+    };
+
+    // Symbol indices: function symbols first (in vector order), then data
+    // symbols, then — when import_stack_pointer — the __stack_pointer global
+    // symbol last. Producers compute reloc indices with that rule; serialize()
+    // emits the table in exactly that order.
+    struct ObjectModule {
+        std::vector<FuncType> types;
+        std::vector<Import> imports;      // function imports; indices 0..n-1
+        std::vector<Function> functions;  // defined; bodies carry relocs
+        bool import_stack_pointer = false;
+        std::vector<uint32_t> table_elements; // function indices, placed from slot 1
+        std::vector<ObjectSegment> segments;
+        std::vector<ObjectFunctionSymbol> function_symbols;
+        std::vector<ObjectDataSymbol> data_symbols;
 
         auto intern_type(FuncType type) -> uint32_t;
         [[nodiscard]] auto serialize() const -> std::vector<uint8_t>;

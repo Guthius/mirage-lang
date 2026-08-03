@@ -1,7 +1,7 @@
 const string := import("../string")
 const builder := import("../builder")
 
-ext fn write(fd: i32, buf: *u8, count: usize) -> i64
+ext fn write(fd: i32, buf: *u8, count: usize) -> i32
 
 // Every variant's payload struct has exactly one field of a distinct scalar/slice type — this is
 // what makes the sema's implicit-coercion rule (exact single-field-type match) unambiguous for

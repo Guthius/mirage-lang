@@ -13,7 +13,7 @@ const builder := import("../builder")
 // reflection plan).
 const rt := import("../../runtime/type_info")
 
-ext fn write(fd: i32, buf: *u8, count: usize) -> i64
+ext fn write(fd: i32, buf: *u8, count: usize) -> i32
 
 pub type ReflectError = enum(i32) {
     WriteFailed = 1

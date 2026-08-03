@@ -912,6 +912,36 @@ auto main(const int argc, char *argv[]) -> int {
 
         if (wasm_target) {
             const auto object_start = std::chrono::steady_clock::now();
+            // Emscripten (stage 8): a RELOCATABLE object handed to the same emcc
+            // link tail the LLVM path uses — libc, the web runtime and raylib's
+            // ports all come from there (decision D5). Anything else: the final
+            // standalone .wasm module, written straight to the output.
+            if (target_triple.isOSEmscripten()) {
+                const auto generated = backend_wasm::generate_object(
+                    lowered.module, lowered.test_info_global, lowered.test_runner_function);
+                if (!generated.ok) {
+                    for (const auto &error : generated.errors) {
+                        llvm::errs() << "error: native backend: " << error << "\n";
+                    }
+                    return 1;
+                }
+                const auto object_path = make_temp_file(".o");
+                if (object_path.empty()) {
+                    return 1;
+                }
+                std::error_code write_error;
+                llvm::raw_fd_ostream out(object_path.string(), write_error);
+                if (write_error) {
+                    llvm::errs() << "error: cannot write '" << object_path.string() << "'\n";
+                    return 1;
+                }
+                out.write(reinterpret_cast<const char *>(generated.bytes.data()),
+                           static_cast<size_t>(generated.bytes.size()));
+                out.close();
+                const auto object_elapsed = std::chrono::steady_clock::now() - object_start;
+                return link_and_finish(object_path, options, target_triple,
+                                        sema.link_directives, start_time, object_elapsed);
+            }
             const auto generated = backend_wasm::generate(lowered.module,
                                                            lowered.test_info_global,
                                                            lowered.test_runner_function);

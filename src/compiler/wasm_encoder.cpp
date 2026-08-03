@@ -36,6 +36,24 @@ namespace wasm {
             out.insert(out.end(), text.begin(), text.end());
         }
 
+        // 5-byte padded LEBs: a relocation target must have a fixed width so the
+        // linker can patch any value in place.
+        void uleb_padded(std::vector<uint8_t> &out, uint32_t value) {
+            for (int i = 0; i < 4; ++i) {
+                out.push_back(static_cast<uint8_t>((value & 0x7F) | 0x80));
+                value >>= 7;
+            }
+            out.push_back(static_cast<uint8_t>(value & 0x7F));
+        }
+        void sleb_padded(std::vector<uint8_t> &out, const int64_t value) {
+            auto v = value;
+            for (int i = 0; i < 4; ++i) {
+                out.push_back(static_cast<uint8_t>((v & 0x7F) | 0x80));
+                v >>= 7;
+            }
+            out.push_back(static_cast<uint8_t>(v & 0x7F));
+        }
+
         void section(std::vector<uint8_t> &out, const uint8_t id,
                       const std::vector<uint8_t> &payload) {
             if (payload.empty()) return;
@@ -148,7 +166,51 @@ namespace wasm {
         for (int i = 0; i < 8; ++i) bytes.push_back(static_cast<uint8_t>(bits >> (8 * i)));
     }
 
+    void Code::call_reloc(const uint32_t function_index, const uint32_t symbol) {
+        op(0x10);
+        relocs.push_back({reloc::FUNCTION_INDEX_LEB,
+                          static_cast<uint32_t>(bytes.size()), symbol, 0});
+        uleb_padded(bytes, function_index);
+    }
+    void Code::i32_const_table(const uint32_t symbol) {
+        op(0x41);
+        relocs.push_back({reloc::TABLE_INDEX_SLEB,
+                          static_cast<uint32_t>(bytes.size()), symbol, 0});
+        sleb_padded(bytes, 0);
+    }
+    void Code::i32_const_memory(const uint32_t symbol, const int64_t addend) {
+        op(0x41);
+        relocs.push_back({reloc::MEMORY_ADDR_SLEB,
+                          static_cast<uint32_t>(bytes.size()), symbol, addend});
+        sleb_padded(bytes, 0);
+    }
+    void Code::global_get_reloc(const uint32_t global_index, const uint32_t symbol) {
+        op(0x23);
+        relocs.push_back({reloc::GLOBAL_INDEX_LEB,
+                          static_cast<uint32_t>(bytes.size()), symbol, 0});
+        uleb_padded(bytes, global_index);
+    }
+    void Code::global_set_reloc(const uint32_t global_index, const uint32_t symbol) {
+        op(0x24);
+        relocs.push_back({reloc::GLOBAL_INDEX_LEB,
+                          static_cast<uint32_t>(bytes.size()), symbol, 0});
+        uleb_padded(bytes, global_index);
+    }
+    void Code::call_indirect_reloc(const uint32_t type_index) {
+        op(0x11);
+        // For TYPE_INDEX_LEB the reloc's index field IS the type index.
+        relocs.push_back({reloc::TYPE_INDEX_LEB,
+                          static_cast<uint32_t>(bytes.size()), type_index, 0});
+        uleb_padded(bytes, type_index);
+        bytes.push_back(0x00); // table 0
+    }
+
     void Code::append(const Code &other) {
+        const auto base = static_cast<uint32_t>(bytes.size());
+        for (auto entry : other.relocs) {
+            entry.offset += base;
+            relocs.push_back(entry);
+        }
         bytes.insert(bytes.end(), other.bytes.begin(), other.bytes.end());
     }
 
@@ -294,6 +356,228 @@ namespace wasm {
             }
             section(out, 11, payload);
         }
+        return out;
+    }
+
+    // --- ObjectModule -------------------------------------------------------------
+
+    auto ObjectModule::intern_type(FuncType type) -> uint32_t {
+        for (uint32_t i = 0; i < types.size(); ++i) {
+            if (types[i] == type) return i;
+        }
+        types.push_back(std::move(type));
+        return static_cast<uint32_t>(types.size() - 1);
+    }
+
+    auto ObjectModule::serialize() const -> std::vector<uint8_t> {
+        std::vector<uint8_t> out{0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00};
+        // Reloc custom sections name their target by SECTION ORDINAL (0-based,
+        // counting every section emitted); track it as we go.
+        uint32_t ordinal = 0;
+        int64_t code_ordinal = -1;
+        int64_t data_ordinal = -1;
+        const auto emit_section = [&](const uint8_t id, const std::vector<uint8_t> &payload) {
+            section(out, id, payload);
+            return ordinal++;
+        };
+
+        // 1: types
+        {
+            std::vector<uint8_t> payload;
+            uleb(payload, types.size());
+            for (const auto &type : types) {
+                payload.push_back(0x60);
+                uleb(payload, type.params.size());
+                for (const auto param : type.params) payload.push_back(static_cast<uint8_t>(param));
+                uleb(payload, type.results.size());
+                for (const auto result : type.results) payload.push_back(static_cast<uint8_t>(result));
+            }
+            emit_section(1, payload);
+        }
+        // 2: imports — memory and the funcref table are imports in an object
+        // (the linker owns both), function imports carry their symbols' names,
+        // and the shadow-stack pointer is the imported global env.__stack_pointer.
+        {
+            std::vector<uint8_t> payload;
+            const auto count = 2 + imports.size() + (import_stack_pointer ? 1 : 0);
+            uleb(payload, count);
+            name(payload, "env");
+            name(payload, "__linear_memory");
+            payload.push_back(0x02); // memory
+            payload.push_back(0x00); // min only
+            uleb(payload, 1);
+            for (const auto &import : imports) {
+                name(payload, import.module);
+                name(payload, import.name);
+                payload.push_back(0x00);
+                uleb(payload, import.type_index);
+            }
+            name(payload, "env");
+            name(payload, "__indirect_function_table");
+            payload.push_back(0x01); // table
+            payload.push_back(static_cast<uint8_t>(ValType::Funcref));
+            payload.push_back(0x00); // min only
+            uleb(payload, table_elements.size() + 1);
+            if (import_stack_pointer) {
+                name(payload, "env");
+                name(payload, "__stack_pointer");
+                payload.push_back(0x03); // global
+                payload.push_back(static_cast<uint8_t>(ValType::I32));
+                payload.push_back(0x01); // mutable
+            }
+            emit_section(2, payload);
+        }
+        // 3: functions
+        if (!functions.empty()) {
+            std::vector<uint8_t> payload;
+            uleb(payload, functions.size());
+            for (const auto &function : functions) uleb(payload, function.type_index);
+            emit_section(3, payload);
+        }
+        // 9: elements — address-taken functions from slot 1; the linker rewrites
+        // slots through the TABLE_INDEX relocations, this just reserves them.
+        if (!table_elements.empty()) {
+            std::vector<uint8_t> payload;
+            uleb(payload, 1);
+            payload.push_back(0x00);
+            payload.push_back(0x41);
+            sleb(payload, 1);
+            payload.push_back(0x0B);
+            uleb(payload, table_elements.size());
+            for (const auto index : table_elements) uleb(payload, index);
+            emit_section(9, payload);
+        }
+        // 12: datacount
+        if (!segments.empty()) {
+            std::vector<uint8_t> payload;
+            uleb(payload, segments.size());
+            emit_section(12, payload);
+        }
+        // 10: code, collecting section-relative reloc offsets as bodies land.
+        std::vector<Reloc> code_relocs;
+        if (!functions.empty()) {
+            std::vector<uint8_t> payload;
+            uleb(payload, functions.size());
+            for (const auto &function : functions) {
+                std::vector<uint8_t> body;
+                std::vector<std::pair<ValType, uint32_t>> runs;
+                for (const auto local : function.locals) {
+                    if (!runs.empty() && runs.back().first == local) runs.back().second += 1;
+                    else runs.push_back({local, 1});
+                }
+                uleb(body, runs.size());
+                for (const auto &[type, count] : runs) {
+                    uleb(body, count);
+                    body.push_back(static_cast<uint8_t>(type));
+                }
+                const auto code_start = static_cast<uint32_t>(body.size());
+                body.insert(body.end(), function.body.bytes.begin(), function.body.bytes.end());
+                body.push_back(0x0B);
+
+                std::vector<uint8_t> size_field;
+                uleb(size_field, body.size());
+                const auto body_base = static_cast<uint32_t>(payload.size()) +
+                                       static_cast<uint32_t>(size_field.size()) + code_start;
+                for (auto entry : function.body.relocs) {
+                    entry.offset += body_base;
+                    code_relocs.push_back(entry);
+                }
+                payload.insert(payload.end(), size_field.begin(), size_field.end());
+                payload.insert(payload.end(), body.begin(), body.end());
+            }
+            code_ordinal = emit_section(10, payload);
+        }
+        // 11: data, likewise collecting rebased reloc offsets.
+        std::vector<Reloc> data_relocs;
+        if (!segments.empty()) {
+            std::vector<uint8_t> payload;
+            uleb(payload, segments.size());
+            for (const auto &segment : segments) {
+                payload.push_back(0x00);
+                payload.push_back(0x41);
+                sleb(payload, 0);
+                payload.push_back(0x0B);
+                uleb(payload, segment.bytes.size());
+                const auto base = static_cast<uint32_t>(payload.size());
+                payload.insert(payload.end(), segment.bytes.begin(), segment.bytes.end());
+                for (auto entry : segment.relocs) {
+                    entry.offset += base;
+                    data_relocs.push_back(entry);
+                }
+            }
+            data_ordinal = emit_section(11, payload);
+        }
+        // custom "linking": symbol table + segment info, version 2.
+        {
+            std::vector<uint8_t> payload;
+            name(payload, "linking");
+            uleb(payload, 2);
+
+            std::vector<uint8_t> symtab;
+            uleb(symtab, function_symbols.size() + data_symbols.size() +
+                          (import_stack_pointer ? 1 : 0));
+            for (const auto &symbol : function_symbols) {
+                symtab.push_back(0x00); // SYMTAB_FUNCTION
+                uint32_t flags = 0;
+                if (!symbol.defined) flags |= 0x10;      // WASM_SYM_UNDEFINED
+                if (symbol.exported) flags |= 0x20;      // WASM_SYM_EXPORTED
+                uleb(symtab, flags);
+                uleb(symtab, symbol.function_index);
+                if (symbol.defined) name(symtab, symbol.name);
+            }
+            for (const auto &symbol : data_symbols) {
+                symtab.push_back(0x01); // SYMTAB_DATA
+                uleb(symtab, 0);
+                name(symtab, symbol.name);
+                uleb(symtab, symbol.segment);
+                uleb(symtab, symbol.offset);
+                uleb(symtab, symbol.size);
+            }
+            if (import_stack_pointer) {
+                symtab.push_back(0x02); // SYMTAB_GLOBAL
+                uleb(symtab, 0x10);     // undefined; named by its import
+                uleb(symtab, 0);        // global index 0 (the only global import)
+            }
+            payload.push_back(0x08); // WASM_SYMBOL_TABLE
+            uleb(payload, symtab.size());
+            payload.insert(payload.end(), symtab.begin(), symtab.end());
+
+            if (!segments.empty()) {
+                std::vector<uint8_t> info;
+                uleb(info, segments.size());
+                for (const auto &segment : segments) {
+                    name(info, segment.name);
+                    uleb(info, segment.align_log2);
+                    uleb(info, 0);
+                }
+                payload.push_back(0x05); // WASM_SEGMENT_INFO
+                uleb(payload, info.size());
+                payload.insert(payload.end(), info.begin(), info.end());
+            }
+            emit_section(0, payload);
+        }
+        // custom reloc sections.
+        const auto emit_relocs = [&](const char *section_name, const int64_t target,
+                                      const std::vector<Reloc> &entries) {
+            if (target < 0 || entries.empty()) return;
+            std::vector<uint8_t> payload;
+            name(payload, section_name);
+            uleb(payload, static_cast<uint64_t>(target));
+            uleb(payload, entries.size());
+            for (const auto &entry : entries) {
+                payload.push_back(entry.type);
+                uleb(payload, entry.offset);
+                uleb(payload, entry.index);
+                if (entry.type == reloc::MEMORY_ADDR_LEB ||
+                    entry.type == reloc::MEMORY_ADDR_SLEB ||
+                    entry.type == reloc::MEMORY_ADDR_I32) {
+                    sleb(payload, entry.addend);
+                }
+            }
+            emit_section(0, payload);
+        };
+        emit_relocs("reloc.CODE", code_ordinal, code_relocs);
+        emit_relocs("reloc.DATA", data_ordinal, data_relocs);
         return out;
     }
 }

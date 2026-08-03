@@ -644,8 +644,47 @@ section framing in ctest. 64 of 74 fixtures produce identical exit codes and
 stdout; the 10 refusals are the nine asm/`@naked` fixtures (x86-only by
 definition) and the funcptr↔anyptr sema error above.
 
-Next per `docs/backend.md`: stage 8 (relocatable wasm for emscripten), stage 9
-(Relooper), stage 10 (flip, soak, delete).
+## Stage 8 — relocatable wasm for emscripten: **done; 62 of 74 fixtures match
+through the full emcc link, and the C ABI checks out against emcc's own clang**
+
+Two parts, committed separately because the second is a correctness project in
+its own right:
+
+- **The C-ABI prerequisite.** The native x86 backend had NEVER implemented the
+  C ABI for by-value aggregates ('ext fn' structs crossed as raw pointers —
+  invisible to the corpus differential because the ABI fixtures live in tests/
+  with a C helper, and present since stage 4). mirgen now owns the C ABI for
+  both targets: SysV eightbyte classification (recursive leaf flattening,
+  MEMORY class for packed/oversized shapes, register accounting with the sret
+  RDI, one/two-eightbyte returns) and clang's wasm rule (single-scalar
+  aggregates direct, everything else byref). Two pieces of Signature metadata
+  carry what MIR values cannot express — byval stack parameters and the
+  two-eightbyte return's synthetic out-pointer — and backend_x86 honors them
+  on both the caller and callee side. ext_abi_test.py and cdecl_abi_test.py
+  now sweep llvm + native/linear + native/trivial.
+- **The object format.** wasm::ObjectModule beside wasm::Module — one
+  serializer each over the same encoder; the translation is shared, with an
+  object-mode flag exactly where an address or index becomes a relocation.
+  Memory/table/stack-pointer are imports, symbols and R_WASM_* relocations
+  carry everything, layout belongs to wasm-ld, and the entry glue defines the
+  C main(argc, argv). Encodings were decoded from a reference object emcc's
+  clang produced (tests recorded in the design record) — the first real link
+  succeeded. Because stage 7 already lowered C-variadic tails via emscripten's
+  buffer convention, printf against REAL emscripten libc worked unchanged.
+
+`tests/wasm_emscripten_test.py` (skips cleanly without emsdk/node) sweeps the
+corpus through the full emcc link — 62/74 matching native x86-64, the rest
+being the named refusals plus test_io/compiler which read the host filesystem
+— and links the ABI fixture against emcc-compiled helper.c: every aggregate
+classification tier survives the boundary in both directions.
+
+One portability fix surfaced by the real libc: three fixtures (and
+core/testing in the stdlib) declared 'ext fn write(...) -> i64'; wasm32 libc's
+write returns i32, so wasm-ld emitted an unreachable stub for the mismatched
+signature. They now declare '-> i32', correct on both targets (the low half of
+RAX on x86-64).
+
+Next per `docs/backend.md`: stage 9 (Relooper), stage 10 (flip, soak, delete).
 
 Remaining:
 

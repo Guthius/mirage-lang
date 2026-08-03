@@ -222,10 +222,23 @@ call is an ordinary import rather than inline asm.
 Because Mirage compiles whole-program into a single object, emit the **final `.wasm`
 directly**: no relocatable-object format, no linking section, no `wasm-ld`.
 
-**8. wasm, relocatable** (for emscripten). A second output shape over the *same* encoder:
-the `linking` custom section, `reloc.CODE`/`reloc.DATA`, the `R_WASM_*` relocation kinds
-actually used, unresolved-symbol placeholders where the standalone path resolves indices
-directly, and memory layout deferred to `wasm-ld` rather than chosen by us. ~900 lines.
+**8. wasm, relocatable** (for emscripten). — DONE, exactly as the sizing predicted: a
+second output shape over the SAME encoder (`wasm::ObjectModule` beside `wasm::Module`,
+one serializer each; the instruction translation in `backend_wasm.cpp` is shared, with
+an object-mode flag at the six emission points where an address or index becomes a
+relocation). Memory and the funcref table are imports (`env.__linear_memory`,
+`env.__indirect_function_table`), the shadow-stack pointer is the imported global
+`env.__stack_pointer`, and layout belongs to `wasm-ld`. The section encodings were
+decoded from a reference object emcc's own clang produced rather than recalled from the
+spec — which is why the first link attempt succeeded. The entry glue defines the C
+`main(argc, argv)` emscripten's runtime calls (the user's main keeps its body under
+`__original_main`), and libc symbols — printf, malloc, write, fmod — resolve at link
+time against emscripten's real libc, which is also what vindicated lowering C-variadic
+tails via emscripten's buffer convention in stage 7. `tests/wasm_emscripten_test.py`
+sweeps the corpus (62 of 74 matching the native x86-64 build through the full emcc
+link; the others are the named refusals plus two fixtures that read the host
+filesystem, which MEMFS does not have) and links the ext-fn ABI fixture against
+emcc-compiled C — the wasm C ABI checked against the other compiler's idea of it.
 
 Built *second*, deliberately: attempting it alongside stage 7 means debugging CFG
 structuring and relocation bugs through the same symptom.

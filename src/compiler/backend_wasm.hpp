@@ -40,4 +40,14 @@ namespace backend_wasm {
     [[nodiscard]] auto generate(const mir::Module &module,
                                  uint32_t test_info = UINT32_MAX,
                                  uint32_t test_runner = UINT32_MAX) -> Result;
+
+    // Stage 8: the RELOCATABLE object for emscripten (decision D5) — the same
+    // translation over the same encoder, but memory/table/stack-pointer become
+    // imports, every address and index a relocation against a symbol table, and
+    // layout is deferred to wasm-ld. The entry glue defines the C 'main(argc,
+    // argv)' emscripten's runtime calls; libc symbols (printf, malloc, fmod)
+    // resolve at link time instead of needing a host shim.
+    [[nodiscard]] auto generate_object(const mir::Module &module,
+                                        uint32_t test_info = UINT32_MAX,
+                                        uint32_t test_runner = UINT32_MAX) -> Result;
 }

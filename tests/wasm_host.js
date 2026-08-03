@@ -12,14 +12,13 @@ const bytes = fs.readFileSync(process.argv[2]);
 let memory;
 const imports = {
     env: {
-        // Declared '-> i64' on the Mirage side, so the return value must be a
-        // BigInt — node maps wasm i64 to BigInt at the boundary in both
-        // directions.
+        // Declared '-> isize' on the Mirage side (the portable ssize_t
+        // spelling), which is i32 on wasm32 — so the return is a plain Number.
         write: (fd, ptr, len) => {
             const buf = Buffer.from(new Uint8Array(memory.buffer, ptr, Number(len)));
             if (fd === 2) process.stderr.write(buf);
             else process.stdout.write(buf);
-            return BigInt(buf.length);
+            return buf.length;
         },
         exit: (code) => process.exit(code & 0xff),
         fmod: (a, b) => a % b,
