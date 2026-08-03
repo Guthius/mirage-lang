@@ -53,6 +53,7 @@ namespace mirgen {
                 emit_trait_method_bodies();
                 emit_generic_function_bodies();
                 emit_init_runner();
+                emit_test_runner();
 
                 // The verifier is the analogue of llvm::verifyModule, which the LLVM path
                 // runs on every compile. Running it here means a lowering bug is reported
@@ -525,7 +526,9 @@ namespace mirgen {
 
                         if (const auto *fn = std::get_if<sema::FunctionSymbol>(&sym)) {
                             if (fn->decl && !fn->decl->generic_params.empty()) continue;
-                            if (fn->is_test) continue;
+                            // '@test' functions exist only under 'mirage test', where the
+                            // synthesized runner calls them (codegen applies the same rule).
+                            if (fn->is_test && options_.testing_module_path.empty()) continue;
 
                             const bool entry = path == ast_.root_module_path && name == "main";
                             mir::Function f;
@@ -1054,7 +1057,8 @@ namespace mirgen {
                         if (mod_ptr->bare_import_origins.contains(name)) continue;
                         const auto *fn = std::get_if<sema::FunctionSymbol>(&sym);
                         if (!fn || !fn->decl) continue;
-                        if (!fn->decl->generic_params.empty() || fn->is_test) continue;
+                        if (!fn->decl->generic_params.empty()) continue;
+                        if (fn->is_test && options_.testing_module_path.empty()) continue;
 
                         const auto it = function_index_.find(key(path, name));
                         if (it == function_index_.end()) continue;
@@ -2830,7 +2834,6 @@ namespace mirgen {
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::IncrDecrExpr>>) return "'++' / '--'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>>) return "'$option'";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) return "'$env'";
-                else if constexpr (std::is_same_v<V, ast::RttiEnabledExpr>) return "'$rtti_enabled'";
                 else if constexpr (std::is_same_v<V, ast::IotaExpr>) return "'iota'";
                 else if constexpr (std::is_same_v<V, ast::ImportExpr> || std::is_same_v<V, ast::ImportBinExpr>) return "an import expression";
                 else if constexpr (std::is_same_v<V, std::unique_ptr<ast::SpreadExpr>>) return "an argument spread";
@@ -3127,6 +3130,11 @@ namespace mirgen {
                         }
                         unsupported(expr_kind_name<V>(), loc);
                         return mir::NO_VALUE;
+
+                    } else if constexpr (std::is_same_v<V, ast::RttiEnabledExpr>) {
+                        // A plain bool sema fixed before any source was read (it mirrors
+                        // '--nortti'), so there is nothing to look up per expression.
+                        return b.const_int(mir::Ty::I1, sema_.options.rtti_enabled ? 1 : 0);
 
                     } else if constexpr (std::is_same_v<V, ast::DefaultExpr>) {
                         // In expression position (an assignment's RHS, a return value): a
@@ -4169,6 +4177,97 @@ namespace mirgen {
                 if (!value) return std::nullopt;
                 auto blob = blob_of(size);
                 blob.put_int(0, static_cast<uint64_t>(*value), std::min(size, 8u));
+                return blob;
+            }
+
+            // Under 'mirage test': one wrapper per discovered '@test' function (each
+            // returning "did it pass"), and the 'Test_Info' descriptor 'core/testing''s
+            // '_run_tests' walks. The entry glue calls that instead of 'main' -- which is
+            // compiled like any other function and simply never invoked, so an ordinary
+            // program can be tested without restructuring it (codegen's emit_test_start).
+            //
+            // The '@test' functions themselves are already declared and emitted by the
+            // ordinary passes; only the wrappers, the descriptor and the entry are new.
+            void emit_test_runner() {
+                if (options_.testing_module_path.empty()) return;
+                const auto &testing = options_.testing_module_path;
+
+                const auto case_type = find_resolved_type_by_name(testing, "Test_Case");
+                const auto info_type = find_resolved_type_by_name(testing, "Test_Info");
+                const auto *case_info = case_type && case_type->kind == sema::TypeKind::Struct
+                    ? sema_.struct_at(case_type->struct_index) : nullptr;
+                const auto *info_struct = info_type && info_type->kind == sema::TypeKind::Struct
+                    ? sema_.struct_at(info_type->struct_index) : nullptr;
+                if (!case_info || case_info->fields.size() != 3 || !info_struct ||
+                    info_struct->fields.empty()) {
+                    diag_.report_error(DiagnosticStage::Codegen, {},
+                        "internal error: 'core/testing' does not expose the expected "
+                        "'Test_Case'/'Test_Info' shapes");
+                    return;
+                }
+
+                std::vector<ConstBlob> cases;
+                for (const auto &test : sema_.discovered_tests) {
+                    const auto callee = function_index_.find(key(test.module_path, test.function_name));
+                    if (callee == function_index_.end()) {
+                        diag_.report_error(DiagnosticStage::Codegen, {}, std::format(
+                            "internal error: '@test' function '{}' was discovered but never declared",
+                            test.function_name));
+                        return;
+                    }
+
+                    // The wrapper: call the test, report Ok as 'true'. A '@test' returns
+                    // 'error(...)', which travels through an sret blob, so the tag lives
+                    // at offset 0 of a slot the wrapper owns.
+                    mir::Function wrapper;
+                    wrapper.name = std::format("__mirage_test_wrapper_{}", cases.size());
+                    wrapper.linkage = mir::Linkage::Internal;
+                    wrapper.signature = result_.module.intern_signature(
+                        mir::Signature{.result = mir::Ty::I1});
+                    wrapper.has_body = true;
+                    result_.module.functions.push_back(std::move(wrapper));
+                    const auto wrapper_index = static_cast<uint32_t>(result_.module.functions.size() - 1);
+
+                    const auto *test_fn = symbol_function(test.module_path, test.function_name);
+                    mir::Builder wb(result_.module, wrapper_index);
+                    wb.set_insert_point(wb.create_block("entry"));
+                    if (test_fn && returns_via_sret(test_fn->return_types)) {
+                        const auto layout = multi_return_layout(test_fn->return_types);
+                        const auto blob = wb.slot_addr(wb.add_slot(layout.size, layout.align, "result"));
+                        wb.call(callee->second, mir::Ty::Void, {blob});
+                        wb.ret(wb.compare(mir::Op::ICmpEq, wb.load(mir::Ty::I32, blob),
+                                           wb.const_int(mir::Ty::I32, 0)));
+                    } else {
+                        wb.call(callee->second, mir::Ty::Void, {});
+                        wb.ret(wb.const_int(mir::Ty::I1, 1));
+                    }
+
+                    cases.push_back(blob_struct(case_type->struct_index, {
+                        {case_info->fields[0].name, blob_string(test.module_name)},
+                        {case_info->fields[1].name, blob_string(test.function_name)},
+                        {case_info->fields[2].name, blob_function_ptr(wrapper_index)},
+                    }));
+                }
+
+                const auto slice = blob_slice_of(cases, size_of(*case_type), align_of(*case_type),
+                                                  ".test_cases");
+                const auto info = blob_struct(info_type->struct_index,
+                                               {{info_struct->fields[0].name, slice}});
+                result_.test_info_global = const_global_from(info, "__mirage_test_info",
+                                                              align_of(*info_type));
+                if (const auto runner = function_index_.find(key(testing, "_run_tests"));
+                    runner != function_index_.end()) {
+                    result_.test_runner_function = runner->second;
+                } else {
+                    diag_.report_error(DiagnosticStage::Codegen, {},
+                        "internal error: 'core/testing''s '_run_tests' was not declared");
+                }
+            }
+
+            auto blob_function_ptr(const uint32_t function_index) -> ConstBlob {
+                auto blob = blob_of(pointer_bytes());
+                blob.relocs.push_back({.kind = mir::Relocation::Kind::FunctionAddr,
+                                        .offset = 0, .target = function_index});
                 return blob;
             }
 

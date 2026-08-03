@@ -48,27 +48,33 @@ def main() -> int:
         print(f"FAIL: no test modules found under {SUITE_ROOT}")
         return 1
 
-    for module in modules:
-        result = subprocess.run(
-            [str(MIRAGE), "test", str(module), f"--std={STD}"],
-            capture_output=True, text=True, timeout=300, cwd=REPO_ROOT,
-        )
-        # The harness's own table is the useful output; pass it through verbatim rather
-        # than re-summarizing it less well.
-        sys.stdout.write(result.stdout)
-        if result.returncode != 0:
-            failures += 1
-            print(f"FAIL: {module.name} exited {result.returncode}")
-            # Compilation errors land on stderr and would otherwise be invisible.
-            for line in result.stderr.splitlines():
-                if "error:" in line or "warning:" in line:
-                    print(f"  {line}")
+    # Both backends (docs/backend.md, validation #2): 'tests/mir' carries real
+    # assertions rather than exit-code comparisons, which is exactly what a backend
+    # swap needs -- a native miscompile shows up here as a FAILED TEST naming itself,
+    # where the differential harness would only report a diverging exit code.
+    for backend in ("llvm", "native"):
+        for module in modules:
+            result = subprocess.run(
+                [str(MIRAGE), "test", str(module), f"--std={STD}", f"--backend={backend}"],
+                capture_output=True, text=True, timeout=300, cwd=REPO_ROOT,
+            )
+            # The harness's own table is the useful output; pass it through verbatim
+            # rather than re-summarizing it less well.
+            sys.stdout.write(result.stdout)
+            if result.returncode != 0:
+                failures += 1
+                print(f"FAIL: {module.name} under --backend={backend} "
+                      f"exited {result.returncode}")
+                # Compilation errors land on stderr and would otherwise be invisible.
+                for line in result.stderr.splitlines():
+                    if "error:" in line or "warning:" in line:
+                        print(f"  {line}")
 
     print()
     if failures:
-        print(f"{failures} module(s) with failures")
+        print(f"{failures} module/backend combination(s) with failures")
         return 1
-    print(f"all {len(modules)} Mirage test module(s) passed")
+    print(f"all {len(modules)} Mirage test module(s) passed on both backends")
     return 0
 
 

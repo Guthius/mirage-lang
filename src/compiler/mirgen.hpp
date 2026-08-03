@@ -27,6 +27,10 @@ namespace mirgen {
         // '--noinit': skip synthesizing the '@init'-runner '_init', mirroring the
         // driver flag codegen honors.
         bool noinit = false;
+        // Set under 'mirage test': synthesize the test-runner entry instead of the
+        // ordinary one. Empty means the normal build; otherwise it is the resolved
+        // 'core/testing' module path, whose '_run_tests' the entry calls.
+        std::string testing_module_path;
         // Byte width of a pointer on the target, mirroring sema::Options::pointer_size.
         // Everything else about the target is a backend concern; MIR is target-independent
         // apart from this one number, which decides Ty::Ptr's width and therefore every
@@ -43,6 +47,11 @@ namespace mirgen {
         // Populated alongside a diagnostic for each occurrence — this is the summary, not
         // the error channel.
         std::set<std::string> unsupported;
+        // Under 'mirage test' (Options::testing_module_path set): the '__mirage_test_info'
+        // descriptor and 'core/testing''s '_run_tests', which the backend's entry glue
+        // calls instead of 'main'. UINT32_MAX when this is an ordinary build.
+        uint32_t test_info_global = UINT32_MAX;
+        uint32_t test_runner_function = UINT32_MAX;
         bool ok = false;
     };
 

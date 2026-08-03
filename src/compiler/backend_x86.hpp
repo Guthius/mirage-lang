@@ -21,5 +21,10 @@ namespace backend_x86 {
         elf::Object object;
     };
 
-    [[nodiscard]] auto generate(const mir::Module &module) -> Result;
+    // 'test_info'/'test_runner' (both UINT32_MAX for an ordinary build) select the
+    // 'mirage test' entry: the glue calls '_run_tests(&__mirage_test_info)' instead of
+    // 'main', which is compiled like any other function and never invoked.
+    [[nodiscard]] auto generate(const mir::Module &module,
+                                 uint32_t test_info = UINT32_MAX,
+                                 uint32_t test_runner = UINT32_MAX) -> Result;
 }

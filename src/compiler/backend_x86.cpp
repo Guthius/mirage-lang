@@ -845,7 +845,8 @@ namespace backend_x86 {
         };
     }
 
-    auto generate(const mir::Module &module) -> Result {
+    auto generate(const mir::Module &module, const uint32_t test_info,
+                   const uint32_t test_runner) -> Result {
         Result result;
         elf::Object &object = result.object;
 
@@ -1007,7 +1008,8 @@ namespace backend_x86 {
             if (module.functions[i].name == "main") main_index = static_cast<int32_t>(i);
             if (module.functions[i].name == "_init") init_index = static_cast<int32_t>(i);
         }
-        if (main_index >= 0) {
+        const bool test_mode = test_info != UINT32_MAX && test_runner != UINT32_MAX;
+        if (main_index >= 0 || test_mode) {
             const auto exit_symbol = runtime_symbol("exit");
             while (object.text.size() % 16 != 0) object.text.push_back(0x90);
             const auto start = object.text.size();
@@ -1021,6 +1023,32 @@ namespace backend_x86 {
             // codes the LLVM _start produces: '-> i32' exits with the value, void exits
             // 0, '-> error(...)' exits with (tag != 0) — the error travels through the
             // sret blob this glue owns.
+            if (test_mode) {
+                // 'mirage test': run the discovered tests and exit 0. 'main' is never
+                // called even when the root module declares one.
+                enc.lea_rip(Reg::RDI, global_symbols[test_info], 0);
+                enc.call_sym(function_symbols[test_runner]);
+                enc.zero(Reg::RDI);
+                enc.call_sym(exit_symbol);
+                enc.ud2();
+                enc.resolve_labels();
+                object.symbols.push_back({
+                    .name = "_start", .section = elf::Section::Text, .value = start,
+                    .size = enc.code.size(), .is_global = true, .is_function = true,
+                });
+                object.text.insert(object.text.end(), enc.code.begin(), enc.code.end());
+                for (const auto &reloc : enc.relocations) {
+                    object.relocations.push_back({
+                        .in = elf::Section::Text, .offset = start + reloc.offset,
+                        .symbol = reloc.symbol,
+                        .type = reloc.kind == x86::Relocation::Kind::Call32
+                            ? elf::R_X86_64_PLT32 : elf::R_X86_64_PC32,
+                        .addend = reloc.addend + (reloc.kind == x86::Relocation::Kind::Rip32 ? -4 : 0),
+                    });
+                }
+                result.ok = result.errors.empty();
+                return result;
+            }
             const auto &main_sig = module.signatures[module.functions[main_index].signature];
             const bool sret_main = main_sig.result == mir::Ty::Void && !main_sig.params.empty();
             if (sret_main) {

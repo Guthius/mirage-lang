@@ -874,6 +874,7 @@ auto main(const int argc, char *argv[]) -> int {
         }
         auto lowered = mirgen::generate(ast, sema, diag, mirgen::Options{
             .noinit = options.noinit,
+            .testing_module_path = testing_module_path, // resolved above; empty unless 'test'
             .pointer_bits = target_triple.getArchPointerBitWidth(),
         });
         if (!lowered.ok) {
@@ -894,7 +895,8 @@ auto main(const int argc, char *argv[]) -> int {
         }
 
         const auto object_start = std::chrono::steady_clock::now();
-        const auto generated = backend_x86::generate(lowered.module);
+        const auto generated = backend_x86::generate(lowered.module, lowered.test_info_global,
+                                                      lowered.test_runner_function);
         if (!generated.ok) {
             for (const auto &error : generated.errors) {
                 llvm::errs() << "error: native backend: " << error << "\n";

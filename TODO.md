@@ -511,6 +511,25 @@ stage list (2–5 marked done, with how each actually landed and which predictio
 held), the validation section (the differential harness's four-way report and what
 it caught), and `README.md`'s backend paragraph and flag list.
 
+- **Validation #2 — `mirage test` on both backends — done, and it found the gap it
+  exists to find.** `mirage test --backend=native` was silently producing a
+  *crashing* binary: the test-runner entry point is synthesized by the backend, and
+  mirgen had none, so a module with no `main` linked with no `_start`. mirgen now
+  synthesizes the same shape codegen does — one wrapper per discovered `@test`
+  (calling it and reporting Ok from the error blob's tag), the `Test_Info` descriptor
+  built with the same `ConstBlob` machinery reflection uses, and an entry that calls
+  `core/testing`'s `_run_tests` instead of `main` (which is compiled but never
+  invoked, so an ordinary program can be tested without restructuring). `@test`
+  functions are kept rather than skipped under test mode, and `$rtti_enabled` — the
+  one construct `tests/mir/generics` needed — lowers as the constant sema fixed
+  before any source was read.
+
+  **All 35 assertion-carrying tests in `tests/mir/` now pass under both backends**,
+  and `mir_suite_test.py` runs both, so it stays true. This matters more than the
+  differential run for one reason: a native miscompile surfaces here as a *named
+  failing test*, where the differential harness can only report a diverging exit
+  code.
+
 Next per `docs/backend.md`: stage 6's linear-scan allocator plus a machine-level
 verifier, differential-tested against this trivial allocator — which stays
 permanently as `--regalloc=trivial`, the standing triage tool.

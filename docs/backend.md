@@ -230,8 +230,13 @@ This is what determines whether the effort succeeds.
    Its report is deliberately four-way: match, mismatch, awaiting-stage-4, and
    refused-by-name. The last two are tolerated but COUNTED and listed, so the suite is
    green while incomplete yet any regression in coverage reads as one.
-2. **`mirage test`** on both backends. `tests/mir/` is a real assertion-carrying suite
-   rather than an exit-code comparison, which is exactly what a backend swap needs.
+2. **`mirage test`** on both backends — DONE. `tests/mir/` is a real assertion-carrying
+   suite rather than an exit-code comparison, which is exactly what a backend swap needs:
+   a native miscompile surfaces as a NAMED failing test, where the differential harness
+   can only report a diverging exit code. `mir_suite_test.py` runs every module under
+   both backends; all 35 tests pass under each. Test mode needs its own synthesized
+   entry (wrappers + `Test_Info` + `_run_tests`), which is why running it caught that
+   `--backend=native` had been emitting a crashing test binary.
 3. **Encoder differential**: assemble every instruction-table entry with both this encoder
    and `as`, byte-compare. This catches the class of bug that produces working-but-wrong
    code, and pays for itself within a day. PARTLY DONE: `tests/x86_encoder_test.cpp` pins
