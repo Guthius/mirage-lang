@@ -380,6 +380,23 @@ Done:
   Remaining in stage 3: the peephole pass (const-fold, identity ops, trivial-param
   folding). Then the differential harness, then stage 4.
 
+- **Stage 3, second half — `peephole`.** Four local cleanups to a fixpoint:
+  width-correct integer constant folding (operands truncated to the type's bits,
+  sign-extended only where the OP is signed; division by zero and oversized shifts
+  are never folded — that would delete runtime behavior), identity simplification
+  (`x+0`, `x*1`, `ptr.add p,0`, ...) via one remap sweep, trivial/unused
+  block-parameter removal (undoing `promote_slots`' deliberate redundancy, argument
+  columns removed from every predecessor jump), and dead pure-instruction
+  elimination (which deletes the orphaned operand chains promotion leaves).
+  `--mir-opt` now runs both passes plus the mandatory re-verify. Three new ctest
+  cases (fold/identity/DCE combined, division-by-zero preservation, trivial-param
+  removal); the corpus sweep stays green across all 142 lowering modules. The
+  `x += 2` loop probe now emits `const.int 42` and a single-parameter loop header.
+
+  **Stage 3 is complete.** Next per `docs/backend.md`: the differential harness
+  (`examples_smoke_test.py --backend=...`) BEFORE stage 4, then x86-64
+  (legalize → ISel → trivial regalloc → frame → encoder → ELF).
+
 Remaining:
 
 - **Stage 2, rest** — aggregates (structs, arrays, slices, trait handles, `any`, error

@@ -357,6 +357,19 @@ namespace mir {
     };
     auto promote_slots(Module &module) -> PromoteStats;
 
+    // peephole (stage 3) — local cleanups to a fixpoint: width-correct integer
+    // constant folding, identity simplification (x+0, x*1, ptr.add p,0 ...), trivial
+    // and unused block-parameter removal (undoing promote_slots' deliberate
+    // redundancy), and dead pure-instruction elimination. Runs in place; the result
+    // must still pass verify().
+    struct PeepholeStats {
+        size_t folded = 0;
+        size_t simplified = 0;
+        size_t params_removed = 0;
+        size_t dead_removed = 0;
+    };
+    auto peephole(Module &module) -> PeepholeStats;
+
     // Textual MIR: the primary debugging surface for the whole backend effort, and what
     // '--emit-mir' prints. Stable and diffable — two compiles of the same input must
     // produce byte-identical output, which is why nothing here is keyed on a hash map.

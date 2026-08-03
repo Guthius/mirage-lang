@@ -525,6 +525,80 @@ namespace {
         check(f.module.functions[0].slots.size() == 2, "both stay in the frame");
     }
 
+    // ---- peephole (stage 3) -------------------------------------------------------
+
+    void test_peephole_folds_and_cleans() {
+        Fixture f;
+        mir::Builder b(f.module, f.fn_index);
+        const auto entry = b.create_block("entry");
+        b.set_insert_point(entry);
+        const auto arg = b.add_block_param(entry, mir::Ty::I64);
+        // (40 + 2) computed from constants; x + 0 an identity; a dead multiply.
+        const auto forty = b.const_int(mir::Ty::I64, 40);
+        const auto two = b.const_int(mir::Ty::I64, 2);
+        const auto sum = b.binary(mir::Op::Add, mir::Ty::I64, forty, two);
+        const auto zero = b.const_int(mir::Ty::I64, 0);
+        const auto same = b.binary(mir::Op::Add, mir::Ty::I64, arg, zero);
+        (void) b.binary(mir::Op::Mul, mir::Ty::I64, arg, sum); // never used
+        b.ret(b.binary(mir::Op::Add, mir::Ty::I64, same, sum));
+
+        const auto stats = mir::peephole(f.module);
+        const auto errors = mir::verify(f.module);
+        check(errors.empty(), "peephole output verifies" + describe(errors));
+        check(stats.folded >= 1, "constants fold");
+        check(stats.simplified >= 1, "x + 0 simplifies to x");
+        check(stats.dead_removed >= 1, "the unused multiply is removed");
+        const auto text = mir::print(f.module);
+        check(text.find("const.int 42") != std::string::npos, "40 + 2 becomes 42");
+        check(text.find("mul") == std::string::npos, "no dead multiply remains");
+    }
+
+    void test_peephole_keeps_division_by_zero() {
+        // Folding '1 / 0' away would delete runtime behavior; the instruction stays.
+        Fixture f;
+        mir::Builder b(f.module, f.fn_index);
+        const auto entry = b.create_block("entry");
+        b.set_insert_point(entry);
+        (void) b.add_block_param(entry, mir::Ty::I64);
+        const auto one = b.const_int(mir::Ty::I64, 1);
+        const auto zero = b.const_int(mir::Ty::I64, 0);
+        b.ret(b.binary(mir::Op::UDiv, mir::Ty::I64, one, zero));
+
+        (void) mir::peephole(f.module);
+        const auto errors = mir::verify(f.module);
+        check(errors.empty(), "division by zero survives verification" + describe(errors));
+        check(mir::print(f.module).find("udiv") != std::string::npos,
+              "and is not folded away");
+    }
+
+    void test_peephole_removes_trivial_params() {
+        // Both arms pass the SAME value to the join, so its parameter is redundant --
+        // exactly the shape promote_slots deliberately leaves for this pass.
+        Fixture f(mir::Ty::I64, {mir::Ty::I1, mir::Ty::I64});
+        mir::Builder b(f.module, f.fn_index);
+        const auto entry = b.create_block("entry");
+        const auto left = b.create_block("left");
+        const auto right = b.create_block("right");
+        const auto join = b.create_block("join");
+        b.set_insert_point(entry);
+        const auto cond = b.add_block_param(entry, mir::Ty::I1);
+        const auto x = b.add_block_param(entry, mir::Ty::I64);
+        b.branch(cond, left, right);
+        const auto param = b.add_block_param(join, mir::Ty::I64);
+        b.set_insert_point(left);
+        b.jump(join, {x});
+        b.set_insert_point(right);
+        b.jump(join, {x});
+        b.set_insert_point(join);
+        b.ret(b.binary(mir::Op::Add, mir::Ty::I64, param, param));
+
+        const auto stats = mir::peephole(f.module);
+        const auto errors = mir::verify(f.module);
+        check(errors.empty(), "trivial-param removal verifies" + describe(errors));
+        check(stats.params_removed == 1, "the redundant parameter is removed");
+        check(f.module.functions[0].blocks[3].params.empty(), "the join takes no parameters");
+    }
+
     void test_printer_renders_globals_and_relocations() {
         mir::Module module;
         module.name = "test";
@@ -574,6 +648,9 @@ int main() {
     test_promote_slots_loop_counter();
     test_promote_slots_splits_branch_edges();
     test_promote_slots_leaves_escaping_and_mixed_slots();
+    test_peephole_folds_and_cleans();
+    test_peephole_keeps_division_by_zero();
+    test_peephole_removes_trivial_params();
     test_printer_renders_globals_and_relocations();
 
     if (failures != 0) {

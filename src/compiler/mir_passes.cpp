@@ -461,4 +461,374 @@ namespace mir {
         }
         return stats;
     }
+
+    // ------------------------------------------------------------------------------
+    // peephole — stage 3's second half. Four local cleanups run to a fixpoint:
+    //
+    //   - integer constant folding, width-correct: operands are truncated to the
+    //     type's bits, sign-extended first only where the OP is signed (sdiv, srem,
+    //     ashr, the signed comparisons) — MIR integers themselves carry no sign.
+    //     Division by zero is left alone; folding it would delete runtime behavior.
+    //   - identity simplification (x+0, x*1, x|0, x<<0, ptr.add p,0 ...): the result
+    //     becomes an alias of the surviving operand, applied via one remap sweep.
+    //   - trivial block parameters: a parameter whose incoming arguments all agree
+    //     (or are the parameter itself) folds to that value, and an UNUSED parameter
+    //     is dropped outright — both undo the redundancy promote_slots deliberately
+    //     leaves behind. The parameter's column of jump arguments goes with it.
+    //   - dead value elimination: a side-effect-free instruction whose result is
+    //     never used is removed. This is what actually deletes the stores' operand
+    //     chains promote_slots orphans.
+    //
+    // Everything here is per-function and local; nothing reorders across calls or
+    // memory operations.
+
+    namespace {
+        struct ConstVal {
+            bool is_int = false;
+            bool is_null = false;
+            int64_t value = 0;
+            Ty type = Ty::Void;
+        };
+
+        // Truncate to the type's width; 'signed_op' additionally sign-extends back.
+        auto normalize(const int64_t value, const Ty type, const uint32_t pointer_bits,
+                        const bool sign_extend) -> int64_t {
+            const auto bits = type_bits(type, pointer_bits);
+            if (bits >= 64) return value;
+            const uint64_t mask = (uint64_t{1} << bits) - 1;
+            uint64_t out = static_cast<uint64_t>(value) & mask;
+            if (sign_extend && (out >> (bits - 1)) & 1) {
+                out |= ~mask;
+            }
+            return static_cast<int64_t>(out);
+        }
+
+        // Folds 'op' over two integer constants, or nullopt when the fold is
+        // unsafe (division by zero, oversized shifts) or the op is not integral.
+        auto fold_binary(const Op op, const Ty type, const int64_t raw_a, const int64_t raw_b,
+                          const uint32_t pointer_bits) -> std::optional<int64_t> {
+            const auto bits = type_bits(type, pointer_bits);
+            const auto ua = static_cast<uint64_t>(normalize(raw_a, type, pointer_bits, false));
+            const auto ub = static_cast<uint64_t>(normalize(raw_b, type, pointer_bits, false));
+            const auto sa = normalize(raw_a, type, pointer_bits, true);
+            const auto sb = normalize(raw_b, type, pointer_bits, true);
+            switch (op) {
+            case Op::Add:  return normalize(static_cast<int64_t>(ua + ub), type, pointer_bits, false);
+            case Op::Sub:  return normalize(static_cast<int64_t>(ua - ub), type, pointer_bits, false);
+            case Op::Mul:  return normalize(static_cast<int64_t>(ua * ub), type, pointer_bits, false);
+            case Op::UDiv:
+                if (ub == 0) return std::nullopt;
+                return static_cast<int64_t>(ua / ub);
+            case Op::URem:
+                if (ub == 0) return std::nullopt;
+                return static_cast<int64_t>(ua % ub);
+            case Op::SDiv:
+                if (sb == 0 || (sa == INT64_MIN && sb == -1)) return std::nullopt;
+                return normalize(sa / sb, type, pointer_bits, false);
+            case Op::SRem:
+                if (sb == 0 || (sa == INT64_MIN && sb == -1)) return std::nullopt;
+                return normalize(sa % sb, type, pointer_bits, false);
+            case Op::And:  return static_cast<int64_t>(ua & ub);
+            case Op::Or:   return static_cast<int64_t>(ua | ub);
+            case Op::Xor:  return static_cast<int64_t>(ua ^ ub);
+            case Op::Shl:
+                if (ub >= bits) return std::nullopt;
+                return normalize(static_cast<int64_t>(ua << ub), type, pointer_bits, false);
+            case Op::LShr:
+                if (ub >= bits) return std::nullopt;
+                return static_cast<int64_t>(ua >> ub);
+            case Op::AShr:
+                if (ub >= bits) return std::nullopt;
+                return normalize(sa >> sb, type, pointer_bits, false);
+            default: return std::nullopt;
+            }
+        }
+
+        auto fold_compare(const Op op, const Ty operand_type, const int64_t raw_a, const int64_t raw_b,
+                           const uint32_t pointer_bits) -> std::optional<int64_t> {
+            const auto ua = static_cast<uint64_t>(normalize(raw_a, operand_type, pointer_bits, false));
+            const auto ub = static_cast<uint64_t>(normalize(raw_b, operand_type, pointer_bits, false));
+            const auto sa = normalize(raw_a, operand_type, pointer_bits, true);
+            const auto sb = normalize(raw_b, operand_type, pointer_bits, true);
+            switch (op) {
+            case Op::ICmpEq:  return ua == ub;
+            case Op::ICmpNe:  return ua != ub;
+            case Op::ICmpUlt: return ua < ub;
+            case Op::ICmpUle: return ua <= ub;
+            case Op::ICmpUgt: return ua > ub;
+            case Op::ICmpUge: return ua >= ub;
+            case Op::ICmpSlt: return sa < sb;
+            case Op::ICmpSle: return sa <= sb;
+            case Op::ICmpSgt: return sa > sb;
+            case Op::ICmpSge: return sa >= sb;
+            default: return std::nullopt;
+            }
+        }
+
+        struct Peep {
+            Function &fn;
+            uint32_t pointer_bits;
+            // value -> its constant, for values defined by const.int/const.null.
+            std::unordered_map<ValueId, ConstVal> consts;
+            std::unordered_map<ValueId, ValueId> remap;
+
+            auto resolve(ValueId value) const -> ValueId {
+                while (true) {
+                    const auto it = remap.find(value);
+                    if (it == remap.end()) return value;
+                    value = it->second;
+                }
+            }
+            auto const_of(const ValueId value) const -> const ConstVal * {
+                const auto it = consts.find(resolve(value));
+                return it == consts.end() ? nullptr : &it->second;
+            }
+            auto int_of(const ValueId value) const -> std::optional<int64_t> {
+                const auto *c = const_of(value);
+                if (!c || !c->is_int) return std::nullopt;
+                return c->value;
+            }
+
+            void rescan_consts() {
+                consts.clear();
+                for (const auto &block : fn.blocks) {
+                    for (const auto &inst : block.insts) {
+                        if (inst.op == Op::ConstInt) {
+                            consts[inst.result] = {.is_int = true, .value = inst.imm, .type = inst.type};
+                        } else if (inst.op == Op::ConstNull) {
+                            consts[inst.result] = {.is_null = true, .type = Ty::Ptr};
+                        }
+                    }
+                }
+            }
+
+            // Rewrites 'inst' into the constant it folds to, keeping its result id --
+            // no remap needed, every existing use stays valid.
+            static void make_const_int(Inst &inst, const Ty type, const int64_t value) {
+                inst.op = Op::ConstInt;
+                inst.type = type;
+                inst.a = NO_VALUE;
+                inst.b = NO_VALUE;
+                inst.c = NO_VALUE;
+                inst.imm = value;
+                inst.args.clear();
+            }
+
+            auto fold_and_simplify(PeepholeStats &stats) -> bool {
+                bool changed = false;
+                rescan_consts();
+                for (auto &block : fn.blocks) {
+                    for (auto &inst : block.insts) {
+                        // ---- constant folding ---------------------------------------
+                        if ((inst.op >= Op::Add && inst.op <= Op::AShr) && is_integer(inst.type)) {
+                            const auto a = int_of(inst.a);
+                            const auto b = int_of(inst.b);
+                            if (a && b) {
+                                if (const auto value = fold_binary(inst.op, inst.type, *a, *b, pointer_bits)) {
+                                    make_const_int(inst, inst.type, *value);
+                                    consts[inst.result] = {.is_int = true, .value = *value, .type = inst.type};
+                                    ++stats.folded;
+                                    changed = true;
+                                    continue;
+                                }
+                            }
+                        }
+                        if (inst.op >= Op::ICmpEq && inst.op <= Op::ICmpUge) {
+                            const auto a = int_of(inst.a);
+                            const auto b = int_of(inst.b);
+                            const auto operand_type = fn.values[resolve(inst.a)].type;
+                            if (a && b && is_integer(operand_type)) {
+                                if (const auto value = fold_compare(inst.op, operand_type, *a, *b, pointer_bits)) {
+                                    make_const_int(inst, Ty::I1, *value);
+                                    consts[inst.result] = {.is_int = true, .value = *value, .type = Ty::I1};
+                                    ++stats.folded;
+                                    changed = true;
+                                    continue;
+                                }
+                            }
+                        }
+                        if (inst.op == Op::Trunc || inst.op == Op::ZExt || inst.op == Op::SExt) {
+                            if (const auto a = int_of(inst.a)) {
+                                const auto from = fn.values[resolve(inst.a)].type;
+                                int64_t value = *a;
+                                if (inst.op == Op::SExt) value = normalize(value, from, pointer_bits, true);
+                                else value = normalize(value, from, pointer_bits, false);
+                                value = normalize(value, inst.type, pointer_bits, false);
+                                make_const_int(inst, inst.type, value);
+                                consts[inst.result] = {.is_int = true, .value = value, .type = inst.type};
+                                ++stats.folded;
+                                changed = true;
+                                continue;
+                            }
+                        }
+
+                        // ---- identities ---------------------------------------------
+                        const auto alias = [&](const ValueId survivor) {
+                            remap[inst.result] = resolve(survivor);
+                            ++stats.simplified;
+                            changed = true;
+                        };
+                        switch (inst.op) {
+                        case Op::Add: case Op::Or: case Op::Xor:
+                            if (int_of(inst.b) == 0) { alias(inst.a); }
+                            else if (inst.op == Op::Add && int_of(inst.a) == 0) { alias(inst.b); }
+                            break;
+                        case Op::Sub: case Op::Shl: case Op::LShr: case Op::AShr:
+                            if (int_of(inst.b) == 0) alias(inst.a);
+                            break;
+                        case Op::Mul:
+                            if (int_of(inst.b) == 1) alias(inst.a);
+                            else if (int_of(inst.a) == 1) alias(inst.b);
+                            break;
+                        case Op::PtrAdd:
+                            if (int_of(inst.b) == 0) alias(inst.a);
+                            break;
+                        case Op::PtrAddConst:
+                            if (inst.imm == 0) alias(inst.a);
+                            break;
+                        default:
+                            break;
+                        }
+                    }
+                }
+                if (changed) apply_remap();
+                return changed;
+            }
+
+            void apply_remap() {
+                if (remap.empty()) return;
+                for (auto &block : fn.blocks) {
+                    for (auto &inst : block.insts) {
+                        for_each_value_operand(inst, [&](ValueId &operand) {
+                            if (operand != NO_VALUE) operand = resolve(operand);
+                        });
+                    }
+                }
+                remap.clear();
+            }
+
+            // A parameter whose incoming arguments all agree folds to that value; an
+            // unused one is dropped. Either way its argument column disappears from
+            // every predecessor's jump. The entry block's parameters ARE the function
+            // signature and are never touched.
+            auto fold_trivial_params(PeepholeStats &stats) -> bool {
+                // (block, param index) removal plan, computed against current state.
+                bool changed = false;
+                std::vector<std::vector<BlockId>> jump_preds(fn.blocks.size());
+                for (BlockId b = 0; b < fn.blocks.size(); ++b) {
+                    if (fn.blocks[b].insts.empty()) continue;
+                    const auto &term = fn.blocks[b].insts.back();
+                    if (term.op == Op::Jump && term.a < fn.blocks.size()) {
+                        jump_preds[term.a].push_back(b);
+                    }
+                }
+                std::unordered_map<ValueId, char> used;
+                for (auto &block : fn.blocks) {
+                    for (auto &inst : block.insts) {
+                        for_each_value_operand(inst, [&](ValueId &operand) {
+                            if (operand != NO_VALUE) used[operand] = 1;
+                        });
+                    }
+                }
+
+                for (BlockId b = 1; b < fn.blocks.size(); ++b) {
+                    auto &block = fn.blocks[b];
+                    if (block.params.empty()) continue;
+                    const auto &preds = jump_preds[b];
+                    if (preds.empty()) continue;
+                    for (size_t k = 0; k < block.params.size();) {
+                        const auto param = block.params[k];
+                        ValueId unique = NO_VALUE;
+                        bool trivial = true;
+                        for (const auto pred : preds) {
+                            const auto &args = fn.blocks[pred].insts.back().args;
+                            if (k >= args.size()) { trivial = false; break; }
+                            const auto arg = resolve(args[k]);
+                            if (arg == param) continue;
+                            if (unique == NO_VALUE) unique = arg;
+                            else if (unique != arg) { trivial = false; break; }
+                        }
+                        const bool unused = !used.contains(param);
+                        if (!trivial || (unique == NO_VALUE && !unused)) {
+                            // 'unique == NO_VALUE' with uses means every incoming edge
+                            // feeds the param itself -- an unreachable loop; leave it.
+                            ++k;
+                            continue;
+                        }
+                        if (!unused) remap[param] = unique;
+                        block.params.erase(block.params.begin() + static_cast<ptrdiff_t>(k));
+                        for (const auto pred : preds) {
+                            auto &args = fn.blocks[pred].insts.back().args;
+                            if (k < args.size()) args.erase(args.begin() + static_cast<ptrdiff_t>(k));
+                        }
+                        ++stats.params_removed;
+                        changed = true;
+                    }
+                }
+                if (changed) apply_remap();
+                return changed;
+            }
+
+            auto remove_dead(PeepholeStats &stats) -> bool {
+                std::unordered_map<ValueId, char> used;
+                for (auto &block : fn.blocks) {
+                    for (auto &inst : block.insts) {
+                        for_each_value_operand(inst, [&](ValueId &operand) {
+                            if (operand != NO_VALUE) used[operand] = 1;
+                        });
+                    }
+                }
+                bool changed = false;
+                for (auto &block : fn.blocks) {
+                    std::erase_if(block.insts, [&](const Inst &inst) {
+                        const bool pure = defines_value(inst.op) &&
+                                           inst.op != Op::Call && inst.op != Op::CallIndirect;
+                        if (!pure || inst.result == NO_VALUE || used.contains(inst.result)) {
+                            return false;
+                        }
+                        ++stats.dead_removed;
+                        changed = true;
+                        return true;
+                    });
+                }
+                return changed;
+            }
+        };
+    }
+
+    auto peephole(Module &module) -> PeepholeStats {
+        PeepholeStats stats;
+        for (auto &fn : module.functions) {
+            if (!fn.has_body || fn.blocks.empty()) continue;
+            Peep p{.fn = fn, .pointer_bits = module.pointer_bits};
+            // Each round can expose work for the others (a folded compare orphans its
+            // operands; a folded param makes another trivial), so iterate to a
+            // fixpoint with a hard cap as a runaway guard.
+            for (int round = 0; round < 16; ++round) {
+                bool changed = p.fold_and_simplify(stats);
+                changed |= p.fold_trivial_params(stats);
+                changed |= p.remove_dead(stats);
+                if (!changed) break;
+            }
+            // Positions changed; keep the ValueDef side data coherent (verify and the
+            // printer walk blocks, but future consumers may trust these).
+            for (BlockId b = 0; b < fn.blocks.size(); ++b) {
+                for (uint32_t k = 0; k < fn.blocks[b].params.size(); ++k) {
+                    auto &def = fn.values[fn.blocks[b].params[k]];
+                    def.block = b;
+                    def.index = k;
+                    def.is_param = true;
+                }
+                for (uint32_t i = 0; i < fn.blocks[b].insts.size(); ++i) {
+                    const auto &inst = fn.blocks[b].insts[i];
+                    if (inst.result != NO_VALUE && inst.result < fn.values.size()) {
+                        fn.values[inst.result].block = b;
+                        fn.values[inst.result].index = i;
+                        fn.values[inst.result].is_param = false;
+                    }
+                }
+            }
+        }
+        return stats;
+    }
 }

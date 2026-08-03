@@ -735,6 +735,7 @@ auto main(const int argc, char *argv[]) -> int {
         });
         if (options.mir_opt && lowered.ok) {
             mir::promote_slots(lowered.module);
+            mir::peephole(lowered.module);
             // The pass must leave a well-formed module behind; a failure here is a
             // pass bug, reported as such rather than passed downstream silently.
             for (const auto &error : mir::verify(lowered.module)) {
