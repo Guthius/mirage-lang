@@ -341,6 +341,27 @@ Done:
   dropped-error tail (3), `stackalloc` (1), a forwarded multi-return with slot
   coercions (2), and singletons (~8).
 
+- **Stage 2, twenty-second increment — the language surface is COMPLETE except
+  inline `asm`.** The last shapes: trait-dispatch and trait-impl-method defaulted
+  arguments (a trait impl never redeclares defaults — they live on the TRAIT's method
+  declaration and evaluate in the trait's module, codegen's
+  `emit_method_trailing_arg`); `callee_return_types` learning trait dispatch, `self`
+  receivers (`lvalue_type` + one stripped pointer level), and struct-field
+  function-pointer callees — which is what the dropped-error handling on those call
+  shapes needed; member access on aggregate temporaries (`holder_of(9).kind`); and
+  indexing slice temporaries (`arr[lo..][0]`).
+
+  **The honest denominator, measured: the corpus is 83 positive + 188 negative
+  fixtures. 74 of 83 positive modules lower fully, and every one of the 9 that
+  remain is inline `asm` or `@naked` — both stage 5 by design (the raw all-dirs
+  number is 142/271, but most of that denominator is compile-fail fixtures that can
+  never lower).** Zero verifier failures.
+
+  Stage 2 is done, pending only the asm-adjacent tail that cannot exist before the
+  stage-5 encoder. Next: stage 3 (`promote_slots` + peephole), and the differential
+  harness (`examples_smoke_test.py --backend=`) BEFORE the x86-64 work, per
+  `docs/backend.md`'s validation plan.
+
 Remaining:
 
 - **Stage 2, rest** — aggregates (structs, arrays, slices, trait handles, `any`, error

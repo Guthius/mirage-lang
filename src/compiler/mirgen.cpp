@@ -344,9 +344,20 @@ namespace mirgen {
             [[nodiscard]] auto callee_return_types(const ast::CallExpr &call) const
                 -> std::optional<std::vector<sema::ResolvedType>> {
                 // A generic call's return list lives on its resolved INSTANCE; checked
-                // first, mirroring emit_call's routing order.
+                // first, mirroring emit_call's routing order. A trait dispatch's lives on
+                // the trait's method entry.
                 if (const auto instance = generic_instance_for_call(call, nullptr)) {
                     return sema_.generic_fn_instances[*instance]->return_types;
+                }
+                if (exprs_) {
+                    if (const auto it = exprs_->expr_trait_dispatch.find(&call);
+                        it != exprs_->expr_trait_dispatch.end()) {
+                        if (const auto *trait_info = sema_.trait_at(it->second.trait_index);
+                            trait_info && it->second.method_order_index >= 0 &&
+                            static_cast<size_t>(it->second.method_order_index) < trait_info->methods.size()) {
+                            return trait_info->methods[it->second.method_order_index].return_types;
+                        }
+                    }
                 }
                 const auto through_pointer = [&]() -> std::optional<std::vector<sema::ResolvedType>> {
                     const auto callee_type = lvalue_type(call.callee);
@@ -364,11 +375,20 @@ namespace mirgen {
                     if (const auto *target = namespace_target((*member)->object)) {
                         return symbol_return_types(*target, (*member)->member);
                     }
-                    const auto receiver_type = expr_type((*member)->object);
+                    // lvalue_type + one stripped pointer level, exactly as emit_method_call
+                    // resolves the receiver ('self' has no recorded expr_type).
+                    auto receiver_type = lvalue_type((*member)->object);
                     if (receiver_type.kind == sema::TypeKind::Trait) return std::nullopt;
+                    if (receiver_type.kind == sema::TypeKind::Pointer) {
+                        if (const auto *pointee = sema_.pointee_at(receiver_type.pointee_index)) {
+                            receiver_type = *pointee;
+                        }
+                    }
                     const auto *info = sema::find_method(receiver_type, (*member)->member, sema_);
-                    if (!info || !info->is_resolved) return std::nullopt;
-                    return info->return_types;
+                    if (info && info->is_resolved) return info->return_types;
+                    // Not a method: a struct FIELD of function type answers as an
+                    // indirect call, same as emit_method_call's reroute.
+                    return through_pointer();
                 }
                 return through_pointer();
             }
@@ -2600,6 +2620,11 @@ namespace mirgen {
                     }
                 } else {
                     base = emit_address(b, member.object);
+                    // A TEMPORARY aggregate ('holder_of(9).kind') has no lvalue address,
+                    // but its value IS one.
+                    if (base == mir::NO_VALUE && !is_scalar(object_type)) {
+                        base = emit_expr(b, member.object);
+                    }
                 }
                 if (base == mir::NO_VALUE) return mir::NO_VALUE;
 
@@ -2652,7 +2677,10 @@ namespace mirgen {
                     const auto *info = sema_.slice_at(operand_type.slice_index);
                     if (!info) return mir::NO_VALUE;
                     element = info->element_type;
-                    const auto slice_addr = emit_address(b, index.operand);
+                    // A slice TEMPORARY ('arr[lo..][0]', a call result) has no lvalue
+                    // address; its value is its header's address.
+                    auto slice_addr = emit_address(b, index.operand);
+                    if (slice_addr == mir::NO_VALUE) slice_addr = emit_expr(b, index.operand);
                     if (slice_addr == mir::NO_VALUE) return mir::NO_VALUE;
                     base = b.load(mir::Ty::Ptr, slice_addr); // data pointer at offset 0
                 } else {
@@ -4859,6 +4887,24 @@ namespace mirgen {
                         ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
                         : value);
                 }
+                // A trait method's defaults live on the TRAIT declaration (the impl may not
+                // redeclare them), so they evaluate in the trait's own module context.
+                if (args.size() < sig.params.size() && trait_method.decl) {
+                    const size_t implicit = (sret_slot != mir::NO_VALUE ? 1 : 0) + 1; // sret + self
+                    while (args.size() < sig.params.size()) {
+                        const size_t i = args.size() - implicit;
+                        if (i >= trait_method.decl->params.size() ||
+                            !trait_method.decl->params[i].default_value) {
+                            break;
+                        }
+                        const auto value = emit_default_arg(
+                            b, *trait_method.decl->params[i].default_value, trait_info->module_path, nullptr);
+                        if (value == mir::NO_VALUE) return mir::NO_VALUE;
+                        args.push_back(coerce_to(b, value, sig.params[args.size()],
+                                                  i < trait_method.params.size() &&
+                                                      signed_type(trait_method.params[i])));
+                    }
+                }
                 if (args.size() != sig.params.size()) {
                     unsupported("a trait method call with defaulted arguments", call.location);
                     return mir::NO_VALUE;
@@ -5046,13 +5092,33 @@ namespace mirgen {
                         ? coerce_to(b, value, sig.params[slot], signed_type(expr_type(call.args[i])))
                         : value);
                 }
-                if (args.size() < sig.params.size() && info->decl) {
+                if (args.size() < sig.params.size()) {
+                    // A trait-impl method never declares its own defaults; they live on the
+                    // TRAIT's method declaration and evaluate in the trait's module.
+                    const ast::TraitType::Method *trait_decl = nullptr;
+                    const std::string *default_module = &info->impl_module;
+                    if (info->trait_name) {
+                        if (const auto *trait_info = sema_.trait_at(info->trait_index);
+                            trait_info && info->trait_method_index >= 0 &&
+                            static_cast<size_t>(info->trait_method_index) < trait_info->methods.size()) {
+                            trait_decl = trait_info->methods[info->trait_method_index].decl;
+                            default_module = &trait_info->module_path;
+                        }
+                    }
                     const size_t implicit = (sret_slot != mir::NO_VALUE ? 1 : 0) + 1; // sret + self
                     while (args.size() < sig.params.size()) {
                         const size_t i = args.size() - implicit;
-                        if (i >= info->decl->params.size() || !info->decl->params[i].default_value) break;
-                        const auto value = emit_default_arg(
-                            b, *info->decl->params[i].default_value, info->impl_module, nullptr);
+                        const ast::Expr *default_expr = nullptr;
+                        if (trait_decl) {
+                            if (i < trait_decl->params.size() && trait_decl->params[i].default_value) {
+                                default_expr = &*trait_decl->params[i].default_value;
+                            }
+                        } else if (info->decl && i < info->decl->params.size() &&
+                                    info->decl->params[i].default_value) {
+                            default_expr = &*info->decl->params[i].default_value;
+                        }
+                        if (!default_expr) break;
+                        const auto value = emit_default_arg(b, *default_expr, *default_module, nullptr);
                         if (value == mir::NO_VALUE) return mir::NO_VALUE;
                         args.push_back(coerce_to(b, value, sig.params[args.size()],
                                                   i < info->param_types.size() && signed_type(info->param_types[i])));
