@@ -243,9 +243,18 @@ emcc-compiled C — the wasm C ABI checked against the other compiler's idea of 
 Built *second*, deliberately: attempting it alongside stage 7 means debugging CFG
 structuring and relocation bugs through the same symptom.
 
-**9. Relooper.** Recover natural `if`/`loop`/`block` structure for reducible regions
-(essentially all of them, since Mirage has no `goto`), falling back to dispatch for
-anything that resists. Purely an optimization; ship stages 7–8 without it.
+**9. Relooper.** — DONE, as Ramsey's dominator-tree structuring ("Beyond Relooper"):
+loop headers (back-edge targets) become `loop`s, merge nodes (≥2 forward in-edges)
+become `block`s wrapped at their immediate dominator in reverse-postorder, and a
+forward branch either `br`s to a label already in scope or inlines its single-
+predecessor target. Both wasm output shapes share the emission; every function in the
+corpus now structures fully — zero `br_table` state machines remain — and the dispatch
+loop stays as the fallback for irreducible CFGs, which the front end cannot currently
+produce but the plan keeps guarded. Shipping it AFTER stages 7–8 paid off exactly as
+predicted: with codegen already differentially validated, the only new variable was the
+structuring, and wasm's strict validator turns any wrong `br` depth into a loud module
+rejection rather than silent misbehavior — both differential harnesses passed on the
+algorithm's first full run.
 
 **10. Flip the default** to `--backend=native`, run everything, delete `codegen.cpp` and
 the LLVM dependency. `emcc` stays in the matrix as a linker for stage 8. Removing

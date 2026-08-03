@@ -115,6 +115,257 @@ namespace backend_wasm {
             bool use_dispatch = false;
             uint32_t current_block = 0;
 
+            // ---- Relooper state (stage 9) ------------------------------------
+            // Dominator-tree structuring after Ramsey ("Beyond Relooper"): loop
+            // headers get 'loop's, merge nodes get 'block's at their immediate
+            // dominator, forward branches either 'br' to a label in scope or
+            // inline their (single-predecessor) target. Falls back to the
+            // dispatch loop for irreducible CFGs — which Mirage's front end
+            // cannot currently produce, but the fallback stays, per the plan.
+            struct Cfg {
+                std::vector<std::vector<uint32_t>> succ;
+                std::vector<uint32_t> rpo_index;  // UINT32_MAX = unreachable
+                std::vector<uint32_t> rpo_order;
+                std::vector<uint32_t> idom;
+                std::vector<bool> is_loop_header;
+                std::vector<bool> is_merge;
+                std::vector<std::vector<uint32_t>> merge_children; // per dominator, RPO order
+                bool reducible = true;
+            };
+            Cfg cfg;
+            enum class NestKind : uint8_t { Block, Loop, If };
+            struct NestEntry {
+                NestKind kind = NestKind::If;
+                uint32_t block = mir::NO_BLOCK;
+            };
+            std::vector<NestEntry> nest;
+
+            void build_cfg() {
+                const auto n = fn.blocks.size();
+                cfg.succ.assign(n, {});
+                cfg.rpo_index.assign(n, UINT32_MAX);
+                cfg.idom.assign(n, UINT32_MAX);
+                cfg.is_loop_header.assign(n, false);
+                cfg.is_merge.assign(n, false);
+                cfg.merge_children.assign(n, {});
+                for (size_t b = 0; b < n; ++b) {
+                    if (fn.blocks[b].insts.empty()) continue;
+                    const auto &term = fn.blocks[b].insts.back();
+                    switch (term.op) {
+                    case mir::Op::Jump: cfg.succ[b].push_back(term.a); break;
+                    case mir::Op::Branch:
+                        cfg.succ[b].push_back(term.b);
+                        cfg.succ[b].push_back(term.c);
+                        break;
+                    case mir::Op::Switch:
+                        cfg.succ[b].push_back(term.b);
+                        for (size_t i = 0; i + 1 < term.args.size(); i += 2) {
+                            cfg.succ[b].push_back(term.args[i + 1]);
+                        }
+                        break;
+                    default: break;
+                    }
+                }
+                // Post-order DFS from the entry, then reverse.
+                std::vector<uint8_t> state(n, 0);
+                std::vector<uint32_t> post;
+                std::vector<std::pair<uint32_t, size_t>> stack{{0, 0}};
+                state[0] = 1;
+                while (!stack.empty()) {
+                    auto &[b, i] = stack.back();
+                    if (i < cfg.succ[b].size()) {
+                        const auto next = cfg.succ[b][i++];
+                        if (state[next] == 0) {
+                            state[next] = 1;
+                            stack.push_back({next, 0});
+                        }
+                    } else {
+                        post.push_back(b);
+                        stack.pop_back();
+                    }
+                }
+                cfg.rpo_order.assign(post.rbegin(), post.rend());
+                for (uint32_t i = 0; i < cfg.rpo_order.size(); ++i) {
+                    cfg.rpo_index[cfg.rpo_order[i]] = i;
+                }
+                // Immediate dominators (Cooper–Harvey–Kennedy over RPO).
+                const auto intersect = [&](uint32_t a, uint32_t b) {
+                    while (a != b) {
+                        while (cfg.rpo_index[a] > cfg.rpo_index[b]) a = cfg.idom[a];
+                        while (cfg.rpo_index[b] > cfg.rpo_index[a]) b = cfg.idom[b];
+                    }
+                    return a;
+                };
+                std::vector<std::vector<uint32_t>> preds(n);
+                for (uint32_t b = 0; b < n; ++b) {
+                    if (cfg.rpo_index[b] == UINT32_MAX) continue;
+                    for (const auto s : cfg.succ[b]) preds[s].push_back(b);
+                }
+                cfg.idom[0] = 0;
+                bool changed = true;
+                while (changed) {
+                    changed = false;
+                    for (const auto b : cfg.rpo_order) {
+                        if (b == 0) continue;
+                        uint32_t new_idom = UINT32_MAX;
+                        for (const auto p : preds[b]) {
+                            if (cfg.idom[p] == UINT32_MAX) continue;
+                            new_idom = new_idom == UINT32_MAX ? p : intersect(new_idom, p);
+                        }
+                        if (new_idom != UINT32_MAX && cfg.idom[b] != new_idom) {
+                            cfg.idom[b] = new_idom;
+                            changed = true;
+                        }
+                    }
+                }
+                const auto dominates = [&](const uint32_t a, uint32_t b) {
+                    while (true) {
+                        if (a == b) return true;
+                        if (b == 0) return false;
+                        b = cfg.idom[b];
+                    }
+                };
+                // Retreating edges must target dominators (back edges) or the
+                // graph is irreducible; forward in-degree ≥ 2 makes a merge node.
+                std::vector<uint32_t> forward_in(n, 0);
+                for (uint32_t b = 0; b < n; ++b) {
+                    if (cfg.rpo_index[b] == UINT32_MAX) continue;
+                    for (const auto s : cfg.succ[b]) {
+                        if (cfg.rpo_index[s] <= cfg.rpo_index[b]) {
+                            if (!dominates(s, b)) cfg.reducible = false;
+                            cfg.is_loop_header[s] = true;
+                        } else {
+                            forward_in[s] += 1;
+                        }
+                    }
+                }
+                for (uint32_t b = 0; b < n; ++b) {
+                    if (cfg.rpo_index[b] != UINT32_MAX && forward_in[b] >= 2) {
+                        cfg.is_merge[b] = true;
+                    }
+                }
+                for (const auto b : cfg.rpo_order) {
+                    if (b == 0 || !cfg.is_merge[b]) continue;
+                    cfg.merge_children[cfg.idom[b]].push_back(b); // RPO order by walk
+                }
+            }
+
+            [[nodiscard]] auto is_back_edge(const uint32_t from, const uint32_t to) const -> bool {
+                return cfg.rpo_index[to] <= cfg.rpo_index[from];
+            }
+
+            [[nodiscard]] auto label_depth(const uint32_t target, const bool retreating) -> uint32_t {
+                uint32_t depth = 0;
+                for (auto it = nest.rbegin(); it != nest.rend(); ++it, ++depth) {
+                    if (it->block != target) continue;
+                    if (retreating && it->kind == NestKind::Loop) return depth;
+                    if (!retreating && it->kind == NestKind::Block) return depth;
+                }
+                error(std::format("wasm backend: relooper: branch target {} not in scope", target));
+                return 0;
+            }
+
+            void transfer_block_args(const mir::BlockId target,
+                                      const std::vector<uint32_t> &args) {
+                const auto &params = fn.blocks[target].params;
+                for (size_t i = 0; i < args.size() && i < params.size(); ++i) {
+                    get(args[i]);
+                    code.local_set(staging_local.at(params[i]));
+                }
+                for (size_t i = 0; i < args.size() && i < params.size(); ++i) {
+                    code.local_get(staging_local.at(params[i]));
+                    code.local_set(value_local[params[i]]);
+                }
+            }
+
+            void do_branch(const uint32_t from, const uint32_t to) {
+                if (is_back_edge(from, to)) {
+                    code.br(label_depth(to, true));
+                } else if (cfg.is_merge[to]) {
+                    code.br(label_depth(to, false));
+                } else {
+                    do_tree(to);
+                }
+            }
+
+            void emit_structured_terminator(const mir::Inst &inst, const uint32_t block) {
+                using Op = mir::Op;
+                switch (inst.op) {
+                case Op::Jump:
+                    transfer_block_args(inst.a, inst.args);
+                    do_branch(block, inst.a);
+                    return;
+                case Op::Branch:
+                    get(inst.a);
+                    code.if_void();
+                    nest.push_back({NestKind::If, mir::NO_BLOCK});
+                    do_branch(block, inst.b);
+                    code.else_op();
+                    do_branch(block, inst.c);
+                    code.end();
+                    nest.pop_back();
+                    return;
+                case Op::Switch: {
+                    const bool wide = is_i64_class(ty(inst.a));
+                    for (size_t i = 0; i + 1 < inst.args.size(); i += 2) {
+                        get(inst.a);
+                        if (wide) {
+                            code.i64_const(static_cast<int64_t>(static_cast<int32_t>(inst.args[i])));
+                            code.op(op::i64_eq);
+                        } else {
+                            code.i32_const(static_cast<int32_t>(inst.args[i]));
+                            code.op(op::i32_eq);
+                        }
+                        code.if_void();
+                        nest.push_back({NestKind::If, mir::NO_BLOCK});
+                        do_branch(block, inst.args[i + 1]);
+                        code.end();
+                        nest.pop_back();
+                    }
+                    do_branch(block, inst.b);
+                    return;
+                }
+                default:
+                    // Return / Unreachable: the shared emission already does the
+                    // right thing (sp restore, return value, trap).
+                    emit_inst(inst);
+                    return;
+                }
+            }
+
+            void emit_block_code(const uint32_t block) {
+                current_block = block;
+                const auto &insts = fn.blocks[block].insts;
+                for (size_t i = 0; i + 1 < insts.size(); ++i) emit_inst(insts[i]);
+                if (!insts.empty()) emit_structured_terminator(insts.back(), block);
+            }
+
+            void node_within(const uint32_t x, const size_t child_count) {
+                if (child_count == 0) {
+                    emit_block_code(x);
+                    return;
+                }
+                const auto child = cfg.merge_children[x][child_count - 1];
+                nest.push_back({NestKind::Block, child});
+                code.block_void();
+                node_within(x, child_count - 1);
+                code.end();
+                nest.pop_back();
+                do_tree(child);
+            }
+
+            void do_tree(const uint32_t x) {
+                if (cfg.is_loop_header[x]) {
+                    nest.push_back({NestKind::Loop, x});
+                    code.loop_void();
+                    node_within(x, cfg.merge_children[x].size());
+                    code.end();
+                    nest.pop_back();
+                } else {
+                    node_within(x, cfg.merge_children[x].size());
+                }
+            }
+
             void error(std::string message) { errors.push_back(std::move(message)); }
 
             // br depth from MIR block 'current_block' code to the dispatch loop,
@@ -232,13 +483,6 @@ namespace backend_wasm {
                     va_base_local = add_local(ValType::I32);
                 }
 
-                use_dispatch = fn.blocks.size() > 1;
-                if (!use_dispatch && !fn.blocks.empty() && !fn.blocks[0].insts.empty()) {
-                    const auto terminator = fn.blocks[0].insts.back().op;
-                    use_dispatch = terminator == mir::Op::Jump ||
-                                   terminator == mir::Op::Branch ||
-                                   terminator == mir::Op::Switch;
-                }
                 if (use_dispatch) state_local = add_local(ValType::I32);
 
                 for (mir::ValueId v = 0; v < fn.values.size(); ++v) {
@@ -847,6 +1091,24 @@ namespace backend_wasm {
 
             void emit() {
                 layout_frame();
+
+                // Pick the control-flow strategy: straight-line for one
+                // fallthrough-free block, the Relooper's structured emission for
+                // any reducible CFG, the dispatch loop only for an irreducible
+                // one (which nothing in the front end currently produces).
+                bool multi = fn.blocks.size() > 1;
+                if (!multi && !fn.blocks.empty() && !fn.blocks[0].insts.empty()) {
+                    const auto terminator = fn.blocks[0].insts.back().op;
+                    multi = terminator == mir::Op::Jump ||
+                            terminator == mir::Op::Branch ||
+                            terminator == mir::Op::Switch;
+                }
+                bool structured = false;
+                if (multi) {
+                    build_cfg();
+                    structured = cfg.reducible;
+                }
+                use_dispatch = multi && !structured;
                 assign_locals();
 
                 if (needs_frame) {
@@ -858,6 +1120,11 @@ namespace backend_wasm {
                     sp_set();
                 }
 
+                if (structured) {
+                    do_tree(0);
+                    code.unreachable_op(); // every path returned or trapped
+                    return;
+                }
                 if (!use_dispatch) {
                     // Straight-line body: no state machine needed.
                     if (!fn.blocks.empty()) {

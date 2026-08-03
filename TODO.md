@@ -684,7 +684,23 @@ write returns i32, so wasm-ld emitted an unreachable stub for the mismatched
 signature. They now declare '-> i32', correct on both targets (the low half of
 RAX on x86-64).
 
-Next per `docs/backend.md`: stage 9 (Relooper), stage 10 (flip, soak, delete).
+## Stage 9 — Relooper: **done; every corpus function structures fully**
+
+Ramsey's dominator-tree structuring ("Beyond Relooper") replaced the dispatch
+loop for reducible CFGs: back-edge targets become `loop`s, merge nodes become
+`block`s at their immediate dominator in RPO, forward branches `br` to a label
+in scope or inline their single-predecessor target. Block-argument transfers
+keep the rotation-proof staging scheme at every edge. Zero `br_table` state
+machines remain in the corpus's output; the dispatch loop survives as the
+irreducible fallback (unreachable from today's front end, guarded anyway).
+Sequencing vindicated: with stages 7–8 already differentially validated, the
+structuring was the only new variable, wasm's validator turns any wrong `br`
+depth into a loud rejection, and both wasm differentials passed on the
+algorithm's first full run.
+
+Next per `docs/backend.md`: stage 10 (flip, soak, delete) — which first needs
+the mirage303-native lowering tail (imported-constant references, asm constant
+operands) closed.
 
 Remaining:
 
