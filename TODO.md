@@ -362,6 +362,24 @@ Done:
   harness (`examples_smoke_test.py --backend=`) BEFORE the x86-64 work, per
   `docs/backend.md`'s validation plan.
 
+- **Stage 3, first half — `promote_slots`** (`src/compiler/mir_passes.cpp`). The
+  lazy SSA-construction algorithm (Braun et al.) adapted to block parameters: a
+  non-escaping slot accessed only by full-width same-type loads/stores becomes a
+  value; merge points become join-block parameters; branch/switch edges into a
+  parameterized join are split through jump-only trampolines (those terminators
+  cannot carry block arguments — the verifier's own rule). Two documented v1
+  simplifications: no trivial-parameter elimination, and a store-free path reads a
+  zero constant (locals are zero-valued; `undefined` reads are unspecified anyway).
+  `--mir-opt` runs it on the `--emit-mir` path with a mandatory re-verify.
+  Validated three ways: 5 new ctest cases (straight-line, diamond, loop back-edge,
+  branch-edge splitting, refusal on escaping/mixed-width slots), a mirgen_test case
+  reading the optimized output, and a corpus sweep — all 142 lowering modules run
+  the pass with the verifier green. `x = 40; x += 2; return x` is now three
+  instructions and zero slots.
+
+  Remaining in stage 3: the peephole pass (const-fold, identity ops, trivial-param
+  folding). Then the differential harness, then stage 4.
+
 Remaining:
 
 - **Stage 2, rest** — aggregates (structs, arrays, slices, trait handles, `any`, error

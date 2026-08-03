@@ -42,6 +42,9 @@ namespace {
         Action action = Action::None;
         bool emit_ir = false;
         // '--emit-mir': lower to Mirage IR and print it. The native backend's primary
+        // '--mir-opt': additionally run the stage-3 passes (promote_slots) before
+        // printing — the debugging view of what the later stages actually consume.
+        bool mir_opt = false;
         // debugging surface until it can produce objects (docs/backend.md, stage 2).
         bool emit_mir = false;
         bool freestanding = false;
@@ -110,6 +113,8 @@ namespace {
                 options.emit_ir = true;
             } else if (arg == "--emit-mir") {
                 options.emit_mir = true;
+            } else if (arg == "--mir-opt") {
+                options.mir_opt = true;
             } else if (arg == "--freestanding") {
                 options.freestanding = true;
             } else if (arg == "--noinit") {
@@ -728,6 +733,16 @@ auto main(const int argc, char *argv[]) -> int {
         auto lowered = mirgen::generate(ast, sema, diag, mirgen::Options{
             .pointer_bits = target_triple.getArchPointerBitWidth(),
         });
+        if (options.mir_opt && lowered.ok) {
+            mir::promote_slots(lowered.module);
+            // The pass must leave a well-formed module behind; a failure here is a
+            // pass bug, reported as such rather than passed downstream silently.
+            for (const auto &error : mir::verify(lowered.module)) {
+                llvm::errs() << "error: internal error: promote_slots produced malformed MIR: "
+                             << error.message << "\n";
+                lowered.ok = false;
+            }
+        }
         llvm::outs() << mir::print(lowered.module);
         if (!lowered.unsupported.empty()) {
             // A coverage report, not a failure list: mirgen is grown construct by construct,

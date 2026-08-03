@@ -345,6 +345,18 @@ namespace mir {
     // Returns an empty vector when the module is well-formed.
     [[nodiscard]] auto verify(const Module &module) -> std::vector<VerifyError>;
 
+    // promote_slots (stage 3) — mem2reg-lite. A slot whose address never escapes,
+    // accessed only by full-width loads/stores of one scalar type, becomes a value;
+    // merge points become block parameters, with branch/switch edges into them split
+    // through jump-only trampolines (those terminators cannot carry block arguments).
+    // Runs in place; the result must still pass verify(). See mir_passes.cpp for the
+    // algorithm notes.
+    struct PromoteStats {
+        size_t slots_promoted = 0;
+        size_t params_added = 0;
+    };
+    auto promote_slots(Module &module) -> PromoteStats;
+
     // Textual MIR: the primary debugging surface for the whole backend effort, and what
     // '--emit-mir' prints. Stable and diffable — two compiles of the same input must
     // produce byte-identical output, which is why nothing here is keyed on a hash map.

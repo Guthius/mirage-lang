@@ -384,6 +384,147 @@ namespace {
         check(has_error(errors, "is a declaration but has blocks"), "a declaration with a body is rejected");
     }
 
+    // ---- promote_slots (stage 3) --------------------------------------------------
+
+    void test_promote_slots_straight_line() {
+        Fixture f;
+        mir::Builder b(f.module, f.fn_index);
+        const auto entry = b.create_block("entry");
+        b.set_insert_point(entry);
+        const auto arg = b.add_block_param(entry, mir::Ty::I64);
+        const auto slot = b.add_slot(8, 8, "x");
+        b.store(b.slot_addr(slot), arg);
+        const auto loaded = b.load(mir::Ty::I64, b.slot_addr(slot));
+        b.ret(b.binary(mir::Op::Add, mir::Ty::I64, loaded, b.const_int(mir::Ty::I64, 2)));
+
+        const auto stats = mir::promote_slots(f.module);
+        const auto errors = mir::verify(f.module);
+        check(errors.empty(), "straight-line promotion verifies" + describe(errors));
+        check(stats.slots_promoted == 1, "the slot is promoted");
+        check(f.module.functions[0].slots.empty(), "and removed from the frame");
+        const auto text = mir::print(f.module);
+        check(text.find("load") == std::string::npos && text.find("store") == std::string::npos,
+              "no loads or stores remain");
+    }
+
+    void test_promote_slots_diamond_becomes_block_param() {
+        Fixture f(mir::Ty::I64, {mir::Ty::I1});
+        mir::Builder b(f.module, f.fn_index);
+        const auto entry = b.create_block("entry");
+        const auto then_block = b.create_block("then");
+        const auto else_block = b.create_block("else");
+        const auto join = b.create_block("join");
+        b.set_insert_point(entry);
+        const auto cond = b.add_block_param(entry, mir::Ty::I1);
+        const auto slot = b.add_slot(8, 8, "x");
+        b.branch(cond, then_block, else_block);
+        b.set_insert_point(then_block);
+        b.store(b.slot_addr(slot), b.const_int(mir::Ty::I64, 1));
+        b.jump(join);
+        b.set_insert_point(else_block);
+        b.store(b.slot_addr(slot), b.const_int(mir::Ty::I64, 2));
+        b.jump(join);
+        b.set_insert_point(join);
+        b.ret(b.load(mir::Ty::I64, b.slot_addr(slot)));
+
+        const auto stats = mir::promote_slots(f.module);
+        const auto errors = mir::verify(f.module);
+        check(errors.empty(), "diamond promotion verifies" + describe(errors));
+        check(stats.slots_promoted == 1 && stats.params_added == 1,
+              "the merge becomes one block parameter");
+        const auto text = mir::print(f.module);
+        check(text.find("^join") != std::string::npos && text.find("(%") != std::string::npos,
+              "the join block takes the value as a parameter");
+    }
+
+    void test_promote_slots_loop_counter() {
+        // i = 0; while (i < n) i = i + 1; return i  -- the counter's merge sits on a
+        // loop header whose predecessors include its own back edge, the cyclic case
+        // the eager memoization exists for. The header is a BRANCH target, so its new
+        // parameter forces the conditional edge through a jump-only trampoline.
+        Fixture f;
+        mir::Builder b(f.module, f.fn_index);
+        const auto entry = b.create_block("entry");
+        const auto header = b.create_block("header");
+        const auto body = b.create_block("body");
+        const auto exit = b.create_block("exit");
+        b.set_insert_point(entry);
+        const auto n = b.add_block_param(entry, mir::Ty::I64);
+        const auto slot = b.add_slot(8, 8, "i");
+        b.store(b.slot_addr(slot), b.const_int(mir::Ty::I64, 0));
+        b.jump(header);
+        b.set_insert_point(header);
+        const auto i1 = b.load(mir::Ty::I64, b.slot_addr(slot));
+        b.branch(b.compare(mir::Op::ICmpSlt, i1, n), body, exit);
+        b.set_insert_point(body);
+        const auto i2 = b.load(mir::Ty::I64, b.slot_addr(slot));
+        b.store(b.slot_addr(slot), b.binary(mir::Op::Add, mir::Ty::I64, i2, b.const_int(mir::Ty::I64, 1)));
+        b.jump(header);
+        b.set_insert_point(exit);
+        b.ret(b.load(mir::Ty::I64, b.slot_addr(slot)));
+
+        const auto stats = mir::promote_slots(f.module);
+        const auto errors = mir::verify(f.module);
+        check(errors.empty(), "loop promotion verifies" + describe(errors));
+        check(stats.slots_promoted == 1, "the counter slot is promoted");
+        check(f.module.functions[0].slots.empty(), "and leaves no frame slots");
+    }
+
+    void test_promote_slots_splits_branch_edges() {
+        // 'if (c) x = 1; return x' -- the join is reached DIRECTLY by one arm of the
+        // branch, and a branch target cannot carry block arguments (the verifier's
+        // rule), so that edge must be split through a jump-only trampoline.
+        Fixture f(mir::Ty::I64, {mir::Ty::I1});
+        mir::Builder b(f.module, f.fn_index);
+        const auto entry = b.create_block("entry");
+        const auto then_block = b.create_block("then");
+        const auto join = b.create_block("join");
+        b.set_insert_point(entry);
+        const auto cond = b.add_block_param(entry, mir::Ty::I1);
+        const auto slot = b.add_slot(8, 8, "x");
+        b.store(b.slot_addr(slot), b.const_int(mir::Ty::I64, 7));
+        b.branch(cond, then_block, join);
+        b.set_insert_point(then_block);
+        b.store(b.slot_addr(slot), b.const_int(mir::Ty::I64, 1));
+        b.jump(join);
+        b.set_insert_point(join);
+        b.ret(b.load(mir::Ty::I64, b.slot_addr(slot)));
+
+        const auto stats = mir::promote_slots(f.module);
+        const auto errors = mir::verify(f.module);
+        check(errors.empty(), "edge-split promotion verifies" + describe(errors));
+        check(stats.slots_promoted == 1 && stats.params_added == 1,
+              "the join takes the value as a parameter");
+        const auto text = mir::print(f.module);
+        check(text.find(".edge") != std::string::npos,
+              "the branch edge into the parameterized join is split through a trampoline");
+    }
+
+    void test_promote_slots_leaves_escaping_and_mixed_slots() {
+        Fixture f;
+        mir::Builder b(f.module, f.fn_index);
+        const auto entry = b.create_block("entry");
+        b.set_insert_point(entry);
+        const auto arg = b.add_block_param(entry, mir::Ty::I64);
+        // Slot 0 escapes: its address is passed to a call... simulated by marking it,
+        // exactly as mirgen does for '&x'.
+        const auto escaping = b.add_slot(8, 8, "escapes");
+        b.mark_slot_escaping(escaping);
+        b.store(b.slot_addr(escaping), arg);
+        // Slot 1 is accessed at two widths -- an aggregate reinterpret promote_slots
+        // must refuse.
+        const auto mixed = b.add_slot(8, 8, "mixed");
+        b.store(b.slot_addr(mixed), arg);
+        const auto narrow = b.load(mir::Ty::I32, b.slot_addr(mixed));
+        b.ret(b.convert(mir::Op::ZExt, mir::Ty::I64, narrow));
+
+        const auto stats = mir::promote_slots(f.module);
+        const auto errors = mir::verify(f.module);
+        check(errors.empty(), "refusal cases verify" + describe(errors));
+        check(stats.slots_promoted == 0, "neither slot is promoted");
+        check(f.module.functions[0].slots.size() == 2, "both stay in the frame");
+    }
+
     void test_printer_renders_globals_and_relocations() {
         mir::Module module;
         module.name = "test";
@@ -428,6 +569,11 @@ int main() {
     test_rejects_dangling_references();
     test_rejects_identity_conversion();
     test_rejects_declaration_with_blocks();
+    test_promote_slots_straight_line();
+    test_promote_slots_diamond_becomes_block_param();
+    test_promote_slots_loop_counter();
+    test_promote_slots_splits_branch_edges();
+    test_promote_slots_leaves_escaping_and_mixed_slots();
     test_printer_renders_globals_and_relocations();
 
     if (failures != 0) {

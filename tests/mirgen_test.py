@@ -715,6 +715,28 @@ def case_loops():
     check("slice" in r.stdout, "'xs[..]' materializes a slice")
 
 
+def case_mir_opt_promotes_slots():
+    """'--mir-opt' runs promote_slots over the lowered module: scalar locals leave
+    their frame slots, merge points become block parameters, and the verifier must
+    still accept the result."""
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "main.mir").write_text(
+            "pub fn main() -> i32 {\n"
+            "  mut x: i32 = 40\n  x += 2\n"
+            "  mut i: i32 = 0\n  while i < 3 { i += 1 }\n"
+            "  return x + i - 3\n}\n")
+        raw = subprocess.run([str(MIRAGE), "build", tmp, "--emit-mir"],
+                             capture_output=True, text=True, timeout=60, cwd=REPO_ROOT)
+        opt = subprocess.run([str(MIRAGE), "build", tmp, "--emit-mir", "--mir-opt"],
+                             capture_output=True, text=True, timeout=60, cwd=REPO_ROOT)
+    check(opt.returncode == 0, f"--mir-opt lowers cleanly ({opt.stderr.strip()[:140]})")
+    check("slot" in raw.stdout, "the raw lowering keeps locals in slots")
+    check("slot" not in opt.stdout, "promote_slots removes every scalar local's slot")
+    check(re.search(r"\^while\.cond\.\d+\(%\d+: i32", opt.stdout) is not None,
+          "the loop counter's merge becomes a block parameter")
+    check("malformed" not in opt.stderr, "and the pass output verifies")
+
+
 def case_mir_goes_to_stdout():
     """'--emit-mir > out.mir' has to produce a valid file, as '--emit-ir' does."""
     r = emit_mir("pub fn main() -> i32 { return 0 }\n")
@@ -763,6 +785,7 @@ def main() -> int:
     case_when_emits_only_the_live_branch()
     case_loops()
     case_unsupported_is_reported_not_skipped()
+    case_mir_opt_promotes_slots()
     case_mir_goes_to_stdout()
 
     print()

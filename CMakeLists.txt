@@ -40,6 +40,7 @@ add_library(mirage_core OBJECT
         src/compiler/lexer.hpp
         src/compiler/mir.cpp
         src/compiler/mir.hpp
+        src/compiler/mir_passes.cpp
         src/compiler/mirgen.cpp
         src/compiler/mirgen.hpp
         src/compiler/module_resolver.cpp
@@ -125,6 +126,7 @@ set_tests_properties(lexer_robustness_test PROPERTIES TIMEOUT 10)
 add_executable(mir_test
         tests/mir_test.cpp
         src/compiler/mir.cpp
+        src/compiler/mir_passes.cpp
         src/compiler/mir.hpp
 )
 
