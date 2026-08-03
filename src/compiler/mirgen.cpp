@@ -2121,6 +2121,17 @@ namespace mirgen {
                         }
                     }
                 }
+                // Anything else (a const-global reference, arithmetic on constants) folds
+                // through the SAME evaluator sema validated the pattern with -- a case label
+                // sema never checked must not be invented here. const_cast because the
+                // folder may force resolution of a referenced global, a no-op by now
+                // (codegen's scalar switch arm does exactly this).
+                if (module_path_) {
+                    if (const auto value = sema::evaluate_integer_constant(
+                            expr, *module_path_, const_cast<sema::Program &>(sema_), diag_)) {
+                        return *value;
+                    }
+                }
                 return std::nullopt;
             }
 
@@ -2880,6 +2891,33 @@ namespace mirgen {
                         // 'type_of(T)' is a compile-time constant: the type's interned id,
                         // which sema assigned. Nothing is computed at runtime.
                         return emit_type_id(b, expr, v->location);
+
+                    } else if constexpr (std::is_same_v<V, std::unique_ptr<ast::OptionExpr>> ||
+                                          std::is_same_v<V, std::unique_ptr<ast::EnvExpr>>) {
+                        // '$option'/'$env' resolved at compile time; sema cached the value
+                        // on the MODULE (it is instantiation-independent by design).
+                        if (module_) {
+                            if (const auto it = module_->expr_option_values.find(sema::get_expr_key(expr));
+                                it != module_->expr_option_values.end()) {
+                                const auto type = expr_type(expr);
+                                if (const auto *num = std::get_if<int64_t>(&it->second); num && is_scalar(type)) {
+                                    const auto ty = scalar_type(type);
+                                    return mir::is_float(ty)
+                                        ? b.const_float(ty, static_cast<double>(*num))
+                                        : b.const_int(ty, *num);
+                                }
+                                if (const auto *str = std::get_if<std::string>(&it->second)) {
+                                    const auto slice = emit_string_literal(b, *str);
+                                    if (type.kind == sema::TypeKind::Slice) return slice;
+                                    // A '*u8' target takes the interned literal's data word.
+                                    if (is_scalar(type) && scalar_type(type) == mir::Ty::Ptr) {
+                                        return b.load(mir::Ty::Ptr, slice);
+                                    }
+                                }
+                            }
+                        }
+                        unsupported(expr_kind_name<V>(), loc);
+                        return mir::NO_VALUE;
 
                     } else if constexpr (std::is_same_v<V, ast::DefaultExpr>) {
                         // In expression position (an assignment's RHS, a return value): a
@@ -4108,17 +4146,34 @@ namespace mirgen {
                     } else if constexpr (std::is_same_v<B, ast::ArrayExpr>) {
                         const auto *info = sema_.array_at(type.array_index);
                         if (!info) { ok = false; return; }
-                        // A trailing '...' fill repeats the last value across the remainder;
-                        // that needs a loop, which is a separate increment.
-                        if (v.has_fill) {
-                            unsupported("an array literal with a '...' fill", v.location);
-                            ok = false;
-                            return;
-                        }
                         const auto stride = size_of(info->element_type);
-                        for (size_t i = 0; i < v.values.size(); ++i) {
+                        const size_t plain = v.values.size() - (v.has_fill ? 1 : 0);
+                        for (size_t i = 0; i < plain; ++i) {
                             if (!store_element(b, base, static_cast<uint32_t>(i) * stride,
                                                 info->element_type, v.values[i])) ok = false;
+                        }
+                        // A trailing '...' fill: the value is evaluated ONCE and repeated
+                        // across the remainder (codegen's emit_array_expr_value). A
+                        // 'default'/'undefined' fill is the zero fill above.
+                        if (v.has_fill && !v.values.empty()) {
+                            const auto &last = v.values.back();
+                            if (!std::holds_alternative<ast::DefaultExpr>(last) &&
+                                !std::holds_alternative<ast::UndefinedExpr>(last)) {
+                                const auto emitted = emit_expr(b, last);
+                                if (emitted == mir::NO_VALUE) { ok = false; return; }
+                                const bool scalar = is_scalar(info->element_type);
+                                const auto value = scalar
+                                    ? coerce(b, emitted, info->element_type, expr_type(last))
+                                    : emitted;
+                                for (size_t i = plain; i < info->count; ++i) {
+                                    const auto addr = b.ptr_add_const(base, static_cast<int64_t>(i) * stride);
+                                    if (scalar) {
+                                        b.store(addr, value);
+                                    } else {
+                                        b.mem_copy(addr, value, b.const_int(usize_ty(), stride));
+                                    }
+                                }
+                            }
                         }
                     } else if constexpr (std::is_same_v<B, ast::EmptyExpr>) {
                         // '{}' -- the zero fill above is the whole answer.
