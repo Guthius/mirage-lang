@@ -549,6 +549,22 @@ def case_ranges_unions_defaults():
     check("MIR is malformed" not in r.stderr, "and the result verifies")
 
 
+def case_macros():
+    """A macro is expression-template expansion: the template emits under the macro's
+    declaring module, while a parameter reference evaluates the ARGUMENT back in its
+    own call-site context."""
+    r = emit_mir("const alignment: usize = 8\n"
+                 "macro align_up(n: usize) -> (n + (alignment - 1)) & ~(alignment - 1)\n"
+                 "pub fn main() -> i32 {\n"
+                 "  const a := align_up(13)\n"
+                 "  return cast(a, i32) - 16\n}\n")
+    check(r.returncode == 0, f"macros lower ({r.stderr.strip()[:140]})")
+    check("call @" not in r.stdout.replace("call @printf", ""),
+          "a macro expands inline -- no call is emitted")
+    check("const.int 13" in r.stdout, "the argument expression lands in the expansion")
+    check("MIR is malformed" not in r.stderr, "and the result verifies")
+
+
 def case_switch_and_conditions():
     r = emit_mir("pub type Dir = enum(u8) { North  South  East  West }\n"
                  "pub fn main() -> i32 {\n"
@@ -658,6 +674,7 @@ def main() -> int:
     case_bitsets_and_slice_casts()
     case_generic_instances()
     case_ranges_unions_defaults()
+    case_macros()
     case_switch_and_conditions()
     case_indirect_calls_and_constants()
     case_when_emits_only_the_live_branch()

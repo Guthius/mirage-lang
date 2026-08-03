@@ -117,6 +117,20 @@ namespace mirgen {
             // its condition -- targeting the condition would skip the increment and spin.
             struct LoopTargets { mir::BlockId header; mir::BlockId exit; };
             std::vector<LoopTargets> loop_stack_;
+            // The macro substitution map for the template currently being expanded. Each
+            // argument captures the CALL SITE's context (module, expr tables, and the
+            // macro args active there), because a parameter reference inside the template
+            // must evaluate the argument back where it was written -- while the template
+            // itself emits under the macro's declaring module.
+            struct MacroArg {
+                const ast::Expr *expr = nullptr;
+                const std::string *module_path = nullptr;
+                const sema::ProgramModule *module = nullptr;
+                const sema::ExprSideTables *exprs = nullptr;
+                std::shared_ptr<const std::unordered_map<std::string, MacroArg>> outer_args;
+            };
+            std::unordered_map<std::string, MacroArg> macro_args_;
+
             // Registered 'defer' bodies, one scope per block, innermost last. Emitted in
             // LIFO order at every exit: the block's own end, 'return' (all scopes),
             // 'break'/'continue' (scopes down to and including the loop body's).
@@ -643,6 +657,7 @@ namespace mirgen {
                 loop_stack_.clear();
                 defer_scopes_.clear();
                 next_block_is_loop_body_ = false;
+                macro_args_.clear();
 
                 const auto entry = b.create_block("entry");
                 b.set_insert_point(entry);
@@ -869,6 +884,7 @@ namespace mirgen {
                 loop_stack_.clear();
                 defer_scopes_.clear();
                 next_block_is_loop_body_ = false;
+                macro_args_.clear();
 
                 const auto entry = b.create_block("entry");
                 b.set_insert_point(entry);
@@ -967,6 +983,7 @@ namespace mirgen {
                 loop_stack_.clear();
                 defer_scopes_.clear();
                 next_block_is_loop_body_ = false;
+                macro_args_.clear();
 
                 const auto entry = b.create_block("entry");
                 b.set_insert_point(entry);
@@ -2943,6 +2960,10 @@ namespace mirgen {
             }
 
             auto emit_ident(mir::Builder &b, const ast::IdentExpr &ident, const ast::Expr &expr) -> mir::ValueId {
+                // A macro parameter shadows everything inside its template.
+                if (const auto macro = macro_args_.find(ident.name); macro != macro_args_.end()) {
+                    return emit_macro_arg(b, macro->second);
+                }
                 if (const auto it = locals_.find(ident.name); it != locals_.end()) {
                     const auto type = local_types_.at(ident.name);
                     if (!is_scalar(type)) {
@@ -3335,6 +3356,15 @@ namespace mirgen {
                 }
 
                 if (it == function_index_.end()) {
+                    // A macro is expression-template expansion, not a call.
+                    if (const auto mod = sema_.modules.find(*callee_module); mod != sema_.modules.end()) {
+                        if (const auto sym = mod->second.symbols.find(callee_name);
+                            sym != mod->second.symbols.end()) {
+                            if (const auto *macro = std::get_if<sema::MacroSymbol>(&sym->second)) {
+                                return emit_macro_call(b, call, *macro, mod->first, mod->second);
+                            }
+                        }
+                    }
                     unsupported(std::format("a call to '{}'", callee_name), call.location);
                     return mir::NO_VALUE;
                 }
@@ -3788,6 +3818,63 @@ namespace mirgen {
                 }
                 const auto result = b.call_indirect(callee, signature, sig.result, args);
                 return sret_slot != mir::NO_VALUE ? sret_slot : result;
+            }
+
+            // A macro call: bind each argument with the CALLER's context captured, then
+            // emit the expression template under the macro's own declaring module -- its
+            // nodes were type-checked there (bare imports included: the caller's alias
+            // already redirected to the origin module before this ran).
+            auto emit_macro_call(mir::Builder &b, const ast::CallExpr &call, const sema::MacroSymbol &macro,
+                                  const std::string &macro_module, const sema::ProgramModule &macro_mod) -> mir::ValueId {
+                if (!macro.decl || call.args.size() != macro.decl->params.size()) {
+                    unsupported("a macro call of this form", call.location);
+                    return mir::NO_VALUE;
+                }
+
+                auto saved_args = macro_args_;
+                const auto outer = std::make_shared<const std::unordered_map<std::string, MacroArg>>(saved_args);
+                for (size_t i = 0; i < macro.decl->params.size(); ++i) {
+                    macro_args_[macro.decl->params[i].name] = MacroArg{
+                        .expr = &call.args[i],
+                        .module_path = module_path_,
+                        .module = module_,
+                        .exprs = exprs_,
+                        .outer_args = outer,
+                    };
+                }
+
+                const auto *saved_path = module_path_;
+                const auto *saved_module = module_;
+                const auto *saved_exprs = exprs_;
+                module_path_ = &macro_module;
+                module_ = &macro_mod;
+                exprs_ = &macro_mod.exprs;
+                const auto value = emit_expr(b, macro.decl->expr_template);
+                module_path_ = saved_path;
+                module_ = saved_module;
+                exprs_ = saved_exprs;
+                macro_args_ = std::move(saved_args);
+                return value;
+            }
+
+            // A macro parameter reference inside a template: the ARGUMENT expression,
+            // emitted back in its own captured call-site context (module, expr tables, and
+            // the macro args that were active there -- nested macros restore their own).
+            auto emit_macro_arg(mir::Builder &b, const MacroArg &arg) -> mir::ValueId {
+                auto saved_args = std::move(macro_args_);
+                const auto *saved_path = module_path_;
+                const auto *saved_module = module_;
+                const auto *saved_exprs = exprs_;
+                module_path_ = arg.module_path;
+                module_ = arg.module;
+                exprs_ = arg.exprs;
+                macro_args_ = arg.outer_args ? *arg.outer_args : std::unordered_map<std::string, MacroArg>{};
+                const auto value = emit_expr(b, *arg.expr);
+                module_path_ = saved_path;
+                module_ = saved_module;
+                exprs_ = saved_exprs;
+                macro_args_ = std::move(saved_args);
+                return value;
             }
 
             // 'receiver.method(args)' on a concrete type. The receiver is passed as a

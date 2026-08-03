@@ -277,6 +277,20 @@ Done:
   Still entirely absent from stage 2: inline `asm`, global initializers,
   `type_info_of`/reflection tables, macros, the runtime unhandled-error check.
 
+- **Stage 2, eighteenth increment** — macros: expression-template expansion, with each
+  argument carrying its own captured call-site context (module, expr tables, and the
+  macro args active there) so a parameter reference inside the template evaluates the
+  argument where it was written, while the template itself emits under the macro's
+  declaring module — codegen's `MacroArg`/`emit_macro_arg` shape, `outer_args`
+  restoration for nested macros included.
+
+  **Coverage: 110 of 271; zero verifier failures.**
+
+  Largest remaining blockers: `type_info_of` (18) and the reflection tables, calls
+  dropping an ignorable error (13), inline `asm` (18), argument spreads (4), plus
+  singletons (`stackalloc`, `$option` as a value, a forwarded multi-return with slot
+  coercions, an array `...` fill).
+
 Remaining:
 
 - **Stage 2, rest** — aggregates (structs, arrays, slices, trait handles, `any`, error
