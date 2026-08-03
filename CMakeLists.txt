@@ -42,6 +42,8 @@ add_library(mirage_core OBJECT
         src/compiler/mir.hpp
         src/compiler/mir_passes.cpp
         src/compiler/mirgen.cpp
+        src/compiler/x86_encoder.cpp
+        src/compiler/x86_encoder.hpp
         src/compiler/mirgen.hpp
         src/compiler/module_resolver.cpp
         src/compiler/module_resolver.hpp
@@ -129,6 +131,19 @@ add_executable(mir_test
         src/compiler/mir_passes.cpp
         src/compiler/mir.hpp
 )
+
+add_executable(x86_encoder_test
+        tests/x86_encoder_test.cpp
+        src/compiler/x86_encoder.cpp
+        src/compiler/x86_encoder.hpp
+)
+
+target_include_directories(x86_encoder_test
+        PRIVATE src
+)
+
+add_test(NAME x86_encoder_test COMMAND x86_encoder_test)
+set_tests_properties(x86_encoder_test PROPERTIES TIMEOUT 10)
 
 target_include_directories(mir_test
         PRIVATE src
